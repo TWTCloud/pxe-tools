@@ -176,6 +176,23 @@ l'accès direct aux ports d'administration. Les essais couvrent les proxys
 simulés ; ils ne constituent pas une validation d'un fournisseur SSO réel.
 
 
+## Métadonnées SBAT du GRUB signé
+
+La construction de GRUB reprend la classification de base utilisée par le
+bootstrap natif. Sur Zorin OS 18, `ID_LIKE` doit contenir le mot `ubuntu` et
+`UBUNTU_CODENAME` doit désigner une base Ubuntu prise en charge ; le composant
+SBAT attendu est alors `grub.ubuntu`. L'identifiant `zorin` ne désigne pas un
+composant SBAT distinct dans les paquets Ubuntu utilisés par cet hôte.
+
+Le helper extrait la section `.sbat` du GRUB signé fourni par la distribution
+et exige toujours la correspondance exacte entre la version de son composant
+Debian ou Ubuntu et celle du paquet de modules `grub-efi-amd64-bin` installé.
+La version du paquet `grub-efi-amd64-signed` n'est pas utilisée comme version
+des modules. Une base inconnue, un autre composant ou une autre version reste
+refusé avant la génération et la signature MOK du chargeur personnalisé.
+Le [manuel GNU GRUB](https://www.gnu.org/software/grub/manual/grub/html_node/Secure-Boot-Advanced-Targeting.html)
+décrit l'inclusion de ces métadonnées par `grub-mkimage --sbat`.
+
 ## Fraîcheur des métadonnées Debian netboot
 
 Sur Ubuntu 24.04 et Zorin OS 18 avec le paquet `debian-archive-keyring` version

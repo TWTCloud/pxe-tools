@@ -11,6 +11,16 @@ import subprocess
 import sys
 
 SIGNED_GRUB = Path('/usr/lib/grub/x86_64-efi-signed/grubnetx64.efi.signed')
+BASE_HELPER = Path(__file__).resolve().with_name('host-base.sh')
+
+
+def grub_distribution(os_release):
+    # Derivatives use the package base's SBAT vendor. Keep the same bounded
+    # classification as native bootstrap, rather than accepting ID_LIKE alone.
+    base = subprocess.check_output(
+        ['/bin/sh', '-c', '. "$1"; pxe_tools_detect_base', 'sbat', str(BASE_HELPER)],
+        env=os_release, text=True).strip()
+    return base.partition(':')[0]
 
 
 def matching_sbat(rows, distro, module_version):
@@ -44,7 +54,7 @@ def main() -> None:
     rows = list(csv.reader(matches[0].splitlines()))
     version = subprocess.check_output(
         ['dpkg-query', '-W', '-f=${Version}', 'grub-efi-amd64-bin'], text=True).strip()
-    distro = platform.freedesktop_os_release().get('ID', '')
+    distro = grub_distribution(platform.freedesktop_os_release())
     if not matching_sbat(rows, distro, version):
         raise ValueError('signed GRUB SBAT does not match the installed GRUB modules')
     sys.stdout.write(matches[0].rstrip('\n') + '\n')
