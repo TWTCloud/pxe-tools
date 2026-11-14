@@ -65,6 +65,15 @@ class RendererTests(unittest.TestCase):
         self.assertNotIn('listen 80 default_server;', template)
         self.assertNotIn('listen [::]:80', template)
 
+    def test_console_only_does_not_render_or_probe_an_interface(self):
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute("INSERT INTO settings VALUES ('pxe_enabled','off')")
+        with patch.object(renderer.subprocess, 'check_output') as call:
+            with self.assertRaisesRegex(ValueError, 'disabled'):
+                renderer.render(self.db, self.template, self.output, wait_seconds=0)
+            call.assert_not_called()
+        self.assertFalse(self.output.exists())
+
     def test_renders_only_selected_ipv4(self):
         self.run_renderer()
         self.assertEqual(self.output.read_text(), 'server { listen 192.0.2.1:80 default_server; listen 127.0.0.1:80; root /var/lib/pxe-tools/http; }\n')
@@ -118,13 +127,15 @@ class RendererTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             renderer.render(self.db, self.template, self.output, environ=env)
 
-    def test_legacy_environment_without_database_only_when_explicitly_allowed(self):
+    def test_fresh_instance_does_not_activate_from_stale_environment(self):
         self.db.unlink()
         env = {'PXE_INTERFACE': 'eth1', 'ORCHESTRATOR_IP': '192.0.2.1'}
-        with patch.object(renderer.subprocess, 'check_output', return_value=self.ip_result):
-            renderer.render(self.db, self.template, self.output, environ=env, allow_missing_db=True)
+        with patch.object(renderer.subprocess, 'check_output') as call:
+            with self.assertRaisesRegex(ValueError, 'disabled'):
+                renderer.render(self.db, self.template, self.output, environ=env, allow_missing_db=True)
+            call.assert_not_called()
         self.assertFalse(self.db.exists())
-        self.assertIn('192.0.2.1:80', self.output.read_text())
+        self.assertFalse(self.output.exists())
 
     def test_waits_for_delayed_address(self):
         missing = b'[{"ifname":"eth1","addr_info":[]}]'
