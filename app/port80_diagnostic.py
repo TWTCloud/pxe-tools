@@ -67,7 +67,9 @@ def health(address):
     try:
         connection.request('GET', '/healthz', headers={'Host': address, 'Connection': 'close'})
         response = connection.getresponse()
-        return response.status == 200 and response.getheader('X-PXE-Tools-HTTP') == '1' and response.read(16) == b'ok\n'
+        if response.status != 200 or response.read(16) != b'ok\n':
+            return False
+        return 'expected' if response.getheader('X-PXE-Tools-HTTP') == '1' else 'compatible'
     except (OSError, http.client.HTTPException):
         return False
     finally:
@@ -95,8 +97,13 @@ def diagnose(address, *, proc=Path('/proc'), probe=health, wildcard=False):
         result['listeners'] = [{'address': row['address'], 'family': row['family']} for row in selected]
         if not selected:
             return dict(result, state='free')
-        if all(probe(target) for target in targets):
+        responses = [probe(target) for target in targets]
+        if all(response is True or response == 'expected' for response in responses):
             return dict(result, state='ready')
+        if 'compatible' in responses:
+            # Older/shared PXE nginx may serve the health endpoint without the
+            # current signature. This is not proof of a competing service.
+            return result
         known = owners(selected, proc)
         if any(not known.get(row['inode']) for row in selected):
             return result

@@ -13,6 +13,14 @@ final class PxeHttpReadiness
         $address = Setting::get(Setting::KEY_PXE_IP, '') ?? '';
         $base = ['state' => 'unknown', 'address' => $address, 'can_stop' => false, 'service' => null, 'listeners' => []];
         if (!filter_var($address, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) return $cached = array_replace($base, ['state' => 'not_configured']);
+        $local = false;
+        foreach (NetworkDetector::listInterfaces() as $interface) {
+            foreach ($interface['ipv4'] as $cidr) if (explode('/', $cidr, 2)[0] === $address) $local = true;
+        }
+        // A configuration copied from another host must not turn a local port
+        // check into a request to that old host. Keep its state indeterminate.
+        if (!$local) return $cached = $base;
+        if (!is_callable('shell_exec')) return $cached = $base;
         $script = __DIR__ . '/../../port80_diagnostic.py';
         $manager = getenv('PXE_SERVICE_MANAGER') === 's6' ? 's6' : 'systemd';
         $raw = @shell_exec('/usr/bin/python3 ' . escapeshellarg($script) . ' ' . escapeshellarg($address) . ' ' . $manager . ' 2>/dev/null');

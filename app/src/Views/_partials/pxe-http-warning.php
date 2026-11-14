@@ -1,6 +1,6 @@
 <?php
 $diagnosis = \Admin\Util\PxeHttpReadiness::diagnose();
-if ($diagnosis['state'] !== 'ready'):
+if (!in_array($diagnosis['state'], ['ready', 'not_configured'], true)):
     \Admin\View::partial('_partials/pxe-http-status', ['diagnosis' => $diagnosis]);
     if (getenv('PXE_SERVICE_MANAGER') === 'systemd' && \Admin\Auth::user() !== null):
 ?>

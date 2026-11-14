@@ -6,6 +6,17 @@ use InvalidArgumentException;
 
 final class NetworkConfiguration
 {
+    /** Same missing-key fallback as the dnsmasq renderer; a saved empty value wins. */
+    public static function effectiveValues(array $stored, array $environment): array
+    {
+        $legacyProxy = match ($environment['DHCP_MODE'] ?? 'tftp_only') { 'proxy' => 'on', 'tftp_only' => 'off', default => 'invalid' };
+        $fallbacks = ['pxe_interface' => $environment['PXE_INTERFACE'] ?? '',
+            'pxe_ip' => ($environment['PXE_IP'] ?? '') ?: ($environment['ORCHESTRATOR_IP'] ?? ''),
+            'dhcp_proxy_enabled' => $legacyProxy, 'dhcp_proxy_network' => $environment['DHCP_PROXY_NETWORK'] ?? '',
+            'dhcp_proxy_netmask' => $environment['DHCP_PROXY_NETMASK'] ?? '', 'pxe_enabled' => 'on'];
+        return array_replace($fallbacks, $stored);
+    }
+
     /** Existing custom values stay in advanced mode until the operator chooses detection. */
     public static function formState(array $stored, array $interfaces): array
     {

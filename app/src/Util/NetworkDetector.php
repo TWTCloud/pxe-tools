@@ -129,6 +129,7 @@ final class NetworkDetector
      */
     private static function ipv4Map(): array
     {
+        if (!is_callable('shell_exec')) return [];
         $out = @shell_exec('ip -j -4 addr show 2>/dev/null');
         if (!is_string($out) || $out === '') return [];
 

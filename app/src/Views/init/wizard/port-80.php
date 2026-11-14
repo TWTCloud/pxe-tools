@@ -1,6 +1,7 @@
 <?php
 use Admin\View;
 $title = 'HTTP de démarrage';
+$suppressPxeHttpWarning = true;
 $contentRender = function () use ($job, $diagnosis, $nonce, $missingConsent, $identityUnavailable) {
     $state = $diagnosis['state'];
 ?>

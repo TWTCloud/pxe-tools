@@ -41,7 +41,6 @@ $contentRender = function () use ($interfaces, $current, $errorMsg, $step, $step
 .network-summary dt { color: var(--color-text-secondary); }
 .network-advanced summary { cursor: pointer; font-weight: 600; padding-block: .75rem; }
 .network-advanced label { margin-block: .8rem; }
-.network-detected[aria-disabled="true"] { opacity: .65; }
 @media(max-width: 420px) { .network-summary { grid-template-columns: 1fr; gap: .2rem; } .network-summary dd { margin-bottom: .45rem; } }
 </style>
 <header><h2 style="margin:0">Le réseau de vos machines</h2></header>
@@ -71,8 +70,8 @@ $contentRender = function () use ($interfaces, $current, $errorMsg, $step, $step
   <fieldset class="network-section">
     <legend>Quand activer le démarrage réseau ?</legend>
     <label class="network-choice"><input type="radio" name="pxe_role" value="console" <?= $role === 'console' ? 'checked' : '' ?>><span>Plus tard — préparer la console<small class="muted">La console reste accessible. Les services de démarrage HTTP, TFTP et proxy DHCP de PXE Tools restent arrêtés après application.</small></span></label>
-    <label class="network-choice"><input type="radio" name="pxe_role" value="proxy" <?= $role === 'proxy' ? 'checked' : '' ?>><span>Activer PXE avec mon DHCP existant<small class="muted">Votre box, routeur ou serveur DHCP continue d’attribuer les adresses IP. PXE Tools fournit les indications de démarrage avec un proxy DHCP, sans distribuer d’adresses. Choisissez ce mode si votre DHCP n’annonce pas déjà un autre serveur PXE.</small></span></label>
-    <label class="network-choice"><input type="radio" name="pxe_role" value="external" <?= $role === 'external' ? 'checked' : '' ?>><span>Activer PXE avec un DHCP déjà configuré pour ce serveur<small class="muted">Vous gérez les indications de démarrage sur votre DHCP. PXE Tools sert les fichiers HTTP et TFTP ; son proxy DHCP reste désactivé.</small></span></label>
+    <label class="network-choice"><input type="radio" name="pxe_role" value="proxy" <?= $role === 'proxy' ? 'checked' : '' ?>><span>Permettre aux machines de démarrer sur ce serveur<small class="muted">Cas courant avec une box ou un routeur : votre DHCP continue d’attribuer les adresses IP. PXE Tools fournit les indications de démarrage avec un proxy DHCP, sans distribuer d’adresses. Choisissez ce mode si votre DHCP n’annonce pas déjà un autre serveur PXE.</small></span></label>
+    <label class="network-choice"><input type="radio" name="pxe_role" value="external" <?= $role === 'external' ? 'checked' : '' ?>><span>Mon réseau annonce déjà ce serveur PXE<small class="muted">Vous avez configuré les indications de démarrage sur votre DHCP. PXE Tools sert les fichiers HTTP et TFTP ; son proxy DHCP reste désactivé.</small></span></label>
     <p class="muted" id="network-activation-note"><?= $settingsFlow ? 'Enregistrer conserve ce choix. Utilisez ensuite « Appliquer la configuration » dans les paramètres pour démarrer ou arrêter ces services.' : 'Les services seront démarrés ou arrêtés après la validation finale de l’assistant. Enregistrer cette étape ne les active pas.' ?></p>
   </fieldset>
 
@@ -105,7 +104,6 @@ $contentRender = function () use ($interfaces, $current, $errorMsg, $step, $step
   function update() {
     const choice = choices[select.value];
     const manual = form.elements.network_mode.value === 'manual';
-    document.getElementById('network-detected').setAttribute('aria-disabled', String(manual));
     [['interface', 'interface'], ['ip', 'ip'], ['cidr', 'cidr']].forEach(([id, key]) => {
       document.getElementById('summary-' + id).textContent = choice ? choice[key] : 'À choisir';
     });

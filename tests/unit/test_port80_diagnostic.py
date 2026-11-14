@@ -49,6 +49,12 @@ class Diagnosis(unittest.TestCase):
     def test_expected_unit_without_health_is_not_a_competing_service(self):
         self.assertEqual(self.run_diagnosis([ROW], {ROW['inode']:[PXE]})['state'], 'starting')
 
+    def test_legacy_health_response_never_claims_a_conflict(self):
+        with patch.object(diagnostic, 'socket_rows', return_value=[ROW]):
+            result = diagnostic.diagnose('192.0.2.17', probe=lambda address: 'compatible')
+        self.assertEqual(result['state'], 'unknown')
+        self.assertFalse(result['can_stop'])
+
     def test_confirmed_competing_service_and_verified_snapshot(self):
         with patch.object(diagnostic.Path, 'read_text', side_effect=['123', 'fixture-boot']), patch.object(diagnostic, 'process_start', return_value='42'):
             result = self.run_diagnosis([ROW], {ROW['inode']:[NGINX]})
@@ -90,7 +96,7 @@ class ReversibleStop(unittest.TestCase):
         self.consent = f"nginx-consent-v2:123:42:{int(time.time())}:{self.boot}:192.0.2.17:{self.snapshot['fingerprint']}"
         self.commands = []
 
-    def run_action(self, *, changed=False, consent=None):
+    def run_action(self, *, changed=False, consent=None, snapshot_changes=None, main_pid='123', boot=None, socket_race=False):
         with sqlite3.connect(self.db) as db:
             db.execute('CREATE TABLE init_jobs (id INTEGER,job_type TEXT,status TEXT,message TEXT)')
             db.execute('INSERT INTO init_jobs VALUES (1,?,?,?)', ('system:release_nginx_port','running',consent or self.consent))
@@ -99,18 +105,19 @@ class ReversibleStop(unittest.TestCase):
             nonlocal stopped
             self.commands.append(args)
             if args[0] == 'stop': stopped = True
-            output = '123' if '--property=MainPID' in args else '/system.slice/nginx.service' if '--property=ControlGroup' in args else ''
+            output = main_pid if '--property=MainPID' in args else '/system.slice/nginx.service' if '--property=ControlGroup' in args else ''
             return subprocess.CompletedProcess(args, 3 if stopped and args[0] == 'is-active' else 0, output)
-        snapshots = [dict(self.snapshot, fingerprint='0'*64) if changed else self.snapshot, {'state':'free'}]
+        snapshot = dict(self.snapshot, **(snapshot_changes or {}))
+        snapshots = [dict(snapshot, fingerprint='0'*64) if changed else snapshot, {'state':'free'}]
         stat = '123 (nginx) ' + ' '.join(['S'] + ['0']*18 + ['42'])
         with patch.dict(os.environ, {'PXE_SERVICE_MANAGER':'systemd','PXE_DB_PATH':str(self.db),'WORKER_JOB_ID':'1'}), \
              patch.object(release.os, 'geteuid', return_value=0), patch.object(release.Path, 'is_dir', return_value=True), \
              patch.object(release.Path, 'read_text', side_effect=lambda path=None: self.boot), \
              patch.object(release, 'systemctl', side_effect=systemctl), patch.object(release, 'diagnose', side_effect=snapshots), \
-             patch.object(release, 'socket_rows', return_value=[ROW]), patch.object(release, 'process_start', return_value='42'), \
+             patch.object(release, 'socket_rows', side_effect=[[ROW], [ROW, dict(ROW, inode='678')]] if socket_race else None, return_value=[ROW]), patch.object(release, 'process_start', return_value='42'), \
              patch.object(release, 'verify_owners') as verify, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             # Existing main validates /proc stat before the shared snapshot.
-            with patch.object(release.Path, 'read_text', side_effect=[self.boot, stat]):
+            with patch.object(release.Path, 'read_text', side_effect=[boot or self.boot, stat]):
                 release.main()
             verify.assert_called_once_with({ROW['inode']}, '/system.slice/nginx.service')
 
@@ -125,6 +132,22 @@ class ReversibleStop(unittest.TestCase):
 
     def test_old_unbound_confirmation_is_rejected_without_stop(self):
         with self.assertRaises(SystemExit): self.run_action(consent='nginx-consent-v1:123:42:1:' + self.boot)
+        self.assertNotIn(('stop','nginx.service'), self.commands)
+
+    def test_changed_master_pid_is_rejected_without_stop(self):
+        with self.assertRaises(SystemExit): self.run_action(main_pid='999')
+        self.assertNotIn(('stop','nginx.service'), self.commands)
+
+    def test_changed_boot_is_rejected_without_stop(self):
+        with self.assertRaises(SystemExit): self.run_action(boot='22222222-2222-3333-4444-555555555555')
+        self.assertNotIn(('stop','nginx.service'), self.commands)
+
+    def test_missing_identity_is_rejected_without_stop(self):
+        with self.assertRaises(SystemExit): self.run_action(snapshot_changes={'can_stop':False})
+        self.assertNotIn(('stop','nginx.service'), self.commands)
+
+    def test_socket_changes_after_validation_are_rejected_without_stop(self):
+        with self.assertRaises(SystemExit): self.run_action(socket_race=True)
         self.assertNotIn(('stop','nginx.service'), self.commands)
 
 

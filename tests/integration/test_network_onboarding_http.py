@@ -27,7 +27,7 @@ with tempfile.TemporaryDirectory(prefix='pxe-image-race-http-') as temporary:
         connection.executescript((root / 'app/db/schema.sqlite.sql').read_text())
         connection.executemany('INSERT INTO settings(key,value) VALUES (?,?)', [
             ('db_init_done', '1'), ('admin_created', '1'), ('wizard_completed', '0')])
-    env = dict(os.environ, PXE_DB_DRIVER='sqlite', PXE_DB_PATH=str(db), PXE_SESSION_DIR=str(work / 'sessions'), PXE_SERVICE_MANAGER='systemd')
+    env = dict(os.environ, PXE_DB_DRIVER='sqlite', PXE_DB_PATH=str(db), PXE_SESSION_DIR=str(work / 'sessions'), PXE_SERVICE_MANAGER='systemd', PXE_INTERFACE='legacy0', PXE_IP='192.0.2.77', DHCP_MODE='proxy', DHCP_PROXY_NETWORK='192.0.2.0', DHCP_PROXY_NETMASK='255.255.255.0')
     bootstrap = "spl_autoload_register(function($c){$f=" + repr(str(root / 'app/src') + '/') + ".str_replace('\\\\','/',substr($c,6)).'.php';if(is_file($f))require_once $f;});"
     subprocess.run(['php', '-r', bootstrap + "Admin\\Models\\User::create('fixture','fixture-password');"],
                    env=env, check=True, stdout=subprocess.DEVNULL)
@@ -74,6 +74,8 @@ stream_wrapper_register('https', OfflineHttpsFixture::class);
             code, headers, _ = request('/login', {'username':'fixture', 'password':'fixture-password', 'csrf_token':token(body)})
             assert code == 302 and headers['Location'] == '/init/network'
             code, _, body = request('/init/network'); assert code == 200
+            assert 'value="legacy0"' in body and 'value="192.0.2.77"' in body
+            assert 'name="pxe_role" value="proxy" checked' in body and 'value="192.0.2.0/24"' in body
             csrf = token(body)
             code, _, invalid = request('/init/network', {'csrf_token':csrf, 'network_mode':'detected',
                 'network_address':'missing|192.0.2.17/24', 'pxe_role':'proxy', 'pxe_ip':'192.0.2.17'})

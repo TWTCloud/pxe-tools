@@ -10,6 +10,11 @@ function rejected(array $post, array $interfaces, string $code): void {
     throw new RuntimeException('Expected rejection: ' . $code);
 }
 $lan = ['name'=>'ens18', 'state'=>'up', 'type'=>'wired', 'wireless'=>false, 'mac'=>'52:54:00:01:02:03', 'ipv4'=>['192.0.2.17/23']];
+$legacyEnv = ['PXE_INTERFACE'=>'old0', 'PXE_IP'=>'192.0.2.77', 'DHCP_MODE'=>'proxy', 'DHCP_PROXY_NETWORK'=>'192.0.2.0', 'DHCP_PROXY_NETMASK'=>'255.255.255.0'];
+$legacy = Configuration::effectiveValues([], $legacyEnv);
+check($legacy['pxe_enabled'] === 'on' && $legacy['pxe_interface'] === 'old0' && $legacy['pxe_ip'] === '192.0.2.77' && $legacy['dhcp_proxy_enabled'] === 'on', 'Legacy effective env retained');
+$empty = Configuration::effectiveValues(['pxe_interface'=>'','pxe_ip'=>'','dhcp_proxy_enabled'=>'off','pxe_enabled'=>'off'], $legacyEnv);
+check($empty['pxe_interface'] === '' && $empty['pxe_ip'] === '' && $empty['dhcp_proxy_enabled'] === 'off' && $empty['pxe_enabled'] === 'off', 'Explicit empty/off overrides legacy environment');
 $other = array_replace($lan, ['name'=>'ens19', 'ipv4'=>['198.51.100.5/24']]);
 $vpn = array_replace($other, ['name'=>'wg0', 'type'=>'tunnel']);
 $bridge = array_replace($lan, ['name'=>'br0', 'type'=>'bridge']);

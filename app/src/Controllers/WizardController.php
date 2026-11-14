@@ -271,11 +271,22 @@ final class WizardController
         if ($st === InitGuard::STATE_ADMIN_PENDING) { header('Location: /init/admin'); exit; }
 
         $interfaces  = NetworkDetector::listInterfaces();
-        $iface = Setting::get(Setting::KEY_PXE_INTERFACE, '') ?: '';
-        $pxeIp = Setting::get(Setting::KEY_PXE_IP, '') ?: '';
+        $stored = [];
+        foreach (['pxe_interface', 'pxe_ip', 'dhcp_proxy_enabled', 'dhcp_proxy_network', 'dhcp_proxy_netmask', 'pxe_enabled'] as $key) {
+            $value = Setting::get($key);
+            if ($value !== null) $stored[$key] = $value;
+        }
+        $environment = [];
+        foreach (['PXE_INTERFACE', 'PXE_IP', 'ORCHESTRATOR_IP', 'DHCP_MODE', 'DHCP_PROXY_NETWORK', 'DHCP_PROXY_NETMASK'] as $key) {
+            $value = getenv($key);
+            if ($value !== false && $value !== '') $environment[$key] = $value;
+        }
+        $effective = \Admin\Util\NetworkConfiguration::effectiveValues($stored, $environment);
+        $iface = $effective['pxe_interface'];
+        $pxeIp = $effective['pxe_ip'];
 
-        $proxyNet  = Setting::get(Setting::KEY_DHCP_PROXY_NETWORK, '') ?: '';
-        $proxyMask = Setting::get(Setting::KEY_DHCP_PROXY_NETMASK, '') ?: '';
+        $proxyNet  = $effective['dhcp_proxy_network'];
+        $proxyMask = $effective['dhcp_proxy_netmask'];
         $proxyCidr = '';
         if ($proxyNet !== '' && $proxyMask !== '') {
             $maskLong = ip2long($proxyMask);
@@ -291,10 +302,10 @@ final class WizardController
             'network_override'     => Setting::get('network_override', 'off') === 'on',
             'pxe_ip'      => $pxeIp,
             'pxe_subnet' => Setting::get(Setting::KEY_PXE_SUBNET, '') ?: '',
-            'dhcp_proxy_enabled'   => Setting::get(Setting::KEY_DHCP_PROXY_ENABLED, 'off') === 'on',
+            'dhcp_proxy_enabled'   => $effective['dhcp_proxy_enabled'] === 'on',
             'dhcp_proxy_cidr'      => $proxyCidr,
             'https_enabled'        => Setting::get(Setting::KEY_HTTPS_ENABLED, 'off') === 'on',
-            'pxe_enabled' => Setting::get(Setting::KEY_PXE_ENABLED, 'on'),
+            'pxe_enabled' => $effective['pxe_enabled'],
         ], $interfaces);
         View::partial('init/wizard/network', [
             'step'       => 3,
@@ -324,6 +335,9 @@ final class WizardController
         } catch (\Throwable $error) {
             http_response_code(422);
             $current = $_POST;
+            foreach (['pxe_interface', 'pxe_ip', 'pxe_subnet', 'dhcp_proxy_cidr'] as $key) {
+                if (!is_string($current[$key] ?? '')) $current[$key] = '';
+            }
             foreach (['dhcp_proxy_enabled', 'https_enabled', 'network_override'] as $key) $current[$key] = isset($_POST[$key]);
             View::partial('init/wizard/network', ['step' => 3, 'interfaces' => $interfaces, 'current' => $current,
                 'settingsFlow' => $settingsFlow,
