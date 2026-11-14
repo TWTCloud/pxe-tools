@@ -29,7 +29,7 @@ class NativeInitSqlitePathGuard(unittest.TestCase):
             path.mkdir(parents=True)
         (self.conf / 'master.key').write_bytes(bytes(range(32)))
         (self.conf / 'master.key').chmod(0o600)
-        (self.app / 'db/schema.sqlite.sql').write_text('CREATE TABLE fixture (id INTEGER);\n')
+        (self.app / 'db/schema.sqlite.sql').write_text('CREATE TABLE fixture (id INTEGER);\nCREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);\n')
         marker = self.data / 'migrated'
         (self.app / 'db/migrate.php').write_text(
             '<?php file_put_contents(' + json.dumps(str(marker)) + ', "ok");\n')
@@ -78,6 +78,7 @@ class NativeInitSqlitePathGuard(unittest.TestCase):
         with sqlite3.connect(database) as connection:
             self.assertEqual(connection.execute(
                 "SELECT name FROM sqlite_master WHERE name='fixture'").fetchone(), ('fixture',))
+            self.assertEqual(connection.execute("SELECT value FROM settings WHERE key='pxe_enabled'").fetchone(), ('off',))
 
     def test_native_init_does_not_require_a_docker_http_volume(self):
         self.env['HTTP_ROOT'] = str(self.root / 'missing-http-root')
@@ -89,12 +90,16 @@ class NativeInitSqlitePathGuard(unittest.TestCase):
         database = self.data / 'restored.sqlite'
         with sqlite3.connect(database) as connection:
             connection.execute('CREATE TABLE fixture (id INTEGER)')
+            connection.execute('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)')
+            connection.execute("INSERT INTO settings VALUES('pxe_enabled','on')")
         database.chmod(0o600)
         result = self.run_init(database)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         web_uid = int(subprocess.check_output(['id', '-u', 'www-data'], text=True).strip())
         self.assertEqual(database.stat().st_uid, web_uid)
         self.assertEqual((self.data / 'migrated').stat().st_uid, web_uid)
+        with sqlite3.connect(database) as connection:
+            self.assertEqual(connection.execute("SELECT value FROM settings WHERE key='pxe_enabled'").fetchone(), ('on',))
 
     def test_empty_legacy_database_remains_available_to_wizard(self):
         database = self.data / 'pxe-tools.sqlite'

@@ -66,6 +66,16 @@ get_setting() {
 
 read_error() { fail_config "impossible de lire les paramètres réseau"; }
 
+# Fresh instances and explicit console-only mode never serve boot traffic.
+LEGACY_ENABLED=off
+if [ -f "$DB" ]; then LEGACY_ENABLED=on; fi
+PXE_ENABLED=$(get_setting 'pxe_enabled' "$LEGACY_ENABLED") || read_error
+case "$PXE_ENABLED" in
+    off) write_inert_config; echo '[render-dnsmasq-conf] Console seule : réseau PXE désactivé.'; exit 0 ;;
+    on) ;;
+    *) fail_config "état du réseau PXE invalide" ;;
+esac
+
 PXE_INTERFACE=$(get_setting 'pxe_interface' "${PXE_INTERFACE:-}") || read_error
 PXE_IP=$(get_setting 'pxe_ip' "${PXE_IP:-${ORCHESTRATOR_IP:-}}") || read_error
 case "${DHCP_MODE:-tftp_only}" in

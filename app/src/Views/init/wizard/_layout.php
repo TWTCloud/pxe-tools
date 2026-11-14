@@ -33,7 +33,7 @@ $wide = $wide ?? false;
   <!-- padding-bottom élargi (inline → bat le shorthand padding de tailwind) :
        donne de l'air sous la barre Retour/Suivant, jugée trop collée au bord. -->
   <article style="padding-bottom: 2rem;">
-    <?php View::partial('_partials/pxe-http-warning'); ?>
+    <?php if (!($suppressPxeHttpWarning ?? false)) View::partial('_partials/pxe-http-warning'); ?>
     <?php $contentRender(); ?>
   </article>
 </main>

@@ -8,6 +8,9 @@ import re
 import sqlite3
 import time
 
+sys.path.insert(0, os.environ.get('PXE_APP_DIR', '/app'))
+from port80_diagnostic import diagnose, snapshot_fingerprint, socket_rows, process_start
+
 
 def fail(message):
     print(message, file=sys.stderr)
@@ -82,10 +85,10 @@ def main():
         fail('Demande explicite invérifiable ; aucune modification effectuée.')
     if not row or row[:2] != ('system:release_nginx_port', 'running'):
         fail('Demande explicite invalide ; aucune modification effectuée.')
-    match = re.fullmatch(r'nginx-consent-v1:([1-9][0-9]*):([0-9]+):([0-9]+):([0-9a-f-]{36})', row[2] or '')
+    match = re.fullmatch(r'nginx-consent-v2:([1-9][0-9]*):([0-9]+):([0-9]+):([0-9a-f-]{36}):([0-9.]+):([0-9a-f]{64})', row[2] or '')
     if not match:
         fail('Confirmation invalide ; aucune modification effectuée.')
-    pid, start, requested, boot = match.groups()
+    pid, start, requested, boot, address, fingerprint = match.groups()
     if not 0 <= time.time() - int(requested) <= 300 or Path('/proc/sys/kernel/random/boot_id').read_text().strip() != boot:
         fail('Confirmation expirée ; aucune modification effectuée.')
     if systemctl('is-active', '--quiet', 'nginx.service', check=False).returncode != 0:
@@ -101,23 +104,30 @@ def main():
     cgroup = systemctl('show', '--property=ControlGroup', '--value', 'nginx.service').stdout.strip()
     if not cgroup or cgroup == '/' or not cgroup.endswith('/nginx.service'):
         fail('Identité systemd nginx.service non vérifiable ; aucune modification effectuée.')
-    current = listeners()
-    verify_owners(current, cgroup)
-    # Recheck immediately before the fixed action; reject any observed change.
-    if (listeners() != current or systemctl('is-active', '--quiet', 'nginx.service', check=False).returncode != 0
-            or systemctl('show', '--property=MainPID', '--value', 'nginx.service').stdout.strip() != pid):
+    current = diagnose(address)
+    if (current['state'] != 'conflict' or not current['can_stop']
+            or current.get('service') != 'nginx.service' or current.get('pid') != pid
+            or current.get('start') != start or current.get('boot') != boot
+            or current.get('fingerprint') != fingerprint):
+        fail('L’occupation du port a changé depuis l’aperçu ; aucune modification effectuée.')
+    # Root independently verifies all relevant owners and repeats process/socket
+    # identity immediately before a fixed, reversible stop. Never disable/mask.
+    rows = socket_rows()
+    relevant_inodes = {row['inode'] for row in rows if row['family'] == 4 and row['address'] in ('0.0.0.0', address, '127.0.0.1')}
+    verify_owners(relevant_inodes, cgroup)
+    if (snapshot_fingerprint(socket_rows()) != fingerprint
+            or systemctl('show', '--property=MainPID', '--value', 'nginx.service').stdout.strip() != pid
+            or process_start(pid) != start):
         fail('Le conflit a changé pendant la vérification ; aucune modification effectuée.')
-    result = systemctl('disable', '--now', 'nginx.service', check=False)
+    result = systemctl('stop', 'nginx.service', check=False)
     if result.returncode:
-        fail('Impossible de désactiver ou arrêter nginx.service ; vérifiez son état avec systemctl.')
+        fail('Impossible d’arrêter nginx.service ; vérifiez son état avec systemctl.')
     if systemctl('is-active', '--quiet', 'nginx.service', check=False).returncode == 0:
         fail('nginx.service est encore actif ; vérifiez son état avec systemctl.')
-    enabled = systemctl('is-enabled', 'nginx.service', check=False).stdout.strip()
-    if enabled not in ('disabled', 'masked', 'masked-runtime'):
-        fail('Désactivation durable de nginx.service non confirmée ; vérifiez son état avec systemctl.')
-    if listeners():
-        fail('Un programme écoute encore sur le port 80 ; vérifiez le conflit avant de continuer.')
-    print('nginx.service arrêté et désactivé ; le port 80 est libre.')
+    after = diagnose(address)
+    if after['state'] != 'free':
+        fail('L’arrêt est effectué, mais le port requis n’est pas confirmé libre ; vérifiez le nouveau diagnostic.')
+    print('nginx.service arrêté temporairement ; le port requis est libre. Son démarrage automatique est inchangé.')
 
 
 if __name__ == '__main__':
