@@ -271,17 +271,22 @@ final class WizardController
         if ($st === InitGuard::STATE_ADMIN_PENDING) { header('Location: /init/admin'); exit; }
 
         $interfaces  = NetworkDetector::listInterfaces();
-        $defaultIface = NetworkDetector::pickBestInterface() ?? '';
-
-        $iface = Setting::get(Setting::KEY_PXE_INTERFACE, '') ?: $defaultIface;
-
-        $pxeIp = Setting::get(Setting::KEY_PXE_IP, '') ?: '';
-        if ($pxeIp === '' && $iface !== '') {
-            $pxeIp = NetworkDetector::suggestOrchestratorIp($iface) ?? '';
+        $stored = [];
+        foreach (['pxe_interface', 'pxe_ip', 'dhcp_proxy_enabled', 'dhcp_proxy_network', 'dhcp_proxy_netmask', 'pxe_enabled'] as $key) {
+            $value = Setting::get($key);
+            if ($value !== null) $stored[$key] = $value;
         }
+        $environment = [];
+        foreach (['PXE_INTERFACE', 'PXE_IP', 'ORCHESTRATOR_IP', 'DHCP_MODE', 'DHCP_PROXY_NETWORK', 'DHCP_PROXY_NETMASK'] as $key) {
+            $value = getenv($key);
+            if ($value !== false && $value !== '') $environment[$key] = $value;
+        }
+        $effective = \Admin\Util\NetworkConfiguration::effectiveValues($stored, $environment);
+        $iface = $effective['pxe_interface'];
+        $pxeIp = $effective['pxe_ip'];
 
-        $proxyNet  = Setting::get(Setting::KEY_DHCP_PROXY_NETWORK, '') ?: '';
-        $proxyMask = Setting::get(Setting::KEY_DHCP_PROXY_NETMASK, '') ?: '';
+        $proxyNet  = $effective['dhcp_proxy_network'];
+        $proxyMask = $effective['dhcp_proxy_netmask'];
         $proxyCidr = '';
         if ($proxyNet !== '' && $proxyMask !== '') {
             $maskLong = ip2long($proxyMask);
@@ -292,22 +297,16 @@ final class WizardController
                 $proxyCidr = $proxyNet . '/' . $plen;
             }
         }
-        if ($proxyCidr === '' && $iface !== '') {
-            $sug = NetworkDetector::suggestProxyNetwork($iface);
-            if ($sug !== null) {
-                $proxyCidr = $sug['cidr'];
-            }
-        }
-
-        $current = [
+        $current = \Admin\Util\NetworkConfiguration::formState([
             'pxe_interface'        => $iface,
             'network_override'     => Setting::get('network_override', 'off') === 'on',
             'pxe_ip'      => $pxeIp,
-            'pxe_subnet' => Setting::get(Setting::KEY_PXE_SUBNET, '') ?: $proxyCidr,
-            'dhcp_proxy_enabled'   => Setting::get(Setting::KEY_DHCP_PROXY_ENABLED, 'off') === 'on',
+            'pxe_subnet' => Setting::get(Setting::KEY_PXE_SUBNET, '') ?: '',
+            'dhcp_proxy_enabled'   => $effective['dhcp_proxy_enabled'] === 'on',
             'dhcp_proxy_cidr'      => $proxyCidr,
             'https_enabled'        => Setting::get(Setting::KEY_HTTPS_ENABLED, 'off') === 'on',
-        ];
+            'pxe_enabled' => $effective['pxe_enabled'],
+        ], $interfaces);
         View::partial('init/wizard/network', [
             'step'       => 3,
             'interfaces' => $interfaces,
@@ -336,6 +335,9 @@ final class WizardController
         } catch (\Throwable $error) {
             http_response_code(422);
             $current = $_POST;
+            foreach (['pxe_interface', 'pxe_ip', 'pxe_subnet', 'dhcp_proxy_cidr'] as $key) {
+                if (!is_string($current[$key] ?? '')) $current[$key] = '';
+            }
             foreach (['dhcp_proxy_enabled', 'https_enabled', 'network_override'] as $key) $current[$key] = isset($_POST[$key]);
             View::partial('init/wizard/network', ['step' => 3, 'interfaces' => $interfaces, 'current' => $current,
                 'settingsFlow' => $settingsFlow,
@@ -429,6 +431,9 @@ final class WizardController
             'bootstrap:render_templates' => 'Préparation des options proposées à vos machines',
             'bootstrap:restart_dnsmasq'  => 'Mise en service du réseau',
         ];
+        if (Setting::get(Setting::KEY_PXE_ENABLED, 'on') === 'off') {
+            $jobs = ['bootstrap:restart_dnsmasq' => 'Préparation de la console ; arrêt des services de démarrage PXE'];
+        }
         $pdo->beginTransaction();
         try {
             // Recheck under the same transaction as completion and enqueueing:
@@ -487,9 +492,9 @@ final class WizardController
 
     private static function networkIsConfirmed(): bool
     {
-        $keys = ['pxe_interface', 'pxe_ip', 'dhcp_proxy_enabled', 'pxe_subnet', 'https_enabled', 'network_override'];
+        $keys = ['pxe_interface', 'pxe_ip', 'dhcp_proxy_enabled', 'pxe_subnet', 'https_enabled', 'network_override', 'pxe_enabled'];
         $values = [];
-        foreach ($keys as $key) $values[$key] = Setting::get($key, '') ?? '';
+        foreach ($keys as $key) $values[$key] = Setting::get($key, $key === 'pxe_enabled' ? 'on' : '') ?? '';
         if ($values['dhcp_proxy_enabled'] === 'on') {
             foreach (['dhcp_proxy_network', 'dhcp_proxy_netmask'] as $key) $values[$key] = Setting::get($key, '') ?? '';
         }
@@ -499,6 +504,11 @@ final class WizardController
 
     private static function networkConfirmation(array $values): string
     {
+        // The proxy range is checked separately when enabled and is not part of
+        // the console-only confirmation. Ignore unrelated mutation metadata.
+        $values = array_intersect_key($values, array_flip(['pxe_interface', 'pxe_ip', 'dhcp_proxy_enabled', 'pxe_subnet', 'https_enabled', 'network_override', 'pxe_enabled', 'dhcp_proxy_network', 'dhcp_proxy_netmask']));
+        if (($values['dhcp_proxy_enabled'] ?? 'off') !== 'on') unset($values['dhcp_proxy_network'], $values['dhcp_proxy_netmask']);
+        ksort($values);
         return hash('sha256', json_encode($values, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
     }
 
@@ -593,10 +603,15 @@ final class WizardController
         }
         try {
             $pdo = Db::get();  // Db::writeConfig() a reset le cache → utilise la nouvelle config
+            $newSettings = !Db::columnExists('settings', 'key');
             $sql = file_get_contents($schemaPath);
             // SQLite et MySQL acceptent tous deux le multi-statement via exec()
+            if ($newSettings && $cfg['driver'] === 'sqlite') $pdo->beginTransaction();
             $pdo->exec($sql);
+            if ($newSettings) Setting::set(Setting::KEY_PXE_ENABLED, 'off');
+            if ($pdo->inTransaction()) $pdo->commit();
         } catch (\Throwable $e) {
+            if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
             return 'schema: ' . $e->getMessage();
         }
         // Lance migrate.php inline (autoload PSR-4 dans le même process)

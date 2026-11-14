@@ -403,6 +403,8 @@ def _prepare_standby(database: Path, *, has_http: bool) -> None:
     updates = (
         "UPDATE settings SET value='0' WHERE key='wizard_completed'",
         "INSERT OR IGNORE INTO settings(key,value) VALUES('wizard_completed','0')",
+        "UPDATE settings SET value='off' WHERE key='pxe_enabled'",
+        "INSERT OR IGNORE INTO settings(key,value) VALUES('pxe_enabled','off')",
         "UPDATE settings SET value='off' WHERE key='dhcp_proxy_enabled'",
         "INSERT OR IGNORE INTO settings(key,value) VALUES('dhcp_proxy_enabled','off')",
         "UPDATE settings SET value='off' WHERE key='ansible_enabled'",

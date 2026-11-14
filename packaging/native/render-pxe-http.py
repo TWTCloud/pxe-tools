@@ -25,10 +25,17 @@ def render(database, template, output, ip_command='ip', *, environ=None, allow_m
         # Open read-only and never create an empty database as root.
         uri = db_path.resolve(strict=True).as_uri() + '?mode=ro'
         with closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
-            rows = connection.execute("SELECT key, value FROM settings WHERE key IN ('pxe_ip','pxe_interface')").fetchall()
+            rows = connection.execute("SELECT key, value FROM settings WHERE key IN ('pxe_ip','pxe_interface','pxe_enabled')").fetchall()
     if len(rows) != len({row[0] for row in rows}):
         raise ValueError('duplicate PXE settings')
     settings = dict(rows)
+    activation = settings.get('pxe_enabled', 'on' if db_path.exists() else 'off')
+    if activation not in ('on', 'off'):
+        raise ValueError('invalid boot-network activation setting')
+    if activation == 'off':
+        # An explicitly stopped network must not acquire a listener, including
+        # when its systemd unit is started manually.
+        raise ValueError('boot network is disabled; administration remains available')
     # Match the existing dnsmasq renderer: environment fallback is used only
     # for missing keys, never for explicitly empty database values.
     interface = settings.get('pxe_interface', environ.get('PXE_INTERFACE', ''))

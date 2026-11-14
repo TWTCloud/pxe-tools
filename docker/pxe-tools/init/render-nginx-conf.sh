@@ -82,3 +82,18 @@ envsubst '${ADMIN_PORT} ${ADMIN_HTTP_PORT}' \
     > "$PXE_NGINX_CONF_DIR/admin-http.conf"
 
 echo "[render-nginx-conf] configuration admin appliquée — $LABEL"
+
+# Docker shares one nginx master with the console. Toggle only its managed
+# boot listener; native packages use their separate boot HTTP unit instead.
+if [ -f "$PXE_NGINX_TEMPLATE_DIR/pxe.conf.tmpl" ]; then
+    if ! PXE_ENABLED=$(python3 "${PXE_APP_DIR:-/app}/network_activation.py"); then
+        rm -f "$PXE_NGINX_CONF_DIR/pxe.conf"
+        echo '[render-nginx-conf] Réseau PXE illisible ; écoute HTTP de démarrage retirée.' >&2
+        exit 1
+    fi
+    if [ "$PXE_ENABLED" = on ]; then
+        install -m 0644 "$PXE_NGINX_TEMPLATE_DIR/pxe.conf.tmpl" "$PXE_NGINX_CONF_DIR/pxe.conf"
+    else
+        rm -f "$PXE_NGINX_CONF_DIR/pxe.conf"
+    fi
+fi

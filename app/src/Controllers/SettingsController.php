@@ -216,6 +216,7 @@ final class SettingsController
             foreach ($tables as $t) {
                 $pdo->exec("DELETE FROM $t");
             }
+            Setting::set(Setting::KEY_PXE_ENABLED, 'off');
             // Purge les jobs init passés puis enqueue le wipe artefacts (worker root).
             $pdo->exec('DELETE FROM init_jobs');
             // A worker may still be completing an older job while reset runs.

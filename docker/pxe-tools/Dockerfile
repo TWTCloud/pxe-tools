@@ -180,7 +180,7 @@ EOF
 # ----------------------------------------------------------------------------
 RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 COPY docker/pxe-tools/nginx/nginx.conf       /etc/nginx/nginx.conf
-COPY docker/pxe-tools/nginx/pxe.conf         /etc/nginx/conf.d/pxe.conf
+COPY docker/pxe-tools/nginx/pxe.conf         /opt/pxe-tools/nginx/pxe.conf.tmpl
 COPY docker/pxe-tools/nginx/admin-https.conf.tmpl         /opt/pxe-tools/nginx/admin-https.conf.tmpl
 COPY docker/pxe-tools/nginx/admin-http-redirect.conf.tmpl /opt/pxe-tools/nginx/admin-http-redirect.conf.tmpl
 COPY docker/pxe-tools/nginx/admin-http-serve.conf.tmpl    /opt/pxe-tools/nginx/admin-http-serve.conf.tmpl

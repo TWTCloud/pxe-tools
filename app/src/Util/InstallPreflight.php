@@ -44,7 +44,7 @@ final class InstallPreflight
         $capacities = Machine::diskCapacitiesMbFromInventory($machine);
         $errors=InstallConfigBuilder::validate($config,$distros,$capacities,true,$hw['nics']);
         if (PxeHttpReadiness::unavailable()) {
-            $errors[] = 'Le service HTTP PXE est indisponible sur le port 80 : résolvez le conflit avant l’installation.';
+            $errors[] = 'Le service HTTP de démarrage n’est pas confirmé disponible sur le port 80. Vérifiez son activation et son état avant l’installation.';
         }
         $serverIp = Setting::get(Setting::KEY_PXE_IP, '') ?? '';
         $accessSubnet = Setting::get(Setting::KEY_PXE_SUBNET, '') ?? '';

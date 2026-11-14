@@ -209,6 +209,7 @@ def main():
             assert db.execute("SELECT status,enabled FROM os_images WHERE version='fixture'").fetchone() == ('failed',0)
             assert db.execute("SELECT value FROM settings WHERE key='wizard_completed'").fetchone() == ('0',)
             assert db.execute("SELECT value FROM settings WHERE key='dhcp_proxy_enabled'").fetchone() == ('off',)
+            assert db.execute("SELECT value FROM settings WHERE key='pxe_enabled'").fetchone() == ('off',)
             assert db.execute("SELECT value FROM settings WHERE key='ansible_enabled'").fetchone() == ('off',)
             assert db.execute("SELECT value FROM settings WHERE key='ansible_repo_webhook_enabled'").fetchone() == ('off',)
             assert db.execute("SELECT value FROM settings WHERE key='ansible_repo_url'").fetchone() == ('https://example.invalid/fixture.git',)

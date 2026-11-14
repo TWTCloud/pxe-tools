@@ -479,7 +479,14 @@ PYTHON
     if [ ! -f "$DB_PATH" ]; then
         if [ -f "$SCHEMA_SQLITE" ]; then
             echo "[php-init] DB SQLite absente — init depuis $SCHEMA_SQLITE"
-            run_as_web sqlite3 "$DB_PATH" < "$SCHEMA_SQLITE"
+            # Publish schema and the fresh-instance network switch atomically.
+            # Never seed this key on an existing database: legacy activation
+            # must remain unchanged until the administrator chooses otherwise.
+            {
+                printf 'BEGIN IMMEDIATE;\n'
+                cat "$SCHEMA_SQLITE"
+                printf "\nINSERT OR REPLACE INTO settings(key,value) VALUES('pxe_enabled','off');\nCOMMIT;\n"
+            } | run_as_web sqlite3 -bail "$DB_PATH"
         else
             echo "[php-init] WARN: $SCHEMA_SQLITE introuvable, DB non initialisée" >&2
         fi
