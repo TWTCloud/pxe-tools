@@ -35,11 +35,6 @@ final class NetworkDetector
 
         foreach (scandir($sysClassNet) ?: [] as $name) {
             if ($name === '.' || $name === '..' || $name === 'lo') continue;
-            if (str_starts_with($name, 'docker') ||
-                str_starts_with($name, 'br-') ||
-                str_starts_with($name, 'veth')) {
-                continue;
-            }
             $base = $sysClassNet . '/' . $name;
             if (!is_dir($base)) continue;
 
@@ -52,6 +47,7 @@ final class NetworkDetector
                 'mac'      => $mac,
                 'state'    => $state,
                 'wireless' => $wireless,
+                'type'     => self::interfaceType($name, $base, $wireless),
                 'ipv4'     => $ipv4ByIface[$name] ?? [],
             ];
         }
@@ -68,6 +64,59 @@ final class NetworkDetector
         });
 
         return $result;
+    }
+
+    private static function interfaceType(string $name, string $base, bool $wireless): string
+    {
+        if ($wireless) return 'wireless';
+        if (str_starts_with($name, 'docker') || str_starts_with($name, 'br-') || str_starts_with($name, 'veth')) return 'internal';
+        if (is_dir($base . '/bridge')) return 'bridge';
+        if (is_file($base . '/tun_flags') || preg_match('/^(tun|tap|wg|tailscale|zt|ip6?tnl|gre|sit)/', $name)) return 'tunnel';
+        if (trim(@file_get_contents($base . '/type') ?: '') !== '1') return 'other';
+        return 'wired'; // Includes Ethernet presented to a virtual machine.
+    }
+
+    public static function typeLabel(array $interface): string
+    {
+        return match ($interface['type'] ?? (!empty($interface['wireless']) ? 'wireless' : 'wired')) {
+            'wired' => 'Ethernet', 'wireless' => 'Wi-Fi', 'bridge' => 'Pont réseau',
+            'tunnel' => 'Tunnel / VPN', 'internal' => 'Réseau interne / conteneur', default => 'Autre interface',
+        };
+    }
+
+    /** One choice is an exact interface/address/prefix, never just the first IPv4. */
+    public static function addressChoices(array $interfaces): array
+    {
+        $choices = [];
+        foreach ($interfaces as $interface) {
+            foreach ($interface['ipv4'] ?? [] as $address) {
+                if (!is_string($address)) continue;
+                $parsed = self::parseCidr($address);
+                $ip = explode('/', $address, 2)[0];
+                if ($parsed === null || !self::isUsableAddress($ip)) continue;
+                $choices[] = ['value' => $interface['name'] . '|' . $address, 'interface' => $interface['name'],
+                    'address' => $address, 'ip' => $ip, 'cidr' => $parsed['network'] . '/' . $parsed['prefix'],
+                    'type' => self::typeLabel($interface), 'state' => $interface['state'],
+                    'automatic' => ($interface['type'] ?? 'wired') === 'wired' && empty($interface['wireless'])
+                        && $interface['state'] === 'up' && $parsed['prefix'] > 0 && $parsed['prefix'] < 31];
+            }
+        }
+        return $choices;
+    }
+
+    public static function isUsableAddress(string $ip): bool
+    {
+        if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) return false;
+        $long = ip2long($ip);
+        return ($long & 0xFF000000) !== 0 && ($long & 0xFF000000) !== 0x7F000000
+            && ($long & 0xFFFF0000) !== 0xA9FE0000 && ($long & 0xF0000000) < 0xE0000000;
+    }
+
+    /** Suggest only one unambiguous, active Ethernet address. Other cases require a choice. */
+    public static function suggestedAddress(array $interfaces): string
+    {
+        $choices = array_values(array_filter(self::addressChoices($interfaces), static fn(array $choice): bool => $choice['automatic']));
+        return count($choices) === 1 ? $choices[0]['value'] : '';
     }
 
     /**

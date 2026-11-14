@@ -4,6 +4,7 @@ namespace Admin\Controllers;
 
 use Admin\Auth;
 use Admin\Util\ApplianceJobs;
+use Admin\Util\PxeHttpReadiness;
 use Admin\View;
 
 final class NativePortController
@@ -21,9 +22,17 @@ final class NativePortController
     public function form(array $params): void
     {
         if (!$this->permitted()) return;
+        $diagnosis = PxeHttpReadiness::diagnose();
+        $nonce = null;
+        unset($_SESSION['port80_preview']);
+        if (!empty($diagnosis['can_stop']) && $diagnosis['state'] === 'conflict') {
+            $nonce = bin2hex(random_bytes(24));
+            $_SESSION['port80_preview'] = ['nonce' => $nonce, 'diagnosis' => $diagnosis, 'created' => time()];
+        }
         $jobs = ApplianceJobs::tracked('native_port_job_ids');
-        $last = $jobs === [] ? null : $jobs[count($jobs) - 1];
-        View::partial('init/wizard/port-80', ['job' => $last, 'missingConsent' => isset($_GET['consent']), 'identityUnavailable' => isset($_GET['identity'])]);
+        View::partial('init/wizard/port-80', ['job' => $jobs === [] ? null : $jobs[count($jobs) - 1],
+            'diagnosis' => $diagnosis, 'nonce' => $nonce,
+            'missingConsent' => isset($_GET['consent']), 'identityUnavailable' => isset($_GET['identity'])]);
     }
 
     public function submit(array $params): void
@@ -33,26 +42,23 @@ final class NativePortController
             header('Location: /init/port-80?consent=missing');
             return;
         }
-        // Bind consent to the current master process and this boot. A queued
-        // request must not stop a different service started in the meantime.
-        $pid = trim((string)@file_get_contents('/run/nginx.pid'));
-        $boot = trim((string)@file_get_contents('/proc/sys/kernel/random/boot_id'));
-        if (!preg_match('/\A[1-9][0-9]{0,9}\z/D', $pid)
-            || !preg_match('/\A[0-9a-f-]{36}\z/D', $boot)) {
-            header('Location: /init/port-80?identity=unavailable');
+        $preview = $_SESSION['port80_preview'] ?? null;
+        unset($_SESSION['port80_preview']);
+        $nonce = $_POST['preview'] ?? null;
+        $current = PxeHttpReadiness::diagnose();
+        $valid = is_array($preview) && is_string($nonce) && hash_equals($preview['nonce'], $nonce)
+            && time() - $preview['created'] <= 300 && !empty($current['can_stop']) && $current['state'] === 'conflict';
+        foreach (['pid', 'start', 'boot', 'fingerprint', 'address', 'service'] as $key) {
+            $valid = $valid && ($preview['diagnosis'][$key] ?? null) === ($current[$key] ?? null);
+        }
+        if (!$valid || ($current['service'] ?? '') !== 'nginx.service') {
+            header('Location: /init/port-80?identity=changed');
             return;
         }
-        $stat = (string)@file_get_contents('/proc/' . $pid . '/stat');
-        $end = strrpos($stat, ') ');
-        $fields = $end === false ? [] : preg_split('/\s+/', substr($stat, $end + 2));
-        $start = $fields[19] ?? '';
-        if (!is_string($start) || !preg_match('/\A[0-9]+\z/D', $start)) {
-            header('Location: /init/port-80?identity=unavailable');
-            return;
-        }
-        $consent = 'nginx-consent-v1:' . $pid . ':' . $start . ':' . time() . ':' . $boot;
-        // No command or service-name parameters. The privileged worker also
-        // independently verifies every TCP/80 listener immediately before acting.
+        // A fixed service action with a fresh socket/process snapshot. The
+        // privileged worker verifies all evidence independently before stop.
+        $consent = implode(':', ['nginx-consent-v2', $current['pid'], $current['start'], time(),
+            $current['boot'], $current['address'], $current['fingerprint']]);
         ApplianceJobs::enqueue(['system:release_nginx_port' => $consent], [], 'native_port_job_ids');
         header('Location: /init/port-80');
     }

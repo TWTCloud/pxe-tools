@@ -20,6 +20,9 @@ echo '::endgroup::'
 
 echo '::group::Concurrent image selection and real onboarding HTTP'
 php tests/unit/test_wizard_image_race.php
+php tests/unit/test_network_onboarding.php
+python3 tests/unit/test_port80_diagnostic.py
+PXE_NETWORK_ONBOARDING_TEST=1 python3 tests/integration/test_network_onboarding_http.py
 PXE_WIZARD_RACE_ISOLATED=1 python3 tests/integration/test_wizard_image_race_http.py
 echo '::endgroup::'
 
@@ -60,6 +63,7 @@ echo '::group::Native PXE HTTP interface binding'
 python3 tests/unit/test_atomic_publish.py
 python3 tests/unit/test_pxe_menu_rows.py
 python3 tests/unit/test_native_pxe_http_bind.py
+python3 tests/unit/test_network_activation.py
 python3 tests/unit/test_native_worker_keyring.py
 python3 tests/unit/test_configure_secure_runtime.py
 python3 tests/unit/test_restored_publication_guard.py

@@ -24,6 +24,7 @@ final class Setting
     public const KEY_PXE_INTERFACE        = 'pxe_interface';
     public const KEY_PXE_IP      = 'pxe_ip';
     public const KEY_PXE_SUBNET  = 'pxe_subnet';
+    public const KEY_PXE_ENABLED = 'pxe_enabled'; // off: console only; missing: legacy enabled configuration.
     // Renommée de l'ancienne `dhcp_mode` (valeurs proxy/tftp_only) en
     // `dhcp_proxy_enabled` (on/off) pour éviter la confusion sémantique :
     // tftp_only mélangeait transport boot et signaling DHCP. Voir migrate.php

@@ -1,288 +1,135 @@
 <?php
 use Admin\View;
-$step      = $step ?? 1;
+use Admin\Util\NetworkDetector;
+$step = $step ?? 3;
 $stepLabel = 'Réseau';
 $interfaces = $interfaces ?? [];
 $current = $current ?? [];
-$error = $error ?? null;
 $settingsFlow = $settingsFlow ?? false;
-$errorMsg = match ($error) {
-    'missing'       => 'Choisissez une carte réseau et une adresse.',
-    'missing_subnet' => 'Indiquez le sous-réseau des clients PXE autorisés.',
-    'invalid_subnet' => 'Le sous-réseau des clients doit être une plage IPv4 valide, par exemple 192.0.2.0/24.',
-    'subnet_mismatch' => 'L’adresse du serveur ne correspond pas au sous-réseau indiqué. Corrigez-le ou confirmez la configuration manuelle.',
-    'invalid_ip'    => 'L\'adresse doit être au format valide (par exemple 192.0.2.10).',
-    'missing_proxy' => 'Le proxy DHCP nécessite d\'indiquer la plage du réseau local (par exemple 192.0.2.0/24).',
-    'invalid_interface' => 'Nom de carte réseau invalide.',
-    'unknown_interface' => 'Cette carte n’est pas détectée. Vérifiez son nom ou confirmez la configuration manuelle.',
-    'interface_ip_mismatch' => 'Cette adresse n’est pas détectée sur la carte choisie. Utilisez la détection ou confirmez la configuration manuelle.',
-    'network_mismatch' => 'L’adresse du serveur n’appartient pas à cette plage. Corrigez-la ou confirmez la configuration manuelle.',
+$errorMsg = match ($error ?? null) {
+    'select_address' => 'Choisissez une adresse détectée sur le réseau des machines. Si elle a changé, rechargez cette page. Vous pouvez aussi préparer uniquement la console.',
+    'missing' => 'Renseignez l’interface et l’adresse dans les paramètres avancés, ou utilisez une adresse détectée.',
+    'missing_subnet', 'invalid_subnet' => 'Indiquez le réseau autorisé au format IPv4/CIDR, par exemple 192.0.2.0/24.',
+    'subnet_mismatch' => 'L’adresse du serveur n’appartient pas au réseau autorisé. Corrigez-le ou utilisez la confirmation avancée si ce routage est volontaire.',
+    'invalid_ip' => 'L’adresse du serveur doit être une adresse IPv4 valide.',
+    'missing_proxy', 'invalid_cidr' => 'Indiquez le réseau d’annonce du proxy DHCP au format IPv4/CIDR, par exemple 192.0.2.0/24.',
+    'invalid_interface' => 'Le nom de l’interface réseau est invalide.',
+    'unknown_interface' => 'Cette interface n’est pas détectée sur cet hôte. Choisissez une interface détectée ou vérifiez la configuration avancée.',
+    'interface_ip_mismatch' => 'Cette adresse n’est pas affectée à l’interface choisie. Corrigez-la ou confirmez explicitement le cas avancé.',
+    'network_mismatch' => 'L’adresse du serveur n’appartient pas au réseau d’annonce du proxy DHCP. Vérifiez le routage dans les paramètres avancés.',
     'save_failed' => 'La configuration n’a pas été enregistrée. Vérifiez la disponibilité de la base puis réessayez.',
-    'confirm_network' => 'Vérifiez et enregistrez la configuration réseau avant de continuer.',
-    'invalid_cidr'  => 'Plage du réseau local invalide. Format attendu : par exemple 192.0.2.0/24.',
-    null            => null,
-    default         => 'La configuration n\'a pas pu être validée.',
+    'confirm_network' => 'Vérifiez et enregistrez le réseau de cet hôte avant de continuer.',
+    null => null,
+    default => 'Choisissez un mode de configuration et une utilisation du démarrage réseau valides.',
 };
 $title = 'Réseau';
 $contentRender = function () use ($interfaces, $current, $errorMsg, $step, $stepLabel, $settingsFlow) {
     if (!$settingsFlow) include __DIR__ . '/_progress.php';
-    // Map JS : iface_name → { ip, network, netmask, wireless, state }.
-    // Permet au navigateur de pré-remplir les champs IP/réseau/netmask et
-    // d'afficher les warnings (Wi-Fi non recommandé, ETH down détectée)
-    // sans round-trip serveur.
-    $jsIfaceMap = [];
-    foreach ($interfaces as $iface) {
-        $cidrAddr = $iface['ipv4'][0] ?? null;
-        $ip = ''; $cidr = '';
-        if ($cidrAddr) {
-            [$ip, $plen] = array_pad(explode('/', $cidrAddr, 2), 2, '24');
-            $plen = max(0, min(32, (int)$plen));
-            $maskLong = $plen === 0 ? 0 : (~((1 << (32 - $plen)) - 1)) & 0xFFFFFFFF;
-            $network  = long2ip(ip2long($ip) & $maskLong);
-            $cidr     = $network . '/' . $plen;
-        }
-        $jsIfaceMap[$iface['name']] = [
-            'ip'       => $ip,
-            'cidr'     => $cidr,
-            'wireless' => (bool)$iface['wireless'],
-            'state'    => $iface['state'],
-        ];
-    }
+    $choices = NetworkDetector::addressChoices($interfaces);
+    $selected = null;
+    foreach ($choices as $choice) if ($choice['value'] === ($current['network_address'] ?? '')) $selected = $choice;
+    $manual = ($current['network_mode'] ?? 'detected') === 'manual';
+    $role = $current['pxe_role'] ?? 'console';
 ?>
-  <header><h2 style="margin:0;">Configuration réseau</h2></header>
-
-  <?php if ($errorMsg): ?>
-    <article class="flash flash-error" id="network-error" tabindex="-1" role="alert" data-persistent><?= View::e($errorMsg) ?></article>
-  <?php endif; ?>
-
-  <p class="muted">
-    Le serveur communiquera avec les machines à installer par la carte réseau
-    choisie. Les machines le contacteront à l'adresse indiquée.
-  </p>
-
-  <form method="post" action="<?= $settingsFlow ? '/init/network?from=settings' : '/init/network' ?>" id="network-form">
-    <label>
-      Carte réseau (ou connexion) à utiliser
-      <?php if ($interfaces === []): ?>
-      <input name="pxe_interface" id="pxe-interface" required value="<?= View::e($current['pxe_interface'] ?? '') ?>" placeholder="enp1s0">
-      <?php else: ?>
-      <select name="pxe_interface" id="pxe-interface" required>
-        <?php foreach ($interfaces as $iface):
-          $sel = $iface['name'] === ($current['pxe_interface'] ?? '') ? ' selected' : '';
-          // <option> ne supporte pas le HTML — caractères Unicode neutres.
-          $stateBadge = $iface['state'] === 'up' ? '●' : '○';
-          $type = $iface['wireless'] ? 'Wi-Fi' : 'Filaire';
-          $ips = !empty($iface['ipv4']) ? ' — ' . implode(', ', $iface['ipv4']) : '';
-        ?>
-          <option value="<?= View::e($iface['name']) ?>"<?= $sel ?>>
-            <?= $stateBadge ?> <?= View::e($iface['name']) ?> · <?= $type ?> · <?= View::e($iface['mac']) ?><?= View::e($ips) ?>
-          </option>
+<style>
+.network-section { margin-block: 1.75rem; }
+.network-choice { display: grid; grid-template-columns: auto 1fr; column-gap: .65rem; margin-block: .85rem; align-items: start; }
+.network-choice input { margin-top: .25rem; }
+.network-choice small { display: block; margin-top: .2rem; font-weight: 400; }
+.network-summary { display: grid; grid-template-columns: minmax(7rem, .8fr) minmax(0, 1.2fr); gap: .45rem 1rem; padding-block: .85rem; margin-block: .8rem; border-block: 1px solid var(--color-divider); }
+.network-summary dt, .network-summary dd { margin: 0; overflow-wrap: anywhere; }
+.network-summary dt { color: var(--color-text-secondary); }
+.network-advanced summary { cursor: pointer; font-weight: 600; padding-block: .75rem; }
+.network-advanced label { margin-block: .8rem; }
+.network-detected[aria-disabled="true"] { opacity: .65; }
+@media(max-width: 420px) { .network-summary { grid-template-columns: 1fr; gap: .2rem; } .network-summary dd { margin-bottom: .45rem; } }
+</style>
+<header><h2 style="margin:0">Le réseau de vos machines</h2></header>
+<p>Choisissez la connexion utilisée par les machines à installer. L’adresse du serveur et leur réseau sont déduits de cette connexion.</p>
+<?php if ($errorMsg): ?><p class="flash flash-error" id="network-error" tabindex="-1" role="alert" data-persistent><?= View::e($errorMsg) ?></p><?php endif; ?>
+<form method="post" action="<?= $settingsFlow ? '/init/network?from=settings' : '/init/network' ?>" id="network-form">
+  <section class="network-section" aria-label="Connexion réseau">
+    <label class="network-choice"><input type="radio" name="network_mode" value="detected" <?= !$manual ? 'checked' : '' ?>><span>Utiliser le réseau détecté</span></label>
+    <div id="network-detected" class="network-detected">
+      <label for="network-address">Connexion vers les machines</label>
+      <select name="network_address" id="network-address" aria-describedby="network-detection-help">
+        <option value="">Choisir une connexion et son adresse</option>
+        <?php foreach ($choices as $choice): ?>
+        <option value="<?= View::e($choice['value']) ?>" <?= $selected !== null && $choice['value'] === $selected['value'] ? 'selected' : '' ?>><?= View::e($choice['interface'] . ' · ' . $choice['address'] . ' · ' . $choice['type'] . ' · ' . ($choice['state'] === 'up' ? 'active' : 'inactive')) ?></option>
         <?php endforeach; ?>
       </select>
-      <?php endif; ?>
-      <small class="muted">
-        Cartes réseau détectées automatiquement. Les connexions internes au système sont masquées.
-      </small>
-    </label>
-
-    <article id="iface-warning" class="flash flash-warning" data-persistent style="display:none;margin-top:.5rem;">
-      <!-- Mis à jour côté JS selon l'interface sélectionnée -->
-    </article>
-
-    <label>
-      Adresse du serveur (celle que les machines utiliseront pour le contacter)
-      <input type="text" name="pxe_ip" id="pxe-ip" required
-             pattern="^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$"
-             placeholder="192.0.2.10"
-             value="<?= View::e($current['pxe_ip'] ?? '') ?>">
-      <small class="muted">
-        Pré-remplie avec l'adresse de la carte réseau choisie. Modifiez-la seulement si les machines doivent passer par une autre adresse (configuration avancée).
-      </small>
-    </label>
-
-    <label>
-      Sous-réseau des clients PXE autorisés
-      <input type="text" name="pxe_subnet" id="pxe-subnet" required
-             pattern="^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$"
-             placeholder="192.0.2.0/24"
-             value="<?= View::e($current['pxe_subnet'] ?? '') ?>">
-      <small class="muted">Les menus, configurations d’installation et signaux PXE sont limités à cette plage. Vérifiez la suggestion avant de continuer.</small>
-    </label>
-
-    <p id="network-detection" class="muted" role="status"></p>
-    <button type="button" id="use-interface-detection" class="btn btn-secondary btn-small">Utiliser les valeurs détectées</button>
-    <label class="mt-4"><input type="checkbox" id="network-override" name="network_override" <?= !empty($current['network_override']) ? 'checked' : '' ?>>
-      Configuration manuelle : je confirme l’interface, l’adresse et la plage, y compris lorsqu’elles diffèrent de la détection.
-    </label>
-    <fieldset>
-      <legend>Proxy DHCP PXE</legend>
-      <label for="dhcp-proxy-enabled">
-        <input type="checkbox" name="dhcp_proxy_enabled" id="dhcp-proxy-enabled" role="switch"
-               <?= ($current['dhcp_proxy_enabled'] ?? false) ? 'checked' : '' ?>>
-        Activer le proxy DHCP PXE sur le réseau choisi
-      </label>
-      <small class="muted" id="dhcp-proxy-help">
-        <!-- Mis à jour côté JS selon l'état de la checkbox -->
-      </small>
-    </fieldset>
-
-    <fieldset id="proxy-fields" style="display:none;">
-      <legend>Plage du réseau local (détectée automatiquement)</legend>
-      <label>
-        Plage du réseau local
-        <input type="text" name="dhcp_proxy_cidr" id="dhcp-proxy-cidr"
-               pattern="^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$"
-               placeholder="192.0.2.0/24"
-               value="<?= View::e($current['dhcp_proxy_cidr'] ?? '') ?>">
-        <small class="muted">
-          Calculée à partir de la carte réseau choisie. Modifiez-la seulement si
-          vos machines à installer sont sur un réseau différent de celui du serveur (configuration avancée).
-        </small>
-      </label>
-    </fieldset>
-
-    <fieldset>
-      <legend>Accès au portail d'administration</legend>
-      <label for="https-enabled">
-        <input type="checkbox" name="https_enabled" id="https-enabled" role="switch"
-               <?= ($current['https_enabled'] ?? true) ? 'checked' : '' ?>>
-        Sécuriser l'accès au portail (connexion chiffrée, recommandé)
-      </label>
-      <small class="muted">
-        Si activé : le portail s'ouvre via une connexion sécurisée, à l'adresse
-        port HTTPS configuré (<?= (int)(getenv('ADMIN_PORT') ?: 8443) ?>), après application par le worker.
-        Un certificat auto-signé doit être vérifié avant de l’accepter.
-        Le port HTTP configuré (<?= (int)(getenv('ADMIN_HTTP_PORT') ?: 8080) ?>) redirigera alors vers HTTPS.<br>
-        Si désactivé : le portail local sert HTTP ; le chiffrement peut être assuré par un reverse proxy externe.
-      </small>
-    </fieldset>
-
-    <div class="wizard-actions">
-      <a href="<?= $settingsFlow ? '/settings' : '/init/admin' ?>" class="btn btn-secondary"><span class="btn-arrow">←</span> <?= $settingsFlow ? 'Retour aux paramètres' : 'Retour' ?></a>
-      <button type="submit" class="btn btn-primary"><?= $settingsFlow ? 'Enregistrer' : 'Suivant' ?> <span class="btn-arrow">→</span></button>
+      <p class="muted" id="network-detection-help"><?= $choices === [] ? 'Aucune IPv4 utilisable n’est détectée. Branchez et configurez la connexion sur cet hôte, puis rechargez la page. La console peut être préparée dès maintenant.' : ($selected === null ? 'Plusieurs connexions ou une interface particulière demandent votre choix. Sélectionnez celle qui rejoint le réseau local des machines.' : 'Vérifiez que cette connexion rejoint bien le réseau local des machines. L’adresse doit rester stable pour qu’elles retrouvent ce serveur.') ?></p>
+      <dl class="network-summary" aria-label="Résumé du réseau détecté" aria-live="polite">
+        <dt>Interface</dt><dd id="summary-interface"><?= View::e($selected['interface'] ?? 'À choisir') ?></dd>
+        <dt>Adresse du serveur</dt><dd id="summary-ip"><?= View::e($selected['ip'] ?? 'À choisir') ?></dd>
+        <dt>Réseau des machines</dt><dd id="summary-cidr"><?= View::e($selected['cidr'] ?? 'À choisir') ?></dd>
+      </dl>
+      <p id="interface-note" class="muted" role="status"></p>
     </div>
-  </form>
+  </section>
 
-  <script>
-  (function(){
-    const ifaceMap  = <?= json_encode($jsIfaceMap, JSON_UNESCAPED_SLASHES) ?>;
-    const selIface  = document.getElementById('pxe-interface');
-    const chkProxy  = document.getElementById('dhcp-proxy-enabled');
-    const fs        = document.getElementById('proxy-fields');
-    const ipInput   = document.getElementById('pxe-ip');
-    const cidrInput = document.getElementById('dhcp-proxy-cidr');
-    const subnetInput = document.getElementById('pxe-subnet');
-    const helpEl    = document.getElementById('dhcp-proxy-help');
-    const warnEl    = document.getElementById('iface-warning');
-    const form      = document.getElementById('network-form');
+  <fieldset class="network-section">
+    <legend>Quand activer le démarrage réseau ?</legend>
+    <label class="network-choice"><input type="radio" name="pxe_role" value="console" <?= $role === 'console' ? 'checked' : '' ?>><span>Plus tard — préparer la console<small class="muted">La console reste accessible. Les services de démarrage HTTP, TFTP et proxy DHCP de PXE Tools restent arrêtés après application.</small></span></label>
+    <label class="network-choice"><input type="radio" name="pxe_role" value="proxy" <?= $role === 'proxy' ? 'checked' : '' ?>><span>Activer PXE avec mon DHCP existant<small class="muted">Votre box, routeur ou serveur DHCP continue d’attribuer les adresses IP. PXE Tools fournit les indications de démarrage avec un proxy DHCP, sans distribuer d’adresses. Choisissez ce mode si votre DHCP n’annonce pas déjà un autre serveur PXE.</small></span></label>
+    <label class="network-choice"><input type="radio" name="pxe_role" value="external" <?= $role === 'external' ? 'checked' : '' ?>><span>Activer PXE avec un DHCP déjà configuré pour ce serveur<small class="muted">Vous gérez les indications de démarrage sur votre DHCP. PXE Tools sert les fichiers HTTP et TFTP ; son proxy DHCP reste désactivé.</small></span></label>
+    <p class="muted" id="network-activation-note"><?= $settingsFlow ? 'Enregistrer conserve ce choix. Utilisez ensuite « Appliquer la configuration » dans les paramètres pour démarrer ou arrêter ces services.' : 'Les services seront démarrés ou arrêtés après la validation finale de l’assistant. Enregistrer cette étape ne les active pas.' ?></p>
+  </fieldset>
 
-    // Pour comparer la sélection courante aux autres ETH dispo : on a besoin
-    // de la liste des Ethernet UP/down présents.
-    const allIfaces = Object.entries(ifaceMap).map(([name, cfg]) => ({ name, ...cfg }));
-    const ethernetIfs = allIfaces.filter(i => !i.wireless);
-    const ethUp       = ethernetIfs.filter(i => i.state === 'up').map(i => i.name);
-    const ethDown     = ethernetIfs.filter(i => i.state !== 'up').map(i => i.name);
-
-    const helpTexts = {
-      on:
-        'Le serveur répondra aux demandes de démarrage PXE en complément du DHCP existant. ' +
-        'Activez-le seulement après avoir vérifié que ce mode convient à votre réseau.',
-      off:
-        'Le proxy DHCP est désactivé. Configurez votre DHCP existant pour diriger les machines ' +
-        'vers ce serveur si vous souhaitez démarrer par le réseau.',
-    };
-
-    function updateIfaceWarning(){
-      const cfg = ifaceMap[selIface.value];
-      if (!cfg) { warnEl.style.display = 'none'; warnEl.innerHTML = ''; return; }
-
-      const messages = [];
-      if (cfg.wireless) {
-        messages.push(
-          '<strong>Attention : le Wi-Fi est déconseillé.</strong> ' +
-          'Le démarrage par le réseau est bien plus fiable sur une connexion filaire (câble). ' +
-          'En Wi-Fi, l\'opération échoue souvent et reste lente. Préférez une carte réseau filaire.'
-        );
-        if (ethUp.length > 0) {
-          messages.push(
-            'Carte(s) réseau filaire(s) active(s) disponible(s) : <code>' +
-            ethUp.join('</code>, <code>') + '</code>.'
-          );
-        } else if (ethDown.length > 0) {
-          messages.push(
-            'Une carte réseau filaire est détectée mais semble inactive : <code>' +
-            ethDown.join('</code>, <code>') + '</code>. Branchez le câble pour l\'utiliser.'
-          );
-        }
-      } else if (cfg.state !== 'up') {
-        messages.push(
-          '<strong>Attention : carte réseau inactive.</strong> ' +
-          'La carte réseau choisie est inactive (câble débranché ?). ' +
-          'Le démarrage par le réseau ne fonctionnera pas tant qu\'elle reste inactive.'
-        );
-      }
-
-      if (messages.length === 0) {
-        warnEl.style.display = 'none';
-        warnEl.innerHTML = '';
-      } else {
-        warnEl.style.display = '';
-        warnEl.innerHTML = messages.join('<br><br>');
-      }
-    }
-
-    const manual = document.getElementById('network-override');
-    const detected = document.getElementById('network-detection');
-    let ipEdited = false, cidrEdited = false, subnetEdited = false;
-    ipInput.addEventListener('input', () => { ipEdited = true; });
-    cidrInput.addEventListener('input', () => { cidrEdited = true; });
-    subnetInput.addEventListener('input', () => { subnetEdited = true; });
-    function applyIfaceDefaults(force = false, changed = false){
-      const cfg = ifaceMap[selIface.value] || {ip:'', cidr:''};
-      detected.textContent = cfg.ip ? 'Détecté sur ' + selIface.value + ' : ' + cfg.ip + ' · ' + cfg.cidr : 'Aucune adresse détectée : une configuration manuelle doit être confirmée.';
-      if (force || (changed && !ipEdited && !manual.checked)) ipInput.value = cfg.ip || '';
-      if (force || (changed && !cidrEdited && !manual.checked)) cidrInput.value = cfg.cidr || '';
-      if (force || (changed && !subnetEdited && !manual.checked)) subnetInput.value = cfg.cidr || '';
-      if (changed && (ipEdited || cidrEdited || subnetEdited || manual.checked)) detected.textContent += ' Votre saisie manuelle est conservée ; vérifiez sa cohérence avec cette carte.';
-      if (force) { ipEdited = false; cidrEdited = false; subnetEdited = false; manual.checked = false; }
-    }
-    document.getElementById('use-interface-detection').addEventListener('click', () => applyIfaceDefaults(true));
-
-    function updateProxy(){
-      const on = chkProxy.checked;
-      fs.style.display = on ? '' : 'none';
-      helpEl.textContent = helpTexts[on ? 'on' : 'off'];
-    }
-
-    selIface.addEventListener('change', () => {
-      applyIfaceDefaults(false, true);
-      updateIfaceWarning();
+  <details class="network-section network-advanced" id="network-advanced" <?= $manual ? 'open' : '' ?>>
+    <summary>Paramètres avancés et accès à la console</summary>
+    <p class="muted">Pour un réseau routé, une adresse annoncée différente ou une configuration reprise d’un autre hôte. Vos valeurs sont conservées lorsque vous changez de mode.</p>
+    <label class="network-choice"><input type="radio" name="network_mode" value="manual" <?= $manual ? 'checked' : '' ?>><span>Utiliser ces valeurs réseau manuelles</span></label>
+    <label for="pxe-interface">Interface réseau<input name="pxe_interface" id="pxe-interface" list="detected-interface-names" value="<?= View::e($current['pxe_interface'] ?? '') ?>" placeholder="enp1s0"></label>
+    <datalist id="detected-interface-names"><?php foreach ($interfaces as $interface): ?><option value="<?= View::e($interface['name']) ?>"><?= View::e(NetworkDetector::typeLabel($interface) . ' · ' . implode(', ', $interface['ipv4'])) ?></option><?php endforeach; ?></datalist>
+    <label for="pxe-ip">Adresse du serveur annoncée aux machines<input name="pxe_ip" id="pxe-ip" value="<?= View::e($current['pxe_ip'] ?? '') ?>" placeholder="192.0.2.10" inputmode="decimal"></label>
+    <label for="pxe-subnet">Réseau des clients autorisés<input name="pxe_subnet" id="pxe-subnet" value="<?= View::e($current['pxe_subnet'] ?? '') ?>" placeholder="192.0.2.0/24"><small class="muted">Limite l’accès aux menus, aux configurations d’installation et aux signaux PXE.</small></label>
+    <label for="dhcp-proxy-cidr">Réseau d’annonce du proxy DHCP<input name="dhcp_proxy_cidr" id="dhcp-proxy-cidr" value="<?= View::e($current['dhcp_proxy_cidr'] ?? '') ?>" placeholder="192.0.2.0/24"><small class="muted">Utilisé uniquement avec le proxy DHCP. Ce réseau d’annonce peut différer du réseau autorisé dans une installation routée ; il ne s’agit pas d’une réserve d’adresses à distribuer.</small></label>
+    <label class="network-choice"><input type="checkbox" name="network_override" id="network-override" <?= !empty($current['network_override']) ? 'checked' : '' ?>><span>Autoriser des valeurs absentes de la détection<small class="muted">Je confirme que l’interface, l’adresse et le routage sont configurés sur cet hôte. Cette option permet l’enregistrement ; elle n’ajoute aucune adresse et ne crée aucune route. Les services vérifient encore leurs propres conditions de démarrage.</small></span></label>
+    <button type="button" class="btn btn-secondary btn-sm" id="copy-detected-network">Copier le réseau détecté dans ces champs</button>
+    <fieldset class="network-section">
+      <legend>Accès à la console</legend>
+      <label class="network-choice"><input type="checkbox" name="https_enabled" id="https-enabled" <?= !empty($current['https_enabled']) ? 'checked' : '' ?>><span>Activer HTTPS sur le port <?= (int)(getenv('ADMIN_PORT') ?: 8443) ?><small class="muted">Après application, le port HTTP <?= (int)(getenv('ADMIN_HTTP_PORT') ?: 8080) ?> redirige vers HTTPS. Le certificat auto-signé doit être vérifié. Le port 80 utilisé pour le démarrage des machines est distinct de la console.</small></span></label>
+    </fieldset>
+  </details>
+  <div class="wizard-actions">
+    <a href="<?= $settingsFlow ? '/settings' : '/init/admin' ?>" class="btn btn-secondary"><?= $settingsFlow ? 'Retour aux paramètres' : 'Retour' ?></a>
+    <button type="submit" class="btn btn-primary"><?= $settingsFlow ? 'Enregistrer' : 'Continuer' ?></button>
+  </div>
+</form>
+<script>
+(function () {
+  const choices = <?= json_encode(array_column($choices, null, 'value'), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+  const form = document.getElementById('network-form');
+  const select = document.getElementById('network-address');
+  function update() {
+    const choice = choices[select.value];
+    const manual = form.elements.network_mode.value === 'manual';
+    document.getElementById('network-detected').setAttribute('aria-disabled', String(manual));
+    [['interface', 'interface'], ['ip', 'ip'], ['cidr', 'cidr']].forEach(([id, key]) => {
+      document.getElementById('summary-' + id).textContent = choice ? choice[key] : 'À choisir';
     });
-    chkProxy.addEventListener('change', updateProxy);
-
-    // Confirmation au submit si Wi-Fi sélectionné — évite l'erreur muette d'un
-    // utilisateur pressé qui valide sans lire le warning inline.
-    form.addEventListener('submit', (e) => {
-      const cfg = ifaceMap[selIface.value];
-      if (cfg && cfg.wireless) {
-        const ok = window.confirm(
-          'Vous avez choisi une connexion Wi-Fi (' + selIface.value + ').\n\n' +
-          'Le démarrage par le réseau est instable en Wi-Fi : il échoue souvent ' +
-          'et reste lent. Une connexion filaire (câble) est fortement recommandée.\n\n' +
-          'Continuer quand même ?'
-        );
-        if (!ok) {
-          e.preventDefault();
-          return;
-        }
-      }
-    });
-
-    if (document.getElementById('network-error')) document.getElementById('network-error').focus();
-    applyIfaceDefaults();
-    updateIfaceWarning();
-    updateProxy();
-  })();
-  </script>
+    document.getElementById('interface-note').textContent = !choice ? '' : choice.state !== 'up'
+      ? 'Cette interface est inactive. Vérifiez le câble et sa configuration avant d’activer PXE.'
+      : choice.type === 'Wi-Fi' ? 'Pour démarrer les machines, préférez une connexion Ethernet au même réseau local.'
+      : ['Pont réseau', 'Tunnel / VPN', 'Réseau interne / conteneur'].includes(choice.type)
+        ? 'Vérifiez que cette interface rejoint les machines : un réseau interne ou un VPN ne transporte pas forcément leur démarrage.' : '';
+    if (manual) document.getElementById('network-advanced').open = true;
+  }
+  form.querySelectorAll('[name="network_mode"]').forEach(input => input.addEventListener('change', update));
+  select.addEventListener('change', update);
+  document.getElementById('copy-detected-network').addEventListener('click', () => {
+    const choice = choices[select.value];
+    if (!choice) return;
+    document.getElementById('pxe-interface').value = choice.interface;
+    document.getElementById('pxe-ip').value = choice.ip;
+    document.getElementById('pxe-subnet').value = choice.cidr;
+    document.getElementById('dhcp-proxy-cidr').value = choice.cidr;
+    document.getElementById('network-override').checked = false;
+  });
+  if (document.getElementById('network-error')) document.getElementById('network-error').focus();
+  update();
+})();
+</script>
 <?php };
 include __DIR__ . '/_layout.php';
