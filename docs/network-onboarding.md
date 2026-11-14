@@ -39,6 +39,10 @@ L'adresse de liaison, IPv4/IPv6 et les droits de lecture disponibles limitent le
 
 Si le service concurrent peut être identifié avec certitude et qu'une action contrôlée est disponible, l'interface présente l'interruption attendue et demande confirmation. L'action revalide l'occupant, effectue un arrêt propre et vérifie le résultat. Elle ne doit ni tuer arbitrairement un PID, ni désactiver ou masquer durablement un service tiers. Un refus de confirmation ne change aucun service.
 
+## Retour à une version antérieure
+
+Une version antérieure au candidat ne connaît pas `pxe_enabled` : cette seule valeur ne garantit donc pas qu'elle gardera le réseau arrêté. Avant un retour arrière, arrêter les services de démarrage et conserver une sauvegarde cohérente des réglages et de leurs fichiers associés. Reprendre la configuration et la supervision adaptées à la version restaurée, puis vérifier les écoutes effectives avant toute activation. Le candidat ne déclenche aucune rétrogradation automatique.
+
 ## Changement d'hôte et sauvegardes
 
 Il n'existe actuellement aucun export portable complet d'instance ; les modèles JSON et l'inventaire de migration ne sont pas un tel transfert. L'archive de récupération complète reste une sauvegarde fidèle, avec la base et ses paramètres d'origine.
