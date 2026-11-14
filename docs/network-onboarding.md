@@ -27,6 +27,8 @@ Le réglage `pxe_enabled` sépare l'activation des services de démarrage de la 
 - Une base héritée sans cette clé conserve son comportement antérieur ; une clé explicite `off` reste prioritaire sur les variables d'environnement.
 - Une valeur illisible ou invalide ne doit pas être interprétée comme une demande d'activation.
 
+Pour les anciennes configurations natives, PHP, le worker, dnsmasq et le service HTTP de démarrage chargent le même environnement dans l’ordre `default.env`, `network.env`, puis `runtime.env`. L’assistant affiche ainsi les valeurs effectivement utilisées lorsque les clés réseau sont absentes de SQLite. Une valeur déjà enregistrée dans SQLite, même vide, garde la priorité. Aucun élargissement des droits du service web n’est ajouté.
+
 En mode console seule, le rendu dnsmasq est inerte. L'application native arrête ses propres services HTTP de démarrage et dnsmasq et retire le démarrage automatique de sa propre target PXE. La console et le worker restent indépendants. Dans Docker, nginx continue à servir la console et sa configuration HTTP de démarrage est retirée ; dnsmasq est arrêté lors de l'application explicite. Les modèles de configuration conservés restent disponibles pour une activation ultérieure.
 
 ## Port 80 et diagnostic

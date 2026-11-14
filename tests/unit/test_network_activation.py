@@ -14,6 +14,16 @@ activation = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(activation)
 
 class NetworkActivationTests(unittest.TestCase):
+    def test_native_readers_share_environment_precedence(self):
+        expected = ['EnvironmentFile=/usr/lib/pxe-tools/native/default.env',
+                    'EnvironmentFile=-/var/lib/pxe-tools-native/network.env',
+                    'EnvironmentFile=-/var/lib/pxe-tools-native/runtime.env']
+        for name in ('php', 'worker', 'dnsmasq', 'pxe-http'):
+            with self.subTest(service=name):
+                unit = (ROOT/'packaging/native'/f'pxe-tools-{name}.service').read_text()
+                files = [line for line in unit.splitlines() if line.startswith('EnvironmentFile=')]
+                self.assertEqual(files, expected)
+
     def test_fresh_database_is_not_created(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)/'missing.sqlite'
