@@ -1,6 +1,6 @@
-# Cycle automatique de mise à niveau APT — candidat
+# Cycle automatique de mise à niveau APT — bêta 7 publiée
 
-Ce document décrit le correctif de l’issue #56. La bêta 6 publiée conserve son refus d’upgrade lorsque les services sont actifs. Le candidat ne remplace pas les octets de cette version et n’est pas encore distribué dans le dépôt APT.
+Ce document décrit le correctif de l’issue #56, publié le 15 novembre 2026 dans la [release v0.1.0-beta7](https://github.com/williamboglietti/pxe-tools/releases/tag/v0.1.0-beta7) et le dépôt APT signé. La [publication APT, run 43719131612](https://github.com/williamboglietti/pxe-tools/actions/runs/43719131612), a réussi après l’accord de publication. Les anciens paquets bêta 6 conservent leur refus d’upgrade lorsque les services sont actifs ; leurs octets et leurs liens immuables restent conservés.
 
 ## Comportement recherché
 
@@ -36,7 +36,7 @@ Les résultats doivent distinguer :
 - échecs de préparation, travail réellement en cours, configuration interrompue et retry ciblé ;
 - tests CI Debian et éventuelles autres VM de distribution, sans étendre leur portée par simple similarité de version PHP ou systemd.
 
-Le correctif n’autorise aucun test sur le réseau PXE domestique, aucune modification de l’Atom ou de la machine utilisateur, ni une nouvelle release. Les versions et empreintes exactes du candidat reçues sur Zorin sont consignées ci-dessous ; la décision de publication reste distincte.
+Les essais décrits ici n’autorisaient aucun test sur le réseau PXE domestique, aucune modification de l’Atom ou de la machine utilisateur, ni une nouvelle release. Les versions et empreintes exactes reçues sur Zorin sont consignées ci-dessous ; la publication bêta 7 a ensuite reçu un accord distinct.
 
 ## Références
 
@@ -83,4 +83,10 @@ La réception a vérifié :
 
 La preuve locale de cette réception est `canonical-zorin-smoke.json`, conservée dans le dossier d’audit de la préparation de diffusion. Cette réception n’établit ni une comparaison binaire ni une nouvelle transaction de ces octets sur Debian ou Ubuntu ; elle ne valide aucun boot client PXE ou matériel physique supplémentaire.
 
-La candidate reste non publiée. Une décision de publication distincte reste nécessaire ; aucune nouvelle release, signature APT ou annonce du site n’est déclenchée par cette réception seule.
+### Publication et réception du dépôt public
+
+Après l’accord de publication, la [release v0.1.0-beta7](https://github.com/williamboglietti/pxe-tools/releases/tag/v0.1.0-beta7) a publié les deux DEB canoniques de la source `52c31ffc98df79c8a31b7239ada652a5c9e11e12` et du build `43711527397`, avec les SHA-256 ci-dessus. Le manifeste de production a été intégré par la PR #59 au commit `e31c7ae8f0610311350346f0a0d62767b12e2270` ; sa [CI après fusion, run 43719060899](https://github.com/williamboglietti/pxe-tools/actions/runs/43719060899), puis la [publication APT signée, run 43719131612](https://github.com/williamboglietti/pxe-tools/actions/runs/43719131612), ont réussi.
+
+La réception publique du 15 novembre 2026 a vérifié l’InRelease signé avec la clé primaire et la sous-clé attendues, sa validité jusqu’au 22 novembre 2026, les index SHA-256/SHA-512 et leurs accès by-hash. Les deux paquets `0.1.0~beta7` sont téléchargeables anonymement avec HTTP 200 et leurs empreintes correspondent aux DEB canoniques. Les liens immuables des deux paquets bêta 6 restent accessibles et leurs empreintes ont été vérifiées. La preuve locale est `public-apt-receipt.json`, conservée dans le dossier d’audit de la publication.
+
+Cette réception confirme la distribution publique des octets reçus sur Zorin ; elle ne constitue ni une nouvelle transaction APT sur un client, ni une réception supplémentaire sur Debian ou Ubuntu, ni un nouveau boot PXE ou matériel physique.
