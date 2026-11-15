@@ -36,7 +36,7 @@ Les résultats doivent distinguer :
 - échecs de préparation, travail réellement en cours, configuration interrompue et retry ciblé ;
 - tests CI Debian et éventuelles autres VM de distribution, sans étendre leur portée par simple similarité de version PHP ou systemd.
 
-Le correctif n’autorise aucun test sur le réseau PXE domestique, aucune modification de l’Atom ou de la machine utilisateur, ni une nouvelle release. Les versions et empreintes exactes du candidat seront figées avec les preuves reçues avant une décision de publication distincte.
+Le correctif n’autorise aucun test sur le réseau PXE domestique, aucune modification de l’Atom ou de la machine utilisateur, ni une nouvelle release. Les versions et empreintes exactes du candidat reçues sur Zorin sont consignées ci-dessous ; la décision de publication reste distincte.
 
 ## Références
 
@@ -59,4 +59,28 @@ Les baselines de distribution ont été préparées dans des VM de laboratoire e
 
 Le candidat initial `6835b67` échouait réellement au dégel sur Debian 12. Le correctif évite la terminaison fatale du main avant normalisation du freezer : gel vérifié, pause SIGSTOP ciblée après contrôle d’identité, dégel systemd/noyau vérifié, même processus à l’arrêt, puis arrêt standard TERM/CONT. Le pont et sa compensation ont été reçus en vrai ; le contrôle PID/starttime/cgroup avant signal n’est pas une garantie d’atomicité face à une intervention extérieure entre contrôle et signal.
 
-Les paquets de laboratoire ont des métadonnées Maintainer propres aux essais et leurs hashes diffèrent. Ils ne sont pas promus comme artefacts de publication. Après intégration, le build CI canonique devra fixer source/run/deuxpaquets/SHA, être comparé aux payloads et scripts reçus, puis subir au moins un smoke upgrade Zorin depuis la bêta 6 sur ces octets exacts avant proposition de publication. Aucune nouvelle release, signature APT ou annonce du site n’est déclenchée par la recette seule.
+Les paquets de laboratoire ont des métadonnées Maintainer propres aux essais et leurs hashes diffèrent. Ils ne sont pas promus comme artefacts de publication. La réception du build canonique exact est consignée ci-dessous ; elle ne transforme pas les essais Debian et Ubuntu précédents en réception de ces octets.
+
+### Réception des paquets canoniques sur Zorin
+
+Le 15 novembre 2026, le smoke réel sur la VM Zorin OS 18.1 a réussi avec les paquets de la source `52c31ffc98df79c8a31b7239ada652a5c9e11e12`, issus du [run GitHub Actions 43711527397](https://github.com/williamboglietti/pxe-tools/actions/runs/43711527397).
+
+| Paquet canonique `0.1.0~beta7` | SHA-256 |
+|---|---|
+| `pxe-tools` | `cca1e2978716acad39cd654c996fd487d272e19c01c6d33bb07d66aff93c6467` |
+| `pxe-tools-ansible` | `2a03855e5045191220f2124febff1ec244dc7ae2840e86f6b802e093b5f58790` |
+
+Les deux paquets publics bêta 6 étaient déjà installés. Une transaction `DEBIAN_FRONTEND=noninteractive apt-get -y upgrade`, avec sources/listes/cache APT de fixture isolés et le vrai status dpkg, les a mis à niveau vers ces deux paquets canoniques bêta 7 sans préarrêt manuel ; APT a terminé avec le code zéro. Ce parcours vérifie la mise à niveau normale des deux paquets installés, sans mise à niveau globale des autres paquets de l’OS.
+
+La réception a vérifié :
+
+- la conservation exacte des états actifs et des politiques de démarrage des neuf unités ; l’administration reprend, le réseau PXE et le proxy restent arrêtés ;
+- la conservation des données, de la configuration, de la clé, des médias, du compte et de l’assistant terminé ;
+- le runtime Ansible `ready`, avec son compte, ses groupes, son espace de travail et son drop-in conservés ;
+- le snapshot `93a7b56bef384f519044e49350c9ea74` en phase `complete`, une intégrité SQLite `ok`, des répertoires root `0700` et des fichiers `0600`, sans journal inachevé ;
+- le worker dégelé et le PID du nginx système étranger à PXE Tools inchangé ;
+- la correspondance du payload installé avec les DEB canoniques : 406 entrées du socle et 11 du module, plus les quatre scripts de maintenance de chaque paquet.
+
+La preuve locale de cette réception est `canonical-zorin-smoke.json`, conservée dans le dossier d’audit de la préparation de diffusion. Cette réception n’établit ni une comparaison binaire ni une nouvelle transaction de ces octets sur Debian ou Ubuntu ; elle ne valide aucun boot client PXE ou matériel physique supplémentaire.
+
+La candidate reste non publiée. Une décision de publication distincte reste nécessaire ; aucune nouvelle release, signature APT ou annonce du site n’est déclenchée par cette réception seule.
