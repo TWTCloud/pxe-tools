@@ -1,0 +1,62 @@
+# Cycle automatique de mise à niveau APT — candidat
+
+Ce document décrit le correctif de l’issue #56. La bêta 6 publiée conserve son refus d’upgrade lorsque les services sont actifs. Le candidat ne remplace pas les octets de cette version et n’est pas encore distribué dans le dépôt APT.
+
+## Comportement recherché
+
+Une mise à niveau APT normale, y compris sans terminal interactif, doit assurer sa propre fenêtre de maintenance lorsque l’instance est au repos. L’administrateur ne doit pas arrêter manuellement les neuf unités ni fournir une phrase de passe à chaque mise à jour. Aucun cron, daemon ou réglage global unattended-upgrades n’est ajouté.
+
+Le paquet conserve les états actifs et les politiques enabled/disabled. Il vérifie quelle base et quelle clé sont effectivement utilisées, quiesce le worker et les points d’entrée, puis prépare un snapshot local privé avant le remplacement et les migrations existantes. Il redémarre ensuite les seuls rôles précédemment actifs. Les noms de compte, les réglages, les données, la clé maîtresse et l’état d’onboarding ne sont pas réinitialisés. Un réseau PXE auparavant arrêté n’est pas activé.
+
+## Travaux en cours
+
+Le fonctionnement d’un service ne constitue pas une occupation bloquante. Les tâches techniques simplement en attente restent en file pour le nouveau worker. En revanche, une opération démarrée ou une tâche client PXE déjà engagée peut nécessiter un refus conservateur : une absence de processus local ne prouve pas la fin d’un travail distant.
+
+Un refus doit indiquer le type et l’identifiant de l’opération à terminer ou à examiner dans l’interface, sans imprimer de jeton, mot de passe ou contenu de configuration. Le paquet ne modifie pas les statuts en base pour contourner cette barrière.
+
+La barrière worker doit être validée sous systemd réel, et non seulement avec des doublures de test. Les transitions entre inspection de la base, gel, arrêt et redémarrage sont particulièrement importantes : arrêter nginx ou PHP trop tôt pourrait arrêter le worker par dépendance, avant le contrôle de son activité.
+
+## Snapshots et reprise
+
+Les snapshots automatiques restent sur le même disque, dans un répertoire réservé à root. Ils sont non interactifs et ne constituent ni une sauvegarde distante ni une garantie de rollback de schéma. Ils conservent notamment la base cohérente, la configuration et la clé effective, ainsi que les petits fichiers natifs nécessaires avec leurs empreintes et métadonnées. Les médias HTTP/TFTP et ISO ne sont pas recopiés à chaque upgrade.
+
+La rétention est limitée aux snapshots automatiques terminés et reconnus. Une archive manuelle ou un état en échec/en attente doit être conservé.
+
+Avant dépaquetage, une erreur de préparation peut reprendre l’ancien état seulement si aucun remplacement n’a eu lieu. Après un échec de dépaquetage, les fichiers peuvent être mixtes : ne pas relancer aveuglément l’ancien programme ni réinjecter une base. Après un échec de configuration ou de migration, le journal et le snapshot antérieur restent disponibles ; la reprise garde l’intention initiale plutôt que de capturer les services désormais arrêtés comme nouvel état voulu.
+
+Une correction suivie de `sudo dpkg --configure pxe-tools` est une reprise ciblée envisageable dans le cas d’un paquet dépaqueté mais non configuré. Elle ne remplace pas le diagnostic d’un autre état dpkg ni ne justifie `dpkg --configure -a`, `--fix-broken` ou une suppression de fichiers à l’aveugle.
+
+## Réception du cycle avant diffusion
+
+Les résultats doivent distinguer :
+
+- SQLite et fichiers réels avec systemd simulé ;
+- transitions réelles depuis les paquets publics bêta 5 et bêta 6 dans le laboratoire Zorin ;
+- proxy actif, DHCP externe actif, réseau arrêté et services déjà arrêtés avec target enabled ;
+- échecs de préparation, travail réellement en cours, configuration interrompue et retry ciblé ;
+- tests CI Debian et éventuelles autres VM de distribution, sans étendre leur portée par simple similarité de version PHP ou systemd.
+
+Le correctif n’autorise aucun test sur le réseau PXE domestique, aucune modification de l’Atom ou de la machine utilisateur, ni une nouvelle release. Les versions et empreintes exactes du candidat seront figées avec les preuves reçues avant une décision de publication distincte.
+
+## Références
+
+- [Debian Policy, scripts de maintenance et procédure d’installation](https://www.debian.org/doc/debian-policy/ch-maintainerscripts.html) : ordre ancien/nouveau paquet, échecs et idempotence.
+- [systemctl — gel et dégel des unités](https://www.freedesktop.org/software/systemd/man/255/systemctl.html#freeze%20PATTERN%E2%80%A6) : comportement à confirmer sur les versions réellement exécutées.
+
+### Résultats reçus sur le code `ce09d2ca`
+
+| Environnement | Réception effective |
+|---|---|
+| Zorin OS 18.1, systemd 255, VM Hyper-V | Vraies transactions APT non interactives depuis bêta 5 (proxy actif) et bêta 6 (DHCP externe actif, console seule, toutes unités arrêtées mais target enabled). Aucun préarrêt manuel du candidat ; reprise exacte des rôles et enabled, données/clé/configuration/médias et compte préservés, sans reset du wizard. |
+| Zorin, travail concurrent | Vrai refresh catalogue avec enfants du worker : refus conservateur reçu, mêmes PID/starttimes encore présents au refus, puis fin normale du travail. Aucun enfant n’est tué pour forcer la mise à niveau. |
+| Zorin, configure échoué | Faute PHP de laboratoire : journal et snapshot initial conservés ; après retrait du seul drop-in fautif, `dpkg --configure pxe-tools` reprend la même transaction et réussit sans rollback de base. |
+| Debian 12, systemd 252.39, VM existante | Bêta 6 publique authentifiée → candidat 7 par APT, administration active et réseau arrêté, puis réinstallation du même candidat : réussite, rôles/enabled et données préservés. |
+| Ubuntu 26.04.1, systemd 259.5, VM existante | Même transition et réinstallation réussies ; administration active avec policy disabled conservée et réseau arrêté. |
+| Debian 13, CI | Suite applicative complète, tests SQLite/fichiers et cycle avec systemd simulé. Pas de transaction systemd réelle Debian 13 dans cette recette. |
+| Ubuntu 24.04 direct | Pas de nouvelle VM vanilla dans cette recette ; Zorin fournit une réception réelle de sa base Ubuntu noble, sans équivaloir à une validation directe de toutes les installations Ubuntu 24.04. |
+
+Les baselines de distribution ont été préparées dans des VM de laboratoire existantes, avec archives privées ; ce ne sont pas des OS vierges. Les commandes APT utilisent des sources/listes de fixture isolées et le vrai status dpkg, pas une mise à niveau globale de tous les paquets de l’OS. Aucun trafic PXE sur le LAN réel, poste utilisateur, Atom ou NAS n’a été utilisé.
+
+Le candidat initial `6835b67` échouait réellement au dégel sur Debian 12. Le correctif évite la terminaison fatale du main avant normalisation du freezer : gel vérifié, pause SIGSTOP ciblée après contrôle d’identité, dégel systemd/noyau vérifié, même processus à l’arrêt, puis arrêt standard TERM/CONT. Le pont et sa compensation ont été reçus en vrai ; le contrôle PID/starttime/cgroup avant signal n’est pas une garantie d’atomicité face à une intervention extérieure entre contrôle et signal.
+
+Les paquets de laboratoire ont des métadonnées Maintainer propres aux essais et leurs hashes diffèrent. Ils ne sont pas promus comme artefacts de publication. Après intégration, le build CI canonique devra fixer source/run/deuxpaquets/SHA, être comparé aux payloads et scripts reçus, puis subir au moins un smoke upgrade Zorin depuis la bêta 6 sur ces octets exacts avant proposition de publication. Aucune nouvelle release, signature APT ou annonce du site n’est déclenchée par la recette seule.

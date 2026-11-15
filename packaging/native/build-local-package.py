@@ -45,12 +45,9 @@ PXE_CACHE_CLEANUP
     fi
 fi
 if [ "$1" = upgrade ] && [ -d /run/systemd/system ]; then
-    for unit in pxe-tools.target pxe-tools-admin.target pxe-tools-worker.service pxe-tools-dnsmasq-tail.service pxe-tools-nginx.service pxe-tools-pxe-http.service pxe-tools-php.service pxe-tools-dnsmasq.service pxe-tools-init.service; do
-        if systemctl is-active --quiet "$unit"; then
-            echo 'pxe-tools-local-test: stop the PXE Tools services before upgrading' >&2
-            exit 1
-        fi
-    done
+    python3 - prepare '@@PXE_PACKAGE_VERSION@@' <<'PXE_UPGRADE_LIFECYCLE'
+@@PXE_UPGRADE_LIFECYCLE@@
+PXE_UPGRADE_LIFECYCLE
 fi
 '''
 PRERM = '''#!/bin/sh
@@ -67,6 +64,9 @@ POSTINST = '''#!/bin/sh
 set -eu
 if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
     systemctl daemon-reload
+    # The incoming code is now installed. The preinst snapshot precedes all
+    # init/schema work; failed configure retains its journal for a safe retry.
+    python3 /usr/lib/pxe-tools/native/upgrade-lifecycle.py configure
     # Existing instance data may contain queued jobs or an enabled DHCP setup.
     # Leave its startup under the administrator's control.
     if [ -z "${2:-}" ] && [ ! -e /var/lib/pxe-tools ] && [ ! -L /var/lib/pxe-tools ] \
@@ -85,6 +85,11 @@ fi
 POSTRM = '''#!/bin/sh
 set -eu
 if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
+if [ "$1" = abort-upgrade ] && [ -d /run/systemd/system ]; then
+    python3 - abort <<'PXE_UPGRADE_LIFECYCLE'
+@@PXE_UPGRADE_LIFECYCLE@@
+PXE_UPGRADE_LIFECYCLE
+fi
 if [ "$1" = purge ]; then echo 'PXE Tools: instance data, native runtime and configuration were kept.' >&2; fi
 '''
 
@@ -130,8 +135,10 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         (control/'control').write_text(CONTROL.format(version=version, package_name=package_name,
                                                        maintainer=maintainer, description=description, details=details))
         cleanup = checked(ROOT/'packaging/native/prune-package-cache.py').read_text()
+        lifecycle = checked(ROOT/'packaging/native/upgrade-lifecycle.py').read_text()
         preinst = PREINST.replace('@@PXE_CACHE_CLEANUP@@', cleanup)
         for name, text in [('preinst',preinst),('postinst',POSTINST),('prerm',PRERM),('postrm',POSTRM)]:
+            text = text.replace('@@PXE_UPGRADE_LIFECYCLE@@', lifecycle).replace('@@PXE_PACKAGE_VERSION@@', version)
             p=control/name; p.write_text(text.replace('pxe-tools-local-test', package_name)); p.chmod(0o755)
         copy_tree(ROOT/'app', root/'usr/lib/pxe-tools/app', tracked)
         (root/'usr/lib/pxe-tools/app/src/native-build-version.txt').write_text(version + '\n', encoding='utf-8')
@@ -147,7 +154,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             shutil.copy2(checked(ROOT/name), docs/name)
         copy_tree(ROOT/'third_party/licenses', docs/'licenses', tracked)
         native=root/'usr/lib/pxe-tools/native'; native.mkdir(parents=True)
-        for name in ('default.env','init.sh','start-php-fpm.sh','start-worker.py','configure-secure-tftp.py','php-fpm.conf','nginx.conf','pxe-nginx.conf','render-pxe-http.py'):
+        for name in ('default.env','init.sh','start-php-fpm.sh','start-worker.py','configure-secure-tftp.py','php-fpm.conf','nginx.conf','pxe-nginx.conf','render-pxe-http.py','upgrade-lifecycle.py'):
             shutil.copy2(checked(ROOT/'packaging/native'/name), native/name)
         copy_tree(ROOT/'packaging/native/keyrings', native/'keyrings', tracked)
         units=root/'usr/lib/systemd/system'; units.mkdir(parents=True)
