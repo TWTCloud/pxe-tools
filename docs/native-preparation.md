@@ -39,19 +39,41 @@ Hyper-V ; la procédure d'enrôlement varie selon le matériel.
 Si la bêta 4 refuse de démarrer après une visite avant l'assistant et signale
 `presets.static_cidr absente`, consultez le [diagnostic de configuration initiale interrompue](reprise-configuration-initiale.md).
 
-La mise à niveau est refusée si les services PXE Tools sont encore actifs. Avant
-de commencer, prévoyez une fenêtre d'arrêt, une sauvegarde chiffrée vérifiée et
-conservez le paquet de la version précédente ainsi que les chemins et la
-configuration existants pour préparer un éventuel retour arrière. La remise en
-service et le retour arrière doivent être vérifiés pour votre instance.
+Le comportement dépend du paquet entrant. Avec la bêta 6, la mise à niveau est
+refusée si les services PXE Tools sont encore actifs : cette ancienne version
+demande leur arrêt manuel dans une fenêtre de maintenance avant son installation.
+Conservez le paquet précédent, les chemins et la configuration existants pour
+préparer un éventuel retour arrière, ainsi qu'une sauvegarde chiffrée vérifiée.
 
-Arrêtez les services dans la fenêtre de maintenance, puis mettez le paquet à
-niveau :
+Pour installer la bêta 6, l'ancien parcours reste :
 
 ```sh
 sudo systemctl stop pxe-tools.target pxe-tools-admin.target pxe-tools-worker.service pxe-tools-dnsmasq-tail.service pxe-tools-nginx.service pxe-tools-pxe-http.service pxe-tools-php.service pxe-tools-dnsmasq.service pxe-tools-init.service
 sudo apt install --only-upgrade pxe-tools
 ```
+
+Le paquet entrant bêta 7 gère lui-même la fenêtre de maintenance lorsque
+l'instance est au repos, y compris lors d'une mise à niveau depuis la bêta 6.
+Il ne demande ni préarrêt manuel des services ni phrase de passe pour son
+snapshot local privé. Utilisez le parcours APT normal :
+
+```sh
+sudo apt update
+sudo apt upgrade
+```
+
+Cette transaction met aussi à niveau `pxe-tools-ansible` s'il est déjà installé ;
+le module reste facultatif. Le paquet préserve les données, la clé effective,
+la configuration et les médias, puis reprend uniquement les rôles auparavant
+actifs et leurs politiques de démarrage. Il n'active pas un réseau PXE arrêté.
+Une véritable opération en cours ou une configuration non prise en charge
+entraîne un refus précis ; ne contournez pas ce refus en modifiant les statuts
+des travaux. Consultez le [cycle de mise à niveau APT](apt-upgrade-lifecycle.md)
+pour le snapshot, ses limites et les consignes de reprise après échec. Ce
+snapshot reste local et ne recopie pas les médias volumineux : conservez vos
+propres sauvegardes vérifiées de l'ensemble nécessaire à une restauration.
+La remise en service et le retour arrière doivent être vérifiés pour votre
+instance.
 
 Une installation neuve reçoit les chemins protégés décrits ci-dessous lors de
 la configuration du paquet. Pour une instance existante, la mise à niveau ne
