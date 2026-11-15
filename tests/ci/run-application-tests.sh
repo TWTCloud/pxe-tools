@@ -64,6 +64,7 @@ python3 tests/unit/test_atomic_publish.py
 python3 tests/unit/test_pxe_menu_rows.py
 python3 tests/unit/test_native_pxe_http_bind.py
 python3 tests/unit/test_network_activation.py
+python3 tests/unit/test_native_upgrade_lifecycle.py
 python3 tests/integration/test_docker_nginx_activation.py
 python3 tests/unit/test_native_worker_keyring.py
 python3 tests/unit/test_configure_secure_runtime.py
