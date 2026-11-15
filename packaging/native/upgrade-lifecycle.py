@@ -46,6 +46,7 @@ BUSY = (
     ('installations', "install_status='in_progress' OR ansible_status='running'"),
     ('wipes', "wipe_status IN ('pending','running')"),
     ('disk_tests', "job_status IN ('pending','running')"),
+    ('task_phases', "status='running'"),
     ('discoveries', "discovery_status='running'"),
     ('machines', "status IN ('installing','wiping','testing','inventorying')"),
 )
@@ -217,7 +218,12 @@ class Lifecycle:
                 expected.append('/var/lib/pxe-tools-native/network.env')
             expected.append('/var/lib/pxe-tools-native/runtime.env')
             parsed = re.findall(r'(/[^ ]+) \(ignore_errors=(?:yes|no)\)', files)
-            if parsed != expected:
+            supported = [expected]
+            if unit == 'pxe-tools-php.service':
+                # beta 5 did not load network.env in PHP yet; the worker's
+                # authoritative database environment already had the same list.
+                supported.append([expected[0], expected[-1]])
+            if parsed not in supported:
                 raise RuntimeError('unsupported service EnvironmentFile override; restore the packaged environment-file list before upgrading')
             environment = self.systemctl('show', '--property=Environment', '--value', unit).stdout.strip()
             for assignment in shlex.split(environment):
@@ -428,7 +434,7 @@ class Lifecycle:
         prior = self.load()
         if prior is not None:
             if prior['version'] != version:
-                raise RuntimeError('an earlier PXE Tools upgrade is unfinished; run dpkg --configure -a first')
+                raise RuntimeError('an earlier PXE Tools upgrade is unfinished; finish its package operation or run sudo dpkg --configure pxe-tools first')
             if prior['phase'] in ('prepared', 'configuring'):
                 # A configure retry may have started services before failing.
                 # Do not overwrite the pre-migration snapshot with changed DB.

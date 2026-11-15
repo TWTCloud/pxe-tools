@@ -39,6 +39,7 @@ class Systemd:
         self.on_freeze = None
         self.on_start = None
         self.environment = ''
+        self.beta5_php = False
         group = root / 'sys/fs/cgroup/system.slice/pxe-tools-worker.service'
         group.mkdir(parents=True)
         (group / 'cgroup.events').write_text('frozen 0\n')
@@ -66,7 +67,7 @@ class Systemd:
                 output = '/system.slice/pxe-tools-worker.service' if unit in self.active else ''
             elif prop == 'EnvironmentFiles':
                 names = ['/usr/lib/pxe-tools/native/default.env']
-                if unit != 'pxe-tools-init.service':
+                if unit != 'pxe-tools-init.service' and not (self.beta5_php and unit == 'pxe-tools-php.service'):
                     names.append('/var/lib/pxe-tools-native/network.env')
                 names.append('/var/lib/pxe-tools-native/runtime.env')
                 output = ' '.join(name + ' (ignore_errors=yes)' for name in names)
@@ -191,6 +192,19 @@ class NativeUpgrade(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'actions'):
             self.subject.prepare('1')
         self.assertFalse(any(call[0] == 'stop' for call in self.systemd.calls))
+
+    def test_running_task_phase_requires_reconciliation_even_with_idle_parent_tables(self):
+        self.row("INSERT INTO task_phases(task_type,task_id,phase_key,status) VALUES('install',1,'preseed-loaded','running')")
+        with self.assertRaisesRegex(RuntimeError, 'task_phases id=1'):
+            self.subject.prepare('1')
+        self.assertFalse(any(call[0] == 'stop' for call in self.systemd.calls))
+
+    def test_beta5_php_environment_list_is_supported(self):
+        self.systemd.beta5_php = True
+        self.subject.prepare('1')
+        self.systemd.beta5_php = False  # Incoming beta 7 carries the newer unit.
+        self.subject.configure()
+        self.assertEqual(self.systemd.active, set(lifecycle.UNITS))
 
     def test_untracked_worker_child_refuses_and_thaws_without_stopping(self):
         subgroup = self.systemd.group / 'child'
