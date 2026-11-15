@@ -16,11 +16,13 @@ from pathlib import Path
 import re
 import shutil
 import shlex
+import signal
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 
@@ -53,10 +55,13 @@ BUSY = (
 
 
 class Lifecycle:
-    def __init__(self, root=Path('/'), *, runner=subprocess.run, owner=0):
+    def __init__(self, root=Path('/'), *, runner=subprocess.run, owner=0, signaler=os.kill):
         self.root = Path(root)
         self.runner = runner
         self.owner = owner
+        self.signaler = signaler
+        self.paused_worker = None
+        self.frozen_worker = None
         self.home = self.path('/var/lib/pxe-tools-native/upgrade')
         self.state_file = self.home / 'state.json'
 
@@ -236,6 +241,66 @@ class Lifecycle:
         restart = self.systemctl('show', '--property=Restart', '--value', 'pxe-tools-worker.service').stdout.strip()
         if restart not in ('no', 'on-failure'):
             raise RuntimeError('unsupported worker Restart policy; use no or on-failure before upgrading')
+        kill_signal = self.systemctl('show', '--property=KillSignal', '--value', 'pxe-tools-worker.service').stdout.strip()
+        if kill_signal not in ('15', 'SIGTERM'):
+            raise RuntimeError('unsupported worker KillSignal; restore SIGTERM before upgrading')
+
+    def worker_status(self):
+        unit = 'pxe-tools-worker.service'
+        return {key: self.systemctl('show', '--property=' + key, '--value', unit).stdout.strip()
+                for key in ('ActiveState', 'FreezerState', 'ControlGroup', 'MainPID')}
+
+    def worker_kernel_thawed(self, status):
+        group = status['ControlGroup']
+        if not group:
+            return status['ActiveState'] in ('inactive', 'failed') and status['MainPID'] == '0'
+        if not group.startswith('/') or '..' in Path(group).parts:
+            raise RuntimeError('cannot inspect the worker cgroup during thaw')
+        directory = self.path('/sys/fs/cgroup' + group)
+        try:
+            frozen = (directory / 'cgroup.freeze').read_text().strip()
+            events = (directory / 'cgroup.events').read_text().splitlines()
+        except FileNotFoundError:
+            return status['ActiveState'] in ('inactive', 'failed') and status['MainPID'] == '0'
+        return frozen == '0' and 'frozen 0' in events
+
+    def thaw_worker(self):
+        # A fatal signal can remove the cgroup before a later thaw command.
+        # systemd 252 rejects thaw for inactive units. Do not mistake that
+        # normal lifetime transition for failure, or trust a stale manager cache.
+        deadline = time.monotonic() + 10
+        while True:
+            status = self.worker_status()
+            if status['FreezerState'] == 'running' and self.worker_kernel_thawed(status):
+                return
+            self.systemctl('thaw', 'pxe-tools-worker.service', check=False)
+            status = self.worker_status()
+            if status['FreezerState'] == 'running' and self.worker_kernel_thawed(status):
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError('worker thaw did not reach matching systemd/kernel state; journal kept, inspect its freezer status before retrying')
+            time.sleep(0.1)
+
+    def paused_identity_matches(self):
+        if self.paused_worker is None:
+            return False
+        pid, started, group = self.paused_worker
+        try:
+            current = (self.path('/proc/' + pid) / 'stat').read_text().rpartition(')')[2].split()
+        except FileNotFoundError:
+            return False
+        status = self.worker_status()
+        return (current[19] == started and status['MainPID'] == pid
+                and status['ControlGroup'] == group)
+
+    def release_worker(self):
+        self.thaw_worker()
+        if self.paused_identity_matches():
+            # Only undo our own SIGSTOP on the same process, after both freezer
+            # authorities say running. Never signal a reused or replacement PID.
+            self.signaler(int(self.paused_worker[0]), signal.SIGCONT)
+        self.paused_worker = None
+        self.frozen_worker = None
 
     def freeze_worker(self, state):
         unit = 'pxe-tools-worker.service'
@@ -278,6 +343,7 @@ class Lifecycle:
         after = (process / 'stat').read_text().rpartition(')')[2].split()[19]
         if before != after or self.systemctl('show', '--property=MainPID', '--value', unit).stdout.strip() != pid:
             raise RuntimeError('worker identity changed during quiescence; retry the upgrade')
+        self.frozen_worker = (pid, before, group)
         return True
 
     @staticmethod
@@ -298,12 +364,41 @@ class Lifecycle:
 
     def stop(self, state, frozen):
         if frozen:
-            # Queue default SIGTERM while every thread is frozen, then thaw.
-            # The shipped worker has no SIGTERM handler; it exits before it can
-            # spawn a new bootstrap child. systemctl stop by itself thaws first.
-            self.systemctl('kill', '--kill-whom=main', '--signal=SIGTERM', 'pxe-tools-worker.service')
-            self.systemctl('thaw', 'pxe-tools-worker.service')
+            status = self.worker_status()
+            pid = status['MainPID']
+            group = status['ControlGroup']
+            if not pid.isdigit() or pid == '0' or not group.startswith('/'):
+                raise RuntimeError('worker identity disappeared before controlled stop')
+            directory = self.path('/sys/fs/cgroup' + group)
+            process = self.path('/proc/' + pid)
+            started = (process / 'stat').read_text().rpartition(')')[2].split()[19]
+            if self.frozen_worker != (pid, started, group):
+                raise RuntimeError('worker identity changed before controlled stop')
+            if ('frozen 1' not in (directory / 'cgroup.events').read_text().splitlines()
+                    or (directory / 'cgroup.freeze').read_text().strip() != '1'):
+                raise RuntimeError('worker is no longer frozen before controlled stop')
+            # Keep the main process alive across thaw. Fatal SIGTERM while the
+            # cgroup is frozen can leave systemd 252's inactive unit cache frozen,
+            # and that version cannot thaw an inactive unit. SIGSTOP prevents
+            # userspace from advancing while we synchronize both freezer states.
+            self.signaler(int(pid), signal.SIGSTOP)
+            self.paused_worker = (pid, started, group)
+            self.thaw_worker()
+            deadline = time.monotonic() + 10
+            while self.paused_identity_matches():
+                process_state = (process / 'stat').read_text().rpartition(')')[2].split()[0]
+                if process_state == 'T':
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('worker did not reach a stopped process state after thaw')
+                time.sleep(0.1)
+            else:
+                raise RuntimeError('worker identity changed during controlled stop')
+            # The packaged KillSignal=SIGTERM and systemd's following SIGCONT
+            # terminate the stopped worker before it can spawn a new child.
         self.systemctl('stop', 'pxe-tools-worker.service')
+        self.paused_worker = None
+        self.thaw_worker()
         self.systemctl('stop', *STOP_ORDER)
         for unit in UNITS:
             if self.systemctl('is-active', '--quiet', unit, check=False).returncode == 0:
@@ -444,7 +539,7 @@ class Lifecycle:
                 try:
                     self.quiesce(prior, snapshot=False)
                 except Exception:
-                    self.systemctl('thaw', 'pxe-tools-worker.service', check=False)
+                    self.release_worker()
                     print('PXE Tools: retry preparation failed; some previous roles may remain stopped. Original snapshot and journal were kept; correct the service/configuration error and retry the package operation.', file=sys.stderr)
                     raise
                 return
@@ -454,7 +549,7 @@ class Lifecycle:
             self.quiesce(state, snapshot=True)
         except Exception:
             try:
-                self.systemctl('thaw', 'pxe-tools-worker.service', check=False)
+                self.release_worker()
                 self.restore(state, old=True)
             except Exception:
                 print('PXE Tools: upgrade preparation failed and previous roles could not all resume; inspect systemd and the private upgrade journal.', file=sys.stderr)
@@ -478,10 +573,12 @@ class Lifecycle:
                                    + '); let them finish or inspect/cancel them in the application, then retry APT')
             self.stop(state, frozen)
         finally:
-            self.systemctl('thaw', 'pxe-tools-worker.service', check=False)
-            if connection is not None:
-                connection.rollback()
-                connection.close()
+            try:
+                self.release_worker()
+            finally:
+                if connection is not None:
+                    connection.rollback()
+                    connection.close()
         if self.database() != database:
             raise RuntimeError('database selection changed during upgrade preparation')
         if snapshot:

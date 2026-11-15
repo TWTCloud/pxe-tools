@@ -8,6 +8,7 @@ from contextlib import closing, contextmanager
 import importlib.util
 import json
 import os
+import signal
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -41,9 +42,17 @@ class Systemd:
         self.environment = ''
         self.beta5_php = False
         self.restart = 'on-failure'
+        self.kill_signal = '15'
+        self.freezer = 'running'
+        self.signals = []
+        self.fail_thaw = False
+        self.thaw_failures_remaining = 0
+        self.fail_worker_stop = False
+        self.on_worker_stop = None
         group = root / 'sys/fs/cgroup/system.slice/pxe-tools-worker.service'
         group.mkdir(parents=True)
         (group / 'cgroup.events').write_text('frozen 0\n')
+        (group / 'cgroup.freeze').write_text('0\n')
         (group / 'cgroup.procs').write_text('123\n')
         self.group = group
         process = root / 'proc/123'
@@ -63,7 +72,9 @@ class Systemd:
             if prop == 'ActiveState':
                 output = 'active' if unit in self.active else 'inactive'
             elif prop == 'MainPID':
-                output = '123'
+                output = '123' if unit in self.active else '0'
+            elif prop == 'FreezerState':
+                output = self.freezer
             elif prop == 'ControlGroup':
                 output = '/system.slice/pxe-tools-worker.service' if unit in self.active else ''
             elif prop == 'EnvironmentFiles':
@@ -78,6 +89,8 @@ class Systemd:
                 output = '{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 /usr/lib/pxe-tools/native/start-worker.py ; ignore_errors=no ; }'
             elif prop == 'Restart':
                 output = self.restart
+            elif prop == 'KillSignal':
+                output = self.kill_signal
         elif action == 'is-active':
             status = 0 if unit in self.active else 3
         elif action == 'is-enabled':
@@ -87,6 +100,8 @@ class Systemd:
                 status = 1
             else:
                 (self.group / 'cgroup.events').write_text('frozen 1\n')
+                (self.group / 'cgroup.freeze').write_text('1\n')
+                self.freezer = 'frozen'
                 environment = []
                 for name in ('usr/lib/pxe-tools/native/default.env', 'var/lib/pxe-tools-native/network.env', 'var/lib/pxe-tools-native/runtime.env'):
                     if (self.root / name).exists():
@@ -95,11 +110,23 @@ class Systemd:
                 if self.on_freeze:
                     self.on_freeze()
         elif action == 'thaw':
-            (self.group / 'cgroup.events').write_text('frozen 0\n')
+            if self.fail_thaw or self.thaw_failures_remaining or unit not in self.active:
+                status = 1
+                self.thaw_failures_remaining = max(0, self.thaw_failures_remaining - 1)
+            else:
+                (self.group / 'cgroup.events').write_text('frozen 0\n')
+                (self.group / 'cgroup.freeze').write_text('0\n')
+                self.freezer = 'running'
         elif action == 'kill':
             assert (self.group / 'cgroup.events').read_text() == 'frozen 1\n'
         elif action == 'stop':
-            self.active.difference_update(args[1:])
+            if args == ['stop', 'pxe-tools-worker.service'] and self.fail_worker_stop:
+                self.fail_worker_stop = False
+                status = 1
+            else:
+                if args == ['stop', 'pxe-tools-worker.service'] and self.on_worker_stop:
+                    self.on_worker_stop()
+                self.active.difference_update(args[1:])
             if self.fail_stop and len(args) > 2:
                 self.fail_stop = False
                 status = 1
@@ -115,6 +142,21 @@ class Systemd:
             raise AssertionError(args)
         return subprocess.CompletedProcess(argv, status, stdout=output + '\n', stderr='')
 
+    def signal(self, pid, number):
+        assert pid == 123
+        self.signals.append((pid, number))
+        if number == signal.SIGSTOP:
+            assert self.freezer == 'frozen'
+            assert (self.group / 'cgroup.freeze').read_text().strip() == '1'
+            state = 'T'
+        elif number == signal.SIGCONT:
+            assert self.freezer == 'running'
+            assert (self.group / 'cgroup.freeze').read_text().strip() == '0'
+            state = 'S'
+        else:
+            raise AssertionError(number)
+        (self.root / 'proc/123/stat').write_text('123 (python3) ' + state + ' ' + ' '.join(['0'] * 19))
+
 
 class NativeUpgrade(unittest.TestCase):
     def setUp(self):
@@ -129,7 +171,7 @@ class NativeUpgrade(unittest.TestCase):
         (self.root / 'etc/pxe-tools/db.conf').write_text(json.dumps({'driver': 'sqlite', 'path': '/var/lib/pxe-tools/pxe-tools.sqlite'}))
         (self.root / 'etc/pxe-tools/master.key').write_bytes(b'k' * 32)
         self.systemd = Systemd(self.root, lifecycle.UNITS)
-        self.subject = lifecycle.Lifecycle(self.root, runner=self.systemd, owner=os.geteuid())
+        self.subject = lifecycle.Lifecycle(self.root, runner=self.systemd, owner=os.geteuid(), signaler=self.systemd.signal)
         self.subject.private_home()
 
     def tearDown(self):
@@ -333,6 +375,64 @@ class NativeUpgrade(unittest.TestCase):
             self.subject.prepare('1')
         self.assertFalse(any(call[0] in ('freeze', 'stop', 'kill') for call in self.systemd.calls))
         self.assertIsNone(self.subject.load())
+
+    def test_custom_kill_signal_refuses_before_freeze_or_stop(self):
+        self.systemd.kill_signal = '9'
+        with self.assertRaisesRegex(RuntimeError, 'unsupported worker KillSignal'):
+            self.subject.prepare('1')
+        self.assertFalse(any(call[0] in ('freeze', 'stop', 'kill') for call in self.systemd.calls))
+        self.assertEqual(self.systemd.signals, [])
+
+    def test_bridge_keeps_process_stopped_until_manager_and_kernel_are_thawed(self):
+        def stopped_boundary():
+            self.assertEqual(self.systemd.freezer, 'running')
+            self.assertEqual((self.systemd.group / 'cgroup.freeze').read_text().strip(), '0')
+            self.assertEqual((self.root / 'proc/123/stat').read_text().rpartition(')')[2].split()[0], 'T')
+        self.systemd.on_worker_stop = stopped_boundary
+        self.subject.prepare('1')
+        self.assertEqual(self.systemd.signals, [(123, signal.SIGSTOP)])
+        self.assertFalse(any(call[0] == 'kill' for call in self.systemd.calls))
+
+    def test_inactive_worker_with_absent_cgroup_does_not_receive_invalid_thaw(self):
+        self.systemd.active.clear()
+        self.subject.thaw_worker()
+        self.assertFalse(any(call[0] == 'thaw' for call in self.systemd.calls))
+
+    def test_transient_thaw_failure_is_retried_until_both_states_match(self):
+        self.systemd.thaw_failures_remaining = 2
+        with patch.object(lifecycle.time, 'sleep'):
+            self.subject.prepare('1')
+        self.assertEqual(sum(call[0] == 'thaw' for call in self.systemd.calls), 3)
+        self.assertEqual(self.systemd.freezer, 'running')
+        self.assertEqual(self.systemd.signals, [(123, signal.SIGSTOP)])
+
+    def test_persistent_thaw_failure_keeps_journal_and_never_sends_cont_or_restarts(self):
+        self.systemd.fail_thaw = True
+        with patch.object(lifecycle.time, 'monotonic', side_effect=range(0, 1000, 11)), patch.object(lifecycle.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'matching systemd/kernel state'):
+                self.subject.prepare('1')
+        self.assertIsNotNone(self.subject.load())
+        self.assertEqual(self.systemd.signals, [(123, signal.SIGSTOP)])
+        self.assertFalse(any(call[0] == 'start' for call in self.systemd.calls))
+
+    def test_stop_failure_resumes_only_our_same_stopped_process_after_verified_thaw(self):
+        self.systemd.fail_worker_stop = True
+        with self.assertRaisesRegex(RuntimeError, 'stop failed'):
+            self.subject.prepare('1')
+        self.assertEqual(self.systemd.signals, [(123, signal.SIGSTOP), (123, signal.SIGCONT)])
+        self.assertEqual(self.systemd.active, set(lifecycle.UNITS))
+        self.assertIsNone(self.subject.load())
+
+    def test_compensation_does_not_signal_a_reused_pid(self):
+        self.subject.paused_worker = ('123', 'previous-start-time', '/system.slice/pxe-tools-worker.service')
+        self.subject.release_worker()
+        self.assertEqual(self.systemd.signals, [])
+
+    def test_compensation_does_not_signal_a_dead_pid(self):
+        self.subject.paused_worker = ('123', '0', '/system.slice/pxe-tools-worker.service')
+        self.systemd.active.clear()
+        self.subject.release_worker()
+        self.assertEqual(self.systemd.signals, [])
 
     def test_override_added_during_retry_refuses_before_freeze(self):
         self.subject.prepare('1')
