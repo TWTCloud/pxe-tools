@@ -233,6 +233,9 @@ class Lifecycle:
         command = self.systemctl('show', '--property=ExecStart', '--value', 'pxe-tools-worker.service').stdout
         if not re.search(r'argv\[\]=/usr/bin/python3 /usr/lib/pxe-tools/native/start-worker\.py\s*;', command):
             raise RuntimeError('unsupported worker command override; restore the packaged worker before upgrading')
+        restart = self.systemctl('show', '--property=Restart', '--value', 'pxe-tools-worker.service').stdout.strip()
+        if restart not in ('no', 'on-failure'):
+            raise RuntimeError('unsupported worker Restart policy; use no or on-failure before upgrading')
 
     def freeze_worker(self, state):
         unit = 'pxe-tools-worker.service'
@@ -577,7 +580,7 @@ def main():
             # dpkg can invoke this after partial unpack. Preparation compensates
             # its own errors, but an unpack error cannot safely replay old code.
             if lifecycle.load() is not None:
-                print('PXE Tools: interrupted upgrade kept stopped with its private snapshot; fix the package error and retry configuration. No database rollback was attempted.', file=sys.stderr)
+                print('PXE Tools: interrupted upgrade kept its recovery journal and any completed snapshot; some roles may remain stopped. Fix the package error and retry the package operation. No database rollback was attempted.', file=sys.stderr)
         else:
             raise ValueError('invalid upgrade lifecycle action')
     finally:

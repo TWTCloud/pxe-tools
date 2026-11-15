@@ -40,6 +40,7 @@ class Systemd:
         self.on_start = None
         self.environment = ''
         self.beta5_php = False
+        self.restart = 'on-failure'
         group = root / 'sys/fs/cgroup/system.slice/pxe-tools-worker.service'
         group.mkdir(parents=True)
         (group / 'cgroup.events').write_text('frozen 0\n')
@@ -75,6 +76,8 @@ class Systemd:
                 output = self.environment
             elif prop == 'ExecStart':
                 output = '{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 /usr/lib/pxe-tools/native/start-worker.py ; ignore_errors=no ; }'
+            elif prop == 'Restart':
+                output = self.restart
         elif action == 'is-active':
             status = 0 if unit in self.active else 3
         elif action == 'is-enabled':
@@ -323,6 +326,13 @@ class NativeUpgrade(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Environment override'):
             self.subject.prepare('1')
         self.assertFalse(any(call[0] in ('freeze', 'stop') for call in self.systemd.calls))
+
+    def test_restart_always_override_refuses_before_freeze_or_stop(self):
+        self.systemd.restart = 'always'
+        with self.assertRaisesRegex(RuntimeError, 'unsupported worker Restart policy'):
+            self.subject.prepare('1')
+        self.assertFalse(any(call[0] in ('freeze', 'stop', 'kill') for call in self.systemd.calls))
+        self.assertIsNone(self.subject.load())
 
     def test_override_added_during_retry_refuses_before_freeze(self):
         self.subject.prepare('1')
