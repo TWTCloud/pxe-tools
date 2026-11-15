@@ -62,8 +62,10 @@ sudo apt update
 sudo apt upgrade
 ```
 
-Cette transaction met aussi à niveau `pxe-tools-ansible` s'il est déjà installé ;
-le module reste facultatif. Le paquet préserve les données, la clé effective,
+Cette transaction propose les mises à niveau des paquets éligibles de l'hôte,
+dont `pxe-tools` et `pxe-tools-ansible` si le module facultatif est déjà installé.
+Vérifiez ensuite les versions installées et les éventuels paquets conservés par
+APT. Le paquet préserve les données, la clé effective,
 la configuration et les médias, puis reprend uniquement les rôles auparavant
 actifs et leurs politiques de démarrage. Il n'active pas un réseau PXE arrêté.
 Une véritable opération en cours ou une configuration non prise en charge
