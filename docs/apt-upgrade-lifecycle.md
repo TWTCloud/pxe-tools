@@ -26,7 +26,7 @@ Avant dépaquetage, une erreur de préparation peut reprendre l’ancien état s
 
 Une correction suivie de `sudo dpkg --configure pxe-tools` est une reprise ciblée envisageable dans le cas d’un paquet dépaqueté mais non configuré. Elle ne remplace pas le diagnostic d’un autre état dpkg ni ne justifie `dpkg --configure -a`, `--fix-broken` ou une suppression de fichiers à l’aveugle.
 
-## Validation avant livraison
+## Réception du cycle avant diffusion
 
 Les résultats doivent distinguer :
 
@@ -42,3 +42,21 @@ Le correctif n’autorise aucun test sur le réseau PXE domestique, aucune modif
 
 - [Debian Policy, scripts de maintenance et procédure d’installation](https://www.debian.org/doc/debian-policy/ch-maintainerscripts.html) : ordre ancien/nouveau paquet, échecs et idempotence.
 - [systemctl — gel et dégel des unités](https://www.freedesktop.org/software/systemd/man/255/systemctl.html#freeze%20PATTERN%E2%80%A6) : comportement à confirmer sur les versions réellement exécutées.
+
+### Résultats reçus sur le code `ce09d2ca`
+
+| Environnement | Réception effective |
+|---|---|
+| Zorin OS 18.1, systemd 255, VM Hyper-V | Vraies transactions APT non interactives depuis bêta 5 (proxy actif) et bêta 6 (DHCP externe actif, console seule, toutes unités arrêtées mais target enabled). Aucun préarrêt manuel du candidat ; reprise exacte des rôles et enabled, données/clé/configuration/médias et compte préservés, sans reset du wizard. |
+| Zorin, travail concurrent | Vrai refresh catalogue avec enfants du worker : refus conservateur reçu, mêmes PID/starttimes encore présents au refus, puis fin normale du travail. Aucun enfant n’est tué pour forcer la mise à niveau. |
+| Zorin, configure échoué | Faute PHP de laboratoire : journal et snapshot initial conservés ; après retrait du seul drop-in fautif, `dpkg --configure pxe-tools` reprend la même transaction et réussit sans rollback de base. |
+| Debian 12, systemd 252.39, VM existante | Bêta 6 publique authentifiée → candidat 7 par APT, administration active et réseau arrêté, puis réinstallation du même candidat : réussite, rôles/enabled et données préservés. |
+| Ubuntu 26.04.1, systemd 259.5, VM existante | Même transition et réinstallation réussies ; administration active avec policy disabled conservée et réseau arrêté. |
+| Debian 13, CI | Suite applicative complète, tests SQLite/fichiers et cycle avec systemd simulé. Pas de transaction systemd réelle Debian 13 dans cette recette. |
+| Ubuntu 24.04 direct | Pas de nouvelle VM vanilla dans cette recette ; Zorin fournit une réception réelle de sa base Ubuntu noble, sans équivaloir à une validation directe de toutes les installations Ubuntu 24.04. |
+
+Les baselines de distribution ont été préparées dans des VM de laboratoire existantes, avec archives privées ; ce ne sont pas des OS vierges. Les commandes APT utilisent des sources/listes de fixture isolées et le vrai status dpkg, pas une mise à niveau globale de tous les paquets de l’OS. Aucun trafic PXE sur le LAN réel, poste utilisateur, Atom ou NAS n’a été utilisé.
+
+Le candidat initial `6835b67` échouait réellement au dégel sur Debian 12. Le correctif évite la terminaison fatale du main avant normalisation du freezer : gel vérifié, pause SIGSTOP ciblée après contrôle d’identité, dégel systemd/noyau vérifié, même processus à l’arrêt, puis arrêt standard TERM/CONT. Le pont et sa compensation ont été reçus en vrai ; le contrôle PID/starttime/cgroup avant signal n’est pas une garantie d’atomicité face à une intervention extérieure entre contrôle et signal.
+
+Les paquets de laboratoire ont des métadonnées Maintainer propres aux essais et leurs hashes diffèrent. Ils ne sont pas promus comme artefacts de publication. Après intégration, le build CI canonique devra fixer source/run/deuxpaquets/SHA, être comparé aux payloads et scripts reçus, puis subir au moins un smoke upgrade Zorin depuis la bêta 6 sur ces octets exacts avant proposition de publication. Aucune nouvelle release, signature APT ou annonce du site n’est déclenchée par la recette seule.
