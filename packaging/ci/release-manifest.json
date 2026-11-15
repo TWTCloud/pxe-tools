@@ -1,11 +1,11 @@
 {
-  "version": "0.1.0~beta6",
-  "release_tag": "v0.1.0-beta6",
-  "source_commit": "d38a79b6c3a4069be2de5825fa11b5166a43a3a5",
-  "build_run_id": "43642247365",
-  "package_asset": "pxe-tools_0.1.0-beta6_amd64.deb",
-  "package_sha256": "a0ddd87747226125b4007e0d50a436011c50832ce25272d3fe1edb2dbd3d1a6a",
-  "ansible_version": "0.1.0~beta6",
-  "ansible_package_asset": "pxe-tools-ansible_0.1.0-beta6_all.deb",
-  "ansible_package_sha256": "cff6daa1049c842581ffe3d39ba393b535c3644edd60f3c955239222ec94bc37"
+  "version": "0.1.0~beta7",
+  "release_tag": "v0.1.0-beta7",
+  "source_commit": "52c31ffc98df79c8a31b7239ada652a5c9e11e12",
+  "build_run_id": "43711527397",
+  "package_asset": "pxe-tools_0.1.0-beta7_amd64.deb",
+  "package_sha256": "cca1e2978716acad39cd654c996fd487d272e19c01c6d33bb07d66aff93c6467",
+  "ansible_version": "0.1.0~beta7",
+  "ansible_package_asset": "pxe-tools-ansible_0.1.0-beta7_all.deb",
+  "ansible_package_sha256": "2a03855e5045191220f2124febff1ec244dc7ae2840e86f6b802e093b5f58790"
 }
