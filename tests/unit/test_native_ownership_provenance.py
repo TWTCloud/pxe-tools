@@ -761,6 +761,19 @@ class AccountCreationTests(unittest.TestCase):
         self.assertEqual(accounts.calls, [])
         self.assertFalse((self.root / 'var/lib/pxe-tools-ownership').exists())
 
+    def test_separate_uninstall_marker_blocks_module_before_useradd(self):
+        marker = self.root / 'var/lib/pxe-tools-uninstall'
+        marker.mkdir()
+        accounts = FakeAccounts()
+        store = ownership.Store(self.root, owner=os.geteuid())
+        with self.assertRaisesRegex(ValueError, 'uninstall'):
+            store.configure_ansible(accounts=accounts, groups=accounts,
+                                    group_list=accounts.getgrouplist,
+                                    runner=accounts.run, chown=accounts.chown)
+        self.assertEqual(accounts.calls, [])
+        self.assertTrue(marker.is_dir())
+        self.assertFalse((self.root / 'var/lib/pxe-tools-ownership').exists())
+
     def test_linked_removal_runtime_refuses_module_before_useradd(self):
         (self.root / 'var/lib/pxe-tools-native').symlink_to(self.root / 'elsewhere', target_is_directory=True)
         accounts = FakeAccounts()

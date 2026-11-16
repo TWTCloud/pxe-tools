@@ -517,6 +517,8 @@ class Store:
         # following a linked ancestor, and preserve malformed runtime trees.
         parent = self._parent(('var', 'lib'))
         try:
+            if self._exists(parent, 'pxe-tools-uninstall'):
+                raise ValueError('unfinished PXE Tools uninstall requires inspection')
             for part in ('pxe-tools-native', 'upgrade'):
                 try:
                     child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)

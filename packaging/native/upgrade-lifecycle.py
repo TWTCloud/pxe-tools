@@ -529,6 +529,33 @@ class Lifecycle:
         return sorted(skipped)
 
     def refuse_unfinished_uninstall(self):
+        # A removal receipt must outlive the runtime it can remove. Treat any
+        # object at its reserved location as an unfinished transaction; never
+        # follow a symlink to decide that a receipt is absent.
+        directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in ('var', 'lib'):
+                info = os.fstat(directory)
+                if info.st_uid != self.owner or info.st_mode & 0o022:
+                    raise RuntimeError('untrusted uninstall journal ancestor')
+                try:
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                except FileNotFoundError:
+                    break
+                os.close(directory)
+                directory = child
+            else:
+                info = os.fstat(directory)
+                if info.st_uid != self.owner or info.st_mode & 0o022:
+                    raise RuntimeError('untrusted uninstall journal ancestor')
+                try:
+                    os.stat('pxe-tools-uninstall', dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise RuntimeError('an interrupted PXE Tools uninstall requires inspection before upgrade or configuration')
+        finally:
+            os.close(directory)
         marker = self.home / 'uninstall-state.json'
         if marker.exists() or marker.is_symlink():
             raise RuntimeError('an interrupted PXE Tools uninstall requires inspection before upgrade or configuration')
