@@ -455,6 +455,21 @@ class LifecycleLoaderTests(unittest.TestCase):
             subject = uninstall.load_ownership(root, owner=os.getuid())
             self.assertEqual(subject.root, root)
 
+    def test_real_reconciler_loader_holds_the_shared_stable_lock(self):
+        with tempfile.TemporaryDirectory(prefix='pxe-helper-fixture-') as tmp:
+            root = Path(tmp)
+            helper = root / 'usr/lib/pxe-tools/native/reconcile-nginx.py'
+            helper.parent.mkdir(parents=True)
+            helper.write_bytes((SCRIPT.parent / 'reconcile-nginx.py').read_bytes())
+            (root / 'run/lock').mkdir(parents=True)
+            subject = uninstall.load_reconciler(root, lambda *args, **kwargs: None, owner=os.getuid())
+            with subject.stable_lock():
+                lock = root / 'run/lock/pxe-tools-nginx-reconcile.lock'
+                self.assertTrue(lock.is_file())
+                with self.assertRaises(BlockingIOError):
+                    with subject.stable_lock():
+                        pass
+
     def test_symlinked_helper_is_refused(self):
         with tempfile.TemporaryDirectory(prefix='pxe-helper-fixture-') as tmp:
             root = Path(tmp)
