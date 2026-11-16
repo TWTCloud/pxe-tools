@@ -409,6 +409,15 @@ class TransactionTests(unittest.TestCase):
         self.execute(apply=True)
         self.assertEqual((external / 'keep').read_text(), 'shared')
 
+    def test_nginx_ownership_journal_requires_reconciliation_before_removal(self):
+        journal = self.root / 'var/lib/pxe-tools-nginx-ownership'
+        journal.mkdir(parents=True)
+        (journal / 'state.json').write_text('{"format": 1, "phase": "complete"}')
+        with self.assertRaisesRegex(RuntimeError, 'ownership'):
+            self.execute(apply=True)
+        self.assertTrue((journal / 'state.json').exists())
+        self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
+
     def test_unproven_instance_data_aborts_before_package_removal(self):
         self.unproven.mkdir()
         (self.unproven / 'preserve').write_text('unproven')

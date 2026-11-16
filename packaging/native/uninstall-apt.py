@@ -305,6 +305,13 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
     source, key = apt_cleanup_plan(root, owner=owner)
     preserved = tuple(path for path in sorted(TREES) if path not in paths and
                       ((root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink()))
+    # Issue #61 records nginx state outside the application runtime. Until its
+    # restore contract is implemented, refuse rather than leave an unrelated
+    # service in a product-induced state or undo an administrator's choice.
+    nginx_path = '/var/lib/pxe-tools-nginx-ownership'
+    nginx = root / nginx_path.lstrip('/')
+    if nginx.exists() or nginx.is_symlink():
+        preserved += (nginx_path,)
     plan = {'trees': paths, 'source': source, 'key': key, 'preserved': preserved}
     if not apply:
         return plan
