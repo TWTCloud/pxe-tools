@@ -528,7 +528,13 @@ class Lifecycle:
                 raise RuntimeError('worker did not resume; inspect systemd and retry sudo dpkg --configure pxe-tools')
         return sorted(skipped)
 
+    def refuse_unfinished_uninstall(self):
+        marker = self.home / 'uninstall-state.json'
+        if marker.exists() or marker.is_symlink():
+            raise RuntimeError('an interrupted PXE Tools uninstall requires inspection before upgrade or configuration')
+
     def prepare(self, version):
+        self.refuse_unfinished_uninstall()
         prior = self.load()
         if prior is not None:
             if prior['version'] != version:
@@ -588,6 +594,7 @@ class Lifecycle:
             self.save(state)
 
     def configure(self):
+        self.refuse_unfinished_uninstall()
         state = self.load()
         if state is None:
             return
@@ -658,6 +665,9 @@ class Lifecycle:
 def main():
     os.umask(0o077)
     lifecycle = Lifecycle()
+    lifecycle.refuse_unfinished_uninstall()
+    if len(sys.argv) == 2 and sys.argv[1] == 'check-removal':
+        return
     if not Path('/run/systemd/system').is_dir():
         return
     if sys.argv[1] in ('configure', 'abort') and not (

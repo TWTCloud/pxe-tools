@@ -66,6 +66,12 @@ python3 tests/unit/test_native_pxe_http_bind.py
 python3 tests/unit/test_network_activation.py
 python3 tests/unit/test_native_upgrade_lifecycle.py
 python3 tests/unit/test_native_nginx_ownership.py
+python3 tests/unit/test_native_ownership_provenance.py
+python3 tests/unit/test_uninstall_apt.py
+python3 tests/unit/test_uninstall_account.py
+python3 tests/unit/test_uninstall_metadata.py
+python3 tests/unit/test_uninstall_persistent_masks.py
+python3 -W error::ResourceWarning tests/unit/test_uninstall_roundtrip.py
 python3 tests/integration/test_docker_nginx_activation.py
 python3 tests/unit/test_native_worker_keyring.py
 python3 tests/unit/test_configure_secure_runtime.py

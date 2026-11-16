@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 """Prepare a new protected native TFTP root; never alter existing paths."""
 import os
+import subprocess
 from pathlib import Path
 import sys
 
@@ -16,21 +17,30 @@ MARKER = (b'TFTP_ROOT=/var/lib/pxe-tools-tftp\n'
           b'MOK_DIR=/var/lib/pxe-tools-native/mok\n')
 
 
-def prepare(base=BASE):
+def prepare(base=BASE, *, journal=None, root=Path('/'), owner=0, after_create=None):
     # /var and /var/lib are expected to be root-owned and not writable by the
     # web account. Open the entire path without following symlinks.
-    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    created = []
+    base, root = Path(base), Path(root)
+    if (not base.is_absolute() or not root.is_absolute()
+            or '..' in base.parts or '..' in root.parts):
+        raise ValueError('unsafe native TFTP base')
     try:
-        root = os.fstat(fd)
-        if root.st_uid != 0 or root.st_mode & 0o022:
+        relative = base.relative_to(root)
+    except ValueError as exc:
+        raise ValueError('native TFTP base outside the trusted root') from exc
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    created = []
+    held = {}
+    try:
+        root_info = os.fstat(fd)
+        if root_info.st_uid != owner or root_info.st_mode & 0o022:
             raise ValueError('unsafe root directory')
-        for part in Path(base).parts[1:]:
+        for part in relative.parts:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = child
             info = os.fstat(fd)
-            if info.st_uid != 0 or info.st_mode & 0o022:
+            if info.st_uid != owner or info.st_mode & 0o022:
                 raise ValueError('unsafe parent of native TFTP paths')
         for name in (RUNTIME, TFTP, HTTP):
             try:
@@ -38,14 +48,21 @@ def prepare(base=BASE):
             except FileNotFoundError:
                 continue
             raise FileExistsError('native TFTP destination or marker already exists: ' + name)
+        if journal is not None:
+            journal.begin_runtime()
         for name in (RUNTIME, TFTP, HTTP):
             os.mkdir(name, 0o755, dir_fd=fd)
             created.append(name)
             opened = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             try:
                 os.fchmod(opened, 0o755)
+                if journal is not None:
+                    journal.record_runtime_created('/var/lib/' + name, opened)
+                held['/var/lib/' + name] = opened
+                opened = None
             finally:
-                os.close(opened)
+                if opened is not None:
+                    os.close(opened)
         runtime = os.open(RUNTIME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         try:
             os.mkdir('rendered', 0o755, dir_fd=runtime)
@@ -71,6 +88,10 @@ def prepare(base=BASE):
         finally:
             os.close(runtime)
         os.fsync(fd)
+        if journal is not None:
+            journal.finish_runtime(held=held)
+        if after_create is not None:
+            after_create(held)
     except BaseException:
         # Only remove empty directories created by this invocation. A marker
         # must never be deleted after an ambiguous failure.
@@ -81,14 +102,39 @@ def prepare(base=BASE):
                 pass
         raise
     finally:
+        for descriptor in held.values():
+            os.close(descriptor)
         os.close(fd)
+
+
+def activate_admin(runner=subprocess.run):
+    # Preserve the package contract: inability to start administration is a
+    # warning, not an APT failure. Directory ownership is independently pinned.
+    for action in ('enable', 'start'):
+        try:
+            result = runner(['systemctl', action, 'pxe-tools-admin.target'], check=False)
+            if result.returncode:
+                raise OSError('systemctl ' + action + ' failed')
+        except OSError:
+            print('PXE Tools: could not ' + action + ' the administration service; inspect systemd status.', file=sys.stderr)
+            return
 
 
 if __name__ == '__main__':
     try:
-        if len(sys.argv) != 1 or os.geteuid() != 0:
-            raise ValueError('this command must be run as root without arguments')
-        prepare()
+        if sys.argv[1:] not in ([], ['--initialize-instance']) or os.geteuid() != 0:
+            raise ValueError('expected root and optional --initialize-instance')
+        import importlib.util
+        helper = Path(__file__).with_name('ownership-provenance.py')
+        spec = importlib.util.spec_from_file_location('pxe_native_ownership', helper)
+        if spec is None or spec.loader is None:
+            raise ValueError('native ownership helper unavailable')
+        ownership = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ownership)
+        store = ownership.Store()
+        def initialize(held):
+            store.create_base(require_runtime=True, native_fds=held, activate=activate_admin)
+        prepare(journal=store, after_create=initialize if sys.argv[1:] else None)
         print('Protected native TFTP root prepared; existing paths were not changed.')
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise SystemExit(f'Cannot prepare native TFTP root: {exc}')

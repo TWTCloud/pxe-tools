@@ -8,6 +8,7 @@ also the ownership contract for a future removal tool; it is not a blanket right
 to restore a service after an administrator has changed it.
 """
 import argparse
+from contextlib import contextmanager
 from datetime import datetime
 import fcntl
 import gzip
@@ -25,6 +26,49 @@ import time
 
 class Preserve(RuntimeError):
     """Insufficient evidence to change a service."""
+
+
+@contextmanager
+def stable_nginx_lock(root=Path('/'), *, owner=0):
+    """Hold the permanent, shared reconciliation lock; never unlink it."""
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    lock = None
+    name = 'pxe-tools-nginx-reconcile.lock'
+    try:
+        for part in ('run', 'lock'):
+            info = os.fstat(directory)
+            if info.st_uid != owner or info.st_mode & 0o022:
+                raise Preserve('Ancêtre du verrou nginx non fiable.')
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory)
+            os.close(directory)
+            directory = child
+        info = os.fstat(directory)
+        if info.st_uid != owner or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
+            raise Preserve('Répertoire du verrou nginx non fiable.')
+        flags = os.O_RDWR | os.O_NOFOLLOW
+        try:
+            lock = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
+            os.fchmod(lock, 0o600)
+            os.fsync(directory)
+        except FileExistsError:
+            lock = os.open(name, flags, dir_fd=directory)
+        info = os.fstat(lock)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != owner
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            raise Preserve('Verrou nginx permanent non fiable.')
+        identity = (info.st_dev, info.st_ino)
+        for acquire in (False, True):
+            if acquire:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != identity:
+                raise Preserve('Verrou nginx permanent remplacé.')
+        yield
+    finally:
+        if lock is not None:
+            os.close(lock)
+        os.close(directory)
 
 
 class Reconciler:
@@ -300,6 +344,13 @@ class Reconciler:
             os.close(descriptor)
 
     def reconcile(self, confirm_stock=False):
+        try:
+            with stable_nginx_lock(self.root):
+                return self._reconcile_locked(confirm_stock=confirm_stock)
+        except (OSError, ValueError, Preserve, subprocess.SubprocessError) as error:
+            return {'action': 'conflict', 'reason': str(error)}
+
+    def _reconcile_locked(self, confirm_stock=False):
         try:
             current = self.state()
             if self.journal.exists() or self.journal.is_symlink():

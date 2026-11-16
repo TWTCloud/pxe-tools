@@ -45,34 +45,11 @@ fi
 POSTINST = '''#!/bin/sh
 set -eu
 if [ "$1" = configure ]; then
-    account=pxe-tools-ansible
-    home=/var/lib/pxe-tools-ansible/home
-    if getent passwd "$account" >/dev/null; then
-        entry=$(getent passwd "$account")
-        [ "$(printf '%s' "$entry" | cut -d: -f6)" = "$home" ] && [ "$(printf '%s' "$entry" | cut -d: -f7)" = /usr/sbin/nologin ] || {
-            echo 'Existing Ansible account differs; it was preserved.' >&2; exit 1; }
-    else
-        useradd --system --user-group --no-create-home --home-dir "$home" --shell /usr/sbin/nologin "$account"
-    fi
-    uid=$(id -u "$account"); gid=$(id -g "$account")
-    dedicated=$(getent group "$account" | cut -d: -f3)
-    [ "$uid" != 0 ] && [ "$gid" != 0 ] && [ -n "$dedicated" ] && [ "$gid" = "$dedicated" ] && [ "$(id -G "$account")" = "$gid" ] || {
-        echo 'Ansible account has unexpected groups; it was preserved.' >&2; exit 1; }
-    for path in /var/lib/pxe-tools-ansible "$home" /var/lib/pxe-tools-ansible/workspace; do
-        if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
-            echo 'Existing Ansible path is not a regular directory; it was preserved.' >&2; exit 1
-        fi
-        if [ -d "$path" ]; then
-            mode=$(stat -c %a "$path")
-            [ "$(stat -c %u "$path")" = "$uid" ] && [ "$(stat -c %g "$path")" = "$gid" ] && [ $((0$mode & 07077)) -eq 0 ] && [ $((0$mode & 0700)) -eq 448 ] || {
-                echo 'Existing Ansible directory ownership or permissions differ; it was preserved.' >&2; exit 1; }
-        else
-            install -d -o "$uid" -g "$gid" -m 0700 "$path"
-        fi
-    done
+    python3 /usr/lib/pxe-tools-ansible/ownership-provenance.py configure-ansible
     if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
 fi
 '''
+
 PRERM = '''#!/bin/sh
 set -eu
 if [ "$1" = remove ] && [ -d /run/systemd/system ] && systemctl is-active --quiet pxe-tools-worker.service; then
@@ -101,11 +78,14 @@ def build(destination: Path, version: str = '0.0.1~local1', *, package_name: str
         raise ValueError('Invalid package version')
     tracked = source_inventory.tracked_files(ROOT)
     dropin=source_inventory.checked_file(ROOT, ROOT/'packaging/native/ansible-worker.conf', tracked)
+    ownership=source_inventory.checked_file(ROOT, ROOT/'packaging/native/ownership-provenance.py', tracked)
     with tempfile.TemporaryDirectory(prefix='pxe-native-ansible-package-') as temporary:
         root=Path(temporary)/'root'; control=root/'DEBIAN'; control.mkdir(parents=True)
         (control/'control').write_text(CONTROL.format(version=version, package_name=package_name, maintainer=maintainer, base_package=base_package, minimum_base=minimum_base, maximum_base=maximum_base))
         for name,text in [('preinst',PREINST),('postinst',POSTINST),('prerm',PRERM),('postrm',POSTRM)]:
             path=control/name; path.write_text(text); path.chmod(0o755)
+        helper=root/'usr/lib/pxe-tools-ansible/ownership-provenance.py'
+        helper.parent.mkdir(parents=True); shutil.copyfile(ownership,helper)
         target=root/'usr/lib/systemd/system/pxe-tools-worker.service.d/50-ansible.conf'
         target.parent.mkdir(parents=True); shutil.copyfile(dropin,target)
         doc = root / 'usr/share/doc' / package_name

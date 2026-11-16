@@ -3,10 +3,14 @@
 import importlib.util
 import sqlite3
 import json
+import os
+import subprocess
+import sys
 from contextlib import closing, redirect_stderr
 from io import StringIO
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'packaging/native/uninstall-apt.py'
@@ -16,6 +20,17 @@ if SCRIPT.exists():
     spec.loader.exec_module(uninstall)
 else:
     uninstall = None
+
+
+def fixture_proof(path):
+    info = path.lstat()
+    return {'dev': info.st_dev, 'ino': info.st_ino, 'btime_sec': 1,
+            'btime_nsec': 1, 'nonce': 'a' * 64}
+
+
+def fixture_matches(fd, proof):
+    info = os.fstat(fd)
+    return (info.st_dev, info.st_ino) == (proof['dev'], proof['ino'])
 
 
 class ScopedRemovalTests(unittest.TestCase):
@@ -47,6 +62,19 @@ class ScopedRemovalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.remove(mounts=('/var/lib/pxe-tools/mounted',))
         self.assertTrue((self.target / 'data').exists())
+
+    def test_new_mount_during_descent_is_not_followed(self):
+        import errno
+        mounted = self.target / 'mounted'
+        mounted.mkdir()
+        (mounted / 'keep').write_text('mounted-sentinel')
+        def opener(parent, name):
+            if name == 'mounted':
+                raise OSError(errno.EXDEV, 'mount boundary')
+            return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        with self.assertRaises(OSError):
+            uninstall.remove_tree(self.root, '/var/lib/pxe-tools', mounts=(), owner=None, opener=opener)
+        self.assertEqual((mounted / 'keep').read_text(), 'mounted-sentinel')
 
     def test_root_symlink_is_refused(self):
         (self.target / 'data').unlink()
@@ -97,23 +125,50 @@ class ProvenanceTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.runtime = self.root / 'var/lib/pxe-tools-native'
         self.runtime.mkdir(parents=True)
+        self.data = self.root / 'var/lib/pxe-tools'
+        self.data.mkdir()
+        (self.root / 'etc/pxe-tools').mkdir(parents=True)
         self.marker = self.runtime / 'runtime.env'
         self.marker.write_text('TFTP_ROOT=/var/lib/pxe-tools-tftp\nHTTP_ROOT=/var/lib/pxe-tools-http\nPXE_TOOLS_DATA_DIR=/var/lib/pxe-tools-native/rendered\nMOK_DIR=/var/lib/pxe-tools-native/mok\n')
+        paths = ('/var/lib/pxe-tools-native', '/var/lib/pxe-tools', '/etc/pxe-tools')
+        self.record = {'format': 2, 'base_phase': 'complete', 'directories': {}}
+        for path in paths:
+            self.record['directories'][path] = fixture_proof(self.root / path.lstrip('/'))
 
-    def test_known_fresh_marker_identifies_standard_roots_only(self):
-        found = uninstall.proven_tree_paths(self.root, owner=None)
-        self.assertNotIn('/var/lib/pxe-tools', found)
-        self.assertNotIn('/etc/pxe-tools', found)
-        self.assertIn('/var/lib/pxe-tools-native', found)
+    def test_runtime_environment_alone_is_not_creation_proof(self):
+        self.assertEqual(uninstall.proven_tree_paths(self.root, owner=None), ())
+
+    def test_journalled_directory_identity_is_required(self):
+        found = uninstall.proven_tree_paths(self.root, owner=None, record=self.record, generation_matches=fixture_matches)
+        self.assertIn('/var/lib/pxe-tools', found)
+        self.assertIn('/etc/pxe-tools', found)
+        self.data.rename(self.root / 'var/lib/original-data')
+        self.data.mkdir()
+        with self.assertRaises(ValueError):
+            uninstall.proven_tree_paths(self.root, owner=None, record=self.record, generation_matches=fixture_matches)
+        self.assertTrue((self.root / 'var/lib/original-data').exists())
+
+    def test_ansible_workspace_not_claimed_without_account_proof(self):
+        workspace = self.root / 'var/lib/pxe-tools-ansible'
+        workspace.mkdir()
+        self.record['directories']['/var/lib/pxe-tools-ansible'] = fixture_proof(workspace)
+        found = uninstall.proven_tree_paths(self.root, owner=None, record=self.record, generation_matches=fixture_matches)
         self.assertNotIn('/var/lib/pxe-tools-ansible', found)
-        self.assertNotIn('/var/log/pxe-tools', found)
+        self.assertTrue(workspace.exists())
 
-    def test_custom_or_symlinked_marker_does_not_prove_ownership(self):
-        self.marker.write_text('TFTP_ROOT=/external/share\n')
-        self.assertEqual(uninstall.proven_tree_paths(self.root, owner=None), ())
-        self.marker.unlink()
-        self.marker.symlink_to(self.root / 'external')
-        self.assertEqual(uninstall.proven_tree_paths(self.root, owner=None), ())
+    def test_incomplete_creation_journal_is_refused(self):
+        self.record['base_phase'] = 'runtime-preparing'
+        with self.assertRaises(ValueError):
+            uninstall.proven_tree_paths(self.root, owner=None, record=self.record, generation_matches=fixture_matches)
+
+    def test_legacy_or_weak_proof_is_not_authority_to_delete(self):
+        self.record['format'] = 1
+        with self.assertRaises(ValueError):
+            uninstall.proven_tree_paths(self.root, owner=None, record=self.record, generation_matches=fixture_matches)
+        self.record['format'] = 2
+        self.record['directories']['/etc/pxe-tools'].update(btime_sec=None, btime_nsec=None, nonce=None)
+        with self.assertRaises(ValueError):
+            uninstall.proven_tree_paths(self.root, owner=None, record=self.record, generation_matches=fixture_matches)
 
 
 
@@ -153,21 +208,175 @@ class DatabaseQuiescenceTests(unittest.TestCase):
 
 
 
+class ActiveServiceQuiescenceTests(unittest.TestCase):
+    def setUp(self):
+        helper = SCRIPT.parents[2] / 'tests/unit/test_native_upgrade_lifecycle.py'
+        spec = importlib.util.spec_from_file_location('upgrade_fixtures_uninstall', helper)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.fixture = module.NativeUpgrade(methodName='runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+        self.life = self.fixture.subject
+        self.systemd = self.fixture.systemd
+        self.original = set(self.systemd.active)
+
+    def test_idle_active_services_are_stopped_under_database_barrier(self):
+        with uninstall.quiesced_lifecycle(self.life):
+            self.assertFalse(self.systemd.active)
+            self.assertEqual(self.life.load()['phase'], 'prepared')
+            self.assertTrue((self.life.home / 'uninstall-state.json').exists())
+            self.assertFalse((self.life.home / 'state.json').exists())
+        # Successful callers own the next transaction; no automatic restart.
+        self.assertFalse(self.systemd.active)
+        self.assertTrue((self.life.home / 'uninstall-state.json').exists())
+        self.assertIsNone(self.life.load())
+
+    def test_running_job_refuses_without_stopping_services(self):
+        self.fixture.row("INSERT INTO init_jobs(job_type,status) VALUES('fixture','running')")
+        with self.assertRaisesRegex(RuntimeError, 'operations are still active'):
+            with uninstall.quiesced_lifecycle(self.life):
+                self.fail('must not enter')
+        self.assertEqual(self.systemd.active, self.original)
+        self.assertIsNone(self.life.load())
+        self.assertFalse(any(call[0] in ('stop', 'start') for call in self.systemd.calls))
+        self.assertFalse((self.life.home / 'uninstall-state.json').exists())
+
+    def test_legacy_pending_installation_ansible_and_discovery_refuse(self):
+        cases = [
+            ("INSERT INTO installations(machine_id,install_status) VALUES(1,'pending')", 'installations'),
+            ("INSERT INTO installations(machine_id,ansible_status) VALUES(1,'pending')", 'installations'),
+            ("INSERT INTO discoveries(machine_id,discovery_status) VALUES(1,'pending')", 'discoveries'),
+            ("INSERT INTO init_jobs(job_type,status) VALUES('machine:ansible_redeploy:1','pending')", 'init_jobs'),
+        ]
+        self.fixture.row("INSERT INTO machines(id,mac) VALUES(1,'02:00:00:00:00:01')")
+        for sql, table in cases:
+            with self.subTest(sql=sql):
+                self.fixture.row(sql)
+                with self.assertRaisesRegex(RuntimeError, table):
+                    with uninstall.quiesced_lifecycle(self.life):
+                        self.fail('must not stop while work is pending')
+                self.assertEqual(self.systemd.active, self.original)
+                self.fixture.row('DELETE FROM ' + table)
+
+    def test_upgrade_and_configure_refuse_interrupted_uninstall(self):
+        journal = self.life.home / 'uninstall-state.json'
+        journal.write_text('{}')
+        with self.assertRaisesRegex(RuntimeError, 'uninstall'):
+            self.life.prepare('2')
+        with self.assertRaisesRegex(RuntimeError, 'uninstall'):
+            self.life.configure()
+        self.assertFalse(any(call[0] in ('stop', 'start') for call in self.systemd.calls))
+
+    def test_check_removal_entrypoint_is_nonmutating_and_refuses_journal(self):
+        # Simulate a running systemd host without touching the real host.
+        namespace = self.life.prepare.__func__.__globals__
+        fake_path = lambda value: type('RunPath', (), {'is_dir': lambda self: True})()
+        with patch.dict(namespace, {'Lifecycle': lambda: self.life, 'Path': fake_path}), patch('sys.argv', ['lifecycle', 'check-removal']):
+            namespace['main']()
+            (self.life.home / 'uninstall-state.json').write_text('{}')
+            with self.assertRaisesRegex(RuntimeError, 'uninstall'):
+                namespace['main']()
+        self.assertFalse(any(call[0] in ('stop', 'start') for call in self.systemd.calls))
+
+    def test_persistent_barrier_is_installed_before_database_barrier_releases(self):
+        from contextlib import contextmanager
+        observed = []
+        @contextmanager
+        def barrier(transaction):
+            self.assertFalse(self.systemd.active)
+            with closing(sqlite3.connect(self.fixture.db, timeout=0)) as conn:
+                with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
+                    conn.execute("UPDATE settings SET value='race' WHERE key='fixture'")
+            observed.append('entered')
+            yield
+            observed.append('exited')
+        with uninstall.quiesced_lifecycle(self.life, after_stop=barrier):
+            self.assertEqual(observed, ['entered'])
+        self.assertEqual(observed, ['entered', 'exited'])
+
+    def test_write_barrier_is_held_during_worker_freeze(self):
+        def contender():
+            with closing(sqlite3.connect(self.fixture.db, timeout=0)) as conn:
+                with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
+                    conn.execute("UPDATE settings SET value='race' WHERE key='fixture'")
+        self.systemd.on_freeze = contender
+        with uninstall.quiesced_lifecycle(self.life):
+            pass
+
+    def test_uncertain_mask_cleanup_keeps_services_stopped_and_journal(self):
+        from contextlib import contextmanager
+        @contextmanager
+        def barrier(transaction):
+            yield
+            raise uninstall.BarrierRecoveryRequired('mask cleanup uncertain')
+        with self.assertRaises(uninstall.BarrierRecoveryRequired):
+            with uninstall.quiesced_lifecycle(self.life, after_stop=barrier):
+                pass
+        self.assertFalse(self.systemd.active)
+        self.assertTrue((self.life.home / 'uninstall-state.json').exists())
+        self.assertFalse(any(call[0] == 'start' for call in self.systemd.calls))
+
+    def test_failure_before_purge_restores_original_services(self):
+        with self.assertRaisesRegex(RuntimeError, 'preflight'):
+            with uninstall.quiesced_lifecycle(self.life):
+                raise RuntimeError('preflight')
+        self.assertEqual(self.systemd.active, self.original)
+        self.assertIsNone(self.life.load())
+
+    def test_failure_after_purge_begins_retains_recovery_journal(self):
+        with self.assertRaisesRegex(RuntimeError, 'dpkg'):
+            with uninstall.quiesced_lifecycle(self.life) as transaction:
+                transaction.begin_purge()
+                raise RuntimeError('dpkg')
+        self.assertFalse(self.systemd.active)
+        self.assertIsNone(self.life.load())
+        journal = json.loads((self.life.home / 'uninstall-state.json').read_text())
+        self.assertEqual(journal['phase'], 'purge_started')
+
+
+
 class PackageRemovalTests(unittest.TestCase):
     def test_only_the_two_product_packages_are_requested(self):
         commands = []
         def runner(command, **kwargs):
-            commands.append(command)
+            commands.append((command, kwargs))
             return type('Result', (), {'returncode': 0})()
-        uninstall.purge_packages(runner)
-        self.assertEqual(commands, [['dpkg', '--purge', 'pxe-tools-ansible', 'pxe-tools']])
+        uninstall.purge_packages(runner, frontend_locked=True)
+        self.assertEqual(commands[0][0], ['dpkg', '--purge', 'pxe-tools-ansible', 'pxe-tools'])
+        env = commands[0][1]['env']
+        self.assertEqual(env['DPKG_FRONTEND_LOCKED'], '1')
+        self.assertNotIn('DPKG_ROOT', env)
+        self.assertNotIn('DPKG_ADMINDIR', env)
+        self.assertNotIn('DPKG_FORCE', env)
+
+    def test_purge_without_frontend_lock_is_refused(self):
+        with self.assertRaises(RuntimeError):
+            uninstall.purge_packages(lambda *a, **kw: self.fail('must not run'), frontend_locked=False)
+
+    def test_absent_package_status_is_verified_from_complete_database(self):
+        def absent(command, **kwargs):
+            return type('Result', (), {'returncode': 0, 'stdout': 'bash\tinstalled\tok\n', 'stderr': ''})()
+        self.assertTrue(uninstall.packages_absent(absent))
+
+    def test_partial_or_config_files_are_not_absent(self):
+        for status in ('installed', 'half-installed', 'config-files'):
+            def found(command, **kwargs):
+                return type('Result', (), {'returncode': 0, 'stdout': f'bash\tinstalled\tok\npxe-tools\t{status}\tok\n', 'stderr': ''})()
+            with self.subTest(status=status):
+                self.assertFalse(uninstall.packages_absent(found))
+
+    def test_unknown_package_query_fails_closed(self):
+        def failed(command, **kwargs):
+            return type('Result', (), {'returncode': 1, 'stdout': '', 'stderr': 'database inaccessible'})()
+        with self.assertRaises(RuntimeError):
+            uninstall.packages_absent(failed)
 
     def test_purge_failure_is_propagated(self):
         def runner(command, **kwargs):
             return type('Result', (), {'returncode': 1})()
         with self.assertRaises(RuntimeError):
-            uninstall.purge_packages(runner)
-
+            uninstall.purge_packages(runner, frontend_locked=True)
 
 
 class ServiceBarrierTests(unittest.TestCase):
@@ -214,6 +423,18 @@ class ServiceBarrierTests(unittest.TestCase):
 
 
 
+class PackagedUnitHashTests(unittest.TestCase):
+    def test_embedded_unit_hashes_match_packaged_sources(self):
+        import hashlib
+        for name in uninstall.UNITS:
+            with self.subTest(unit=name):
+                content = (SCRIPT.parent / name).read_bytes()
+                self.assertEqual(uninstall.UNIT_HASHES[name], hashlib.sha256(content).hexdigest())
+        self.assertEqual(uninstall.ANSIBLE_DROPIN_HASH,
+                         hashlib.sha256((SCRIPT.parent / 'ansible-worker.conf').read_bytes()).hexdigest())
+
+
+
 class LifecycleLoaderTests(unittest.TestCase):
     def test_installed_helper_loads_from_regular_trusted_fixture(self):
         with tempfile.TemporaryDirectory(prefix='pxe-helper-fixture-') as tmp:
@@ -223,6 +444,15 @@ class LifecycleLoaderTests(unittest.TestCase):
             helper.write_bytes((SCRIPT.parent / 'upgrade-lifecycle.py').read_bytes())
             subject = uninstall.load_lifecycle(root, owner=None)
             self.assertIsNotNone(subject)
+            self.assertEqual(subject.root, root)
+
+    def test_ownership_helper_loads_without_following_links(self):
+        with tempfile.TemporaryDirectory(prefix='pxe-helper-fixture-') as tmp:
+            root = Path(tmp)
+            helper = root / 'usr/lib/pxe-tools/native/ownership-provenance.py'
+            helper.parent.mkdir(parents=True)
+            helper.write_bytes((SCRIPT.parent / 'ownership-provenance.py').read_bytes())
+            subject = uninstall.load_ownership(root, owner=os.getuid())
             self.assertEqual(subject.root, root)
 
     def test_symlinked_helper_is_refused(self):
@@ -311,6 +541,30 @@ class InstallerLockTests(unittest.TestCase):
 
 
 
+class DpkgFrontendLockTests(unittest.TestCase):
+    def test_frontend_lock_excludes_another_process(self):
+        with tempfile.TemporaryDirectory(prefix='pxe-dpkg-lock-') as tmp:
+            path = Path(tmp) / 'lock-frontend'
+            program = "import fcntl,os,sys; f=os.open(sys.argv[1],os.O_RDWR); fcntl.lockf(f,fcntl.LOCK_EX|fcntl.LOCK_NB)"
+            with uninstall.dpkg_frontend_lock(path, owner=None):
+                result = subprocess.run([sys.executable, '-c', program, str(path)], capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+            result = subprocess.run([sys.executable, '-c', program, str(path)], capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(path.exists())
+
+    def test_frontend_lock_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix='pxe-dpkg-lock-') as tmp:
+            target = Path(tmp) / 'keep'
+            target.write_text('sentinel')
+            path = Path(tmp) / 'lock-frontend'
+            path.symlink_to(target)
+            with self.assertRaises(OSError):
+                with uninstall.dpkg_frontend_lock(path, owner=None): pass
+            self.assertEqual(target.read_text(), 'sentinel')
+
+
+
 class TransactionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='pxe-transaction-fixture-')
@@ -318,35 +572,90 @@ class TransactionTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         runtime = self.root / 'var/lib/pxe-tools-native'
         runtime.mkdir(parents=True)
+        (self.root / 'var/lib/dpkg').mkdir(parents=True)
         (runtime / 'runtime.env').write_text('TFTP_ROOT=/var/lib/pxe-tools-tftp\nHTTP_ROOT=/var/lib/pxe-tools-http\nPXE_TOOLS_DATA_DIR=/var/lib/pxe-tools-native/rendered\nMOK_DIR=/var/lib/pxe-tools-native/mok\n')
         self.data = self.root / 'var/lib/pxe-tools-http'
         self.data.mkdir()
         (self.data / 'db').write_text('instance')
-        self.unproven = self.root / 'var/lib/pxe-tools'
-        self.systemd = ServiceBarrierTests.Systemd()
+        (self.root / 'etc/pxe-tools').mkdir(parents=True)
+        (self.root / 'var/lib/pxe-tools').mkdir()
+        (self.root / 'var/log').mkdir()
+        self.unproven = self.root / 'var/log/pxe-tools'
+        self.record = {'format': 2, 'base_phase': 'complete', 'directories': {}}
+        for path in ('/etc/pxe-tools', '/var/lib/pxe-tools', '/var/lib/pxe-tools-native', '/var/lib/pxe-tools-http'):
+            self.record['directories'][path] = fixture_proof(self.root / path.lstrip('/'))
+        unit_dir = self.root / 'etc/systemd/system'
+        unit_dir.mkdir(parents=True)
+        (self.root / 'run/systemd/system').mkdir(parents=True)
+        (self.root / 'run/lock').mkdir()
+        packaged = self.root / 'usr/lib/systemd/system'
+        packaged.mkdir(parents=True)
+        for name in ('pxe-tools-worker.service', 'pxe-tools-php.service'):
+            (packaged / name).write_bytes((SCRIPT.parent / name).read_bytes())
+        fixture_file = SCRIPT.parents[2] / 'tests/unit/test_uninstall_persistent_masks.py'
+        fixture_spec = importlib.util.spec_from_file_location('mask_fixtures_for_transaction', fixture_file)
+        fixture_module = importlib.util.module_from_spec(fixture_spec)
+        fixture_spec.loader.exec_module(fixture_module)
+        self.systemd = fixture_module.FakeSystemd(unit_dir, ('pxe-tools-worker.service', 'pxe-tools-php.service'))
+        (unit_dir / 'pxe-tools-php.service').symlink_to('/dev/null')
+        self.systemd.preexisting.add('pxe-tools-php.service')
         self.events = []
         self.fail_purge = False
+        ownership_file = SCRIPT.parent / 'ownership-provenance.py'
+        ownership_spec = importlib.util.spec_from_file_location('ownership_fixture', ownership_file)
+        ownership_module = importlib.util.module_from_spec(ownership_spec)
+        ownership_spec.loader.exec_module(ownership_module)
+        self.ownership = ownership_module.Store(self.root, owner=os.getuid())
+        self.ownership.generation.matches = fixture_matches
+        with self.ownership._locked() as fd:
+            self.ownership._write(fd, self.record)
+        systemd = self.systemd
+        events = self.events
         class Lifecycle:
             def __init__(self, root):
+                self.root = root
                 self.home = root / 'var/lib/pxe-tools-native/upgrade'
                 self.state_file = self.home / 'state.json'
             def private_home(self): self.home.mkdir(parents=True, exist_ok=True)
             def database(self): return None
+            def environments(self): return getattr(self, 'storage_environment', {})
             def load(self): return None
             def check_effective_configuration(self): pass
             def freeze_worker(self, state): return False
+            def busy(self, connection): return []
+            def capture(self, version):
+                self.check_effective_configuration()
+                state = {'phase': 'captured', 'active': dict(systemd.active)}
+                self.save(state)
+                return state
+            def save(self, state): self.state_file.write_text(json.dumps(state))
+            def stop(self, state, frozen):
+                events.append(['fixture-stop'])
+                for unit in systemd.active: systemd.active[unit] = 'inactive'
+            def quiesce(self, state, snapshot=False):
+                self.check_effective_configuration()
+                self.stop(state, False)
+                state['phase'] = 'prepared'
+                self.save(state)
+            def restore(self, state, old=False): systemd.active.update(state['active'])
             def release_worker(self): pass
+            def sync_directory(self, directory): pass
         self.lifecycle = Lifecycle(self.root)
 
     def runner(self, command, **kwargs):
         self.events.append(command)
         if command[0] == 'dpkg':
+            if self.lifecycle is not None:
+                with self.assertRaises(BlockingIOError):
+                    with self.ownership._locked(create=False): pass
             return type('Result', (), {'returncode': int(self.fail_purge)})()
+        if command[0] == 'dpkg-query':
+            return type('Result', (), {'returncode': 0, 'stdout': 'bash\tinstalled\tok\n', 'stderr': ''})()
         return self.systemd(command, **kwargs)
 
     def execute(self, **kwargs):
         return uninstall.run_uninstall(self.root, self.runner, self.lifecycle,
-                                       tuple(self.systemd.active), lambda: (), owner=None, **kwargs)
+                                       tuple(self.systemd.active), lambda: (), owner=None, record=self.record, ownership=self.ownership, **kwargs)
 
     def test_preview_does_not_mutate_or_invoke_system_commands(self):
         self.execute(apply=False)
@@ -365,13 +674,52 @@ class TransactionTests(unittest.TestCase):
         def mount_provider():
             nonlocal calls
             calls += 1
-            if calls >= 3:
+            if calls >= 5:
                 return ('/var/lib/pxe-tools-http',)
             return ()
         with self.assertRaisesRegex(RuntimeError, 'purge succeeded'):
             uninstall.run_uninstall(self.root, self.runner, self.lifecycle,
-                                    tuple(self.systemd.active), mount_provider, owner=None, apply=True)
+                                    tuple(self.systemd.active), mount_provider, owner=None, record=self.record, ownership=self.ownership, apply=True)
         self.assertTrue(any(command[0] == 'dpkg' for command in self.events))
+        self.assertTrue((self.data / 'db').exists())
+
+    def test_changed_ownership_journal_refuses_before_purge(self):
+        self.ownership._read = lambda fd: {'format': 1, 'base_phase': 'preparing', 'directories': {}}
+        with self.assertRaisesRegex(RuntimeError, 'ownership'):
+            self.execute(apply=True)
+        self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
+        self.assertTrue((self.data / 'db').exists())
+
+    def test_frontend_lock_is_required_before_service_or_package_changes(self):
+        from contextlib import contextmanager
+        @contextmanager
+        def busy(*args, **kwargs):
+            raise BlockingIOError('frontend lock held')
+            yield
+        with patch.object(uninstall, 'dpkg_frontend_lock', busy), self.assertRaises(BlockingIOError):
+            self.execute(apply=True)
+        self.assertEqual(self.events, [])
+        self.assertTrue((self.data / 'db').exists())
+
+    def test_custom_active_unit_refuses_before_any_service_stop(self):
+        override = self.root / 'etc/systemd/system/pxe-tools-worker.service'
+        override.write_text('administrator unit')
+        self.systemd.active['pxe-tools-worker.service'] = 'active'
+        with self.assertRaises((ValueError, RuntimeError)):
+            self.execute(apply=True)
+        self.assertEqual(override.read_text(), 'administrator unit')
+        self.assertEqual(self.systemd.active['pxe-tools-worker.service'], 'active')
+        self.assertFalse(any(command[0] in ('dpkg', 'fixture-stop') for command in self.events))
+
+    def test_storage_configuration_changed_during_stop_refuses_purge(self):
+        original = self.lifecycle.stop
+        def changed(state, frozen):
+            original(state, frozen)
+            self.lifecycle.storage_environment = {'HTTP_ROOT': '/srv/external-pxe'}
+        self.lifecycle.stop = changed
+        with self.assertRaisesRegex(RuntimeError, 'storage configuration'):
+            self.execute(apply=True)
+        self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
         self.assertTrue((self.data / 'db').exists())
 
     def test_unsupported_service_override_refuses_before_purge(self):
@@ -383,12 +731,22 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue((self.data / 'db').exists())
         self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
 
+    def test_idle_active_services_are_quiesced_before_purge(self):
+        self.systemd.active['pxe-tools-worker.service'] = 'active'
+        self.systemd.active['pxe-tools-php.service'] = 'active'
+        self.execute(apply=True)
+        self.assertTrue(any(command[0] == 'dpkg' for command in self.events))
+        self.assertTrue(all(state == 'inactive' for state in self.systemd.active.values()))
+
     def test_failed_package_purge_leaves_data_untouched(self):
         self.fail_purge = True
         with self.assertRaises(RuntimeError):
             self.execute(apply=True)
         self.assertTrue((self.data / 'db').exists())
-        self.assertEqual(self.systemd.masked, {'pxe-tools-php.service'})
+        self.assertTrue((self.root / 'etc/systemd/system/pxe-tools-php.service').is_symlink())
+        self.assertTrue((self.root / 'etc/systemd/system/pxe-tools-worker.service').is_symlink())
+        journal = json.loads((self.root / 'var/lib/pxe-tools-native/upgrade/uninstall-state.json').read_text())
+        self.assertEqual(journal['phase'], 'purge_started')
 
     def test_cleanup_after_success_preserves_external_link_target(self):
         external = self.root / 'external'
@@ -398,7 +756,8 @@ class TransactionTests(unittest.TestCase):
         self.execute(apply=True)
         self.assertFalse(self.data.exists())
         self.assertEqual((external / 'keep').read_text(), 'shared')
-        self.assertEqual(self.systemd.masked, {'pxe-tools-php.service'})
+        self.assertFalse((self.root / 'var/lib/pxe-tools-ownership').exists())
+        self.assertTrue((self.root / 'etc/systemd/system/pxe-tools-php.service').is_symlink())
 
     def test_reexecution_after_success_does_not_touch_external_data(self):
         external = self.root / 'external'
@@ -406,6 +765,8 @@ class TransactionTests(unittest.TestCase):
         (external / 'keep').write_text('shared')
         self.execute(apply=True)
         self.lifecycle = None
+        self.record = None
+        self.ownership = None
         self.execute(apply=True)
         self.assertEqual((external / 'keep').read_text(), 'shared')
 
@@ -413,10 +774,35 @@ class TransactionTests(unittest.TestCase):
         journal = self.root / 'var/lib/pxe-tools-nginx-ownership'
         journal.mkdir(parents=True)
         (journal / 'state.json').write_text('{"format": 1, "phase": "complete"}')
-        with self.assertRaisesRegex(RuntimeError, 'ownership'):
+        with self.assertRaises((ValueError, RuntimeError, OSError)):
             self.execute(apply=True)
         self.assertTrue((journal / 'state.json').exists())
         self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
+
+    def test_verified_nginx_journal_is_removed_without_changing_nginx(self):
+        journal = self.root / 'var/lib/pxe-tools-nginx-ownership'
+        journal.mkdir(mode=0o700)
+        (journal / 'lock').touch(mode=0o600)
+        state = {'format': 1, 'service': 'nginx.service', 'phase': 'complete',
+                 'before': {'active': 'active', 'enabled': 'enabled'},
+                 'after': {'active': 'inactive', 'enabled': 'disabled'},
+                 'resources': {'fixture': 'unchanged'}, 'identity': {'pid': '1'},
+                 'provenance': {'source': 'apt-and-dpkg', 'nginx_previously_absent': True,
+                                'start': 'fixture', 'end': None, 'core': 'pxe-tools',
+                                'initial_packages': {'nginx': '1', 'nginx-common': '1', 'pxe-tools': '1'}}}
+        (journal / 'state.json').write_text(json.dumps(state))
+        (journal / 'state.json').chmod(0o600)
+        class Reconciler:
+            def stock(self): return {'fixture': 'unchanged'}
+            def state(self): return {'ActiveState': 'inactive', 'UnitFileState': 'disabled'}
+            def stable_lock(self):
+                from contextlib import nullcontext
+                return nullcontext()
+        uninstall.run_uninstall(self.root, self.runner, self.lifecycle, tuple(self.systemd.active),
+                                lambda: (), owner=None, record=self.record, ownership=self.ownership,
+                                reconciler=Reconciler(), apply=True)
+        self.assertFalse(journal.exists())
+        self.assertFalse(any(command[0] == 'systemctl' and command[-1] == 'nginx.service' for command in self.events))
 
     def test_unproven_instance_data_aborts_before_package_removal(self):
         self.unproven.mkdir()
@@ -453,7 +839,7 @@ class TransactionTests(unittest.TestCase):
     def test_mount_is_refused_before_purge(self):
         with self.assertRaises(ValueError):
             uninstall.run_uninstall(self.root, self.runner, self.lifecycle, tuple(self.systemd.active),
-                                    lambda: ('/var/lib/pxe-tools-http',), owner=None, apply=True)
+                                    lambda: ('/var/lib/pxe-tools-http',), owner=None, record=self.record, ownership=self.ownership, apply=True)
         self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
         self.assertTrue((self.data / 'db').exists())
 
@@ -485,8 +871,28 @@ class AptSourceTests(unittest.TestCase):
     def test_untrusted_ownership_prevents_source_removal(self):
         self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=-1), (False, False))
 
-    def test_dedicated_source_and_key_can_be_removed(self):
-        self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=None), (True, True))
+    def test_dedicated_source_is_removed_but_key_is_preserved(self):
+        self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=None), (True, False))
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None), (True, False))
+        self.assertFalse(self.source.exists())
+        self.assertTrue(self.key.exists())
+
+    def test_unrelated_url_in_product_named_source_is_never_removed(self):
+        other = self.source.read_text().replace('https://packages.pxetools.com/apt',
+                                                'https://third-party.example/apt')
+        self.source.write_text(other)
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None), (False, False))
+        self.assertEqual(self.source.read_text(), other)
+        self.assertTrue(self.key.exists())
+
+    def test_nonstandard_apt_sources_do_not_cause_key_deletion(self):
+        custom = self.root / 'custom-apt-sources'
+        custom.mkdir()
+        (custom / 'other.list').write_text('deb [signed-by=/etc/apt/keyrings/pxe-tools-archive-keyring.gpg] https://other.invalid stable main\n')
+        (self.root / 'etc/apt/apt.conf').write_text('Dir::Etc::sourceparts "/custom-apt-sources";\n')
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None), (True, False))
+        self.assertTrue(self.key.exists())
+        self.assertTrue((custom / 'other.list').exists())
 
     def test_other_source_uses_key_so_key_is_preserved(self):
         (self.source.parent / 'other.list').write_text('deb [signed-by=/etc/apt/keyrings/pxe-tools-archive-keyring.gpg] https://other.invalid stable main\n')
