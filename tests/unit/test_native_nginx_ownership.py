@@ -376,6 +376,35 @@ class ReconciliationTests(unittest.TestCase):
         self.fixture.reconciler().reconcile()
         self.assert_generic_preserved(before)
 
+    def test_other_manual_application_in_same_transaction_is_preserved(self):
+        history = self.fixture.path('/var/log/apt/history.log')
+        history.write_text(history.read_text().replace(
+            'pxe-tools:amd64 (0.1.0~beta7)',
+            'pxe-tools:amd64 (0.1.0~beta7), customer-web:all (1.0)'))
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile()
+        self.assert_generic_preserved(before)
+
+    def test_core_installed_as_an_automatic_dependency_is_preserved(self):
+        history = self.fixture.path('/var/log/apt/history.log')
+        history.write_text(history.read_text().replace(
+            'pxe-tools:amd64 (0.1.0~beta7)',
+            'pxe-tools:amd64 (0.1.0~beta7, automatic)'))
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile()
+        self.assert_generic_preserved(before)
+
+    def test_manually_requested_core_and_its_optional_module_are_owned(self):
+        history = self.fixture.path('/var/log/apt/history.log')
+        history.write_text(history.read_text().replace(
+            'pxe-tools:amd64 (0.1.0~beta7)',
+            'pxe-tools:amd64 (0.1.0~beta7), pxe-tools-ansible:all (0.1.0~beta7)'))
+        result = self.fixture.reconciler().reconcile()
+        self.assertEqual(result['action'], 'disabled')
+        state = self.fixture.service_state()
+        self.assertFalse(state['units']['nginx.service']['active'])
+        self.assertEqual(state['units']['nginx.service']['enabled'], 'disabled')
+
     def test_failed_apt_transaction_is_not_an_ownership_receipt(self):
         history = self.fixture.path('/var/log/apt/history.log')
         history.write_text(history.read_text().replace('End-Date:',
