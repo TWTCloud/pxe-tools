@@ -128,7 +128,7 @@ class PersistentMaskFixtures(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.unit_dir.iterdir()), ['nginx.service'])
         for unit in self.units:
             phases = [event['phase'] for event in self.transaction.events if event['unit'] == unit]
-            self.assertEqual(phases, ['prepared', 'published', 'removed'])
+            self.assertEqual(phases, ['creating', 'prepared', 'published', 'removed'])
         self.assertTrue(any(call[1] == 'daemon-reload' for call in self.systemd.calls))
         self.assert_third_party_intact()
 

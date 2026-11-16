@@ -29,6 +29,11 @@ Description: optional Ansible integration for PXE Tools
 '''
 PREINST = '''#!/bin/sh
 set -eu
+if [ "$1" = install ] || [ "$1" = upgrade ]; then
+    python3 - check-removal <<'PXE_UPGRADE_LIFECYCLE'
+@@PXE_UPGRADE_LIFECYCLE@@
+PXE_UPGRADE_LIFECYCLE
+fi
 if getent passwd pxe-tools-ansible >/dev/null; then
     uid=$(id -u pxe-tools-ansible); gid=$(id -g pxe-tools-ansible)
     dedicated=$(getent group pxe-tools-ansible | cut -d: -f3)
@@ -79,11 +84,12 @@ def build(destination: Path, version: str = '0.0.1~local1', *, package_name: str
     tracked = source_inventory.tracked_files(ROOT)
     dropin=source_inventory.checked_file(ROOT, ROOT/'packaging/native/ansible-worker.conf', tracked)
     ownership=source_inventory.checked_file(ROOT, ROOT/'packaging/native/ownership-provenance.py', tracked)
+    lifecycle=source_inventory.checked_file(ROOT, ROOT/'packaging/native/upgrade-lifecycle.py', tracked).read_text()
     with tempfile.TemporaryDirectory(prefix='pxe-native-ansible-package-') as temporary:
         root=Path(temporary)/'root'; control=root/'DEBIAN'; control.mkdir(parents=True)
         (control/'control').write_text(CONTROL.format(version=version, package_name=package_name, maintainer=maintainer, base_package=base_package, minimum_base=minimum_base, maximum_base=maximum_base))
         for name,text in [('preinst',PREINST),('postinst',POSTINST),('prerm',PRERM),('postrm',POSTRM)]:
-            path=control/name; path.write_text(text); path.chmod(0o755)
+            path=control/name; path.write_text(text.replace('@@PXE_UPGRADE_LIFECYCLE@@', lifecycle)); path.chmod(0o755)
         helper=root/'usr/lib/pxe-tools-ansible/ownership-provenance.py'
         helper.parent.mkdir(parents=True); shutil.copyfile(ownership,helper)
         target=root/'usr/lib/systemd/system/pxe-tools-worker.service.d/50-ansible.conf'

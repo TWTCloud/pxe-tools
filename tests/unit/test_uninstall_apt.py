@@ -76,6 +76,34 @@ class ScopedRemovalTests(unittest.TestCase):
             uninstall.remove_tree(self.root, '/var/lib/pxe-tools', mounts=(), owner=None, opener=opener)
         self.assertEqual((mounted / 'keep').read_text(), 'mounted-sentinel')
 
+    def test_new_mount_on_ancestor_is_not_followed(self):
+        import errno
+        for component in ('var', 'lib'):
+            def opener(parent, name):
+                if name == component:
+                    raise OSError(errno.EXDEV, 'mount boundary')
+                return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            with self.subTest(component=component), self.assertRaises(OSError):
+                uninstall.remove_tree(self.root, '/var/lib/pxe-tools', mounts=(), owner=None, opener=opener)
+            self.assertTrue((self.target / 'data').exists())
+            self.assertEqual((self.outside / 'keep').read_text(), 'outside')
+
+    def test_directory_removal_is_synchronized_before_return(self):
+        target_inode = self.target.stat().st_ino
+        parent_inode = self.target.parent.stat().st_ino
+        events = []
+        fsync, rmdir = os.fsync, os.rmdir
+        def observed_fsync(fd):
+            events.append(('fsync', os.fstat(fd).st_ino))
+            return fsync(fd)
+        def observed_rmdir(path, *args, **kwargs):
+            events.append(('rmdir', os.fspath(path)))
+            return rmdir(path, *args, **kwargs)
+        with patch('os.fsync', side_effect=observed_fsync), patch('os.rmdir', side_effect=observed_rmdir):
+            self.remove()
+        self.assertLess(events.index(('fsync', target_inode)), events.index(('rmdir', 'pxe-tools')))
+        self.assertLess(events.index(('rmdir', 'pxe-tools')), events.index(('fsync', parent_inode)))
+
     def test_root_symlink_is_refused(self):
         (self.target / 'data').unlink()
         self.target.rmdir()
@@ -617,10 +645,11 @@ class ConsentTests(unittest.TestCase):
         self.assertTrue(uninstall.parse_arguments(['--yes']).yes)
         self.assertFalse(uninstall.parse_arguments(['--dry-run']).yes)
 
-    def test_unvalidated_candidate_cannot_run_a_real_removal(self):
-        with self.assertRaisesRegex(RuntimeError, 'not yet validated'):
-            uninstall.require_release_ready(True)
-        uninstall.require_release_ready(False)
+    def test_resume_is_explicit_and_distinct_from_new_removal(self):
+        self.assertTrue(uninstall.parse_arguments(['--resume']).resume)
+        self.assertFalse(uninstall.parse_arguments([]).resume)
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            uninstall.parse_arguments(['--resume', '--yes'])
 
     def test_yes_and_preview_are_mutually_exclusive(self):
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
@@ -912,6 +941,9 @@ class TransactionTests(unittest.TestCase):
         self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
 
     def test_verified_nginx_journal_is_removed_without_changing_nginx(self):
+        helper = self.root / 'usr/lib/pxe-tools/native/reconcile-nginx.py'
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes((SCRIPT.parent / 'reconcile-nginx.py').read_bytes())
         journal = self.root / 'var/lib/pxe-tools-nginx-ownership'
         journal.mkdir(mode=0o700)
         (journal / 'lock').touch(mode=0o600)
@@ -999,6 +1031,148 @@ class AptSourceTests(unittest.TestCase):
         self.key = self.root / 'etc/apt/keyrings/pxe-tools-archive-keyring.gpg'
         self.source.write_text('Types: deb\nURIs: https://packages.pxetools.com/apt\nSuites: stable\nComponents: main\nArchitectures: amd64\nSigned-By: /etc/apt/keyrings/pxe-tools-archive-keyring.gpg\n')
         self.key.write_bytes(b'fixture')
+        import hashlib
+        self.source_anchor = self.source.parent / ('.pxe-tools-sources.' + hashlib.sha256(self.source.read_bytes()).hexdigest() + '.created')
+        os.link(self.source, self.source_anchor)
+        self.anchor = self.key.parent / ('.pxe-tools-archive-keyring.' + hashlib.sha256(self.key.read_bytes()).hexdigest() + '.created')
+        self.standard = {'SOURCE': '/etc/apt/sources.list', 'PARTS': '/etc/apt/sources.list.d/',
+                         'TRUSTED': '/etc/apt/trusted.gpg', 'TRUSTEDPARTS': '/etc/apt/trusted.gpg.d/', 'ROOT': ''}
+
+    def prove_created_key(self):
+        os.link(self.key, self.anchor)
+
+    def test_effective_config_query_uses_clean_environment_and_does_not_eval_shell(self):
+        from types import SimpleNamespace
+        lines = "SOURCE='/etc/apt/sources.list'\nPARTS='/etc/apt/sources.list.d/'\nTRUSTEDPARTS='/etc/apt/trusted.gpg.d/'\n"
+        with patch('subprocess.run', return_value=SimpleNamespace(returncode=0, stdout=lines, stderr='')) as run:
+            result = uninstall._apt_effective_config()
+        self.assertEqual(result['SOURCE'], self.standard['SOURCE'])
+        self.assertEqual(run.call_args.kwargs['env'], {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C'})
+        self.assertEqual(run.call_args.args[0][0], '/usr/bin/apt-config')
+        with patch('subprocess.run', return_value=SimpleNamespace(returncode=0, stdout="SOURCE='value';touch /tmp/bad\n", stderr='')):
+            with self.assertRaises(ValueError):
+                uninstall._apt_effective_config()
+
+    def test_effective_config_duplicate_or_unknown_values_are_refused(self):
+        from types import SimpleNamespace
+        for lines in ("SOURCE='/one'\nSOURCE='/two'\n", "UNKNOWN='/value'\n"):
+            with self.subTest(lines=lines), patch('subprocess.run', return_value=SimpleNamespace(returncode=0, stdout=lines, stderr='')):
+                with self.assertRaises(ValueError):
+                    uninstall._apt_effective_config()
+
+    @unittest.skipUnless(sys.platform == 'linux' and Path('/usr/bin/apt-config').is_file(),
+                         'requires the real apt-config command')
+    def test_real_apt_config_supports_the_standard_fixture(self):
+        # apt-config is read-only; all source/key files remain in the fixture.
+        self.prove_created_key()
+        config = uninstall._apt_effective_config()
+        self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=None, apt_config=config), (True, True))
+
+    def test_proven_key_with_unshared_standard_sources_is_removed(self):
+        self.prove_created_key()
+        (self.root / 'etc/apt/sources.list').write_text('deb [signed-by=/usr/share/keyrings/debian.gpg] https://deb.debian.org/debian stable main\n')
+        self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=None, apt_config=self.standard), (True, True))
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, True))
+        self.assertFalse(self.source.exists())
+        self.assertFalse(self.key.exists())
+        self.assertFalse(self.anchor.exists())
+
+    def test_in_place_changed_proven_key_is_preserved(self):
+        self.prove_created_key()
+        self.key.write_bytes(b'administrator changed it')
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, False))
+        self.assertEqual(self.key.read_bytes(), b'administrator changed it')
+        self.assertTrue(self.anchor.exists())
+
+    def test_redirected_apt_configuration_preserves_even_a_proven_key(self):
+        self.prove_created_key()
+        changed = dict(self.standard, PARTS='/srv/custom-sources')
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=changed), (False, False))
+        self.assertTrue(self.source.exists())
+        self.assertTrue(self.key.exists())
+
+    def test_effective_source_pointing_at_witness_preserves_both_links(self):
+        self.prove_created_key()
+        changed = dict(self.standard, SOURCE='/etc/apt/sources.list.d/' + self.source_anchor.name)
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=changed), (False, False))
+        self.assertTrue(self.source.exists())
+        self.assertTrue(self.source_anchor.exists())
+        self.assertTrue(self.key.exists())
+
+    def test_new_mount_on_apt_ancestor_prevents_any_unlink(self):
+        import errno
+        self.prove_created_key()
+        def opener(parent, name):
+            if name == 'apt':
+                raise OSError(errno.EXDEV, 'mount boundary')
+            return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        with self.assertRaises(OSError):
+            uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard, opener=opener)
+        self.assertTrue(self.source.exists())
+        self.assertTrue(self.source_anchor.exists())
+        self.assertTrue(self.key.exists())
+
+    def test_debian_13_unset_legacy_trusted_keyring_is_accepted(self):
+        self.prove_created_key()
+        config = dict(self.standard)
+        del config['TRUSTED']
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=config), (True, True))
+        self.assertFalse(self.key.exists())
+
+    def test_redirected_root_or_trusted_parts_preserve_proven_key(self):
+        self.prove_created_key()
+        for config in (dict(self.standard, ROOT='/mnt/image'),
+                       dict(self.standard, TRUSTEDPARTS='/srv/custom-trusted'),
+                       dict(self.standard, TRUSTED='/srv/custom-keyring.gpg')):
+            with self.subTest(config=config):
+                self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=None, apt_config=config),
+                                 (False if config['ROOT'] else True, False))
+                self.assertTrue(self.key.exists())
+
+    def test_shared_key_reference_via_external_symlink_is_preserved(self):
+        self.prove_created_key()
+        alias = self.root / 'alias.gpg'
+        alias.symlink_to(self.key)
+        (self.source.parent / 'other.sources').write_text('Types: deb\nURIs: https://example.invalid\nSigned-By: /alias.gpg\n')
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, False))
+        self.assertTrue(self.key.exists())
+
+    def test_partial_key_unlink_can_finish_from_pinned_witness(self):
+        self.prove_created_key()
+        self.source.unlink()
+        self.key.unlink()
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (False, True))
+        self.assertFalse(self.anchor.exists())
+
+    def test_several_creation_witnesses_preserve_everything(self):
+        self.prove_created_key()
+        other = self.anchor.parent / ('.pxe-tools-archive-keyring.' + '0' * 64 + '.created')
+        other.write_text('other')
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, False))
+        self.assertTrue(self.key.exists())
+        self.assertEqual(other.read_text(), 'other')
+
+    def test_shared_proven_key_is_preserved(self):
+        self.prove_created_key()
+        (self.source.parent / 'other.list').write_text('deb [signed-by=/etc/apt/keyrings/pxe-tools-archive-keyring.gpg] https://example.invalid stable main\n')
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, False))
+        self.assertTrue(self.key.exists())
+        self.assertTrue(self.anchor.exists())
+
+    def test_proven_key_is_preserved_if_global_key_alias_exists(self):
+        self.prove_created_key()
+        trusted = self.root / 'etc/apt/trusted.gpg.d'
+        trusted.mkdir()
+        (trusted / 'alias.gpg').symlink_to(self.key)
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, False))
+        self.assertTrue(self.key.exists())
+
+    def test_proven_key_can_be_removed_after_source_was_already_removed(self):
+        self.prove_created_key()
+        self.source.unlink()
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (False, True))
+        self.assertFalse(self.key.exists())
+        self.assertFalse(self.anchor.exists())
 
     def test_untrusted_ownership_prevents_source_removal(self):
         self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=-1), (False, False))
@@ -1009,6 +1183,27 @@ class AptSourceTests(unittest.TestCase):
         self.assertFalse(self.source.exists())
         self.assertTrue(self.key.exists())
 
+    def test_matching_preexisting_source_and_its_key_are_not_claimed(self):
+        self.source_anchor.unlink()
+        self.prove_created_key()
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (False, False))
+        self.assertTrue(self.source.exists())
+        self.assertTrue(self.key.exists())
+        self.assertTrue(self.anchor.exists())
+
+    def test_source_can_finish_after_interruption_between_unlinks(self):
+        self.source.unlink()
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (False, False))
+        self.assertFalse(self.source_anchor.exists())
+        self.assertTrue(self.key.exists())
+
+    def test_additional_hardlink_to_source_prevents_removal(self):
+        alias = self.root / 'etc/apt/sources.list.d/third-party.sources'
+        os.link(self.source, alias)
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (False, False))
+        self.assertTrue(self.source.exists())
+        self.assertTrue(alias.exists())
+
     def test_unrelated_url_in_product_named_source_is_never_removed(self):
         other = self.source.read_text().replace('https://packages.pxetools.com/apt',
                                                 'https://third-party.example/apt')
@@ -1016,6 +1211,17 @@ class AptSourceTests(unittest.TestCase):
         self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None), (False, False))
         self.assertEqual(self.source.read_text(), other)
         self.assertTrue(self.key.exists())
+
+    def test_created_source_with_explicit_test_repository_is_removed(self):
+        import hashlib
+        self.source_anchor.unlink()
+        self.source.write_text(self.source.read_text().replace('https://packages.pxetools.com/apt',
+                                                                'https://apt.fixture.invalid/repository'))
+        anchor = self.source.parent / ('.pxe-tools-sources.' + hashlib.sha256(self.source.read_bytes()).hexdigest() + '.created')
+        os.link(self.source, anchor)
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, False))
+        self.assertFalse(self.source.exists())
+        self.assertFalse(anchor.exists())
 
     def test_nonstandard_apt_sources_do_not_cause_key_deletion(self):
         custom = self.root / 'custom-apt-sources'
@@ -1043,7 +1249,7 @@ class AptSourceTests(unittest.TestCase):
 
     def test_symlinked_other_source_preserves_key(self):
         (self.source.parent / 'other.list').symlink_to(self.root / 'other')
-        self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=None), (True, False))
+        self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=None), (False, False))
 
     def test_symlinked_apt_parent_preserves_everything(self):
         external = self.root / 'outside-apt'
@@ -1065,6 +1271,7 @@ class AptSourceTests(unittest.TestCase):
 
     def test_missing_files_are_idempotent(self):
         self.source.unlink()
+        self.source_anchor.unlink()
         self.key.unlink()
         self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=None), (False, False))
 

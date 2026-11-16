@@ -35,6 +35,11 @@ Description: {description}
 '''
 PREINST = '''#!/bin/sh
 set -eu
+if [ "$1" = install ] || [ "$1" = upgrade ]; then
+    python3 - check-removal <<'PXE_UPGRADE_LIFECYCLE'
+@@PXE_UPGRADE_LIFECYCLE@@
+PXE_UPGRADE_LIFECYCLE
+fi
 if [ "$1" = install ]; then
     if [ -e /usr/lib/pxe-tools ] || [ -L /usr/lib/pxe-tools ] || \
        [ -e /opt/pxe-tools ] || [ -L /opt/pxe-tools ]; then

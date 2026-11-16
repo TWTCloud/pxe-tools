@@ -567,6 +567,16 @@ class BuilderHooksTests(unittest.TestCase):
         self.assertIn('configure-secure-tftp.py --initialize-instance', postinst)
         self.assertLess(postinst.index('reconcile-nginx.py'), postinst.index('configure-secure-tftp.py --initialize-instance'))
 
+    def test_preinst_checks_removal_before_unpack_for_both_packages(self):
+        for name in ('build-local-package.py', 'build-local-ansible-package.py'):
+            with self.subTest(builder=name):
+                preinst = self.builder(name).PREINST
+                self.assertIn('check-removal', preinst)
+                self.assertIn('@@PXE_UPGRADE_LIFECYCLE@@', preinst)
+                self.assertLess(preinst.index('check-removal'),
+                                preinst.index('getent passwd') if 'getent passwd' in preinst
+                                else preinst.index('PXE_CACHE_CLEANUP'))
+
     def test_both_package_staging_trees_carry_exact_helper_bytes(self):
         expected_helper = (ROOT / 'packaging/native/ownership-provenance.py').read_bytes()
         expected_uninstall = (ROOT / 'packaging/native/uninstall-apt.py').read_bytes()

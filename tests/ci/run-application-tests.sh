@@ -73,6 +73,8 @@ python3 tests/unit/test_uninstall_metadata.py
 python3 tests/unit/test_uninstall_persistent_masks.py
 python3 -W error::ResourceWarning tests/unit/test_uninstall_roundtrip.py
 python3 tests/unit/test_uninstall_recovery_journal.py
+python3 -W error::ResourceWarning tests/unit/test_uninstall_recovery.py
+python3 -W error::ResourceWarning tests/unit/test_uninstall_worker_recovery.py
 python3 tests/integration/test_docker_nginx_activation.py
 python3 tests/unit/test_native_worker_keyring.py
 python3 tests/unit/test_configure_secure_runtime.py

@@ -7,11 +7,13 @@ PXE boot, HTTP onboarding test, or evidence of distribution compatibility.
 The shared native Linux receipt must establish those separately.
 """
 import copy
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -131,9 +133,11 @@ class FakeLifecycle:
         self.process = root / 'proc' / self.PID
         thread = self.process / 'task' / self.PID
         thread.mkdir(parents=True, exist_ok=True)
+        (self.process / 'cgroup').write_text('0::' + self.CGROUP + '\n')
         self.freezer = 'running'
         self.freeze_calls = 0
         self.release_calls = 0
+        self.signaler = lambda pid, number: None
         self._write_cgroup(frozen=False, active=True)
         self.write_process_state('S')
 
@@ -164,10 +168,15 @@ class FakeLifecycle:
     def check_effective_configuration(self): pass
     def sync_directory(self, path): pass
     def busy(self, conn): return []
-    def save(self, state): self.state_file.write_text(json.dumps(state))
+    def save(self, state):
+        self.state_file.write_text(json.dumps(state))
+        self.state_file.chmod(0o600)
 
     def capture(self, version):
-        state = {'format': 1, 'phase': 'captured', 'active': dict(self.systemd.active)}
+        state = {'format': 1, 'id': 'a' * 32, 'version': version, 'phase': 'captured',
+                 'units': {unit: {'active': active == 'active', 'enabled': 'static'}
+                           for unit, active in self.systemd.active.items()},
+                 'active': dict(self.systemd.active)}
         self.save(state)
         return state
 
@@ -188,6 +197,7 @@ class FakeLifecycle:
     def stop(self, state, frozen):
         if not frozen or self.freezer != 'frozen':
             raise AssertionError('fixture worker must be frozen before safe stop')
+        self.signaler(int(self.PID), signal.SIGSTOP)
         # Only update the fake systemd state; no process or signal is touched.
         for unit in self.systemd.active:
             self.systemd.active[unit] = 'inactive'
@@ -300,6 +310,11 @@ class SyntheticRoundTrip(unittest.TestCase):
             payload.mkdir()
             (payload / 'package-file').write_text('synthetic-package-payload')
         self.source.write_text('Types: deb\nURIs: https://packages.pxetools.com/apt\nSuites: stable\nComponents: main\nArchitectures: amd64\nSigned-By: /etc/apt/keyrings/pxe-tools-archive-keyring.gpg\n')
+        source_hash = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        os.link(self.source, self.source.parent / ('.pxe-tools-sources.' + source_hash + '.created'))
+        boot_id = self.root / 'proc/sys/kernel/random/boot_id'
+        boot_id.parent.mkdir(parents=True, exist_ok=True)
+        boot_id.write_text('12345678-1234-1234-1234-123456789abc\n')
         if not self.key.exists():
             self.key.write_text('synthetic-shared-key')
         self.package_states = {'pxe-tools': 'installed', 'nginx': 'installed',

@@ -548,11 +548,11 @@ class Lifecycle:
                 info = os.fstat(directory)
                 if info.st_uid != self.owner or info.st_mode & 0o022:
                     raise RuntimeError('untrusted uninstall journal ancestor')
-                try:
-                    os.stat('pxe-tools-uninstall', dir_fd=directory, follow_symlinks=False)
-                except FileNotFoundError:
-                    pass
-                else:
+                for name in ('pxe-tools-uninstall', 'pxe-tools-uninstall-complete', 'pxe-tools-uninstall-aborted'):
+                    try:
+                        os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
                     raise RuntimeError('an interrupted PXE Tools uninstall requires inspection before upgrade or configuration')
         finally:
             os.close(directory)
