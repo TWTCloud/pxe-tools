@@ -17,10 +17,48 @@ que son réseau dispose d'un serveur DHCP compatible.
 Le serveur HTTP PXE utilise TCP 80. Si le nginx installé par Debian ou un autre
 service occupe ce port, l'assistant signale le conflit. L'action proposée pour
 `nginx.service` vérifie l'identité des processus et nécessite une confirmation
-explicite : elle arrête ce service et désactive son démarrage automatique. Les
+explicite : elle arrête temporairement ce service sans modifier son démarrage automatique. Les
 sites qui en dépendent deviennent alors indisponibles. Sa configuration reste en
 place. Aucun autre service n'est arrêté automatiquement ; en présence d'un autre
 occupant, résolvez le conflit avant d'activer le réseau PXE.
+
+### Nginx générique installé comme dépendance
+
+Le correctif de [l'issue61](https://github.com/williamboglietti/pxe-tools/issues/61)
+ajoute une réconciliation au `postinst` du paquet candidat. Il ne fait pas partie
+des octets bêta7 déjà publiés. Les dépendances peuvent démarrer leur service avant
+la configuration de PXE Tools ; aucun `policy-rc.d` global n'est installé pour
+modifier les règles de l'hôte.
+
+Le candidat arrête et désactive uniquement `nginx.service` lorsque sa première
+installation automatique avec PXE Tools est prouvée par APT et dpkg, sans autre
+application demandée dans la transaction hors module Ansible facultatif, que tous
+les fichiers actifs et la page d'accueil sont ceux du paquet, et que le master
+sert toujours cette configuration stock. Une configuration personnalisée, un
+historique insuffisant, une unité modifiée ou un état arrêté/désactivé/masqué
+restent conservés. Le binaire nginx, les sites et les contenus ne sont pas retirés.
+La console8080 et le HTTP de boot restent des unités distinctes ; cette
+réconciliation ne démarre aucune unité PXE, DHCP ou TFTP.
+
+Pour une installation déjà affectée dont la provenance n'est plus disponible,
+après examen des usages et consentement explicite, le candidat fournit :
+
+```sh
+sudo python3 /usr/lib/pxe-tools/native/reconcile-nginx.py --confirm-stock-service
+```
+
+Cette commande refuse elle aussi les sites/contenus personnalisés et les
+observations ambiguës. Elle ne relance pas le job réseau. Avant toute activation
+ultérieure du HTTP PXE, le retour arrière du seul changement de service est
+`sudo systemctl enable --now nginx.service`. Après activation du HTTP PXE, sa
+suspension doit être coordonnée pour libérer80 avant ce retour arrière.
+
+Les ressources et états avant/après sont consignés dans
+`/var/lib/pxe-tools-nginx-ownership/state.json`, format1, fichier root0600
+dans un répertoire root0700. Le journal `prepared` précède les modifications ;
+`complete` atteste leur réussite. Une interruption ou un changement ultérieur
+de l'administrateur impose un examen ; le journal ne permet pas à un futur
+désinstallateur de rétablir aveuglément un ancien état.
 
 Les deux services nginx natifs stockent leurs fichiers temporaires dans leurs
 répertoires respectifs sous `/run`. Ce répertoire peut être en mémoire (tmpfs) :

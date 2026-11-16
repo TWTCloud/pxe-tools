@@ -64,6 +64,9 @@ POSTINST = '''#!/bin/sh
 set -eu
 if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
     systemctl daemon-reload
+    # Dependencies are configured before us and may have started stock nginx.
+    # Preserve any preexisting/custom service unless ownership is proven.
+    python3 /usr/lib/pxe-tools/native/reconcile-nginx.py --configure
     # The incoming code is now installed. The preinst snapshot precedes all
     # init/schema work; failed configure retains its journal for a safe retry.
     python3 /usr/lib/pxe-tools/native/upgrade-lifecycle.py configure
@@ -154,7 +157,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             shutil.copy2(checked(ROOT/name), docs/name)
         copy_tree(ROOT/'third_party/licenses', docs/'licenses', tracked)
         native=root/'usr/lib/pxe-tools/native'; native.mkdir(parents=True)
-        for name in ('default.env','init.sh','start-php-fpm.sh','start-worker.py','configure-secure-tftp.py','php-fpm.conf','nginx.conf','pxe-nginx.conf','render-pxe-http.py','upgrade-lifecycle.py'):
+        for name in ('default.env','init.sh','start-php-fpm.sh','start-worker.py','configure-secure-tftp.py','php-fpm.conf','nginx.conf','pxe-nginx.conf','render-pxe-http.py','upgrade-lifecycle.py','reconcile-nginx.py'):
             shutil.copy2(checked(ROOT/'packaging/native'/name), native/name)
         copy_tree(ROOT/'packaging/native/keyrings', native/'keyrings', tracked)
         units=root/'usr/lib/systemd/system'; units.mkdir(parents=True)
