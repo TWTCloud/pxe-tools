@@ -112,12 +112,48 @@ class FakeAccounts:
 
 
 class FakeLifecycle:
-    """Model the quiescence boundary without running systemctl or touching /proc."""
+    """Model quiescence with fixture cgroup/proc files and no real signals."""
+    PID = '123'
+    CGROUP = '/system.slice/pxe-tools-worker.service'
+
     def __init__(self, root, systemd):
         self.root = root
         self.systemd = systemd
         self.home = root / 'var/lib/pxe-tools-native/upgrade'
         self.state_file = self.home / 'state.json'
+        self.group = root / 'sys/fs/cgroup' / self.CGROUP.lstrip('/')
+        self.group.mkdir(parents=True, exist_ok=True)
+        # system.slice is an actual non-root ancestor in cgroup v2. The
+        # hierarchy root itself deliberately has no cgroup.freeze fixture.
+        self.parent_group = self.group.parent
+        (self.parent_group / 'cgroup.events').write_text('frozen 0\n')
+        (self.parent_group / 'cgroup.freeze').write_text('0\n')
+        self.process = root / 'proc' / self.PID
+        thread = self.process / 'task' / self.PID
+        thread.mkdir(parents=True, exist_ok=True)
+        self.freezer = 'running'
+        self.freeze_calls = 0
+        self.release_calls = 0
+        self._write_cgroup(frozen=False, active=True)
+        self.write_process_state('S')
+
+    def _write_cgroup(self, *, frozen, active):
+        (self.group / 'cgroup.events').write_text('frozen ' + ('1' if frozen else '0') + '\n')
+        (self.group / 'cgroup.freeze').write_text('1\n' if frozen else '0\n')
+        (self.group / 'cgroup.procs').write_text(self.PID + '\n' if active else '')
+
+    def write_process_state(self, state):
+        # /proc/PID/stat and /proc/PID/task/TID/stat expose the same starttime.
+        value = self.PID + ' (python3) ' + state + ' ' + ' '.join(['0'] * 18 + ['4242']) + '\n'
+        (self.process / 'stat').write_text(value)
+        (self.process / 'task' / self.PID / 'stat').write_text(value)
+
+    def worker_status(self):
+        active = self.systemd.active['pxe-tools-worker.service'] == 'active'
+        return {'ActiveState': 'active' if active else 'inactive',
+                'FreezerState': self.freezer,
+                'ControlGroup': self.CGROUP if active else '',
+                'MainPID': self.PID if active else '0'}
 
     def private_home(self):
         self.home.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -126,7 +162,6 @@ class FakeLifecycle:
     def environments(self): return {}
     def load(self): return None
     def check_effective_configuration(self): pass
-    def release_worker(self): pass
     def sync_directory(self, path): pass
     def busy(self, conn): return []
     def save(self, state): self.state_file.write_text(json.dumps(state))
@@ -136,17 +171,43 @@ class FakeLifecycle:
         self.save(state)
         return state
 
+    def freeze_worker(self, state):
+        if self.worker_status()['ActiveState'] != 'active':
+            raise AssertionError('fixture expected active worker before freeze')
+        self.freeze_calls += 1
+        self.freezer = 'frozen'
+        self._write_cgroup(frozen=True, active=True)
+        return True
+
+    def release_worker(self):
+        self.release_calls += 1
+        active = self.systemd.active['pxe-tools-worker.service'] == 'active'
+        self.freezer = 'running'
+        self._write_cgroup(frozen=False, active=active)
+
     def stop(self, state, frozen):
+        if not frozen or self.freezer != 'frozen':
+            raise AssertionError('fixture worker must be frozen before safe stop')
+        # Only update the fake systemd state; no process or signal is touched.
         for unit in self.systemd.active:
             self.systemd.active[unit] = 'inactive'
+        self.freezer = 'running'
+        self._write_cgroup(frozen=False, active=False)
 
     def quiesce(self, state, snapshot=False):
-        self.stop(state, False)
+        frozen = self.freeze_worker(state)
+        try:
+            self.stop(state, frozen)
+        finally:
+            self.release_worker()
         state['phase'] = 'prepared'
         self.save(state)
 
     def restore(self, state, old=False):
         self.systemd.active.update(state['active'])
+        active = self.systemd.active['pxe-tools-worker.service'] == 'active'
+        self.freezer = 'running'
+        self._write_cgroup(frozen=False, active=active)
 
 
 class SyntheticRoundTrip(unittest.TestCase):
@@ -312,6 +373,8 @@ class SyntheticRoundTrip(unittest.TestCase):
             self.assertIn('account', first)
             self.assertIn('/var/lib/pxe-tools-ansible', first['directories'])
         self.uninstall_fixture(store)
+        self.assertEqual(self.life.freeze_calls, 1, 'the fake active worker must pass the real pre-freeze check')
+        self.assertGreaterEqual(self.life.release_calls, 1)
         for relative in ('etc/pxe-tools', 'var/lib/pxe-tools', 'var/lib/pxe-tools-native',
                          'var/lib/pxe-tools-tftp', 'var/lib/pxe-tools-http',
                          'var/lib/pxe-tools-ownership', 'var/log/pxe-tools',
@@ -352,6 +415,64 @@ class SyntheticRoundTrip(unittest.TestCase):
                 self.assertTrue(second_store.generation.matches(fd, identity))
             finally:
                 os.close(fd)
+        self.assert_external_survives()
+
+    def test_preexisting_stopped_worker_is_not_signalled_or_purged(self):
+        store = self.install_fixture(with_module=False)
+        self.life.write_process_state('T')
+        with self.assertRaisesRegex(RuntimeError, 'stopped'):
+            self.uninstall_fixture(store)
+        self.assertEqual(self.life.freeze_calls, 0)
+        self.assertEqual(self.life.release_calls, 0)
+        self.assertFalse(any(Path(command[0]).name == 'dpkg' for command in self.calls))
+        self.assertTrue((self.root / 'var/lib/pxe-tools/instance.sqlite').exists())
+        self.assert_external_survives()
+
+    def test_preexisting_stopped_thread_is_not_signalled_or_purged(self):
+        store = self.install_fixture(with_module=False)
+        thread = self.life.process / 'task' / self.life.PID / 'stat'
+        thread.write_text(thread.read_text().replace(' (python3) S ', ' (python3) T '))
+        with self.assertRaisesRegex(RuntimeError, 'stopped'):
+            self.uninstall_fixture(store)
+        self.assertEqual(self.life.freeze_calls, 0)
+        self.assertEqual(self.life.release_calls, 0)
+        self.assertFalse(any(Path(command[0]).name == 'dpkg' for command in self.calls))
+        self.assertTrue((self.root / 'var/lib/pxe-tools/instance.sqlite').exists())
+        self.assert_external_survives()
+
+    def test_unexpected_cgroup_child_is_not_interrupted_or_purged(self):
+        store = self.install_fixture(with_module=False)
+        (self.life.group / 'cgroup.procs').write_text(self.life.PID + '\n124\n')
+        with self.assertRaisesRegex(RuntimeError, 'unexpected processes'):
+            self.uninstall_fixture(store)
+        self.assertEqual(self.life.freeze_calls, 0)
+        self.assertEqual(self.life.release_calls, 0)
+        self.assertFalse(any(Path(command[0]).name == 'dpkg' for command in self.calls))
+        self.assert_external_survives()
+
+    def test_requested_ancestor_freeze_refuses_without_thaw_or_purge(self):
+        store = self.install_fixture(with_module=False)
+        # The ancestor has a freeze requested even before frozen=1 is observed.
+        (self.life.parent_group / 'cgroup.freeze').write_text('1\n')
+        with self.assertRaisesRegex(RuntimeError, 'ancestor'):
+            self.uninstall_fixture(store)
+        self.assertEqual(self.life.freeze_calls, 0)
+        self.assertEqual(self.life.release_calls, 0)
+        self.assertEqual((self.life.parent_group / 'cgroup.freeze').read_text(), '1\n')
+        self.assertFalse(any(Path(command[0]).name == 'dpkg' for command in self.calls))
+        self.assertTrue((self.root / 'var/lib/pxe-tools/instance.sqlite').exists())
+        self.assert_external_survives()
+
+    def test_preexisting_frozen_worker_is_not_thawed_or_purged(self):
+        store = self.install_fixture(with_module=False)
+        self.life.freezer = 'frozen'
+        self.life._write_cgroup(frozen=True, active=True)
+        with self.assertRaisesRegex(RuntimeError, 'freezer'):
+            self.uninstall_fixture(store)
+        self.assertEqual(self.life.freeze_calls, 0)
+        self.assertEqual(self.life.release_calls, 0)
+        self.assertFalse(any(Path(command[0]).name == 'dpkg' for command in self.calls))
+        self.assertTrue((self.root / 'var/lib/pxe-tools/instance.sqlite').exists())
         self.assert_external_survives()
 
     def test_weak_generation_proof_refuses_before_any_purge(self):

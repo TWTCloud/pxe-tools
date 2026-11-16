@@ -935,6 +935,133 @@ def load_reconciler(root, runner, *, owner=0):
     return reconciler
 
 
+def _check_worker_not_prepaused(lifecycle):
+    """Refuse pre-existing freezes or stopped threads before removal mutates anything.
+
+    This cannot serialize an uncooperative administrator changing freezer or
+    signal state concurrently; removal remains gated pending the Linux recipe.
+    """
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    status = lifecycle.worker_status()
+    if status.get('FreezerState') != 'running' or status.get('ActiveState') not in ('active', 'inactive', 'failed'):
+        raise RuntimeError('worker freezer state is not safely running')
+    group = status.get('ControlGroup', '')
+    pid = status.get('MainPID', '')
+    if not group:
+        if status['ActiveState'] not in ('inactive', 'failed') or pid != '0':
+            raise RuntimeError('worker identity cannot be established')
+        if lifecycle.worker_status() != status:
+            raise RuntimeError('worker state changed during inspection')
+        return
+    if (not group.startswith('/') or group == '/' or '..' in Path(group).parts
+            or (status['ActiveState'] == 'active' and (not pid.isdecimal() or pid == '0'))
+            or (status['ActiveState'] != 'active' and pid != '0')):
+        raise RuntimeError('worker identity or cgroup cannot be established')
+
+    def open_dir(parts):
+        fd = os.open(lifecycle.root, flags)
+        try:
+            for part in parts:
+                child = os.open(part, flags, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def read_file(fd, name, *, raw=False):
+        child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        try:
+            value = os.read(child, 1000001)
+            if len(value) > 1000000:
+                raise RuntimeError('worker state exceeds inspection limit')
+            return value if raw else value.decode('ascii')
+        finally:
+            os.close(child)
+
+    def proc_stat(directory, name, expected):
+        text = read_file(directory, name, raw=True)
+        prefix, separator, suffix = text.rpartition(b')')
+        fields = suffix.split()
+        if (not separator or not prefix.startswith(expected.encode('ascii') + b' (') or len(fields) < 20
+                or fields[0] not in (b'R', b'S', b'D', b'I') or not fields[19].isdigit()):
+            raise RuntimeError('worker process is stopped or its state cannot be established')
+        return fields[19]
+
+    try:
+        def check_freezer(fd):
+            events = [line.split() for line in read_file(fd, 'cgroup.events').splitlines()]
+            frozen = [entry for entry in events if entry and entry[0] == 'frozen']
+            if frozen != [['frozen', '0']] or read_file(fd, 'cgroup.freeze').strip() != '0':
+                raise RuntimeError('worker cgroup or ancestor is frozen or uncertain')
+
+        def check_ancestors():
+            parts = Path(group).parts[1:]
+            # cgroup v2 does not expose cgroup.freeze on its hierarchy root.
+            for end in range(1, len(parts)):
+                ancestor = open_dir(('sys', 'fs', 'cgroup', *parts[:end]))
+                try:
+                    check_freezer(ancestor)
+                finally:
+                    os.close(ancestor)
+
+        check_ancestors()
+        directory = open_dir(('sys', 'fs', 'cgroup', *Path(group).parts[1:]))
+        try:
+            def scan(fd):
+                check_freezer(fd)
+                processes = read_file(fd, 'cgroup.procs').split()
+                if any(not item.isdecimal() or item == '0' for item in processes):
+                    raise RuntimeError('worker cgroup processes cannot be established')
+                with os.scandir(fd) as entries:
+                    for entry in entries:
+                        if entry.is_symlink():
+                            raise RuntimeError('linked worker cgroup')
+                        if entry.is_dir(follow_symlinks=False):
+                            child = os.open(entry.name, flags, dir_fd=fd)
+                            try:
+                                processes.extend(scan(child))
+                            finally:
+                                os.close(child)
+                return processes
+            processes = scan(directory)
+            if sorted(processes) != ([pid] if pid != '0' else []):
+                raise RuntimeError('worker cgroup has unexpected processes')
+            if pid != '0':
+                process = open_dir(('proc', pid))
+                try:
+                    started = proc_stat(process, 'stat', pid)
+                    task = os.open('task', flags, dir_fd=process)
+                    try:
+                        threads = os.listdir(task)
+                        if pid not in threads or any(not name.isdecimal() for name in threads):
+                            raise RuntimeError('worker threads cannot be established')
+                        for tid in threads:
+                            thread = os.open(tid, flags, dir_fd=task)
+                            try:
+                                thread_started = proc_stat(thread, 'stat', tid)
+                                if tid == pid and thread_started != started:
+                                    raise RuntimeError('worker identity changed')
+                            finally:
+                                os.close(thread)
+                        if set(os.listdir(task)) != set(threads):
+                            raise RuntimeError('worker threads changed during inspection')
+                    finally:
+                        os.close(task)
+                    if proc_stat(process, 'stat', pid) != started:
+                        raise RuntimeError('worker identity changed')
+                finally:
+                    os.close(process)
+            check_ancestors()
+            if scan(directory) != processes or lifecycle.worker_status() != status:
+                raise RuntimeError('worker state changed during inspection')
+        finally:
+            os.close(directory)
+    except (OSError, UnicodeError, ValueError) as error:
+        raise RuntimeError('cannot safely inspect worker state') from error
+
+
 def quiesced_lifecycle(lifecycle, *, after_stop=None):
     """Quiesce active units using a separate durable removal journal.
 
@@ -951,14 +1078,19 @@ def quiesced_lifecycle(lifecycle, *, after_stop=None):
         removal_file = lifecycle.home / 'uninstall-state.json'
         if removal_file.exists() or removal_file.is_symlink():
             raise RuntimeError('an earlier uninstall requires recovery')
+        _check_worker_not_prepaused(lifecycle)
         original_file = lifecycle.state_file
         lifecycle.state_file = removal_file
         original_busy = lifecycle.busy
         original_stop = lifecycle.stop
-        overrides = {key: lifecycle.__dict__.get(key) for key in ('busy', 'stop')}
-        present = {key: key in lifecycle.__dict__ for key in ('busy', 'stop')}
+        original_freeze = lifecycle.freeze_worker
+        original_release = lifecycle.release_worker
+        override_keys = ('busy', 'stop', 'freeze_worker', 'release_worker')
+        overrides = {key: lifecycle.__dict__.get(key) for key in override_keys}
+        present = {key: key in lifecycle.__dict__ for key in override_keys}
         state = None
         stop_started = False
+        freeze_confirmed = False
 
         class Transaction:
             purge_started = False
@@ -997,15 +1129,34 @@ def quiesced_lifecycle(lifecycle, *, after_stop=None):
                 stack.enter_context(after_stop(transaction))
             return result
 
+        def removal_freeze(state_arg):
+            nonlocal freeze_confirmed
+            _check_worker_not_prepaused(lifecycle)
+            try:
+                frozen = original_freeze(state_arg)
+                if type(frozen) is not bool:
+                    raise RuntimeError('unexpected freeze result')
+            except BaseException as error:
+                raise BarrierRecoveryRequired(
+                    'worker freeze outcome is uncertain; journal retained for manual recovery') from error
+            freeze_confirmed = frozen
+            return frozen
+
+        def removal_release():
+            if freeze_confirmed:
+                original_release()
+
         try:
             with ExitStack() as stack:
                 state = lifecycle.capture('uninstall')
                 lifecycle.busy = removal_busy
                 lifecycle.stop = removal_stop
+                lifecycle.freeze_worker = removal_freeze
+                lifecycle.release_worker = removal_release
                 try:
                     lifecycle.quiesce(state, snapshot=False)
                 finally:
-                    for key in ('busy', 'stop'):
+                    for key in override_keys:
                         if present[key]:
                             setattr(lifecycle, key, overrides[key])
                         else:
@@ -1016,7 +1167,8 @@ def quiesced_lifecycle(lifecycle, *, after_stop=None):
                 raise
             if not transaction.purge_started and state is not None:
                 try:
-                    lifecycle.release_worker()
+                    if freeze_confirmed:
+                        lifecycle.release_worker()
                     if stop_started:
                         lifecycle.restore(state, old=True)
                     removal_file.unlink()

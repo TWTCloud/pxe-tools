@@ -220,6 +220,120 @@ class ActiveServiceQuiescenceTests(unittest.TestCase):
         self.life = self.fixture.subject
         self.systemd = self.fixture.systemd
         self.original = set(self.systemd.active)
+        parent_group = self.systemd.group.parent
+        (parent_group / 'cgroup.events').write_text('frozen 0\n')
+        (parent_group / 'cgroup.freeze').write_text('0\n')
+        process = self.fixture.root / 'proc/123'
+        (process / 'stat').write_text('123 (python3) S ' + ' '.join(['0'] * 19))
+        task = process / 'task/123'
+        task.mkdir(parents=True)
+        (task / 'stat').write_text((process / 'stat').read_text())
+
+    def test_preexisting_frozen_or_stopped_worker_is_never_touched(self):
+        process = self.fixture.root / 'proc/123'
+        for case in ('systemd-frozen', 'kernel-frozen', 'freeze-requested', 'stopped',
+                     'thread-stopped', 'unknown', 'unexpected-process', 'malformed-events'):
+            with self.subTest(case=case):
+                self.systemd.calls.clear()
+                if case == 'systemd-frozen':
+                    self.systemd.freezer = 'frozen'
+                elif case == 'kernel-frozen':
+                    (self.systemd.group / 'cgroup.events').write_text('frozen 1\n')
+                elif case == 'freeze-requested':
+                    (self.systemd.group / 'cgroup.freeze').write_text('1\n')
+                elif case == 'stopped':
+                    (process / 'stat').write_text('123 (python3) T ' + ' '.join(['0'] * 19))
+                elif case == 'thread-stopped':
+                    (process / 'task/123/stat').write_text('123 (python3) t ' + ' '.join(['0'] * 19))
+                elif case == 'unexpected-process':
+                    (self.systemd.group / 'cgroup.procs').write_text('123\n456\n')
+                elif case == 'malformed-events':
+                    (self.systemd.group / 'cgroup.events').write_text('frozen 0\nfrozen 1\n')
+                else:
+                    (process / 'stat').write_text('malformed')
+                with self.assertRaises(RuntimeError):
+                    with uninstall.quiesced_lifecycle(self.life):
+                        self.fail('unsafe worker state must refuse')
+                self.assertFalse(any(call[0] in ('freeze', 'thaw', 'stop', 'start', 'kill') for call in self.systemd.calls))
+                self.assertEqual(self.systemd.signals, [])
+                self.assertEqual(self.systemd.active, self.original)
+                self.assertFalse((self.life.home / 'uninstall-state.json').exists())
+                self.systemd.freezer = 'running'
+                (self.systemd.group / 'cgroup.events').write_text('frozen 0\n')
+                (self.systemd.group / 'cgroup.freeze').write_text('0\n')
+                (self.systemd.group / 'cgroup.procs').write_text('123\n')
+                (process / 'stat').write_text('123 (python3) S ' + ' '.join(['0'] * 19))
+                (process / 'task/123/stat').write_text((process / 'stat').read_text())
+
+    def test_linked_or_missing_process_state_refuses_without_effect(self):
+        process = self.fixture.root / 'proc/123'
+        (process / 'stat').unlink()
+        (process / 'stat').symlink_to(process / 'task/123/stat')
+        with self.assertRaises(RuntimeError):
+            with uninstall.quiesced_lifecycle(self.life):
+                self.fail('linked process state must be refused')
+        self.assertFalse(any(call[0] in ('freeze', 'thaw', 'stop', 'start', 'kill') for call in self.systemd.calls))
+        self.assertEqual(self.systemd.signals, [])
+
+    def test_worker_frozen_after_initial_inspection_is_not_thawed(self):
+        original = self.life.check_effective_configuration
+        checks = []
+        def change_during_quiescence():
+            original()
+            checks.append(True)
+            if len(checks) == 2:
+                self.systemd.freezer = 'frozen'
+                (self.systemd.group / 'cgroup.events').write_text('frozen 1\n')
+                (self.systemd.group / 'cgroup.freeze').write_text('1\n')
+        self.life.check_effective_configuration = change_during_quiescence
+        with self.assertRaises(RuntimeError):
+            with uninstall.quiesced_lifecycle(self.life):
+                self.fail('worker became frozen')
+        self.assertFalse(any(call[0] in ('freeze', 'thaw', 'stop', 'start', 'kill') for call in self.systemd.calls))
+        self.assertEqual(self.systemd.signals, [])
+        self.assertFalse((self.life.home / 'uninstall-state.json').exists())
+
+    def test_ancestor_freeze_request_refuses_without_touching_worker(self):
+        parent = self.systemd.group.parent
+        for name, data in (('cgroup.freeze', '1\n'), ('cgroup.events', 'frozen 1\n'), ('cgroup.freeze', 'unknown\n')):
+            with self.subTest(name=name, data=data):
+                (parent / name).write_text(data)
+                with self.assertRaises(RuntimeError):
+                    with uninstall.quiesced_lifecycle(self.life):
+                        self.fail('ancestor freezer requested')
+                self.assertFalse(any(call[0] in ('freeze', 'thaw', 'stop', 'start', 'kill') for call in self.systemd.calls))
+                self.assertEqual(self.systemd.signals, [])
+                self.assertFalse((self.life.home / 'uninstall-state.json').exists())
+                (parent / 'cgroup.freeze').write_text('0\n')
+                (parent / 'cgroup.events').write_text('frozen 0\n')
+
+    def test_process_name_can_contain_non_ascii(self):
+        process = self.fixture.root / 'proc/123'
+        data = '123 (processus-é) S ' + ' '.join(['0'] * 19)
+        (process / 'stat').write_text(data)
+        (process / 'task/123/stat').write_text(data)
+        with uninstall.quiesced_lifecycle(self.life):
+            pass
+
+    def test_failed_freeze_never_thaws_and_keeps_recovery_journal(self):
+        for after_freeze in (False, True):
+            with self.subTest(after_freeze=after_freeze):
+                self.systemd.calls.clear()
+                def failed_freeze(_state):
+                    if after_freeze:
+                        self.life.systemctl('freeze', 'pxe-tools-worker.service')
+                    raise RuntimeError('freeze outcome uncertain')
+                self.life.freeze_worker = failed_freeze
+                with self.assertRaisesRegex(uninstall.BarrierRecoveryRequired, 'freeze'):
+                    with uninstall.quiesced_lifecycle(self.life):
+                        self.fail('freeze failed')
+                self.assertFalse(any(call[0] in ('thaw', 'stop', 'start', 'kill') for call in self.systemd.calls))
+                self.assertEqual(self.systemd.signals, [])
+                self.assertTrue((self.life.home / 'uninstall-state.json').exists())
+                (self.life.home / 'uninstall-state.json').unlink()
+                self.systemd.freezer = 'running'
+                (self.systemd.group / 'cgroup.events').write_text('frozen 0\n')
+                (self.systemd.group / 'cgroup.freeze').write_text('0\n')
 
     def test_idle_active_services_are_stopped_under_database_barrier(self):
         with uninstall.quiesced_lifecycle(self.life):
@@ -636,6 +750,9 @@ class TransactionTests(unittest.TestCase):
             def environments(self): return getattr(self, 'storage_environment', {})
             def load(self): return None
             def check_effective_configuration(self): pass
+            def worker_status(self):
+                # Transaction-only fixture: there is no worker process here.
+                return {'ActiveState': 'inactive', 'FreezerState': 'running', 'ControlGroup': '', 'MainPID': '0'}
             def freeze_worker(self, state): return False
             def busy(self, connection): return []
             def capture(self, version):
