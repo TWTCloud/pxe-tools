@@ -597,8 +597,10 @@ class Store:
                 base = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
                 try:
                     if created_root:
-                        chown(base, entry.pw_uid, entry.pw_gid)
+                        # Set the private mode while still owner; root may hold
+                        # CAP_CHOWN without CAP_FOWNER after transferring it.
                         os.fchmod(base, 0o700)
+                        chown(base, entry.pw_uid, entry.pw_gid)
                     info = os.fstat(base)
                     if (info.st_uid != entry.pw_uid or info.st_gid != entry.pw_gid
                             or stat.S_IMODE(info.st_mode) != 0o700):
@@ -625,8 +627,8 @@ class Store:
                         child = os.open(child_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=base)
                         try:
                             if made:
-                                chown(child, entry.pw_uid, entry.pw_gid)
                                 os.fchmod(child, 0o700)
+                                chown(child, entry.pw_uid, entry.pw_gid)
                             info = os.fstat(child)
                             if (info.st_uid != entry.pw_uid or info.st_gid != entry.pw_gid
                                     or stat.S_IMODE(info.st_mode) != 0o700):

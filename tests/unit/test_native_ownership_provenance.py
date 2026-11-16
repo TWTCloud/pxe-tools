@@ -614,12 +614,13 @@ class NativeFirstBootCompatibility(unittest.TestCase):
             runtime = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(runtime)
             store = ownership.Store(root, owner=0)
-            runtime.prepare(base=root / 'var/lib', journal=store)
-            record = store.read()
-            self.assertEqual(record['base_phase'], 'runtime-prepared')
-            self.assertEqual(set(record['directories']), ownership.NATIVE_DIRECTORIES)
-            store.create_base(require_runtime=True)
-            self.assertEqual(store.read()['base_phase'], 'prepared')
+            def initialize(held):
+                record = store.read()
+                self.assertEqual(record['base_phase'], 'runtime-prepared')
+                self.assertEqual(set(record['directories']), ownership.NATIVE_DIRECTORIES)
+                store.create_base(require_runtime=True, native_fds=held, activate=lambda: None)
+            runtime.prepare(base=root / 'var/lib', journal=store, after_create=initialize)
+            self.assertEqual(store.read()['base_phase'], 'complete')
 
     def test_real_runtime_interruption_does_not_adopt_any_uncreated_path(self):
         with tempfile.TemporaryDirectory(prefix='pxe-runtime-proof-', dir='/root') as temporary:
@@ -652,8 +653,6 @@ class NativeFirstBootCompatibility(unittest.TestCase):
             for part in ('etc', 'var/lib', 'var/log', 'run/lock'):
                 (root / part).mkdir(parents=True, exist_ok=True)
             store = ownership.Store(root, owner=0)
-            store.create_base()
-            original = store.read()['directories']
             script = (ROOT / 'docker/pxe-tools/init/php-init.sh').read_text()
             for path in ('/etc/pxe-tools', '/var/lib/pxe-tools', '/run/php'):
                 script = script.replace(path, str(root / path.lstrip('/')))
@@ -661,14 +660,27 @@ class NativeFirstBootCompatibility(unittest.TestCase):
             fixture.write_text(script)
             env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'PXE_APP_DIR': str(ROOT / 'app'),
                    'PXE_SERVICE_MANAGER': 'systemd'}
-            result = subprocess.run(['/bin/sh', str(fixture)], env=env, text=True,
-                                    capture_output=True, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertTrue((root / 'etc/pxe-tools/master.key').is_file())
-            self.assertTrue((root / 'var/lib/pxe-tools/sessions').is_dir())
-            self.assertEqual(store.read()['directories'], original)
-            store.finish_base()
-            self.assertEqual(store.read()['base_phase'], 'complete')
+            identities = {}
+            def initialize():
+                # Production keeps these FDs pinned across service startup;
+                # direct finish_base after closing them must refuse weak proof.
+                for path in ('etc/pxe-tools', 'var/lib/pxe-tools'):
+                    info = (root / path).stat()
+                    identities[path] = (info.st_dev, info.st_ino)
+                result = subprocess.run(['/bin/sh', str(fixture)], env=env, text=True,
+                                        capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue((root / 'etc/pxe-tools/master.key').is_file())
+                self.assertTrue((root / 'var/lib/pxe-tools/sessions').is_dir())
+                for path, expected in identities.items():
+                    info = (root / path).stat()
+                    self.assertEqual((info.st_dev, info.st_ino), expected)
+            store.create_base(activate=initialize)
+            record = store.read()
+            self.assertEqual(record['base_phase'], 'complete')
+            for path, expected in identities.items():
+                proof = record['directories']['/' + path]
+                self.assertEqual((proof['dev'], proof['ino']), expected)
 
     @unittest.skipUnless(shutil.which('dpkg-deb') and shutil.which('git'), 'dpkg-deb and git required')
     def test_actual_debs_contain_identical_canonical_helpers(self):
@@ -756,6 +768,31 @@ class AccountCreationTests(unittest.TestCase):
             self.store().configure_ansible(accounts=accounts, groups=accounts,
                     group_list=accounts.getgrouplist, runner=accounts.run, chown=accounts.chown)
         self.assertEqual(accounts.calls, [])
+
+    def test_mode_is_set_before_transferring_each_new_directory(self):
+        # Model root with CAP_CHOWN and DAC_OVERRIDE but without CAP_FOWNER:
+        # fchmod becomes forbidden as soon as ownership has been transferred.
+        accounts = FakeAccounts()
+        store = self.store()
+        transferred = set()
+        real_chmod = os.fchmod
+        def identity(fd):
+            info = os.fstat(fd)
+            return info.st_dev, info.st_ino
+        def tracked_chown(fd, uid, gid):
+            accounts.chown(fd, uid, gid)
+            transferred.add(identity(fd))
+        def limited_chmod(fd, mode):
+            if identity(fd) in transferred:
+                raise PermissionError('fixture: CAP_FOWNER unavailable after chown')
+            return real_chmod(fd, mode)
+        with patch.object(ownership.os, 'fchmod', side_effect=limited_chmod):
+            store.configure_ansible(accounts=accounts, groups=accounts,
+                                    group_list=accounts.getgrouplist,
+                                    runner=accounts.run, chown=tracked_chown)
+        for path in ('var/lib/pxe-tools-ansible', 'var/lib/pxe-tools-ansible/home',
+                     'var/lib/pxe-tools-ansible/workspace'):
+            self.assertEqual((self.root / path).stat().st_mode & 0o777, 0o700)
 
     def test_new_account_and_new_workspace_are_proven(self):
         accounts = FakeAccounts()

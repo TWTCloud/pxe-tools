@@ -12,10 +12,12 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -49,6 +51,19 @@ class FakeAccounts:
                                      pw_gecos='fixture', pw_dir='/home/automation', pw_shell='/bin/bash')
         self.human_group = SimpleNamespace(gr_name='automation', gr_gid=98762, gr_mem=[])
         self.calls = []
+        self._fstat = os.fstat
+        self._owners = {}
+
+    def fstat(self, fd):
+        info = self._fstat(fd)
+        identity = (info.st_dev, info.st_ino)
+        if identity not in self._owners:
+            return info
+        # Simulate only the uid/gid of fixture directories, leaving the real
+        # directory owned by the runner so it can fchmod without CAP_FOWNER.
+        fields = list(info)
+        fields[stat.ST_UID], fields[stat.ST_GID] = self._owners[identity]
+        return os.stat_result(fields)
 
     def getpwnam(self, name):
         if name != NAME or self.account is None:
@@ -76,7 +91,8 @@ class FakeAccounts:
     def chown(self, fd, uid, gid):
         if (uid, gid) != (self.uid, self.gid):
             raise AssertionError('unexpected synthetic account')
-        os.fchown(fd, uid, gid)
+        info = self._fstat(fd)
+        self._owners[(info.st_dev, info.st_ino)] = (uid, gid)
 
     def snapshot(self):
         return {'accounts': copy.deepcopy(([self.account] if self.account else []) + [self.human]),
@@ -188,6 +204,10 @@ class SyntheticRoundTrip(unittest.TestCase):
 
     def install_fixture(self, with_module):
         """Exercise real directory creation/provenance and fake the DEB payload."""
+        if self.accounts.account is None:
+            # The previous fixture account was removed; do not model stale
+            # ownership if the filesystem reuses one of its former inodes.
+            self.accounts._owners.clear()
         self.generation = self.fixture_generation()
         store = authority.Store(self.root, owner=os.geteuid(), generation=self.generation)
         runtime.prepare(base=self.root / 'var/lib', root=self.root,
@@ -195,9 +215,12 @@ class SyntheticRoundTrip(unittest.TestCase):
         store.create_base(require_runtime=True)
         store.finish_base()
         if with_module:
-            store.configure_ansible(accounts=self.accounts, groups=self.accounts,
-                                    group_list=self.accounts.getgrouplist,
-                                    runner=self.accounts.create, chown=self.accounts.chown)
+            # The test must never rely on CAP_CHOWN/FOWNER in the CI container.
+            with patch('os.fstat', side_effect=self.accounts.fstat), \
+                 patch('os.fchown', side_effect=AssertionError('fixture must not call fchown')):
+                store.configure_ansible(accounts=self.accounts, groups=self.accounts,
+                                        group_list=self.accounts.getgrouplist,
+                                        runner=self.accounts.create, chown=self.accounts.chown)
         data = self.root / 'var/lib/pxe-tools'
         (data / 'instance.sqlite').write_text('synthetic-database')
         (data / 'external-link').symlink_to(self.external, target_is_directory=True)
@@ -382,6 +405,22 @@ class SyntheticRoundTrip(unittest.TestCase):
             path = self.root / 'etc/systemd/system' / unit
             self.assertTrue(path.is_symlink())
             self.assertEqual(os.readlink(path), '/dev/null')
+        self.assert_external_survives()
+
+    def test_module_uses_synthetic_nonroot_uid_without_chown_capability(self):
+        # Model the CI container: euid/gid 0 and an account with nonzero IDs.
+        # Only fixture-reported fstat values change; the OS owner stays ours.
+        with patch('os.geteuid', return_value=0), patch('os.getegid', return_value=0):
+            self.accounts = FakeAccounts()
+        self.assertEqual((self.accounts.uid, self.accounts.gid), (1234, 1234))
+        store = self.install_fixture(with_module=True)
+        workspace = self.root / 'var/lib/pxe-tools-ansible'
+        self.assertEqual((workspace.stat().st_uid, workspace.stat().st_gid),
+                         (os.geteuid(), os.getegid()))
+        self.assertEqual(store.read()['account']['uid'], 1234)
+        self.uninstall_fixture(store)
+        self.assertIsNone(self.accounts.account)
+        self.assertIsNone(self.accounts.group)
         self.assert_external_survives()
 
     def test_base_install_remove_and_reinstall(self):
