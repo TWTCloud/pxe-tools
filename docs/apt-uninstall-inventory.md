@@ -24,3 +24,9 @@
 ## Validation à effectuer
 
 Fixtures isolées et, si autorisées, VM propres : installation puis retrait, module présent et absent, paquets partiels et réexécution ; transaction APT échouée ; tâche active ; site nginx personnalisé ; clé APT partagée ; liens, montages et témoins externes ; conservation des comptes préexistants. Tester séparément Debian 12/13, Ubuntu 24.04/26.04 et Zorin pris en charge et rapporter uniquement les environnements effectivement exécutés. Aucun essai sur le Mac mini, la Zorin de William, le NAS ou l'Atom.
+
+## État du candidat
+
+Le marqueur de `configure-secure-tftp.py` démontre la création de ses trois racines natives, mais le helper peut aussi être appelé alors que `/etc/pxe-tools` et `/var/lib/pxe-tools` existaient déjà. Il ne démontre donc pas la propriété de ces deux répertoires. Le candidat les préserve et refuse de poursuivre si une ressource nécessaire reste de provenance incertaine. La suppression réelle est explicitement désactivée dans le candidat : il ne doit pas être présenté comme une commande disponible.
+
+Pour atteindre le résultat demandé, enregistrer de manière fiable, au moment de leur création, la provenance des répertoires d'instance et du compte facultatif ; traiter les installations anciennes sans preuve de manière conservatrice. Les points d'intégration probables sont `packaging/native/build-local-package.py` et `packaging/native/build-local-ansible-package.py`. Le premier est réservé à #61 ; `tests/ci/run-application-tests.sh` est également modifié par #61. Leur attribution et les changements de scripts partagés doivent être réconciliés avant édition. Les tests de fixtures ajoutés ici n'établissent ni le comportement réel de systemd/dpkg ni la compatibilité des distributions en VM.
