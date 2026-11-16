@@ -33,6 +33,20 @@ is idempotent and does not reverse a later administrator choice.
 
 ## Validation and boundaries
 
+An open APT history record must belong to the running APT/dpkg ancestor chain
+of this postinst, not merely have a recent date. Current package status and
+dpkg installation/configuration events supplement the planned APT entries.
+Before changing a service, also verify its packaged unit, master command,
+listening sockets and that the stock resources have not changed since startup.
+
+The private ownership journal is
+`/var/lib/pxe-tools-native/nginx-ownership/state.json` (root0600, parent0700).
+Format1 records the service, `before`/`after` active/enabled states, stock resource
+hashes/timestamps, process identity and provenance. `phase=prepared` is durable
+before mutation; `phase=complete` certifies both transitions. An incomplete
+journal needs examination; a later administrator choice must not be reversed.
+Removal tools must revalidate current resources/states against this record.
+
 Regression first on the existing PR CI: real filesystem/package/log fixtures,
 deterministic systemd/dpkg boundaries, fresh dependency activation, affected
 upgrade, custom/preexisting nginx, intentional inactive states, idempotence and

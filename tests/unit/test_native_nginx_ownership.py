@@ -7,6 +7,7 @@ commands and unrelated setup helpers are doubled. Never execute this module's
 package-building entry point or call a real service manager.
 """
 import hashlib
+from datetime import datetime
 import importlib.util
 import json
 import os
@@ -14,7 +15,9 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,12 +26,15 @@ ROOT = Path(__file__).resolve().parents[2]
 class FixtureRunner:
     """A deterministic systemd/dpkg boundary shared by the subprocess fixture."""
 
-    def __init__(self, root):
+    def __init__(self, root, on_call=None):
         self.root = Path(root)
+        self.on_call = on_call
 
     def __call__(self, argv, **kwargs):
         argv = [str(value) for value in argv]
         command, args = Path(argv[0]).name, argv[1:]
+        if self.on_call is not None:
+            self.on_call(argv)
         state_path = self.root / 'services.json'
         state = json.loads(state_path.read_text())
         state['calls'].append(argv)
@@ -55,6 +61,7 @@ class FixtureRunner:
                     'DropInPaths': '', 'NeedDaemonReload': 'no',
                     'ExecStart': '{ path=/usr/sbin/nginx ; argv[]=/usr/sbin/nginx -g daemon on; master_process on; ; }',
                 }
+                values.update(state.get('properties', {}))
                 output = '\n'.join(values.get(prop, '') if '--value' in args
                                    else prop + '=' + values.get(prop, '') for prop in properties)
             elif action == 'is-active':
@@ -65,6 +72,10 @@ class FixtureRunner:
                 status = 0 if output in ('enabled', 'enabled-runtime', 'static') else 1
             elif action == 'stop':
                 service['active'] = False
+                if unit == 'nginx.service':
+                    tcp = self.root / 'proc/net/tcp'
+                    tcp.write_text(''.join(line for line in tcp.read_text().splitlines(keepends=True)
+                                           if len(line.split()) < 10 or line.split()[9] != '42'))
             elif action == 'disable':
                 service['enabled'] = 'disabled'
                 if '--now' in args:
@@ -75,6 +86,12 @@ class FixtureRunner:
                     service['active'] = True
             elif action == 'start':
                 service['active'] = True
+                if unit == 'nginx.service':
+                    tcp = self.root / 'proc/net/tcp'
+                    if not any(len(line.split()) >= 10 and line.split()[9] == '42'
+                               for line in tcp.read_text().splitlines()):
+                        with tcp.open('a') as output:
+                            output.write('   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 42 1\n')
             elif action != 'daemon-reload':
                 raise AssertionError('Unexpected service mutation: ' + repr(argv))
         elif command == 'dpkg-query':
@@ -84,7 +101,7 @@ class FixtureRunner:
             elif '-S' in args or '--search' in args:
                 output = 'nginx-common: ' + args[-1]
             elif any('Version' in arg for arg in args):
-                output = '1.24.0-2ubuntu7.19'
+                output = '0.1.0~beta7' if args[-1] == 'pxe-tools' else '1.24.0-2ubuntu7.19'
             else:
                 output = 'install ok installed'
         else:
@@ -123,8 +140,16 @@ class PackageFixture:
         self.write('/usr/sbin/nginx', '#!/bin/sh\nexit 0\n')
         self.path('/usr/sbin/nginx').chmod(0o755)
         self.write('/proc/123/cgroup', '0::/system.slice/nginx.service\n')
-        self.write('/proc/123/stat', '123 (nginx) ' + ' '.join(['0'] * 19 + ['100']) + '\n')
+        self.write('/proc/123/cmdline',
+                   b'nginx: master process /usr/sbin/nginx -g daemon on; master_process on;\0')
         self.path('/proc/123/exe').symlink_to(self.path('/usr/sbin/nginx'))
+        self.path('/proc/123/fd').mkdir()
+        self.path('/proc/123/fd/5').symlink_to('socket:[42]')
+        self.write('/proc/net/tcp',
+                   '  sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n'
+                   '   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 42 1\n')
+        self.write('/proc/net/tcp6',
+                   '  sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n')
         self.write('/proc/sys/kernel/random/boot_id', '12345678-1234-1234-1234-123456789abc\n')
         self.path('/run/systemd/system').mkdir(parents=True)
         self.write('/var/log/apt/history.log',
@@ -138,6 +163,7 @@ class PackageFixture:
                    '2026-11-14 21:00:38 install nginx-common:all <none> 1.24.0-2ubuntu7.19\n'
                    '2026-11-14 21:00:38 install nginx:amd64 <none> 1.24.0-2ubuntu7.19\n'
                    '2026-11-14 21:00:40 install pxe-tools:amd64 <none> 0.1.0~beta7\n'
+                   '2026-11-14 21:00:44 status installed nginx-common:all 1.24.0-2ubuntu7.19\n'
                    '2026-11-14 21:00:57 status installed nginx:amd64 1.24.0-2ubuntu7.19\n')
         conffiles = {name: hashlib.md5(self.path(name).read_bytes()).hexdigest()
                      for name in ('/etc/nginx/nginx.conf', '/etc/nginx/sites-available/default',
@@ -150,6 +176,10 @@ class PackageFixture:
             'pxe-tools-dnsmasq.service': {'active': False, 'enabled': 'static'},
             'pxe-tools-pxe-http.service': {'active': False, 'enabled': 'static'},
         }}))
+        self.write('/var/lib/dpkg/info/nginx-common.md5sums', '\n'.join(
+            hashlib.md5(self.path(name).read_bytes()).hexdigest() + '  ' + name.lstrip('/')
+            for name in ('/usr/lib/systemd/system/nginx.service', '/usr/share/nginx/html/index.html')) + '\n')
+        self.start_master_after_fixture()
 
     def path(self, name):
         return self.root / name.lstrip('/')
@@ -159,6 +189,30 @@ class PackageFixture:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data.encode() if isinstance(data, str) else data)
         return path
+
+    def start_master_after_fixture(self):
+        boot = int(time.time()) - 10000
+        ticks = int((time.time() - boot + 0.1) * os.sysconf('SC_CLK_TCK'))
+        self.write('/proc/stat', 'cpu 0 0 0 0\nbtime ' + str(boot) + '\n')
+        self.write('/proc/123/stat', '123 (nginx) ' + ' '.join(['0'] * 19 + [str(ticks)]) + '\n')
+
+    def service_state(self):
+        return json.loads(self.state.read_text())
+
+    def set_unit(self, *, active=None, enabled=None):
+        state = self.service_state()
+        if active is not None:
+            state['units']['nginx.service']['active'] = active
+        if enabled is not None:
+            state['units']['nginx.service']['enabled'] = enabled
+        self.state.write_text(json.dumps(state))
+
+    def reconciler(self, *, run=None, configuring=False):
+        spec = importlib.util.spec_from_file_location('nginx_ownership_under_test', ROOT / 'packaging/native/reconcile-nginx.py')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module.Reconciler(root=self.root, run=run or FixtureRunner(self.root), configuring=configuring)
 
     def run_postinst(self, old_version=''):
         spec = importlib.util.spec_from_file_location('nginx_fixture_builder', ROOT / 'packaging/native/build-local-package.py')
@@ -192,7 +246,8 @@ class PackageFixture:
             ' print(json.dumps(result))\n')
         python.chmod(0o755)
         env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ.get('PATH', ''),
-                   NGINX_FIXTURE_ROOT=str(self.root), PYTHONDONTWRITEBYTECODE='1')
+                   NGINX_FIXTURE_ROOT=str(self.root), PYTHONDONTWRITEBYTECODE='1',
+                   DPKG_MAINTSCRIPT_PACKAGE='pxe-tools', DPKG_MAINTSCRIPT_NAME='postinst')
         return subprocess.run(['/bin/sh', '-s', 'configure', old_version], input=script,
                               env=env, text=True, capture_output=True, check=True)
 
@@ -212,6 +267,258 @@ class MaintainerRegression(unittest.TestCase):
             self.assertTrue(fixture.path('/etc/nginx/sites-enabled/default').is_symlink())
             self.assertEqual(fixture.path('/var/www/html/index.nginx-debian.html').read_bytes(),
                              fixture.path('/usr/share/nginx/html/index.html').read_bytes())
+
+    def test_affected_upgrade_does_not_start_previously_stopped_application_roles(self):
+        with tempfile.TemporaryDirectory(prefix='pxe-nginx-upgrade-') as directory:
+            fixture = PackageFixture(directory)
+            history = fixture.path('/var/log/apt/history.log')
+            history.write_text(history.read_text().replace('pxe-tools:amd64 (0.1.0~beta7)',
+                                                           'pxe-tools:amd64 (0.1.0~beta5)'))
+            fixture.run_postinst(old_version='0.1.0~beta7')
+            state = fixture.service_state()
+            self.assertFalse(state['units']['nginx.service']['active'])
+            self.assertEqual(state['units']['nginx.service']['enabled'], 'disabled')
+            for unit in ('pxe-tools-admin.target', 'pxe-tools.target',
+                         'pxe-tools-dnsmasq.service', 'pxe-tools-pxe-http.service'):
+                self.assertFalse(state['units'][unit]['active'], unit + ' must preserve its stopped state')
+
+
+class ReconciliationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='pxe-nginx-policy-')
+        self.addCleanup(self.temporary.cleanup)
+        self.fixture = PackageFixture(self.temporary.name)
+
+    def assert_generic_preserved(self, before):
+        after = self.fixture.service_state()
+        self.assertEqual(after['units']['nginx.service'], before['units']['nginx.service'])
+        destructive = [argv for argv in after['calls']
+                       if argv[0].endswith('systemctl') and argv[1] in ('stop', 'disable', 'mask')]
+        self.assertEqual(destructive, [], 'unowned/custom nginx must not be changed')
+
+    def test_closed_first_install_provenance_releases_stock_dependency(self):
+        result = self.fixture.reconciler().reconcile()
+        self.assertEqual(result['action'], 'disabled')
+        state = self.fixture.service_state()
+        self.assertFalse(state['units']['nginx.service']['active'])
+        self.assertEqual(state['units']['nginx.service']['enabled'], 'disabled')
+        journal = self.fixture.path('/var/lib/pxe-tools-native/nginx-ownership/state.json')
+        record = json.loads(journal.read_text())
+        self.assertEqual(record['format'], 1)
+        self.assertEqual(record['phase'], 'complete')
+        self.assertEqual(record['service'], 'nginx.service')
+        self.assertEqual(record['before'], {'active': 'active', 'enabled': 'enabled'})
+        self.assertEqual(record['after'], {'active': 'inactive', 'enabled': 'disabled'})
+        self.assertEqual(record['provenance']['source'], 'apt-and-dpkg')
+        self.assertIn('/etc/nginx/nginx.conf', record['resources'])
+        self.assertEqual(journal.stat().st_uid, 0)
+        self.assertEqual(journal.parent.stat().st_uid, 0)
+        self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(journal.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_inflight_apt_transaction_is_accepted_only_in_configure_context(self):
+        stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        start = stamp.replace(' ', '  ', 1)
+        self.fixture.write('/var/log/apt/history.log',
+                           'Start-Date: ' + start + '\nCommandline: apt-get install pxe-tools\n'
+                           'Install: nginx:amd64 (1.24.0-2ubuntu7.19, automatic), '
+                           'nginx-common:all (1.24.0-2ubuntu7.19, automatic), '
+                           'pxe-tools:amd64 (0.1.0~beta7)\n')
+        self.fixture.write('/var/log/dpkg.log',
+                           stamp + ' install nginx-common:all <none> 1.24.0-2ubuntu7.19\n'
+                           + stamp + ' install nginx:amd64 <none> 1.24.0-2ubuntu7.19\n'
+                           + stamp + ' install pxe-tools:amd64 <none> 0.1.0~beta7\n'
+                           + stamp + ' status installed nginx-common:all 1.24.0-2ubuntu7.19\n'
+                           + stamp + ' status installed nginx:amd64 1.24.0-2ubuntu7.19\n')
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile()
+        self.assert_generic_preserved(before)
+        reconciler = self.fixture.reconciler(configuring=True)
+        with patch.object(reconciler, 'apt_started', return_value=datetime.fromisoformat(stamp).timestamp()), \
+                patch.dict(os.environ, {'DPKG_MAINTSCRIPT_PACKAGE': 'pxe-tools',
+                                        'DPKG_MAINTSCRIPT_NAME': 'postinst'}):
+            result = reconciler.reconcile()
+        self.assertEqual(result['action'], 'disabled')
+
+    def test_nginx_installed_independently_is_preserved(self):
+        history = self.fixture.path('/var/log/apt/history.log')
+        history.write_text(history.read_text().replace(
+            ', pxe-tools:amd64 (0.1.0~beta7)', ''))
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile()
+        self.assert_generic_preserved(before)
+
+    def test_manually_selected_nginx_in_same_transaction_is_preserved(self):
+        history = self.fixture.path('/var/log/apt/history.log')
+        history.write_text(history.read_text().replace(
+            'nginx:amd64 (1.24.0-2ubuntu7.19, automatic)',
+            'nginx:amd64 (1.24.0-2ubuntu7.19)'))
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile()
+        self.assert_generic_preserved(before)
+
+    def test_failed_apt_transaction_is_not_an_ownership_receipt(self):
+        history = self.fixture.path('/var/log/apt/history.log')
+        history.write_text(history.read_text().replace('End-Date:',
+                                                       'Error: dpkg failed\nEnd-Date:'))
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile()
+        self.assert_generic_preserved(before)
+
+    def test_missing_history_requires_explicit_stock_confirmation(self):
+        self.fixture.path('/var/log/apt/history.log').unlink()
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile()
+        self.assert_generic_preserved(before)
+        result = self.fixture.reconciler().reconcile(confirm_stock=True)
+        self.assertEqual(result['action'], 'disabled')
+
+    def test_modified_conffile_is_preserved_even_with_confirmation(self):
+        self.fixture.write('/etc/nginx/sites-available/default',
+                           'server { listen 80; root /srv/customer; }\n')
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile(confirm_stock=True)
+        self.assert_generic_preserved(before)
+
+    def test_extra_conf_d_site_is_preserved(self):
+        self.fixture.write('/etc/nginx/conf.d/customer.conf',
+                           'server { listen 443 ssl; proxy_pass http://127.0.0.1:9001; }\n')
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile(confirm_stock=True)
+        self.assert_generic_preserved(before)
+
+    def test_custom_web_content_is_preserved(self):
+        self.fixture.write('/var/www/html/customer.html', '<h1>Customer content</h1>\n')
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile(confirm_stock=True)
+        self.assert_generic_preserved(before)
+
+    def test_edited_welcome_page_is_preserved(self):
+        self.fixture.write('/var/www/html/index.nginx-debian.html', '<h1>Custom home</h1>\n')
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile(confirm_stock=True)
+        self.assert_generic_preserved(before)
+
+    def test_custom_systemd_dropin_is_preserved(self):
+        state = self.fixture.service_state()
+        state['properties'] = {'DropInPaths': '/etc/systemd/system/nginx.service.d/customer.conf'}
+        self.fixture.state.write_text(json.dumps(state))
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile(confirm_stock=True)
+        self.assert_generic_preserved(before)
+
+    def test_master_with_another_listening_port_is_preserved(self):
+        self.fixture.path('/proc/123/fd/6').symlink_to('socket:[43]')
+        with self.fixture.path('/proc/net/tcp').open('a') as output:
+            output.write('   1: 00000000:01BB 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 43 1\n')
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile(confirm_stock=True)
+        self.assert_generic_preserved(before)
+
+    def test_stock_file_changed_after_master_start_is_not_assumed_loaded(self):
+        config = self.fixture.path('/etc/nginx/nginx.conf')
+        # Keep the package bytes/hash, but make the file newer than the loaded
+        # master. A matching file on disk does not prove its loaded contents.
+        modified = time.time() + 5
+        os.utime(config, (modified, modified))
+        before = self.fixture.service_state()
+        result = self.fixture.reconciler().reconcile(confirm_stock=True)
+        self.assertEqual(result['action'], 'conflict')
+        self.assert_generic_preserved(before)
+
+    def test_intentional_service_states_are_preserved(self):
+        for active, enabled in ((False, 'enabled'), (False, 'disabled'),
+                                (False, 'masked'), (True, 'disabled')):
+            with self.subTest(active=active, enabled=enabled):
+                self.fixture.set_unit(active=active, enabled=enabled)
+                before = self.fixture.service_state()
+                self.fixture.reconciler().reconcile(confirm_stock=True)
+                self.assert_generic_preserved(before)
+
+    def test_reinstall_after_success_is_idempotent(self):
+        first = self.fixture.reconciler().reconcile()
+        self.assertEqual(first['action'], 'disabled')
+        calls = len(self.fixture.service_state()['calls'])
+        self.fixture.reconciler().reconcile()
+        state = self.fixture.service_state()
+        mutations = [argv for argv in state['calls'][calls:]
+                     if argv[0].endswith('systemctl') and argv[1] in ('stop', 'disable', 'start', 'enable')]
+        self.assertEqual(mutations, [])
+        self.assertFalse(state['units']['nginx.service']['active'])
+
+    def test_later_administrator_reactivation_is_not_undone(self):
+        self.assertEqual(self.fixture.reconciler().reconcile()['action'], 'disabled')
+        self.fixture.set_unit(active=True, enabled='enabled')
+        before = self.fixture.service_state()
+        self.fixture.reconciler().reconcile()
+        self.assert_generic_preserved(before)
+
+    def test_partial_journal_is_preserved_for_diagnosis_without_retrying_mutations(self):
+        journal = self.fixture.write('/var/lib/pxe-tools-native/nginx-ownership/state.json',
+                                     json.dumps({'format': 1, 'phase': 'prepared'}))
+        journal.parent.chmod(0o700)
+        journal.chmod(0o600)
+        for active in (True, False):
+            with self.subTest(active=active):
+                self.fixture.set_unit(active=active)
+                before = self.fixture.service_state()
+                result = self.fixture.reconciler().reconcile()
+                self.assertEqual(result['action'], 'conflict')
+                self.assert_generic_preserved(before)
+                self.assertEqual(json.loads(journal.read_text())['phase'], 'prepared')
+
+    def test_configuration_changed_during_revalidation_is_not_stopped(self):
+        calls = []
+
+        def change_config(argv):
+            if argv[0].endswith('dpkg-query') and any('Conffiles' in arg for arg in argv):
+                calls.append(argv)
+                if len(calls) == 2:
+                    self.fixture.write('/etc/nginx/sites-available/default',
+                                       'server { listen 80; root /srv/new-customer; }\n')
+
+        before = self.fixture.service_state()
+        result = self.fixture.reconciler(run=FixtureRunner(self.fixture.root, on_call=change_config)).reconcile()
+        self.assertEqual(result['action'], 'conflict')
+        self.assertEqual(len(calls), 2, 'the stock configuration must be revalidated before mutation')
+        self.assert_generic_preserved(before)
+
+    def test_disable_failure_keeps_incomplete_recovery_receipt(self):
+        runner = FixtureRunner(self.fixture.root)
+
+        def fail_disable(argv, **kwargs):
+            if argv[0].endswith('systemctl') and argv[1] == 'disable':
+                return subprocess.CompletedProcess(argv, 1, '', 'fixture disable failure')
+            return runner(argv, **kwargs)
+
+        result = self.fixture.reconciler(run=fail_disable).reconcile()
+        self.assertEqual(result['action'], 'conflict')
+        journal = self.fixture.path('/var/lib/pxe-tools-native/nginx-ownership/state.json')
+        self.assertEqual(json.loads(journal.read_text())['phase'], 'prepared')
+        self.assertTrue(json.loads(journal.read_text()).get('compensated'))
+        self.assertTrue(self.fixture.path('/etc/nginx/sites-enabled/default').is_symlink())
+        self.assertTrue(self.fixture.service_state()['units']['nginx.service']['active'])
+        self.assertEqual(self.fixture.service_state()['units']['nginx.service']['enabled'], 'enabled')
+
+    def test_disable_failure_does_not_restart_over_a_new_port80_owner(self):
+        runner = FixtureRunner(self.fixture.root)
+
+        def fail_with_new_listener(argv, **kwargs):
+            if argv[0].endswith('systemctl') and argv[1] == 'disable':
+                with self.fixture.path('/proc/net/tcp').open('a') as output:
+                    output.write('   1: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 99 1\n')
+                return subprocess.CompletedProcess(argv, 1, '', 'fixture disable failure')
+            return runner(argv, **kwargs)
+
+        result = self.fixture.reconciler(run=fail_with_new_listener).reconcile()
+        self.assertEqual(result['action'], 'conflict')
+        state = self.fixture.service_state()
+        self.assertFalse(state['units']['nginx.service']['active'])
+        self.assertEqual([argv for argv in state['calls']
+                          if argv[0].endswith('systemctl') and argv[1] in ('start', 'enable')], [])
+        journal = self.fixture.path('/var/lib/pxe-tools-native/nginx-ownership/state.json')
+        self.assertEqual(json.loads(journal.read_text())['phase'], 'prepared')
+        self.assertFalse(json.loads(journal.read_text()).get('compensated', False))
 
 
 if __name__ == '__main__':
