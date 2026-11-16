@@ -33,6 +33,11 @@ is idempotent and does not reverse a later administrator choice.
 
 ## Validation and boundaries
 
+Automatic ownership also requires a manually requested core and no other
+manually installed application in that transaction, except the optional Ansible
+module. Another application may not have configured its nginx site yet when
+our postinst runs; a co-installation alone must not authorize stopping its server.
+
 An open APT history record must belong to the running APT/dpkg ancestor chain
 of this postinst, not merely have a recent date. Current package status and
 dpkg installation/configuration events supplement the planned APT entries.

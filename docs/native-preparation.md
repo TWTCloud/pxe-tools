@@ -31,7 +31,8 @@ la configuration de PXE Tools ; aucun `policy-rc.d` global n'est installé pour
 modifier les règles de l'hôte.
 
 Le candidat arrête et désactive uniquement `nginx.service` lorsque sa première
-installation automatique avec PXE Tools est prouvée par APT et dpkg, que tous
+installation automatique avec PXE Tools est prouvée par APT et dpkg, sans autre
+application demandée dans la transaction hors module Ansible facultatif, que tous
 les fichiers actifs et la page d'accueil sont ceux du paquet, et que le master
 sert toujours cette configuration stock. Une configuration personnalisée, un
 historique insuffisant, une unité modifiée ou un état arrêté/désactivé/masqué

@@ -40,3 +40,7 @@ No global service policy or dependency ordering assumptions.
   in the maintainer-script regression; do not relax its existing-path guard.
 - Open APT records require actual dpkg/APT ancestry rather than an arbitrary
   recent-time cutoff; this also allows a slow initial dependency installation.
+- Additional ownership RED: `a0e2e4d`, application run `43855291777`, two actual
+  failures for another manually co-installed application and an automatic core.
+  Restrict automatic reconciliation to a manually requested core, optionally
+  with its Ansible module; preserve ambiguous shared dependencies.

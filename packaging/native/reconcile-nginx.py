@@ -247,6 +247,13 @@ class Reconciler:
                 core = next((name for name in ('pxe-tools', 'pxe-tools-local-test') if name in packages), None)
                 if core is None or any(not packages.get(name, '').endswith(', automatic') for name in ('nginx', 'nginx-common')):
                     continue
+                # Another explicitly requested application may configure its
+                # nginx site only after our postinst. Co-installation alone is
+                # not exclusive ownership, even while the files are still stock.
+                manual = {name for name, details in packages.items()
+                          if not details.endswith(', automatic')}
+                if core not in manual or manual - {core, 'pxe-tools-ansible', 'pxe-tools-ansible-local-test'}:
+                    continue
                 start = self.date(entries['Start-Date'])
                 if 'End-Date' in entries:
                     end = self.date(entries['End-Date'])
@@ -270,7 +277,10 @@ class Reconciler:
                 if any(a[0] > end and a[1:3] == ('install', 'nginx') for a in actions):
                     continue
                 matches.append({'source': 'apt-and-dpkg', 'start': entries['Start-Date'],
-                                'end': entries.get('End-Date'), 'core': core})
+                                'end': entries.get('End-Date'), 'core': core,
+                                'initial_packages': {name: packages[name].split(',')[0]
+                                                     for name in ('nginx', 'nginx-common', core)},
+                                'nginx_previously_absent': True})
         if len(matches) != 1:
             raise Preserve('Provenance APT de la dépendance absente ou ambiguë.')
         return matches[0]
