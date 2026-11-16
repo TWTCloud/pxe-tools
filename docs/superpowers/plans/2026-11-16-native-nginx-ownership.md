@@ -13,15 +13,30 @@ No global service policy or dependency ordering assumptions.
 
 **Spec:** `docs/superpowers/specs/2026-11-16-native-nginx-ownership-design.md`.
 
-- [ ] Add behavior regressions in `tests/unit/test_native_nginx_ownership.py` and
+- [x] Add behavior regressions in `tests/unit/test_native_nginx_ownership.py` and
   register them in `tests/ci/run-application-tests.sh`. Commit/push draft PR and
   receive the expected failure from the existing application CI.
-- [ ] Add `packaging/native/reconcile-nginx.py`; keep external command boundaries
+- [x] Add `packaging/native/reconcile-nginx.py`; keep external command boundaries
   injectable for fixtures, fail closed for missing provenance/custom config.
-- [ ] Package and call the helper from `build-local-package.py` postinst before
+- [x] Package and call the helper from `build-local-package.py` postinst before
   lifecycle configuration. Explain the explicit stock repair and rollback in
   native documentation; preserve no-interaction upgrades and all PXE states.
 - [ ] Receive exact-head existing PR checks, independent review and required
   branch/rule checks; integrate base updates normally and merge only if eligible.
 - [ ] Report SHA/check evidence, native-systemd receipt limitation and the separate
   candidate/publication lot. Do not change approved beta7 manifest or publish.
+
+## Evidence and rulings
+
+- Baseline `main@1a9143d0`; no local builds/tests (explicit task constraint).
+- Regression RED: commit `c5931859`, application run `43851475273`, actual
+  assertion that APT-installed generic nginx still retained the boot listener.
+- Existing PR checks run in hosted disposable fixtures; no dedicated private
+  CI exists for this public history. The historical private Docker checks are
+  not reused as evidence. No workflow or publication settings changed.
+- Independent review found a first-setup collision between the initial journal
+  location and secure TFTP preparation. Keep ownership metadata in the separate
+  `/var/lib/pxe-tools-nginx-ownership` tree, and exercise the real secure preparer
+  in the maintainer-script regression; do not relax its existing-path guard.
+- Open APT records require actual dpkg/APT ancestry rather than an arbitrary
+  recent-time cutoff; this also allows a slow initial dependency installation.

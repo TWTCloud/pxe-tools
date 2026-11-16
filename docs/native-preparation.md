@@ -53,7 +53,7 @@ ultérieure du HTTP PXE, le retour arrière du seul changement de service est
 suspension doit être coordonnée pour libérer80 avant ce retour arrière.
 
 Les ressources et états avant/après sont consignés dans
-`/var/lib/pxe-tools-native/nginx-ownership/state.json`, format1, fichier root0600
+`/var/lib/pxe-tools-nginx-ownership/state.json`, format1, fichier root0600
 dans un répertoire root0700. Le journal `prepared` précède les modifications ;
 `complete` atteste leur réussite. Une interruption ou un changement ultérieur
 de l'administrateur impose un examen ; le journal ne permet pas à un futur

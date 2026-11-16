@@ -40,7 +40,9 @@ Before changing a service, also verify its packaged unit, master command,
 listening sockets and that the stock resources have not changed since startup.
 
 The private ownership journal is
-`/var/lib/pxe-tools-native/nginx-ownership/state.json` (root0600, parent0700).
+`/var/lib/pxe-tools-nginx-ownership/state.json` (root0600, parent0700).
+This directory is separate from the native runtime: creating that runtime
+before `configure-secure-tftp.py` would invalidate the first-install guard.
 Format1 records the service, `before`/`after` active/enabled states, stock resource
 hashes/timestamps, process identity and provenance. `phase=prepared` is durable
 before mutation; `phase=complete` certifies both transitions. An incomplete

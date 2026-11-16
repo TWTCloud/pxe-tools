@@ -32,7 +32,7 @@ class Reconciler:
         self.root = Path(root).resolve()
         self.run = run
         self.configuring = configuring
-        self.directory = self.path('/var/lib/pxe-tools-native/nginx-ownership')
+        self.directory = self.path('/var/lib/pxe-tools-nginx-ownership')
         self.journal = self.directory / 'state.json'
 
     def path(self, name):
@@ -293,8 +293,8 @@ class Reconciler:
         try:
             current = self.state()
             if self.journal.exists() or self.journal.is_symlink():
-                record = json.loads(self.read('/var/lib/pxe-tools-native/nginx-ownership/state.json').decode())
-                if record.get('format') != 1 or record.get('phase') != 'complete':
+                record = json.loads(self.read('/var/lib/pxe-tools-nginx-ownership/state.json').decode())
+                if not isinstance(record, dict) or record.get('format') != 1 or record.get('phase') != 'complete':
                     raise Preserve('Réconciliation nginx antérieure inachevée ; consulter son journal privé.')
                 reason = ('Réconciliation nginx déjà appliquée.' if current['ActiveState'] == 'inactive' and current['UnitFileState'] == 'disabled'
                           else 'Choix nginx modifié depuis la réconciliation ; service conservé.')
@@ -305,7 +305,7 @@ class Reconciler:
             identity = self.identity(resources)
             provenance = {'source': 'explicit-stock-consent'} if confirm_stock else self.provenance()
             # Create only root-owned, private product metadata, never nginx files.
-            for name in ('/var/lib/pxe-tools-native', '/var/lib/pxe-tools-native/nginx-ownership'):
+            for name in ('/var/lib/pxe-tools-nginx-ownership',):
                 path = self.path(name)
                 if not path.exists():
                     path.mkdir(mode=0o700, parents=False)

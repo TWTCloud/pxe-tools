@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 """Native maintainer-script regression; all files/services are disposable fixtures.
 
-The test executes the real package POSTINST. Only external service/package
-commands and unrelated setup helpers are doubled. Never execute this module's
-package-building entry point or call a real service manager.
+The test executes the real package POSTINST and secure fresh-runtime helper.
+Only external service/package commands and the unrelated upgrade lifecycle are
+doubled. Never execute the package-building entry point or a real service manager.
 """
 import hashlib
 from datetime import datetime
@@ -90,8 +90,8 @@ class FixtureRunner:
                     tcp = self.root / 'proc/net/tcp'
                     if not any(len(line.split()) >= 10 and line.split()[9] == '42'
                                for line in tcp.read_text().splitlines()):
-                        with tcp.open('a') as output:
-                            output.write('   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 42 1\n')
+                        with tcp.open('a') as stream:
+                            stream.write('   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 42 1\n')
             elif action != 'daemon-reload':
                 raise AssertionError('Unexpected service mutation: ' + repr(argv))
         elif command == 'dpkg-query':
@@ -243,7 +243,13 @@ class PackageFixture:
             ' module=importlib.util.module_from_spec(spec)\n'
             ' sys.modules[spec.name]=module\n spec.loader.exec_module(module)\n'
             ' result=module.Reconciler(root=root, run=FixtureRunner(root), configuring=True).reconcile()\n'
-            ' print(json.dumps(result))\n')
+            ' print(json.dumps(result))\n'
+            'elif Path(sys.argv[1]).name == "configure-secure-tftp.py":\n'
+            ' spec=importlib.util.spec_from_file_location("fixture_secure_setup", '
+            + repr(str(ROOT / 'packaging/native/configure-secure-tftp.py')) + ')\n'
+            ' module=importlib.util.module_from_spec(spec)\n'
+            ' sys.modules[spec.name]=module\n spec.loader.exec_module(module)\n'
+            ' module.prepare(base=root / "var/lib")\n')
         python.chmod(0o755)
         env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ.get('PATH', ''),
                    NGINX_FIXTURE_ROOT=str(self.root), PYTHONDONTWRITEBYTECODE='1',
@@ -252,9 +258,10 @@ class PackageFixture:
                               env=env, text=True, capture_output=True, check=True)
 
 
+@unittest.skipUnless(os.geteuid() == 0 and Path('/root').is_dir(), 'requires a root-owned Linux fixture')
 class MaintainerRegression(unittest.TestCase):
     def test_fresh_dependency_does_not_leave_generic_nginx_owning_boot_port(self):
-        with tempfile.TemporaryDirectory(prefix='pxe-nginx-ownership-') as directory:
+        with tempfile.TemporaryDirectory(prefix='pxe-nginx-ownership-', dir='/root') as directory:
             fixture = PackageFixture(directory)
             fixture.run_postinst()
             state = json.loads(fixture.state.read_text())
@@ -267,6 +274,16 @@ class MaintainerRegression(unittest.TestCase):
             self.assertTrue(fixture.path('/etc/nginx/sites-enabled/default').is_symlink())
             self.assertEqual(fixture.path('/var/www/html/index.nginx-debian.html').read_bytes(),
                              fixture.path('/usr/share/nginx/html/index.html').read_bytes())
+            runtime = fixture.path('/var/lib/pxe-tools-native/runtime.env')
+            self.assertIn(b'TFTP_ROOT=/var/lib/pxe-tools-tftp\n', runtime.read_bytes())
+            self.assertIn(b'HTTP_ROOT=/var/lib/pxe-tools-http\n', runtime.read_bytes())
+            self.assertEqual(runtime.stat().st_uid, 0)
+            self.assertEqual(runtime.stat().st_mode & 0o777, 0o644)
+            for name in ('pxe-tools-native', 'pxe-tools-tftp', 'pxe-tools-http'):
+                path = fixture.path('/var/lib/' + name)
+                self.assertEqual(path.stat().st_uid, 0)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(fixture.path('/var/lib/pxe-tools-native/network.env').read_bytes(), b'')
 
     def test_affected_upgrade_does_not_start_previously_stopped_application_roles(self):
         with tempfile.TemporaryDirectory(prefix='pxe-nginx-upgrade-') as directory:
@@ -281,6 +298,8 @@ class MaintainerRegression(unittest.TestCase):
             for unit in ('pxe-tools-admin.target', 'pxe-tools.target',
                          'pxe-tools-dnsmasq.service', 'pxe-tools-pxe-http.service'):
                 self.assertFalse(state['units'][unit]['active'], unit + ' must preserve its stopped state')
+            self.assertFalse(fixture.path('/var/lib/pxe-tools-native/runtime.env').exists(),
+                             'upgrade must not prepare or overwrite a fresh runtime')
 
 
 class ReconciliationTests(unittest.TestCase):
@@ -292,7 +311,7 @@ class ReconciliationTests(unittest.TestCase):
     def assert_generic_preserved(self, before):
         after = self.fixture.service_state()
         self.assertEqual(after['units']['nginx.service'], before['units']['nginx.service'])
-        destructive = [argv for argv in after['calls']
+        destructive = [argv for argv in after['calls'][len(before['calls']):]
                        if argv[0].endswith('systemctl') and argv[1] in ('stop', 'disable', 'mask')]
         self.assertEqual(destructive, [], 'unowned/custom nginx must not be changed')
 
@@ -302,7 +321,7 @@ class ReconciliationTests(unittest.TestCase):
         state = self.fixture.service_state()
         self.assertFalse(state['units']['nginx.service']['active'])
         self.assertEqual(state['units']['nginx.service']['enabled'], 'disabled')
-        journal = self.fixture.path('/var/lib/pxe-tools-native/nginx-ownership/state.json')
+        journal = self.fixture.path('/var/lib/pxe-tools-nginx-ownership/state.json')
         record = json.loads(journal.read_text())
         self.assertEqual(record['format'], 1)
         self.assertEqual(record['phase'], 'complete')
@@ -454,7 +473,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assert_generic_preserved(before)
 
     def test_partial_journal_is_preserved_for_diagnosis_without_retrying_mutations(self):
-        journal = self.fixture.write('/var/lib/pxe-tools-native/nginx-ownership/state.json',
+        journal = self.fixture.write('/var/lib/pxe-tools-nginx-ownership/state.json',
                                      json.dumps({'format': 1, 'phase': 'prepared'}))
         journal.parent.chmod(0o700)
         journal.chmod(0o600)
@@ -493,7 +512,7 @@ class ReconciliationTests(unittest.TestCase):
 
         result = self.fixture.reconciler(run=fail_disable).reconcile()
         self.assertEqual(result['action'], 'conflict')
-        journal = self.fixture.path('/var/lib/pxe-tools-native/nginx-ownership/state.json')
+        journal = self.fixture.path('/var/lib/pxe-tools-nginx-ownership/state.json')
         self.assertEqual(json.loads(journal.read_text())['phase'], 'prepared')
         self.assertTrue(json.loads(journal.read_text()).get('compensated'))
         self.assertTrue(self.fixture.path('/etc/nginx/sites-enabled/default').is_symlink())
@@ -516,7 +535,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertFalse(state['units']['nginx.service']['active'])
         self.assertEqual([argv for argv in state['calls']
                           if argv[0].endswith('systemctl') and argv[1] in ('start', 'enable')], [])
-        journal = self.fixture.path('/var/lib/pxe-tools-native/nginx-ownership/state.json')
+        journal = self.fixture.path('/var/lib/pxe-tools-nginx-ownership/state.json')
         self.assertEqual(json.loads(journal.read_text())['phase'], 'prepared')
         self.assertFalse(json.loads(journal.read_text()).get('compensated', False))
 
