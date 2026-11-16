@@ -184,6 +184,22 @@ class NativeUpgrade(unittest.TestCase):
     def snapshot(self):
         return self.subject.home / self.subject.load()['id']
 
+    def test_separate_removal_journal_blocks_upgrade_before_any_service_action(self):
+        journal = self.root / 'var/lib/pxe-tools-uninstall'
+        journal.mkdir()
+        (journal / 'state.json').write_text('{}')
+        with self.assertRaisesRegex(RuntimeError, 'uninstall'):
+            self.subject.prepare('1')
+        self.assertEqual(self.systemd.calls, [])
+        self.assertTrue(self.db.exists())
+
+    def test_link_at_separate_removal_journal_is_preserved_and_blocks_configuration(self):
+        marker = self.root / 'var/lib/pxe-tools-uninstall'
+        marker.symlink_to(self.root / 'missing')
+        with self.assertRaisesRegex(RuntimeError, 'uninstall'):
+            self.subject.configure()
+        self.assertTrue(marker.is_symlink())
+
     def test_idle_active_upgrade_snapshots_key_and_database_then_restores_exact_roles(self):
         self.systemd.active -= {'pxe-tools.target', 'pxe-tools-dnsmasq.service',
                                 'pxe-tools-dnsmasq-tail.service', 'pxe-tools-pxe-http.service'}

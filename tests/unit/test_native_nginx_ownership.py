@@ -152,6 +152,7 @@ class PackageFixture:
                    '  sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n')
         self.write('/proc/sys/kernel/random/boot_id', '12345678-1234-1234-1234-123456789abc\n')
         self.path('/run/systemd/system').mkdir(parents=True)
+        self.path('/run/lock').mkdir(parents=True, exist_ok=True)
         self.write('/var/log/apt/history.log',
                    'Start-Date: 2026-11-14  21:00:36\n'
                    'Commandline: apt-get install pxe-tools\n'
@@ -249,7 +250,17 @@ class PackageFixture:
             + repr(str(ROOT / 'packaging/native/configure-secure-tftp.py')) + ')\n'
             ' module=importlib.util.module_from_spec(spec)\n'
             ' sys.modules[spec.name]=module\n spec.loader.exec_module(module)\n'
-            ' module.prepare(base=root / "var/lib")\n')
+            ' ownspec=importlib.util.spec_from_file_location("fixture_native_ownership", '
+            + repr(str(ROOT / 'packaging/native/ownership-provenance.py')) + ')\n'
+            ' own=importlib.util.module_from_spec(ownspec)\n'
+            ' sys.modules[ownspec.name]=own\n ownspec.loader.exec_module(own)\n'
+            ' store=own.Store(root, owner=0)\n'
+            ' def activate():\n'
+            '  module.activate_admin(FixtureRunner(root))\n'
+            ' def initialize(held):\n'
+            '  store.create_base(require_runtime=True, native_fds=held, activate=activate)\n'
+            ' module.prepare(base=root / "var/lib", journal=store, '
+            'after_create=initialize if "--initialize-instance" in sys.argv else None)\n')
         python.chmod(0o755)
         env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ.get('PATH', ''),
                    NGINX_FIXTURE_ROOT=str(self.root), PYTHONDONTWRITEBYTECODE='1',
@@ -567,6 +578,108 @@ class ReconciliationTests(unittest.TestCase):
         journal = self.fixture.path('/var/lib/pxe-tools-nginx-ownership/state.json')
         self.assertEqual(json.loads(journal.read_text())['phase'], 'prepared')
         self.assertFalse(json.loads(journal.read_text()).get('compensated', False))
+
+
+class StableNginxLockFixture(unittest.TestCase):
+    """Exercise only locks and paths inside a disposable fixture."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='pxe-nginx-stable-lock-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / 'run/lock').mkdir(parents=True)
+        spec = importlib.util.spec_from_file_location('nginx_stable_lock_test', ROOT / 'packaging/native/reconcile-nginx.py')
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+        self.lock = self.root / 'run/lock/pxe-tools-nginx-reconcile.lock'
+
+    def test_lock_excludes_another_process_and_is_never_unlinked(self):
+        program = '''import importlib.util, os, sys\nfrom pathlib import Path\ns=importlib.util.spec_from_file_location("fixture",sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwith m.stable_nginx_lock(Path(sys.argv[2]),owner=os.getuid()):\n    (Path(sys.argv[2]) / "var/lib/pxe-tools-nginx-ownership").mkdir(parents=True)\n'''
+        command = [sys.executable, '-c', program, str(ROOT / 'packaging/native/reconcile-nginx.py'), str(self.root)]
+        journal_dir = self.root / 'var/lib/pxe-tools-nginx-ownership'
+        journal_dir.mkdir(parents=True)
+        with self.module.stable_nginx_lock(self.root, owner=os.getuid()):
+            journal_dir.rmdir()  # The uninstall removes this while holding the stable lock.
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(journal_dir.exists())
+            self.assertTrue(self.lock.is_file())
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(journal_dir.is_dir())
+        self.assertTrue(self.lock.is_file())
+        self.assertEqual(self.lock.stat().st_mode & 0o777, 0o600)
+
+    def test_linked_lock_and_linked_ancestor_are_refused(self):
+        external = self.root / 'external'
+        external.write_text('keep')
+        self.lock.symlink_to(external)
+        with self.assertRaises((OSError, ValueError, RuntimeError)):
+            with self.module.stable_nginx_lock(self.root, owner=os.getuid()): pass
+        self.assertEqual(external.read_text(), 'keep')
+        self.lock.unlink()
+        lock_dir = self.root / 'run/lock'
+        lock_dir.rmdir()
+        lock_dir.symlink_to(external)
+        with self.assertRaises((OSError, ValueError, RuntimeError)):
+            with self.module.stable_nginx_lock(self.root, owner=os.getuid()): pass
+        self.assertEqual(external.read_text(), 'keep')
+
+    def test_hardlinked_or_unsafe_lock_is_refused(self):
+        self.lock.touch(mode=0o600)
+        alias = self.root / 'alias'
+        os.link(self.lock, alias)
+        with self.assertRaises((OSError, ValueError, RuntimeError)):
+            with self.module.stable_nginx_lock(self.root, owner=os.getuid()): pass
+        alias.unlink()
+        self.lock.chmod(0o666)
+        with self.assertRaises((OSError, ValueError, RuntimeError)):
+            with self.module.stable_nginx_lock(self.root, owner=os.getuid()): pass
+        self.assertTrue(self.lock.exists())
+
+    def test_missing_or_untrusted_lock_directory_is_refused(self):
+        lock_dir = self.root / 'run/lock'
+        lock_dir.rmdir()
+        with self.assertRaises((OSError, ValueError, RuntimeError)):
+            with self.module.stable_nginx_lock(self.root, owner=os.getuid()): pass
+        lock_dir.mkdir(mode=0o777)
+        lock_dir.chmod(0o777)
+        with self.assertRaises((OSError, ValueError, RuntimeError)):
+            with self.module.stable_nginx_lock(self.root, owner=os.getuid()): pass
+        self.assertFalse(self.lock.exists())
+
+    def test_sticky_lock_directory_is_accepted(self):
+        (self.root / 'run/lock').chmod(0o1777)
+        with self.module.stable_nginx_lock(self.root, owner=os.getuid()):
+            self.assertTrue(self.lock.exists())
+
+    def test_reconcile_checks_stable_lock_before_inspecting_nginx(self):
+        events = []
+        from contextlib import contextmanager
+        @contextmanager
+        def lock(root, *, owner=0):
+            events.append('lock')
+            yield
+            events.append('unlock')
+        reconciler = self.module.Reconciler(root=self.root)
+        def state():
+            events.append('state')
+            return {'ActiveState': 'inactive', 'UnitFileState': 'disabled'}
+        with patch.object(self.module, 'stable_nginx_lock', lock), patch.object(reconciler, 'state', state):
+            result = reconciler.reconcile()
+        self.assertEqual(result['action'], 'preserved')
+        self.assertEqual(events, ['lock', 'state', 'unlock'])
+
+    def test_reconcile_refuses_lock_contention_before_reading_or_creating_journal(self):
+        reconciler = self.module.Reconciler(root=self.root)
+        stable_lock = self.module.stable_nginx_lock
+        with stable_lock(self.root, owner=os.getuid()):
+            with patch.object(self.module, 'stable_nginx_lock',
+                              lambda root: stable_lock(root, owner=os.getuid())):
+                with patch.object(reconciler, 'state') as state:
+                    result = reconciler.reconcile()
+        self.assertEqual(result['action'], 'conflict')
+        state.assert_not_called()
+        self.assertFalse(reconciler.directory.exists())
 
 
 if __name__ == '__main__':

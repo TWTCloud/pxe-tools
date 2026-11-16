@@ -35,6 +35,11 @@ Description: {description}
 '''
 PREINST = '''#!/bin/sh
 set -eu
+if [ "$1" = install ] || [ "$1" = upgrade ]; then
+    python3 - check-removal <<'PXE_UPGRADE_LIFECYCLE'
+@@PXE_UPGRADE_LIFECYCLE@@
+PXE_UPGRADE_LIFECYCLE
+fi
 if [ "$1" = install ]; then
     if [ -e /usr/lib/pxe-tools ] || [ -L /usr/lib/pxe-tools ] || \
        [ -e /opt/pxe-tools ] || [ -L /opt/pxe-tools ]; then
@@ -62,8 +67,13 @@ fi
 '''
 POSTINST = '''#!/bin/sh
 set -eu
+if [ "$1" = configure ]; then
+    # An interrupted removal must be resolved before nginx or services change.
+    python3 /usr/lib/pxe-tools/native/upgrade-lifecycle.py check-removal
+fi
 if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
     systemctl daemon-reload
+    python3 /usr/lib/pxe-tools/native/ownership-provenance.py check-base
     # Dependencies are configured before us and may have started stock nginx.
     # Preserve any preexisting/custom service unless ownership is proven.
     python3 /usr/lib/pxe-tools/native/reconcile-nginx.py --configure
@@ -76,12 +86,9 @@ if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
        && [ ! -e /etc/pxe-tools ] && [ ! -L /etc/pxe-tools ]; then
         # Only truly new native installations receive the protected TFTP root.
         # Existing paths are never overwritten or silently migrated.
-        python3 /usr/lib/pxe-tools/native/configure-secure-tftp.py
-        if ! systemctl enable pxe-tools-admin.target; then
-            echo 'PXE Tools: could not enable the administration service.' >&2
-        elif ! systemctl start pxe-tools-admin.target; then
-            echo 'PXE Tools: administration did not start; inspect systemd status.' >&2
-        fi
+        # Keep creation descriptors pinned across init, even on filesystems
+        # without birthtime or trusted xattr support.
+        python3 /usr/lib/pxe-tools/native/configure-secure-tftp.py --initialize-instance
     fi
 fi
 '''
@@ -157,7 +164,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             shutil.copy2(checked(ROOT/name), docs/name)
         copy_tree(ROOT/'third_party/licenses', docs/'licenses', tracked)
         native=root/'usr/lib/pxe-tools/native'; native.mkdir(parents=True)
-        for name in ('default.env','init.sh','start-php-fpm.sh','start-worker.py','configure-secure-tftp.py','php-fpm.conf','nginx.conf','pxe-nginx.conf','render-pxe-http.py','upgrade-lifecycle.py','reconcile-nginx.py'):
+        for name in ('default.env','init.sh','start-php-fpm.sh','start-worker.py','configure-secure-tftp.py','php-fpm.conf','nginx.conf','pxe-nginx.conf','render-pxe-http.py','upgrade-lifecycle.py','reconcile-nginx.py','ownership-provenance.py','uninstall-apt.py'):
             shutil.copy2(checked(ROOT/'packaging/native'/name), native/name)
         copy_tree(ROOT/'packaging/native/keyrings', native/'keyrings', tracked)
         units=root/'usr/lib/systemd/system'; units.mkdir(parents=True)
