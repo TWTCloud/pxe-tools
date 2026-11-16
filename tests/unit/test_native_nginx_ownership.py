@@ -153,7 +153,6 @@ class PackageFixture:
         self.write('/proc/sys/kernel/random/boot_id', '12345678-1234-1234-1234-123456789abc\n')
         self.path('/run/systemd/system').mkdir(parents=True)
         self.path('/run/lock').mkdir(parents=True, exist_ok=True)
-        self.path('/run/lock').mkdir(parents=True)
         self.write('/var/log/apt/history.log',
                    'Start-Date: 2026-11-14  21:00:36\n'
                    'Commandline: apt-get install pxe-tools\n'
