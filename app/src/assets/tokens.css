@@ -1,18 +1,19 @@
 /*
- * PXE Tools — palette commune, 11 octobre 2026.
+ * PXE Tools — palette commune, 17 novembre 2026.
  *
- * Les surfaces, la sidebar neutre, les teintes Material et les polices
- * reprennent le main courant. Adaptations de lisibilité : gris de texte
- * opaques en clair, couleurs de statut ajustées sur leurs fonds atténués,
- * fonds d'action distingués des couleurs de texte et des accents graphiques.
- * Le nom historique apple-blue reste compatible avec les CTA blancs :
- * #1976d2 / hover #1565c0 dans les DEUX thèmes (4,60:1 / 5,75:1).
+ * Reprend l'identité de pxetools.com : texte bleu nuit, bleu d'action
+ * #1260c8, sidebar navy, cartes blanches bordées sur un fond bleuté.
+ * surface-0 est le fond de page ; surface-1 la carte ; surface-2 le survol
+ * et les en-têtes de tableau. La sidebar a ses propres tokens car elle reste
+ * sombre dans les deux thèmes.
+ * Le nom historique apple-blue reste un alias du bleu d'action.
  * Les actions danger pleines utilisent action-danger, jamais le texte danger.
- * Contrastes sRGB calculés sur surface-0/1/2/3 + sidebar, alpha composé :
- * clair : secondaire >= 6,19:1, tertiaire >= 4,83:1, lien >= 4,55:1 ;
- * sombre : secondaire >= 7,65:1, tertiaire >= 5,16:1, lien >= 5,96:1 ;
- * badges sur leur tint : minimum clair 4,52:1, sombre 4,62:1 ;
- * actions danger blanches : 4,98:1, hover 6,57:1.
+ * Contrastes sRGB calculés sur surface-0/1/2 (tertiaire aussi sur surface-3),
+ * alpha composé :
+ * clair : secondaire >= 8,49:1, tertiaire >= 4,88:1, lien >= 5,44:1,
+ * badges sur leur tint >= 4,53:1, CTA blanc 5,94:1, danger blanc 5,62:1 ;
+ * sombre : secondaire >= 8,56:1, tertiaire >= 4,92:1, lien >= 7,43:1,
+ * badges >= 5,51:1 ; sidebar : texte >= 9,36:1, texte atténué >= 6,38:1.
  * Ces calculs de tokens ne remplacent pas le contrôle des vues composées.
  *
  * Un seul @theme : les utilities lisent les variables au runtime.
@@ -20,51 +21,55 @@
  */
 
 @theme {
-  /* Surfaces claires neutres. */
-  --color-surface-0: #ffffff;
-  --color-surface-1: #f6f7f9;
-  --color-surface-2: #eef0f3;
-  --color-surface-3: #e2e5ea;
+  --color-surface-0: #f6f8fb;
+  --color-surface-1: #ffffff;
+  --color-surface-2: #f2f5f9;
+  --color-surface-3: #e2e8f0;
   --color-surface-input: #ffffff;
-  --color-sidebar: #f0f1f4;
-  --color-sidebar-active: rgba(0, 0, 0, 0.07);
+
+  --color-sidebar: #0b2040;
+  --color-sidebar-active: rgba(92, 149, 238, 0.20);
+  --color-sidebar-hover: rgba(255, 255, 255, 0.06);
+  --color-sidebar-text: #b6c6de;
+  --color-sidebar-text-strong: #ffffff;
+  --color-sidebar-muted: #8ea4c4;
+  --color-sidebar-divider: rgba(255, 255, 255, 0.08);
+  --color-sidebar-accent: #93b9f7;
 
   /* Fonds d'action : texte blanc lisible, indépendants du thème. */
-  --color-action-primary: #1976d2;
-  --color-action-primary-hover: #1565c0;
+  --color-action-primary: #1260c8;
+  --color-action-primary-hover: #0f4fa6;
   --color-action-primary-foreground: #ffffff;
-  --color-action-danger: #d32f2f;
-  --color-action-danger-hover: #b71c1c;
+  --color-action-danger: #c62828;
+  --color-action-danger-hover: #a51d1d;
   --color-action-danger-foreground: #ffffff;
 
   /* Compatibilité des classes PXE existantes. */
-  --color-apple-blue: #1976d2;
-  --color-apple-blue-hover: #1565c0;
-  --color-apple-blue-link: #1565c0;
-  --color-accent-graphic: #1976d2;
-  --color-focus-ring: #1565c0;
+  --color-apple-blue: #1260c8;
+  --color-apple-blue-hover: #0f4fa6;
+  --color-apple-blue-link: #1260c8;
+  --color-accent-graphic: #1260c8;
+  --color-focus-ring: #1260c8;
 
-  /* Les légendes restent lisibles sur toutes les surfaces claires. */
-  --color-text-primary: #1a1a1a;
-  --color-text-secondary: #525252;
-  --color-text-tertiary: #626262;
+  --color-text-primary: #0c1a2e;
+  --color-text-secondary: #39485e;
+  --color-text-tertiary: #55647a;
 
-  --color-divider: rgba(0, 0, 0, 0.08);
-  --color-divider-strong: rgba(0, 0, 0, 0.28);
-  --color-border-input: rgba(0, 0, 0, 0.20);
-  --color-border-input-focus: #1976d2;
+  --color-divider: #e2e8f0;
+  --color-divider-strong: #cad4e1;
+  --color-border-input: #b9c5d6;
+  --color-border-input-focus: #1260c8;
 
-  /* Textes sémantiques assombris ; les fonds restent ceux de Domains. */
-  --color-success: #256629;
-  --color-success-bg: rgba(76, 175, 80, 0.12);
-  --color-warning: #974100;
-  --color-warning-bg: rgba(255, 152, 0, 0.14);
-  --color-danger: #b71c1c;
-  --color-danger-bg: rgba(244, 67, 54, 0.12);
-  --color-info: #0d47a1;
-  --color-info-bg: rgba(25, 118, 210, 0.10);
-  --color-accent-purple: #7b1fa2;
-  --color-accent-purple-bg: rgba(156, 39, 176, 0.12);
+  --color-success: #15803d;
+  --color-success-bg: #e8f7ee;
+  --color-warning: #a8530a;
+  --color-warning-bg: #fff4e2;
+  --color-danger: #b42318;
+  --color-danger-bg: #fdecea;
+  --color-info: #1260c8;
+  --color-info-bg: #eff5ff;
+  --color-accent-purple: #6d28d9;
+  --color-accent-purple-bg: #f3edff;
 
   /* Identités des distributions : compatibilité du set d'icônes existant. */
   --color-distro-debian: #A81D33;
@@ -74,12 +79,13 @@
   --color-distro-almalinux: #0FB164;
   --color-distro-rocky: #10B981;
 
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
-               "Helvetica Neue", Helvetica, Arial, sans-serif;
-  --font-mono: "SF Mono", SFMono-Regular, ui-monospace, Menlo, monospace;
-  --tracking-tight: -0.01em;
+  --font-sans: "Mona Sans Variable", ui-sans-serif, system-ui, -apple-system,
+               "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo,
+               Consolas, monospace;
+  --tracking-tight: -0.005em;
 
-  --radius-card: 0.5rem;
+  --radius-card: 0.625rem;
   --radius-button: 0.5rem;
   --radius-input: 0.5rem;
   --radius-pill: 9999px;
@@ -88,49 +94,49 @@
   --shadow-card: 0 0 0 0 rgba(0, 0, 0, 0);
   --shadow-card-hover: 0 0 0 0 rgba(0, 0, 0, 0);
   /* Indirection conservée lorsque Tailwind inline une utility shadow-*. */
-  --shadow-dropdown: var(--pxe-shadow-dropdown, 0 6px 18px rgba(0, 0, 0, 0.14));
+  --shadow-dropdown: var(--pxe-shadow-dropdown, 0 2px 6px rgba(12, 26, 46, 0.05), 0 18px 40px -16px rgba(12, 26, 46, 0.28));
 }
 
 [data-theme="light"] {
   color-scheme: light;
-  --pxe-shadow-dropdown: 0 6px 18px rgba(0, 0, 0, 0.14);
+  --pxe-shadow-dropdown: 0 2px 6px rgba(12, 26, 46, 0.05), 0 18px 40px -16px rgba(12, 26, 46, 0.28);
 }
 
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --color-surface-0: #181818;
-  --color-surface-1: #1f1f1f;
-  --color-surface-2: #262626;
-  --color-surface-3: #303030;
-  --color-surface-input: #262626;
-  --color-sidebar: #141414;
-  --color-sidebar-active: rgba(255, 255, 255, 0.10);
+  --color-surface-0: #0a1628;
+  --color-surface-1: #0f1f38;
+  --color-surface-2: #152843;
+  --color-surface-3: #1d3456;
+  --color-surface-input: #0c1a30;
 
-  /* L'accent graphique suit Domains ; les fonds de CTA gardent leur contraste. */
-  --color-accent-graphic: #2196f3;
-  --color-apple-blue-link: #64b5f6;
-  --color-focus-ring: #64b5f6;
+  --color-sidebar: #071730;
+  --color-sidebar-active: rgba(92, 149, 238, 0.22);
 
-  --color-text-primary: rgba(255, 255, 255, 0.92);
-  --color-text-secondary: rgba(255, 255, 255, 0.72);
-  --color-text-tertiary: rgba(255, 255, 255, 0.55);
+  --color-accent-graphic: #5c95ee;
+  --color-apple-blue-link: #93b9f7;
+  --color-focus-ring: #93b9f7;
 
-  --color-divider: rgba(255, 255, 255, 0.08);
-  --color-divider-strong: rgba(255, 255, 255, 0.28);
-  --color-border-input: rgba(255, 255, 255, 0.28);
-  --color-border-input-focus: #2196f3;
+  --color-text-primary: #e6edf7;
+  --color-text-secondary: #b6c6de;
+  --color-text-tertiary: #8ea4c4;
 
-  --color-success: #81c784;
-  --color-success-bg: rgba(76, 175, 80, 0.16);
-  --color-warning: #ffa726;
-  --color-warning-bg: rgba(255, 152, 0, 0.16);
-  --color-danger: #ff8a80;
+  --color-divider: rgba(147, 185, 247, 0.14);
+  --color-divider-strong: rgba(147, 185, 247, 0.32);
+  --color-border-input: rgba(147, 185, 247, 0.32);
+  --color-border-input-focus: #5c95ee;
+
+  --color-success: #6fdc98;
+  --color-success-bg: rgba(52, 196, 110, 0.16);
+  --color-warning: #f7b955;
+  --color-warning-bg: rgba(224, 138, 11, 0.18);
+  --color-danger: #ff9b8f;
   --color-danger-bg: rgba(244, 67, 54, 0.18);
-  --color-info: #64b5f6;
-  --color-info-bg: rgba(66, 165, 245, 0.16);
-  --color-accent-purple: #ce93d8;
-  --color-accent-purple-bg: rgba(156, 39, 176, 0.18);
+  --color-info: #93b9f7;
+  --color-info-bg: rgba(92, 149, 238, 0.18);
+  --color-accent-purple: #c9a8ff;
+  --color-accent-purple-bg: rgba(167, 139, 250, 0.18);
 
-  --pxe-shadow-dropdown: 0 6px 18px rgba(0, 0, 0, 0.32);
+  --pxe-shadow-dropdown: 0 2px 6px rgba(0, 0, 0, 0.2), 0 18px 40px -16px rgba(0, 0, 0, 0.6);
 }
