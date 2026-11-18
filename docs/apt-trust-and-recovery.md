@@ -137,7 +137,9 @@ compromise exige un autre modèle de confiance.
 
 Le prototype `packaging/native/prepare-client-key-transition.py` permet de
 répéter l'inspection et le remplacement atomique **uniquement** dans un arbre
-jetable marqué sous `/tmp`, avec `PXE_APT_ROTATION_FIXTURE=1`. Il refuse les
+jetable marqué sous `/tmp`, avec `PXE_APT_ROTATION_FIXTURE=1`. Avant tout
+remplacement, il vérifie les signatures des deux index de fixture et confirme
+que le nouveau certificat vérifie encore l'ancienne signature. Il refuse les
 sources partagées ou ambiguës, conserve le témoin de la clé initiale et
 signale un état incertain si la synchronisation échoue après remplacement. La
 fixture vérifie notamment les refus et les interruptions. Elle ne constitue
@@ -146,9 +148,15 @@ propriété réels, montages, concurrence et reprise durable restent à réalise
 et recevoir avant toute distribution.
 
 Le workflow de vérification des PR répète localement la construction, la
-signature et la préparation des assets statiques avec des clés jetables. Cette
-répétition ne raccorde pas encore une transition au workflow de publication et
-ne déploie ni certificat ni Worker. Aucun basculement de production n'est livré.
+signature et la préparation des assets statiques avec des clés jetables. La
+présente PR prépare aussi dans le workflow APT un mode manuel explicite
+`transition_rehearsal` : il lance uniquement cette répétition et exclut les jobs
+`prepare` et `publish`, même sur `main`. Il utilise un groupe de concurrence
+séparé et ne reçoit ni environnement de production ni secret. Sur la branche de
+la PR, le [run 44386009370](https://github.com/williamboglietti/pxe-tools/actions/runs/44386009370)
+a réussi ; `prepare` et `publish` ont été sautés. Ce mode ne raccorde pas encore
+une rotation réelle au signataire de publication et ne déploie ni certificat
+ni Worker. Aucun basculement de production n'est livré.
 
 ## Instantanés : ce qui est vérifié
 

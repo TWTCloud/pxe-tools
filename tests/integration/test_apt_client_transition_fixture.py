@@ -46,7 +46,8 @@ class ClientTransitionFixture(unittest.TestCase):
         os.link(self.source, sources / ('.pxe-tools-sources.' + hashlib.sha256(self.source.read_bytes()).hexdigest() + '.created'))
 
     def run_transition(self, *, apply=False, new=None, signer=NEW_SIGNER):
-        return transition.rehearse(self.root, new or self.new, PRIMARY, OLD_SIGNER, signer, apply=apply)
+        return transition.rehearse(self.root, new or self.new, FIXTURE / 'old/dists/stable/InRelease',
+                                   FIXTURE / 'new/dists/stable/InRelease', PRIMARY, OLD_SIGNER, signer, apply=apply)
 
     def test_preview_and_atomic_apply_preserve_original_witness(self):
         before = self.key.stat()
@@ -100,6 +101,20 @@ class ClientTransitionFixture(unittest.TestCase):
         self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
         self.assertEqual(self.anchor.read_bytes(), self.old)
 
+    def test_modified_or_wrong_signed_release_is_rejected_without_writes(self):
+        altered = self.root / 'bad.InRelease'
+        data = (FIXTURE / 'new/dists/stable/InRelease').read_bytes()
+        altered.write_bytes(data.replace(b'PXE Tools', b'PXE Fool!', 1))
+        self.assertNotEqual(altered.read_bytes(), data)
+        with self.assertRaises(ValueError):
+            transition.rehearse(self.root, self.new, FIXTURE / 'old/dists/stable/InRelease',
+                                altered, PRIMARY, OLD_SIGNER, NEW_SIGNER, apply=True)
+        self.assertEqual(self.key.read_bytes(), self.old)
+        with self.assertRaises(ValueError):
+            transition.rehearse(self.root, self.new, FIXTURE / 'new/dists/stable/InRelease',
+                                FIXTURE / 'old/dists/stable/InRelease', PRIMARY, OLD_SIGNER, NEW_SIGNER, apply=True)
+        self.assertEqual(self.key.read_bytes(), self.old)
+
     def test_interrupted_replace_cleans_staging_and_preserves_key_and_anchor(self):
         with patch.object(transition.os, 'replace', side_effect=OSError('fixture interruption')):
             with self.assertRaisesRegex(OSError, 'fixture interruption'):
@@ -142,7 +157,8 @@ class ClientTransitionFixture(unittest.TestCase):
 
     def test_only_explicitly_marked_fixture_in_tmp_is_allowed(self):
         with self.assertRaises(ValueError):
-            transition.rehearse(Path('/'), self.new, PRIMARY, OLD_SIGNER, NEW_SIGNER, apply=True)
+            transition.rehearse(Path('/'), self.new, FIXTURE / 'old/dists/stable/InRelease',
+                                FIXTURE / 'new/dists/stable/InRelease', PRIMARY, OLD_SIGNER, NEW_SIGNER, apply=True)
         (self.root / '.pxe-rotation-fixture').unlink()
         with self.assertRaises(ValueError):
             self.run_transition(apply=True)

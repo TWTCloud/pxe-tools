@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import secrets
 import stat
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,8 +33,8 @@ CONFIG = {'SOURCE': '/etc/apt/sources.list', 'PARTS': '/etc/apt/sources.list.d',
           'TRUSTED': '/etc/apt/trusted.gpg', 'TRUSTEDPARTS': '/etc/apt/trusted.gpg.d', 'ROOT': ''}
 
 
-def rehearse(root: Path, new_certificate: Path, primary: str, old_signer: str,
-             new_signer: str, *, apply: bool = False) -> dict:
+def rehearse(root: Path, new_certificate: Path, old_release: Path, new_release: Path,
+             primary: str, old_signer: str, new_signer: str, *, apply: bool = False) -> dict:
     if os.environ.get('PXE_APT_ROTATION_FIXTURE') != '1':
         raise ValueError('this preparation requires a disposable fixture')
     marker = root / '.pxe-rotation-fixture'
@@ -55,6 +56,21 @@ def rehearse(root: Path, new_certificate: Path, primary: str, old_signer: str,
     if hashlib.sha256(old_bytes).hexdigest() != report['old_certificate_sha256'] or \
        hashlib.sha256(new_bytes).hexdigest() != report['new_certificate_sha256']:
         raise ValueError('certificate changed after inspection')
+    # Test both signers against the exact candidate bytes. This prevents a
+    # certificate which cannot still authenticate the old index from being
+    # installed during the overlap. These are fixture releases only.
+    old_release_bytes = inspector.read_regular(old_release)
+    new_release_bytes = inspector.read_regular(new_release)
+    with tempfile.TemporaryDirectory(prefix='pxe-client-proof-', dir='/tmp') as temporary:
+        proof_root = Path(temporary)
+        old_cert_copy, new_cert_copy = proof_root / 'old.gpg', proof_root / 'new.gpg'
+        old_index_copy, new_index_copy = proof_root / 'old.InRelease', proof_root / 'new.InRelease'
+        for path, data in ((old_cert_copy, old_bytes), (new_cert_copy, new_bytes),
+                           (old_index_copy, old_release_bytes), (new_index_copy, new_release_bytes)):
+            path.write_bytes(data)
+        inspector.proof.verify_signature(old_cert_copy, old_index_copy, old_signer.upper(), primary.upper())
+        inspector.proof.verify_signature(new_cert_copy, old_index_copy, old_signer.upper(), primary.upper())
+        inspector.proof.verify_signature(new_cert_copy, new_index_copy, new_signer.upper(), primary.upper())
     report['applied'] = False
     if not apply:
         return report
@@ -104,13 +120,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fixture-root', required=True, type=Path)
     parser.add_argument('--new-certificate', required=True, type=Path)
+    parser.add_argument('--old-inrelease', required=True, type=Path)
+    parser.add_argument('--new-inrelease', required=True, type=Path)
     parser.add_argument('--primary-fingerprint', required=True)
     parser.add_argument('--old-signing-fingerprint', required=True)
     parser.add_argument('--new-signing-fingerprint', required=True)
     parser.add_argument('--apply-to-fixture', action='store_true')
     args = parser.parse_args()
-    result = rehearse(args.fixture_root, args.new_certificate, args.primary_fingerprint,
-                      args.old_signing_fingerprint, args.new_signing_fingerprint,
+    result = rehearse(args.fixture_root, args.new_certificate, args.old_inrelease, args.new_inrelease,
+                      args.primary_fingerprint, args.old_signing_fingerprint, args.new_signing_fingerprint,
                       apply=args.apply_to_fixture)
     print(json.dumps(result, indent=2))
 
