@@ -12,6 +12,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tempfile
 
@@ -31,6 +32,8 @@ def main() -> None:
     parser.add_argument('--signing-fingerprint', required=True)
     parser.add_argument('--valid-days', type=int, default=7)
     parser.add_argument('--previous', type=Path, help='previous signed snapshot to retain')
+    parser.add_argument('--transition-previous-signing-fingerprint', help='previous signing subkey for an explicit transition')
+    parser.add_argument('--transition-previous-public-key', type=Path, help='public-only previous certificate for the pinned primary')
     parser.add_argument('--public-key-output', type=Path, help='new path for the exported public key only')
     parser.add_argument('--source-commit')
     parser.add_argument('--build-run-id')
@@ -44,6 +47,16 @@ def main() -> None:
         raise ValueError('complete primary and subkey fingerprints are required')
     if primary == signing:
         raise ValueError('the signing subkey must differ from the primary')
+    old_signing = args.transition_previous_signing_fingerprint
+    old_key = args.transition_previous_public_key
+    if old_signing is not None or old_key is not None:
+        if (old_signing is None or old_key is None or args.previous is None
+                or not re.fullmatch(r'(?:[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})', old_signing)
+                or old_signing.upper() in (primary, signing)
+                or not old_key.is_absolute() or old_key.is_symlink() or not old_key.is_file()
+                or old_key.stat().st_size > 1048576):
+            raise ValueError('transition requires a previous snapshot, distinct old signer and public certificate')
+        old_signing = old_signing.upper()
     armored = os.environ.pop('APT_SIGNING_KEY', None)
     passphrase = os.environ.pop('APT_SIGNING_PASSPHRASE', None)
     if not armored or not passphrase or '\n' in passphrase or '\r' in passphrase or '\0' in passphrase:
@@ -84,12 +97,44 @@ def main() -> None:
             all_public = records('--list-keys')
             if len([x for x in all_public if x[0] == 'pub']) != 1:
                 raise ValueError('CI keyring must contain exactly one primary key')
+            if old_key is not None:
+                # Inspect the public certificate before import; never accept
+                # additional secret material into the isolated signing home.
+                descriptor = os.open(old_key, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(descriptor, 'rb') as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        raise ValueError('previous certificate must be a regular file')
+                    old_data = stream.read(1048577)
+                if len(old_data) > 1048576:
+                    raise ValueError('previous certificate is too large')
+                staged_certificate = root / 'previous-public.gpg'
+                staged_certificate.write_bytes(old_data)
+                shown = records('--show-keys', str(staged_certificate))
+                shown_fprs = [x[9].upper() for x in shown if x[0] == 'fpr']
+                if (any(x[0] in ('sec', 'ssb') for x in shown)
+                        or len([x for x in shown if x[0] == 'pub']) != 1
+                        or shown_fprs != [primary, old_signing]):
+                    raise ValueError('previous certificate must contain only the pinned primary and old public subkey')
+                run(common + ['--import', str(staged_certificate)])
+                combined = records('--list-keys')
+                combined_fprs = [x[9].upper() for x in combined if x[0] == 'fpr']
+                if (len([x for x in combined if x[0] == 'pub']) != 1
+                        or len(combined_fprs) != 3
+                        or set(combined_fprs) != {primary, old_signing, signing}):
+                    raise ValueError('transition public keyring contains an unexpected key')
+                after_secret = records('--list-secret-keys', primary)
+                if ([x[9].upper() for x in after_secret if x[0] == 'fpr'] != [primary, signing]
+                        or len([x for x in after_secret if x[0] == 'ssb']) != 1):
+                    raise ValueError('transition added unexpected secret material')
             builder = Path(__file__).with_name('build-apt-release-candidate.py')
             build_args = ['python3', str(builder), str(args.package), str(args.destination),
                           '--gnupg-home', str(home), '--fingerprint', signing,
                           '--valid-days', str(args.valid_days), '--passphrase-file', str(password_file)]
             if args.previous is not None:
                 build_args += ['--previous', str(args.previous)]
+            if old_signing is not None:
+                build_args += ['--previous-signing-fingerprint', old_signing,
+                               '--previous-primary-fingerprint', primary]
             if (args.ansible_package is None) != (args.approved_ansible_sha256 is None):
                 raise ValueError('the module and its approved SHA256 must be supplied together')
             if args.ansible_package is not None:

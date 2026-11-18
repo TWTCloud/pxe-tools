@@ -20,7 +20,10 @@ PY
 }
 trap cleanup EXIT
 
-gpg_base=(gpg --homedir "$home" --batch --no-tty --pinentry-mode loopback --passphrase '')
+passfile="$fixture/passphrase"
+printf '%s\n' 'temporary-fixture-passphrase' > "$passfile"
+chmod 0600 "$passfile"
+gpg_base=(gpg --homedir "$home" --batch --no-tty --pinentry-mode loopback --passphrase-file "$passfile")
 "${gpg_base[@]}" --quick-generate-key 'APT rotation fixture <apt-rotation@example.invalid>' ed25519 cert 1d >/dev/null 2>&1
 primary=$("${gpg_base[@]}" --with-colons --with-fingerprint --list-secret-keys | awk -F: '$1=="fpr" {print $10; exit}')
 "${gpg_base[@]}" --quick-add-key "$primary" ed25519 sign 1d >/dev/null 2>&1
@@ -42,18 +45,18 @@ Description: Synthetic package for APT rotation rehearsal
 CONTROL
 dpkg-deb --build --root-owner-group "$pkg" "$fixture/old.deb" >/dev/null
 builder="$root/packaging/native/build-apt-release-candidate.py"
-python3 "$builder" "$fixture/old.deb" "$fixture/old" --gnupg-home "$home" --fingerprint "$old_signer" --valid-days 1 >/dev/null
+python3 "$builder" "$fixture/old.deb" "$fixture/old" --gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$old_signer" --valid-days 1 >/dev/null
 sed -i 's/Version: 1.0~fixture1/Version: 1.0~fixture2/' "$pkg/DEBIAN/control"
 dpkg-deb --build --root-owner-group "$pkg" "$fixture/new.deb" >/dev/null
 
 # The existing default remains fail-closed when the previous signer differs.
-if python3 "$builder" "$fixture/new.deb" "$fixture/no-transition" --gnupg-home "$home" --fingerprint "$new_signer" --previous "$fixture/old" > "$fixture/default.log" 2>&1; then
+if python3 "$builder" "$fixture/new.deb" "$fixture/no-transition" --gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$new_signer" --previous "$fixture/old" > "$fixture/default.log" 2>&1; then
   echo 'Unexpected acceptance without explicit transition identities' >&2; exit 1
 fi
 test ! -e "$fixture/no-transition"
 
 # Explicit transition pins the old signer and primary, retaining old objects.
-args=(--gnupg-home "$home" --fingerprint "$new_signer" --previous "$fixture/old" --valid-days 1
+args=(--gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$new_signer" --previous "$fixture/old" --valid-days 1
       --previous-signing-fingerprint "$old_signer" --previous-primary-fingerprint "$primary")
 python3 "$builder" "$fixture/new.deb" "$fixture/new" "${args[@]}" >/dev/null
 old_index="$fixture/old/dists/stable/main/binary-amd64/Packages.gz"
@@ -68,16 +71,37 @@ PXE_ROTATION_FIXTURE_DIR="$fixture" PXE_ROTATION_PRIMARY="$primary" \
   PXE_ROTATION_OLD_SIGNER="$old_signer" PXE_ROTATION_NEW_SIGNER="$new_signer" \
   python3 "$root/tests/integration/test_apt_snapshot_recovery_fixture.py" -v
 
+# CI transition uses only the new secret subkey; the old certificate is public.
+"${gpg_base[@]}" --armor --export-secret-subkeys "${new_signer}!" > "$fixture/new-secret.asc"
+export APT_SIGNING_KEY="$(cat "$fixture/new-secret.asc")"
+export APT_SIGNING_PASSPHRASE='temporary-fixture-passphrase'
+ci_signer="$root/packaging/native/ci-sign-apt-candidate.py"
+ci_args=(--primary-fingerprint "$primary" --signing-fingerprint "$new_signer" --previous "$fixture/old"
+         --transition-previous-signing-fingerprint "$old_signer" --transition-previous-public-key "$fixture/old-public.gpg")
+python3 "$ci_signer" "$fixture/new.deb" "$fixture/ci-new" "${ci_args[@]}" --public-key-output "$fixture/ci-public.gpg" >/dev/null
+gpgv --keyring "$fixture/ci-public.gpg" "$fixture/old/dists/stable/InRelease" >/dev/null 2>&1
+gpgv --keyring "$fixture/ci-public.gpg" "$fixture/ci-new/dists/stable/InRelease" >/dev/null 2>&1
+if python3 "$ci_signer" "$fixture/new.deb" "$fixture/ci-wrong-old" --primary-fingerprint "$primary" --signing-fingerprint "$new_signer" --previous "$fixture/old" --transition-previous-signing-fingerprint "$(printf '%040d' 0)" --transition-previous-public-key "$fixture/old-public.gpg" > "$fixture/ci-wrong-old.log" 2>&1; then
+  echo 'CI signer unexpectedly accepted the wrong previous signer' >&2; exit 1
+fi
+test ! -e "$fixture/ci-wrong-old"
+"${gpg_base[@]}" --export-secret-keys "$primary" > "$fixture/secret-key.gpg"
+if python3 "$ci_signer" "$fixture/new.deb" "$fixture/ci-secret" --primary-fingerprint "$primary" --signing-fingerprint "$new_signer" --previous "$fixture/old" --transition-previous-signing-fingerprint "$old_signer" --transition-previous-public-key "$fixture/secret-key.gpg" > "$fixture/ci-secret.log" 2>&1; then
+  echo 'CI signer unexpectedly accepted private material as a previous certificate' >&2; exit 1
+fi
+test ! -e "$fixture/ci-secret"
+unset APT_SIGNING_KEY APT_SIGNING_PASSPHRASE
+
 # Wrong identities and incomplete transitions must not publish an output tree.
-if python3 "$builder" "$fixture/new.deb" "$fixture/wrong-old" --gnupg-home "$home" --fingerprint "$new_signer" --previous "$fixture/old" --previous-signing-fingerprint "$new_signer" --previous-primary-fingerprint "$primary" > "$fixture/wrong-old.log" 2>&1; then
+if python3 "$builder" "$fixture/new.deb" "$fixture/wrong-old" --gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$new_signer" --previous "$fixture/old" --previous-signing-fingerprint "$new_signer" --previous-primary-fingerprint "$primary" > "$fixture/wrong-old.log" 2>&1; then
   echo 'Unexpected acceptance of the wrong previous signer' >&2; exit 1
 fi
 test ! -e "$fixture/wrong-old"
-if python3 "$builder" "$fixture/new.deb" "$fixture/wrong-primary" --gnupg-home "$home" --fingerprint "$new_signer" --previous "$fixture/old" --previous-signing-fingerprint "$old_signer" --previous-primary-fingerprint "$(printf '%040d' 0)" > "$fixture/wrong-primary.log" 2>&1; then
+if python3 "$builder" "$fixture/new.deb" "$fixture/wrong-primary" --gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$new_signer" --previous "$fixture/old" --previous-signing-fingerprint "$old_signer" --previous-primary-fingerprint "$(printf '%040d' 0)" > "$fixture/wrong-primary.log" 2>&1; then
   echo 'Unexpected acceptance of the wrong primary' >&2; exit 1
 fi
 test ! -e "$fixture/wrong-primary"
-if python3 "$builder" "$fixture/new.deb" "$fixture/incomplete" --gnupg-home "$home" --fingerprint "$new_signer" --previous "$fixture/old" --previous-signing-fingerprint "$old_signer" > "$fixture/incomplete.log" 2>&1; then
+if python3 "$builder" "$fixture/new.deb" "$fixture/incomplete" --gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$new_signer" --previous "$fixture/old" --previous-signing-fingerprint "$old_signer" > "$fixture/incomplete.log" 2>&1; then
   echo 'Unexpected acceptance of an incomplete transition' >&2; exit 1
 fi
 test ! -e "$fixture/incomplete"
@@ -87,7 +111,7 @@ test ! -e "$fixture/incomplete"
 "${gpg_base[@]}" --quick-generate-key 'Other fixture <other-rotation@example.invalid>' ed25519 sign 1d >/dev/null 2>&1
 other_signer=$("${gpg_base[@]}" --with-colons --with-fingerprint --list-secret-keys 'other-rotation@example.invalid' | awk -F: '$1=="fpr" {print $10; exit}')
 [[ -n "$other_signer" && "$other_signer" != "$primary" ]]
-if python3 "$builder" "$fixture/new.deb" "$fixture/wrong-new-primary" --gnupg-home "$home" --fingerprint "$other_signer" --previous "$fixture/old" --previous-signing-fingerprint "$old_signer" --previous-primary-fingerprint "$primary" > "$fixture/wrong-new-primary.log" 2>&1; then
+if python3 "$builder" "$fixture/new.deb" "$fixture/wrong-new-primary" --gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$other_signer" --previous "$fixture/old" --previous-signing-fingerprint "$old_signer" --previous-primary-fingerprint "$primary" > "$fixture/wrong-new-primary.log" 2>&1; then
   echo 'Unexpected acceptance of a new signer from another primary' >&2; exit 1
 fi
 test ! -e "$fixture/wrong-new-primary"
