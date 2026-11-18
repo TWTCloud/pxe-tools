@@ -123,6 +123,10 @@ class ClientTransitionFixture(unittest.TestCase):
         stale = update('stale', 'new')
         self.assertNotEqual(stale.returncode, 0, stale.stdout + stale.stderr)
         self.run_transition(apply=True)
+        # During edge propagation, an updated client may still encounter the
+        # old index. The overlap certificate must accept both generations.
+        overlap = update('overlap', 'old')
+        self.assertEqual(overlap.returncode, 0, overlap.stdout + overlap.stderr)
         updated = update('updated', 'new')
         self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
         self.assertEqual(self.anchor.read_bytes(), self.old)

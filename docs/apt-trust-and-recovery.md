@@ -50,7 +50,7 @@ Linux jetable avec `PXE_APT_ROTATION_FIXTURE=1 bash
 tests/integration/test_apt_rotation_rehearsal.sh`. Elle génère ses propres
 clés et paquets ; elle ne modifie aucun état APT système ni aucun secret. Le
 workflow de vérification des PR l'exécute sans accès à l'environnement de
-production ; le workflow de publication reste inchangé. Une nouvelle primaire, une sous-clé renouvelée et une
+production ; son mode de répétition manuel est décrit plus bas. Une nouvelle primaire, une sous-clé renouvelée et une
 compromission exigent des plans distincts ; un certificat compromis ne doit pas
 être utilisé pour authentifier sans examen sa propre relève.
 
@@ -153,7 +153,9 @@ vérification indépendante des empreintes et n'a pas été exécuté sur les
 machines de William.
 
 La fixture vérifie les refus, les interruptions et l'accès APT après
-remplacement. Elle ne constitue pas un programme de migration utilisable sur
+remplacement aux index signés par l'ancienne et par la nouvelle sous-clé. Ce
+test reproduit une alternance locale des index, sans mesurer une propagation
+réelle du Worker. Elle ne constitue pas un programme de migration utilisable sur
 les clients existants : les contrôles de propriété réels, montages, concurrence
 et reprise durable restent à réaliser et recevoir avant toute distribution.
 
