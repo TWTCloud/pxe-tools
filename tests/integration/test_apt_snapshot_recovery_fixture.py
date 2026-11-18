@@ -60,7 +60,7 @@ class SignedRecoveryFixture(unittest.TestCase):
 
     def recover(self, destination, live, assets, downloaded, signer):
         metadata = {'tag_name': 'apt-snapshots', 'draft': False, 'id': 123}
-        fake_subprocess = SimpleNamespace(run=lambda *a, **k: subprocess.CompletedProcess(
+        fake_subprocess = SimpleNamespace(PIPE=subprocess.PIPE, run=lambda *a, **k: subprocess.CompletedProcess(
             a, 0, json.dumps(metadata).encode()))
         validate = lambda path: verifier.validate(path, self.keyring, PRIMARY, signer, allow_expired=True)
         with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'fixture/project'}, clear=False), \
