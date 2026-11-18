@@ -175,6 +175,30 @@ if apt_check stale "$fixture/client/stale.list"; then
 fi
 grep -q 'NO_PUBKEY' "$fixture/client/stale.log"
 apt_check updated "$fixture/client/new.list"
+
+# Rehearse replacing a single client keyring path, not just switching between
+# two source files. All paths and witnesses here belong to this fixture only.
+client_key="$fixture/client/installed-key.gpg"
+client_witness="$fixture/client/installed-key.created"
+cp "$fixture/old-public.gpg" "$client_key"
+ln "$client_key" "$client_witness"
+printf 'deb [signed-by=%s] file:%s/old stable main\n' "$client_key" "$fixture" > "$fixture/client/same-old.list"
+printf 'deb [signed-by=%s] file:%s/new stable main\n' "$client_key" "$fixture" > "$fixture/client/same-new.list"
+apt_check same-old "$fixture/client/same-old.list"
+cp "$fixture/new-public.gpg" "$fixture/client/staged-key.gpg"
+# Before the atomic replacement, an interrupted staging preserves old trust.
+cmp "$client_key" "$fixture/old-public.gpg"
+apt_check staged-old "$fixture/client/same-old.list"
+if apt_check staged-new "$fixture/client/same-new.list"; then
+  echo 'A merely staged key unexpectedly changed client trust' >&2; exit 1
+fi
+mv -T "$fixture/client/staged-key.gpg" "$client_key"
+cmp "$client_key" "$fixture/new-public.gpg"
+cmp "$client_witness" "$fixture/old-public.gpg"
+[[ ! "$client_key" -ef "$client_witness" ]]
+apt_check same-new "$fixture/client/same-new.list"
+# Preserve the old hard-link witness; no ownership of the new key is inferred.
+
 apt-get -o "APT::Sandbox::User=$(id -un)" -o "Dir::Etc::sourcelist=$fixture/client/new.list" \
   -o "Dir::Etc::sourceparts=$fixture/client/parts" -o "Dir::State::lists=$fixture/client/lists-updated" \
   -o "Dir::State::status=$fixture/client/status" -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= \
