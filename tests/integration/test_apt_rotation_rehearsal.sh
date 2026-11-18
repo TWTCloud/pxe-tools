@@ -77,6 +77,9 @@ PXE_ROTATION_FIXTURE_DIR="$fixture" PXE_ROTATION_PRIMARY="$primary" \
   PXE_ROTATION_OLD_SIGNER="$old_signer" PXE_ROTATION_NEW_SIGNER="$new_signer" \
   python3 "$root/tests/integration/test_apt_snapshot_recovery_fixture.py" -v
 PXE_ROTATION_FIXTURE_DIR="$fixture" python3 "$root/tests/integration/test_apt_key_rotation_uninstall_fixture.py" -v
+PXE_ROTATION_FIXTURE_DIR="$fixture" PXE_ROTATION_PRIMARY="$primary" \
+  PXE_ROTATION_OLD_SIGNER="$old_signer" PXE_ROTATION_NEW_SIGNER="$new_signer" \
+  python3 "$root/tests/integration/test_apt_client_transition_fixture.py" -v
 
 # CI transition uses only the new secret subkey; the old certificate is public.
 "${gpg_base[@]}" --armor --export-secret-subkeys "${new_signer}!" > "$fixture/new-secret.asc"
