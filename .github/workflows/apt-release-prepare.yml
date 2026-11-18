@@ -283,3 +283,4 @@ jobs:
         run: |
           set -euo pipefail
           python3 packaging/ci/wait-worker-release.py "$RUNNER_TEMP/candidate/snapshot/dists/stable/InRelease"
+          python3 packaging/ci/wait-worker-client-transitions.py "$RUNNER_TEMP/assets"

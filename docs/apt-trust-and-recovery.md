@@ -198,6 +198,10 @@ aux publications suivantes, tant que les clients hors ligne en ont besoin.
 Une suppression ou un retour à une version antérieure peut rendre une preuve
 indisponible : conserver aussi une copie vérifiée hors Worker. Les sommes et le
 chemin ne remplacent pas une vérification indépendante des empreintes.
+Après un futur déploiement avec des entrées configurées, le workflow attend aussi
+la présence des quatre objets exacts ; ce contrôle est borné et effectué depuis
+un seul point de vue, pas une preuve de propagation mondiale. La liste vide ne
+déclenche aucune requête supplémentaire.
 
 #### Client resté hors ligne
 
