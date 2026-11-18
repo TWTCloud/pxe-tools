@@ -26,7 +26,7 @@ concurrency:
 jobs:
   transition-rehearsal:
     # Explicit manual input: isolated fixtures only, no production environment,
-    # secrets, artifact publication, Worker deployment or real certificates.
+    # secrets, release publication, Worker deployment or real certificates.
     if: github.event_name == 'workflow_dispatch' && inputs.transition_rehearsal == true
     permissions:
       contents: read
@@ -38,11 +38,25 @@ jobs:
           persist-credentials: false
       - name: Install fixture dependencies
         run: sudo apt-get update && sudo apt-get install -y apt-utils dpkg-dev gnupg gpgv python3
-      - name: Rehearse client certificate and static APT staging
+      - name: Stage the source-only client transition candidate
         shell: bash
+        run: bash packaging/ci/stage-client-transition.sh "$RUNNER_TEMP/client-transition"
+      - name: Rehearse bundled client certificate tool and static APT staging
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -euo pipefail
+          (cd "$RUNNER_TEMP/client-transition" && sha256sum --check SHA256SUMS)
+          export PXE_CLIENT_TRANSITION_TOOL="$RUNNER_TEMP/client-transition/packaging/native/prepare-client-key-transition.py"
           PXE_APT_ROTATION_FIXTURE=1 bash tests/integration/test_apt_rotation_rehearsal.sh
+      - name: Retain candidate for review (no certificates)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pxe-client-transition-candidate
+          path: ${{ runner.temp }}/client-transition/
+          if-no-files-found: error
+          retention-days: 7
 
   prepare:
     # Rehearsal must never sign, upload or deploy, even on protected main.

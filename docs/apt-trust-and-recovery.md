@@ -50,7 +50,8 @@ Linux jetable avec `PXE_APT_ROTATION_FIXTURE=1 bash
 tests/integration/test_apt_rotation_rehearsal.sh`. Elle génère ses propres
 clés et paquets ; elle ne modifie aucun état APT système ni aucun secret. Le
 workflow de vérification des PR l'exécute sans accès à l'environnement de
-production ; son mode de répétition manuel est décrit plus bas. Une nouvelle primaire, une sous-clé renouvelée et une
+production ; le workflow de publication possède aussi un mode de répétition
+manuel décrit plus bas. Une nouvelle primaire, une sous-clé renouvelée et une
 compromission exigent des plans distincts ; un certificat compromis ne doit pas
 être utilisé pour authentifier sans examen sa propre relève.
 
@@ -100,8 +101,8 @@ python3 packaging/native/check-apt-key-transition.py \
 
 ### Préparer la distribution aux clients existants
 
-Cette séquence est un cahier des charges à recevoir, pas une commande de
-rotation disponible. Elle concerne uniquement l'ajout d'une sous-clé certifiée
+Cette séquence prépare une transition mais ne constitue pas une autorisation de
+rotation. Elle concerne uniquement l'ajout d'une sous-clé certifiée
 par une primaire non compromise ; le cas d'une nouvelle primaire ou d'une clé
 compromise exige un autre modèle de confiance.
 
@@ -135,13 +136,18 @@ compromise exige un autre modèle de confiance.
    clients. La révocation de l'ancienne sous-clé et toute intervention réelle
    suivent une décision de production distincte.
 
-Le prototype `packaging/native/prepare-client-key-transition.py` permet de
-répéter le remplacement atomique **uniquement** dans un arbre jetable marqué
-sous `/tmp`, avec `PXE_APT_ROTATION_FIXTURE=1`. Avant tout remplacement, il
-vérifie les signatures des deux index de fixture et confirme que le nouveau
-certificat vérifie encore l'ancienne signature. Il refuse les sources partagées
-ou ambiguës, conserve le témoin de la clé initiale et signale un état incertain
-si la synchronisation échoue après remplacement.
+Le candidat `packaging/native/prepare-client-key-transition.py` dispose d'un
+mode `--apply-system` explicite, réservé à root et exigeant l'option
+`--acknowledge-independent-fingerprints`. Avant remplacement, il prend les
+verrous de l'installateur et de dpkg, vérifie les témoins, la configuration APT
+effective, les empreintes et les signatures des deux index fournis. Le nouveau
+certificat doit également accepter l'ancienne signature. Il refuse les sources
+partagées ou ambiguës et les fichiers montés séparément, recontrôle l'état avant
+le remplacement atomique, conserve le témoin initial et signale un état
+incertain si la synchronisation échoue après remplacement. Une nouvelle
+tentative après remplacement est refusée et exige une inspection manuelle.
+Le fichier mis à jour n'est pas revendiqué par l'ancien témoin : le
+désinstallateur le conserve.
 
 Un mode `--inspect-system` prépare une vérification **en lecture seule** d'une
 installation existante : il lit la configuration APT effective, les témoins et
@@ -150,25 +156,33 @@ pas de verrou, ne garantit pas que l'état restera inchangé et ne détecte pas 
 usages éventuels d'un fichier par une invocation APT avec configuration
 alternative. Ce mode n'a été vérifié que sur fixtures ; il ne remplace pas la
 vérification indépendante des empreintes et n'a pas été exécuté sur les
-machines de William.
+machines de William. Les modes système ne prennent pas de chemin racine
+alternatif. L'exécution du candidat sur les machines existantes nécessite une
+transition distinctement autorisée ; elle n'a pas été effectuée ici.
 
 La fixture vérifie les refus, les interruptions et l'accès APT après
 remplacement aux index signés par l'ancienne et par la nouvelle sous-clé. Ce
 test reproduit une alternance locale des index, sans mesurer une propagation
-réelle du Worker. Elle ne constitue pas un programme de migration utilisable sur
-les clients existants : les contrôles de propriété réels, montages, concurrence
-et reprise durable restent à réaliser et recevoir avant toute distribution.
+réelle du Worker. Les essais du chemin d'application utilisent uniquement des
+arbres jetables, avec des interruptions et des conflits de verrous simulés. Le
+candidat ne détecte pas tous les usages de configurations APT alternatives,
+ne vérifie pas la fraîcheur des index fournis et ne coordonne pas les
+processus qui ignorent ses verrous. Il ne prend pas en charge automatiquement
+les clients hors ligne ; la procédure, les garanties de reprise, les dates et
+révocations et la réception sur systèmes représentatifs restent à revoir.
 
 Le workflow de vérification des PR répète localement la construction, la
 signature et la préparation des assets statiques avec des clés jetables. La
 présente PR prépare aussi dans le workflow APT un mode manuel explicite
 `transition_rehearsal` : il lance uniquement cette répétition et exclut les jobs
 `prepare` et `publish`, même sur `main`. Il utilise un groupe de concurrence
-séparé et ne reçoit ni environnement de production ni secret. Sur la branche de
-la PR, le [run 44386009370](https://github.com/williamboglietti/pxe-tools/actions/runs/44386009370)
-a réussi ; `prepare` et `publish` ont été sautés. Ce mode ne raccorde pas encore
-une rotation réelle au signataire de publication et ne déploie ni certificat
-ni Worker. Aucun basculement de production n'est livré.
+séparé et ne reçoit ni environnement de production ni secret. Ce mode assemble
+un dossier de code avec sommes de contrôle, exécute les tests sur sa propre
+copie, puis conserve ce candidat comme artefact Actions temporaire pour revue.
+Il ne contient ni certificat ni secret ; ses sommes seules n'authentifient pas
+sa provenance. Ce mode ne raccorde pas encore une rotation réelle au signataire
+de publication et ne déploie ni certificat ni Worker. Aucun basculement de
+production n'est livré.
 
 ## Instantanés : ce qui est vérifié
 

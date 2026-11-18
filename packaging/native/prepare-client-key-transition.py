@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-only
-"""Inspect APT client trust or rehearse replacement in a disposable fixture.
+"""Prepare an explicitly authorized APT client certificate transition.
 
-The system inspection is read-only. Replacement is deliberately limited to
-fixture roots and is not a production migration tool.
+This candidate requires independently verified fingerprints and signed
+metadata. No automatic download, publication or key rotation is performed.
 """
 from __future__ import annotations
 import argparse
@@ -66,25 +66,25 @@ def inspect_candidate(root: Path, new_certificate: Path, old_release: Path, new_
     return report, old_bytes, new_bytes
 
 
-def rehearse(root: Path, new_certificate: Path, old_release: Path, new_release: Path,
-             primary: str, old_signer: str, new_signer: str, *, apply: bool = False) -> dict:
-    if os.environ.get('PXE_APT_ROTATION_FIXTURE') != '1':
-        raise ValueError('this preparation requires a disposable fixture')
-    marker = root / '.pxe-rotation-fixture'
-    if (not root.is_absolute() or root.is_symlink() or not root.is_dir()
-            or root.resolve().parent != Path('/tmp').resolve()
-            or not root.name.startswith('pxe-rotation-client-')
-            or root.stat().st_uid != os.getuid()
-            or marker.is_symlink() or not marker.is_file()
-            or marker.read_bytes() != b'PXE_TOOLS_ROTATION_DISPOSABLE\n'):
-        raise ValueError('an explicitly marked disposable fixture root is required')
+def apply_locked(root: Path, new_certificate: Path, old_release: Path, new_release: Path,
+                 primary: str, old_signer: str, new_signer: str, *, owner, config_provider,
+                 mounts_provider) -> dict:
+    """Caller must hold the installer and dpkg frontend locks in that order."""
     key = root / KEY_RELATIVE
+    def check_mounts():
+        # A mounted file is not replaced by renaming its parent directory entry.
+        # Also reject mounts directly on the proof/source files.
+        paths = [key, root / 'etc/apt/sources.list.d/pxe-tools.sources']
+        paths.extend(key.parent.glob('.pxe-tools-archive-keyring.*.created'))
+        paths.extend((root / 'etc/apt/sources.list.d').glob('.pxe-tools-sources.*.created'))
+        mounts = set(mounts_provider())
+        if any(str(path) in mounts for path in paths):
+            raise ValueError('APT source, certificate or witness is a mountpoint')
+
+    check_mounts()
     report, old_bytes, new_bytes = inspect_candidate(root, new_certificate, old_release, new_release,
                                                      primary, old_signer, new_signer,
-                                                     owner=None, apt_config=CONFIG)
-    report['applied'] = False
-    if not apply:
-        return report
+                                                     owner=owner, apt_config=config_provider())
     # Keep the old hard-link witness untouched. An interrupted atomic rename
     # leaves either the old or new key at the same path; the new key is never
     # silently claimed as installer-owned by the old witness.
@@ -92,7 +92,8 @@ def rehearse(root: Path, new_certificate: Path, old_release: Path, new_release: 
     temporary = '.pxe-key-transition-' + secrets.token_hex(16)
     created = False
     try:
-        if uninstall.apt_cleanup_plan(root, owner=None, apt_config=CONFIG) != (True, True):
+        check_mounts()
+        if uninstall.apt_cleanup_plan(root, owner=owner, apt_config=config_provider()) != (True, True):
             raise ValueError('source or key ownership changed before replacement')
         current = os.stat(key.name, dir_fd=directory, follow_symlinks=False)
         if not stat.S_ISREG(current.st_mode) or inspector.read_regular(key) != old_bytes:
@@ -105,8 +106,11 @@ def rehearse(root: Path, new_certificate: Path, old_release: Path, new_release: 
             stream.flush()
             os.fchmod(stream.fileno(), 0o644)
             os.fsync(stream.fileno())
-        if uninstall.apt_cleanup_plan(root, owner=None, apt_config=CONFIG) != (True, True):
+        check_mounts()
+        if uninstall.apt_cleanup_plan(root, owner=owner, apt_config=config_provider()) != (True, True):
             raise ValueError('source or key ownership changed during staging')
+        if not os.path.samestat(os.fstat(directory), os.stat(key.parent, follow_symlinks=False)):
+            raise ValueError('key directory changed during staging')
         again = os.stat(key.name, dir_fd=directory, follow_symlinks=False)
         if (again.st_dev, again.st_ino) != (current.st_dev, current.st_ino) or inspector.read_regular(key) != old_bytes:
             raise ValueError('installed key changed during staging')
@@ -118,6 +122,7 @@ def rehearse(root: Path, new_certificate: Path, old_release: Path, new_release: 
             raise RuntimeError('certificate was replaced but directory durability is uncertain; inspect before retrying') from exc
         report['applied'] = True
         report['inspection_only'] = False
+        report['client_keyring_modified'] = True
         return report
     finally:
         if created:
@@ -128,11 +133,44 @@ def rehearse(root: Path, new_certificate: Path, old_release: Path, new_release: 
         os.close(directory)
 
 
+def apply_with_locks(root: Path, new_certificate: Path, old_release: Path, new_release: Path,
+                     primary: str, old_signer: str, new_signer: str, *, owner, config_provider,
+                     mounts_provider) -> dict:
+    # Match the installer's outer flock and the uninstaller's dpkg ordering.
+    with uninstall.installer_lock(root / 'run/lock/pxe-tools-apt-install.lock', owner=owner):
+        with uninstall.dpkg_frontend_lock(root / 'var/lib/dpkg/lock-frontend', owner=owner):
+            return apply_locked(root, new_certificate, old_release, new_release, primary, old_signer,
+                                new_signer, owner=owner, config_provider=config_provider,
+                                mounts_provider=mounts_provider)
+
+
+def rehearse(root: Path, new_certificate: Path, old_release: Path, new_release: Path,
+             primary: str, old_signer: str, new_signer: str, *, apply: bool = False) -> dict:
+    if os.environ.get('PXE_APT_ROTATION_FIXTURE') != '1':
+        raise ValueError('this preparation requires a disposable fixture')
+    marker = root / '.pxe-rotation-fixture'
+    if (not root.is_absolute() or root.is_symlink() or not root.is_dir()
+            or root.resolve().parent != Path('/tmp').resolve()
+            or not root.name.startswith('pxe-rotation-client-')
+            or root.stat().st_uid != os.getuid()
+            or marker.is_symlink() or not marker.is_file()
+            or marker.read_bytes() != b'PXE_TOOLS_ROTATION_DISPOSABLE\n'):
+        raise ValueError('an explicitly marked disposable fixture root is required')
+    if apply:
+        return apply_with_locks(root, new_certificate, old_release, new_release, primary, old_signer,
+                                new_signer, owner=None, config_provider=lambda: CONFIG,
+                                mounts_provider=lambda: ())
+    report, _, _ = inspect_candidate(root, new_certificate, old_release, new_release,
+                                     primary, old_signer, new_signer, owner=None, apt_config=CONFIG)
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument('--fixture-root', type=Path)
     target.add_argument('--inspect-system', action='store_true', help='read-only inspection; never apply')
+    target.add_argument('--apply-system', action='store_true', help='apply a separately authorized transition as root')
     parser.add_argument('--new-certificate', required=True, type=Path)
     parser.add_argument('--old-inrelease', required=True, type=Path)
     parser.add_argument('--new-inrelease', required=True, type=Path)
@@ -140,8 +178,20 @@ def main():
     parser.add_argument('--old-signing-fingerprint', required=True)
     parser.add_argument('--new-signing-fingerprint', required=True)
     parser.add_argument('--apply-to-fixture', action='store_true')
+    parser.add_argument('--acknowledge-independent-fingerprints', action='store_true')
     args = parser.parse_args()
-    if args.inspect_system:
+    if args.apply_system:
+        if args.apply_to_fixture or not args.acknowledge_independent_fingerprints:
+            raise ValueError('system application requires independent fingerprint confirmation and no fixture flag')
+        if os.geteuid() != 0:
+            raise ValueError('system application requires root')
+        os.environ['PATH'] = '/usr/sbin:/usr/bin:/sbin:/bin'
+        result = apply_with_locks(Path('/'), args.new_certificate, args.old_inrelease, args.new_inrelease,
+                                  args.primary_fingerprint, args.old_signing_fingerprint, args.new_signing_fingerprint,
+                                  owner=0, config_provider=uninstall._apt_effective_config,
+                                  mounts_provider=lambda: uninstall.parse_mountinfo(
+                                      Path('/proc/self/mountinfo').read_text(encoding='utf-8')))
+    elif args.inspect_system:
         if args.apply_to_fixture:
             raise ValueError('system inspection cannot apply a replacement')
         # Read-only: no installer lock, APT configuration or keyring is modified.
@@ -160,5 +210,5 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (OSError, ValueError, RuntimeError) as exc:
+    except (OSError, ValueError, RuntimeError, UnicodeError) as exc:
         raise SystemExit(str(exc))

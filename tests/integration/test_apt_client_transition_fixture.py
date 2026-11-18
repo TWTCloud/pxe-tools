@@ -19,7 +19,8 @@ FIXTURE = Path(os.environ['PXE_ROTATION_FIXTURE_DIR'])
 PRIMARY = os.environ['PXE_ROTATION_PRIMARY']
 OLD_SIGNER = os.environ['PXE_ROTATION_OLD_SIGNER']
 NEW_SIGNER = os.environ['PXE_ROTATION_NEW_SIGNER']
-spec = importlib.util.spec_from_file_location('pxe_client_transition_fixture', ROOT / 'packaging/native/prepare-client-key-transition.py')
+tool_path = Path(os.environ.get('PXE_CLIENT_TRANSITION_TOOL', ROOT / 'packaging/native/prepare-client-key-transition.py'))
+spec = importlib.util.spec_from_file_location('pxe_client_transition_fixture', tool_path)
 transition = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(transition)
 
@@ -30,6 +31,8 @@ class ClientTransitionFixture(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         (self.root / '.pxe-rotation-fixture').write_text('PXE_TOOLS_ROTATION_DISPOSABLE\n')
+        (self.root / 'run/lock').mkdir(parents=True)
+        (self.root / 'var/lib/dpkg').mkdir(parents=True)
         keys = self.root / 'etc/apt/keyrings'
         sources = self.root / 'etc/apt/sources.list.d'
         keys.mkdir(parents=True)
@@ -83,6 +86,7 @@ class ClientTransitionFixture(unittest.TestCase):
         self.assertEqual(self.key.stat().st_ino, before.st_ino)
         report = self.run_transition(apply=True)
         self.assertTrue(report['applied'])
+        self.assertTrue(report['client_keyring_modified'])
         self.assertEqual(self.key.read_bytes(), self.new.read_bytes())
         self.assertEqual(self.anchor.read_bytes(), self.old)
         self.assertFalse(os.path.samefile(self.key, self.anchor))
@@ -193,6 +197,83 @@ class ClientTransitionFixture(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.run_transition(apply=True)
         self.assertEqual(self.key.read_bytes(), self.old)
+
+    def test_mount_on_key_or_witness_refuses_replacement(self):
+        for mounted in (self.key, self.anchor, self.source):
+            with self.subTest(mounted=mounted), self.assertRaisesRegex(ValueError, 'mountpoint'):
+                transition.apply_with_locks(self.root, self.new, FIXTURE / 'old/dists/stable/InRelease',
+                                            FIXTURE / 'new/dists/stable/InRelease', PRIMARY, OLD_SIGNER,
+                                            NEW_SIGNER, owner=None, config_provider=lambda: transition.CONFIG,
+                                            mounts_provider=lambda: (str(mounted),))
+            self.assertEqual(self.key.read_bytes(), self.old)
+
+    def test_owner_checks_apply_to_the_same_code_path(self):
+        with self.assertRaisesRegex(ValueError, 'unsafe|ownership'):
+            transition.apply_with_locks(self.root, self.new, FIXTURE / 'old/dists/stable/InRelease',
+                                        FIXTURE / 'new/dists/stable/InRelease', PRIMARY, OLD_SIGNER,
+                                        NEW_SIGNER, owner=-1, config_provider=lambda: transition.CONFIG,
+                                        mounts_provider=lambda: ())
+        self.assertEqual(self.key.read_bytes(), self.old)
+        report = transition.apply_with_locks(self.root, self.new, FIXTURE / 'old/dists/stable/InRelease',
+                                             FIXTURE / 'new/dists/stable/InRelease', PRIMARY, OLD_SIGNER,
+                                             NEW_SIGNER, owner=os.getuid(), config_provider=lambda: transition.CONFIG,
+                                             mounts_provider=lambda: ())
+        self.assertTrue(report['applied'])
+
+    def test_busy_installer_lock_refuses_without_writes(self):
+        with transition.uninstall.installer_lock(self.root / 'run/lock/pxe-tools-apt-install.lock', owner=None):
+            with self.assertRaises(BlockingIOError):
+                self.run_transition(apply=True)
+        self.assertEqual(self.key.read_bytes(), self.old)
+
+    def test_busy_dpkg_frontend_lock_refuses_without_writes(self):
+        lock = self.root / 'var/lib/dpkg/lock-frontend'
+        child = subprocess.Popen([sys.executable, '-c',
+                                  'import fcntl,sys; f=open(sys.argv[1], "w"); '
+                                  'fcntl.lockf(f, fcntl.LOCK_EX); print("locked", flush=True); sys.stdin.read()',
+                                  str(lock)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), 'locked')
+            with self.assertRaises(BlockingIOError):
+                self.run_transition(apply=True)
+        finally:
+            child.communicate(timeout=10)
+        self.assertEqual(self.key.read_bytes(), self.old)
+
+    def test_mount_appearing_during_staging_aborts_without_replacement(self):
+        with patch.object(transition.os, 'replace', wraps=transition.os.replace) as replace:
+            mounts = [(), (), (str(self.key),)]
+            with self.assertRaisesRegex(ValueError, 'mountpoint'):
+                transition.apply_with_locks(self.root, self.new, FIXTURE / 'old/dists/stable/InRelease',
+                                            FIXTURE / 'new/dists/stable/InRelease', PRIMARY, OLD_SIGNER,
+                                            NEW_SIGNER, owner=None, config_provider=lambda: transition.CONFIG,
+                                            mounts_provider=lambda: mounts.pop(0))
+            replace.assert_not_called()
+        self.assertEqual(self.key.read_bytes(), self.old)
+        self.assertFalse(list(self.key.parent.glob('.pxe-key-transition-*')))
+
+    def test_system_application_requires_acknowledgement_before_any_lock(self):
+        argv = ['prepare-client-key-transition.py', '--apply-system', '--new-certificate', str(self.new),
+                '--old-inrelease', str(FIXTURE / 'old/dists/stable/InRelease'),
+                '--new-inrelease', str(FIXTURE / 'new/dists/stable/InRelease'),
+                '--primary-fingerprint', PRIMARY, '--old-signing-fingerprint', OLD_SIGNER,
+                '--new-signing-fingerprint', NEW_SIGNER]
+        with patch.object(sys, 'argv', argv), patch.object(transition, 'apply_with_locks') as apply:
+            with self.assertRaisesRegex(ValueError, 'independent fingerprint'):
+                transition.main()
+            apply.assert_not_called()
+
+    def test_system_application_has_no_fixture_root_override(self):
+        argv = ['prepare-client-key-transition.py', '--apply-system', '--acknowledge-independent-fingerprints',
+                '--new-certificate', str(self.new), '--old-inrelease', str(FIXTURE / 'old/dists/stable/InRelease'),
+                '--new-inrelease', str(FIXTURE / 'new/dists/stable/InRelease'), '--primary-fingerprint', PRIMARY,
+                '--old-signing-fingerprint', OLD_SIGNER, '--new-signing-fingerprint', NEW_SIGNER]
+        with patch.object(sys, 'argv', argv), patch.object(os, 'geteuid', return_value=0), \
+                patch.object(transition, 'apply_with_locks', return_value={}) as apply, \
+                patch.dict(os.environ):
+            transition.main()
+            self.assertEqual(apply.call_args.args[0], Path('/'))
+            self.assertEqual(apply.call_args.kwargs['owner'], 0)
 
 
 if __name__ == '__main__':
