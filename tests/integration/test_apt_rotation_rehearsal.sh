@@ -107,6 +107,11 @@ if apt_check stale "$fixture/client/stale.list"; then
 fi
 grep -q 'NO_PUBKEY' "$fixture/client/stale.log"
 apt_check updated "$fixture/client/new.list"
+apt-get -o "APT::Sandbox::User=$(id -un)" -o "Dir::Etc::sourcelist=$fixture/client/new.list" \
+  -o "Dir::Etc::sourceparts=$fixture/client/parts" -o "Dir::State::lists=$fixture/client/lists-updated" \
+  -o "Dir::State::status=$fixture/client/status" -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= \
+  --simulate install pxe-tools > "$fixture/client/install-simulation.log" 2>&1
+grep -q '^Inst pxe-tools (1.0~fixture2 ' "$fixture/client/install-simulation.log"
 # The updated certificate continues to authenticate the old release.
 gpgv --keyring "$fixture/new-public.gpg" "$fixture/old/dists/stable/InRelease" >/dev/null 2>&1
 echo 'OK disposable old/new signing subkeys, immutable objects and isolated APT client'
