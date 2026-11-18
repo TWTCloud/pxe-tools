@@ -1,5 +1,7 @@
 # Publication APT par Worker
 
+Pour les limites actuelles de rotation de clé, la reprise des instantanés et la portée des essais APT, voir [état de la rotation et reprise](../../docs/apt-trust-and-recovery.md).
+
 Les constructeurs natifs exigent un checkout Git avec son index : les entrées
 copiées doivent être suivies et lisibles selon les modes publics. Une archive
 source sans métadonnées Git est refusée ; reconstruisez depuis un checkout
