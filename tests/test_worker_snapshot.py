@@ -51,6 +51,21 @@ class RecoveryTests(unittest.TestCase):
                         with self.assertRaises(ValueError): module.recover(target, False)
                         self.assertFalse(target.exists())
 
+    def test_alternate_trust_requires_complete_explicit_identities_before_network(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            keyring = root / 'keyring.gpg'
+            keyring.write_bytes(b'fixture')
+            for options in ({'keyring': keyring},
+                            {'keyring': keyring, 'primary': 'A' * 40},
+                            {'keyring': keyring, 'primary': 'A' * 40, 'signing': 'not-a-fingerprint'},
+                            {'keyring': root / 'missing', 'primary': 'A' * 40, 'signing': 'B' * 40}):
+                with self.subTest(options=options), patch.object(module.subprocess, 'run') as remote:
+                    with self.assertRaisesRegex(ValueError, 'complete explicit'):
+                        module.recover(root / 'destination', False, **options)
+                    remote.assert_not_called()
+                    self.assertFalse((root / 'destination').exists())
+
     def test_failed_validation_leaves_no_partial_recovery(self):
         data = archive()
         assets = [{'name': 'snapshot-1-1.tar.gz', 'id': 42, 'size': len(data),

@@ -31,8 +31,10 @@ Par ailleurs :
   précédent soit signé par la même sous-clé que le suivant. Un mode explicite
   de répétition permet de distinguer les deux sous-clés sous une primaire
   épinglée ; il n'est pas raccordé au workflow de production ;
-- la récupération de l'instantané et les workflows épinglent encore les
-  empreintes courantes. La vérification de provenance préparée accepte une
+- les workflows de production épinglent encore les empreintes courantes. La
+  récupération préparée accepte d'autres identités uniquement si le trousseau,
+  la primaire et le signataire sont tous fournis explicitement ; ses valeurs
+  par défaut restent inchangées. La vérification de provenance accepte une
   deuxième sous-clé uniquement si elle est explicitement épinglée ; la
   signature reste vérifiée contre le signataire attendu ;
 - le désinstallateur suit la provenance du trousseau par une empreinte du

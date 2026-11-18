@@ -32,7 +32,6 @@ def load(name, relative):
 
 
 snapshot = load('pxe_fixture_snapshot', 'packaging/ci/worker-snapshot.py')
-verifier = load('pxe_fixture_validator', 'packaging/native/prepare-static-apt.py')
 
 
 def archive(path):
@@ -62,13 +61,11 @@ class SignedRecoveryFixture(unittest.TestCase):
         metadata = {'tag_name': 'apt-snapshots', 'draft': False, 'id': 123}
         fake_subprocess = SimpleNamespace(PIPE=subprocess.PIPE, run=lambda *a, **k: subprocess.CompletedProcess(
             a, 0, json.dumps(metadata).encode()))
-        validate = lambda path: verifier.validate(path, self.keyring, PRIMARY, signer, allow_expired=True)
         with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'fixture/project'}, clear=False), \
              patch.object(snapshot, 'subprocess', fake_subprocess), \
              patch.object(snapshot, 'live_release', return_value=live), \
-             patch.object(snapshot, 'gh', side_effect=[json.dumps([assets]).encode(), downloaded]), \
-             patch.object(snapshot, 'validate_recovered', side_effect=validate):
-            snapshot.recover(destination, False)
+             patch.object(snapshot, 'gh', side_effect=[json.dumps([assets]).encode(), downloaded]):
+            snapshot.recover(destination, False, keyring=self.keyring, primary=PRIMARY, signing=signer)
 
     def test_upload_interrupted_before_deploy_refuses_stale_live_and_resumes_after_deploy(self):
         assets = [asset(1, self.old_archive), asset(2, self.new_archive)]
@@ -84,6 +81,14 @@ class SignedRecoveryFixture(unittest.TestCase):
             after = {p.relative_to(target / 'snapshot'): hashlib.sha256(p.read_bytes()).digest()
                      for p in (target / 'snapshot').rglob('*') if p.is_file()}
             self.assertEqual(before, after)
+
+    def test_wrong_pinned_signer_is_rejected_even_when_keyring_contains_both(self):
+        with tempfile.TemporaryDirectory(prefix='pxe-wrong-signer-') as tmp:
+            target = Path(tmp) / 'previous'
+            with self.assertRaises(ValueError):
+                self.recover(target, self.new_release, [asset(2, self.new_archive)],
+                             self.new_archive, OLD_SIGNER)
+            self.assertFalse(target.exists())
 
     def test_modified_object_is_rejected_without_exposing_a_partial_snapshot(self):
         with tempfile.TemporaryDirectory(prefix='pxe-corrupt-fixture-') as tmp:
