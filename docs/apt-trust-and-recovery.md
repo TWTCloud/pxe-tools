@@ -198,6 +198,8 @@ aux publications suivantes, tant que les clients hors ligne en ont besoin.
 Une suppression ou un retour à une version antérieure peut rendre une preuve
 indisponible : conserver aussi une copie vérifiée hors Worker. Les sommes et le
 chemin ne remplacent pas une vérification indépendante des empreintes.
+Les [assets Cloudflare appartiennent à une version du Worker](https://developers.cloudflare.com/workers/static-assets/)
+et peuvent être servis depuis des versions différentes pendant la propagation.
 Après un futur déploiement avec des entrées configurées, le workflow attend aussi
 la présence des quatre objets exacts ; ce contrôle est borné et effectué depuis
 un seul point de vue, pas une preuve de propagation mondiale. La liste vide ne
@@ -221,6 +223,12 @@ déclenche aucune requête supplémentaire.
    conserver les témoins et demander une inspection. Après reconnexion, un
    `apt update` séparé valide le dépôt courant ; la migration seule ne prouve
    ni sa disponibilité, ni l'installation d'un paquet.
+
+Le candidat actuel traite une seule transition depuis le certificat attesté par
+le témoin initial. Il ne réenchaîne pas automatiquement plusieurs rotations :
+un client ayant manqué plusieurs générations nécessite un plan spécifique et
+une inspection manuelle. La disponibilité et la validité futures des preuves
+conservées doivent être vérifiées avant chaque nouvelle transition.
 
 Le candidat contient aussi `stage-client-transition-data.py`, qui prépare
 localement un dossier de deux certificats publics et deux index signés après
