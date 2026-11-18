@@ -605,14 +605,27 @@ class RemovalJournal:
             raise ValueError('invalid removal journal')
         record = value['record']
         if record is not None:
-            if (not isinstance(record, dict) or record.get('format') != 2 or record.get('base_phase') != 'complete'
-                    or not isinstance(record.get('directories'), dict) or set(value['paths']) - set(record['directories'])):
+            legacy = isinstance(record, dict) and record.get('format') == 3
+            if (not isinstance(record, dict) or not isinstance(record.get('directories'), dict)
+                    or set(value['paths']) - set(record['directories'])
+                    or (legacy and (set(record) != {'format', 'source', 'directories', 'preserved'}
+                                    or record.get('source') != 'explicit-legacy-consent'
+                                    or not isinstance(record.get('preserved'), list)
+                                    or any(not isinstance(path, str) for path in record['preserved'])
+                                    or len(record['preserved']) != len(set(record['preserved']))
+                                    or set(record['preserved']) - {'/var/log/pxe-tools'}
+                                    or set(record['preserved']) & set(record['directories'])
+                                    or set(value['paths']) != set(record['directories'])
+                                    or 'ownership' not in value['metadata']))
+                    or (not legacy and (record.get('format') != 2 or record.get('base_phase') != 'complete'))):
                 raise ValueError('invalid removal ownership record')
             for path in value['paths']:
                 proof = record['directories'][path]
-                if (not isinstance(proof, dict) or set(proof) != {'dev', 'ino', 'btime_sec', 'btime_nsec', 'nonce'}
+                fields = {'dev', 'ino', 'btime_sec', 'btime_nsec'} | (set() if legacy else {'nonce'})
+                if (not isinstance(proof, dict) or set(proof) != fields
                         or any(type(proof[k]) is not int or proof[k] < 0 for k in ('dev', 'ino', 'btime_sec', 'btime_nsec'))
-                        or not re.fullmatch('[0-9a-f]{64}', proof['nonce'] or '')):
+                        or proof['ino'] == 0 or proof['btime_nsec'] >= 1000000000
+                        or (not legacy and not re.fullmatch('[0-9a-f]{64}', proof['nonce'] or ''))):
                     raise ValueError('invalid removal generation proof')
         elif value['paths']:
             raise ValueError('removal paths have no ownership record')
@@ -1316,6 +1329,25 @@ def proven_tree_paths(root, *, owner=0, record=None, generation_matches=None):
     """Identify only directories recorded by the creation transaction."""
     if record is None:
         return ()
+    if isinstance(record, dict) and record.get('format') == 3:
+        if (set(record) != {'format', 'source', 'directories', 'preserved'} or
+                record.get('source') != 'explicit-legacy-consent' or generation_matches is None or
+                not isinstance(record.get('directories'), dict) or not isinstance(record.get('preserved'), list) or
+                any(not isinstance(path, str) for path in record['preserved']) or
+                len(record['preserved']) != len(set(record['preserved'])) or
+                set(record['preserved']) - {'/var/log/pxe-tools'} or
+                set(record['preserved']) & set(record['directories'])):
+            raise ValueError('invalid explicitly authorised legacy identity snapshot')
+        for path, expected in record['directories'].items():
+            if (path not in TREES or not isinstance(expected, dict) or
+                    set(expected) != {'dev', 'ino', 'btime_sec', 'btime_nsec'} or
+                    any(type(expected[key]) is not int or expected[key] < 0 for key in expected) or
+                    expected['ino'] == 0 or expected['btime_nsec'] >= 1000000000):
+                raise ValueError('invalid legacy directory identity')
+            remove_tree(root, path, mounts=(), owner=owner, dry_run=True,
+                        expected=expected, generation_matches=generation_matches)
+        return tuple(sorted(p for p in record['directories'] if p != '/var/lib/pxe-tools-native') +
+                     (['/var/lib/pxe-tools-native'] if '/var/lib/pxe-tools-native' in record['directories'] else []))
     if (not isinstance(record, dict) or record.get('format') != 2 or generation_matches is None or
             record.get('base_phase') != 'complete' or not isinstance(record.get('directories'), dict)):
         raise ValueError('ownership journal is incomplete or invalid')
@@ -1337,6 +1369,86 @@ def proven_tree_paths(root, *, owner=0, record=None, generation_matches=None):
     # Keep the runtime, which contains the removal journal and lock, until last.
     return tuple(sorted((p for p in eligible if p != '/var/lib/pxe-tools-native')) +
                  (['/var/lib/pxe-tools-native'] if '/var/lib/pxe-tools-native' in eligible else []))
+
+
+def legacy_birth_identity(fd):
+    """Snapshot identity for an operator-approved legacy path; not proof of creation."""
+    import ctypes
+    import struct
+    try:
+        info = os.fstat(fd)
+        libc = ctypes.CDLL(None, use_errno=True)
+        call = libc.statx
+        call.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p)
+        call.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(256)
+        if call(fd, b'', 0x1000, 0x100 | 0x800, ctypes.byref(buffer)) != 0:
+            raise ValueError('cannot inspect legacy directory generation')
+        data = buffer.raw
+        mask = struct.unpack_from('=I', data, 0)[0]
+        ino = struct.unpack_from('=Q', data, 32)[0]
+        sec, nsec = struct.unpack_from('=qI', data, 80)
+        major, minor = struct.unpack_from('=II', data, 136)
+        if (mask & (0x100 | 0x800) != (0x100 | 0x800) or
+                (os.makedev(major, minor), ino) != (info.st_dev, info.st_ino) or
+                sec < 0 or not 0 <= nsec < 1000000000):
+            raise ValueError('legacy directory birth identity is unavailable')
+        return {'dev': info.st_dev, 'ino': info.st_ino, 'btime_sec': sec, 'btime_nsec': nsec}
+    except (AttributeError, OSError, struct.error) as exc:
+        raise ValueError('legacy directory birth identity is unavailable') from exc
+
+
+def legacy_identity_matches(fd, expected):
+    try:
+        return legacy_birth_identity(fd) == expected
+    except (OSError, ValueError):
+        return False
+
+
+def snapshot_legacy_paths(root, *, mounts, owner=0, opener=None, identity=legacy_birth_identity):
+    """Inspect only allowlisted directories, without writing or claiming provenance."""
+    import sys
+    root = Path(root)
+    if opener is None:
+        if sys.platform == 'linux':
+            opener = _openat2_no_mount
+        elif root != Path('/') and owner != 0:
+            opener = lambda fd, name: os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        else:
+            raise RuntimeError('Linux openat2 is required for legacy removal')
+    records = {}
+    preserved = []
+    for path in sorted(TREES):
+        target = root / path.lstrip('/')
+        if not target.exists() and not target.is_symlink():
+            continue
+        # Ubuntu commonly has root:syslog 0775 on /var/log. A writable parent
+        # can rename this target while removal is in progress, so preserve it.
+        if path == '/var/log/pxe-tools' and owner is not None:
+            parent = root / 'var/log'
+            info = parent.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or info.st_mode & 0o022):
+                preserved.append(path)
+                continue
+        remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, opener=opener)
+        parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for name in Path(path).parts[1:]:
+                child = opener(parent, name)
+                os.close(parent)
+                parent = child
+            records[path] = identity(parent)
+        finally:
+            os.close(parent)
+    return {'format': 3, 'source': 'explicit-legacy-consent', 'directories': records, 'preserved': preserved}
+
+
+def legacy_plan_hash(record, source, key):
+    """Bind previewed legacy paths, preserved paths and APT cleanup decisions."""
+    import hashlib
+    import json
+    plan = {'record': record, 'apt_source': source, 'apt_key': key}
+    return hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
 
 
 def recorded_generation_matches(fd, proof):
@@ -1370,15 +1482,27 @@ def recorded_generation_matches(fd, proof):
         return False
 
 
-def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, apply=False, record=None, ownership=None, reconciler=None, account_lookup=None):
+def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, apply=False, record=None, ownership=None, reconciler=None, account_lookup=None, allow_legacy=False, legacy_expected=None, legacy_snapshotter=snapshot_legacy_paths, legacy_matcher=legacy_identity_matches):
     """Prepare a bounded transaction. The root override is internal for tests."""
     root = Path(root)
-    generation_matches = ownership.generation.matches if ownership is not None else None
+    original_record = record
+    legacy = allow_legacy and record == {'format': 2, 'directories': {}}
+    if legacy:
+        if ownership is None:
+            raise RuntimeError('legacy ownership journal is unavailable')
+        record = legacy_snapshotter(root, mounts=mounts_provider(), owner=owner)
+    generation_matches = legacy_matcher if legacy else ownership.generation.matches if ownership is not None else None
     paths = proven_tree_paths(root, owner=owner, record=record, generation_matches=generation_matches)
     mounts = mounts_provider()
     for path in paths:
         remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, expected=record['directories'][path], generation_matches=generation_matches)
     source, key = apt_cleanup_plan(root, owner=owner)
+    if legacy:
+        # The preview explicitly preserves APT configuration for this legacy
+        # path, even if a witness appears before cleanup or during recovery.
+        source = key = False
+    if legacy and apply and legacy_expected != legacy_plan_hash(record, source, key):
+        raise ValueError('legacy paths or APT plan changed or were not approved; inspect a fresh preview')
     preserved = tuple(path for path in sorted(TREES) if path not in paths and
                       ((root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink()))
     # Issue #61 records nginx state outside the application runtime. Until its
@@ -1392,10 +1516,11 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
     elif nginx_present and not apply:
         with nginx_journal_guard(root, reconciler, owner=owner, mounts=mounts):
             pass
-    plan = {'trees': paths, 'source': source, 'key': key, 'preserved': preserved}
+    plan = {'trees': paths, 'source': source, 'key': key, 'preserved': preserved, 'legacy': legacy,
+            'legacy_plan_sha256': legacy_plan_hash(record, source, key) if legacy else None}
     if not apply:
         return plan
-    if preserved:
+    if preserved and (not legacy or set(preserved) != set(record['preserved'])):
         raise RuntimeError('Cannot establish ownership of all instance paths; no package was removed')
     critical = ('/etc/pxe-tools', '/var/lib/pxe-tools', '/var/lib/pxe-tools-native')
     if lifecycle is None and any((root / p.lstrip('/')).exists() or
@@ -1413,10 +1538,10 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                 directory = root / 'var/lib/pxe-tools-ownership'
                 if directory.exists() or directory.is_symlink():
                     raise RuntimeError('Ownership journal appeared; no package was removed')
-            if record is not None and ownership._read(ownership_fd) != record:
+            if record is not None and ownership._read(ownership_fd) != original_record:
                 raise RuntimeError('ownership journal changed; no package was removed')
             if any(((root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink())
-                   for path in TREES if path not in paths):
+                   for path in TREES if path not in paths and (not legacy or path not in record['preserved'])):
                 raise RuntimeError('Unproven instance paths appeared; no package was removed')
             ownership_identities = _journal_identities(ownership_fd, owner) if record is not None else None
             ownership_contents = _journal_bytes(ownership_fd) if record is not None else None
@@ -1439,7 +1564,7 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                 with upgrade_guard(lifecycle, owner=owner), removal_journal(
                         root, record, paths, ownership_identities, ownership_contents,
                         nginx_journal, owner=owner) as journal:
-                    if record is not None and record.get('account') is not None and account_lookup is None:
+                    if (legacy or (record is not None and record.get('account') is not None)) and account_lookup is None:
                         raise RuntimeError('Ansible account inventory is unavailable; no package was removed')
                     storage = storage_snapshot(lifecycle)
                     outside = external_paths(lifecycle, paths)
@@ -1447,7 +1572,10 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                         raise RuntimeError('external storage requires review; no package was removed')
                     if account_lookup is not None:
                         accounts = account_lookup()
-                        validate_account(record or {}, accounts['accounts'], accounts['groups'], accounts['process_uids'])
+                        if legacy:
+                            validate_legacy_account(accounts['accounts'], accounts['groups'], accounts['process_uids'])
+                        else:
+                            validate_account(record or {}, accounts['accounts'], accounts['groups'], accounts['process_uids'])
                     def after_stop(transaction):
                         return persistent_masks(root, runner, units, transaction,
                                                 owner=owner, mounts=mounts_provider())
@@ -1460,7 +1588,10 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                             raise RuntimeError('external storage requires review; no package was removed')
                         if account_lookup is not None:
                             accounts = account_lookup()
-                            validate_account(record or {}, accounts['accounts'], accounts['groups'], accounts['process_uids'])
+                            if legacy:
+                                validate_legacy_account(accounts['accounts'], accounts['groups'], accounts['process_uids'])
+                            else:
+                                validate_account(record or {}, accounts['accounts'], accounts['groups'], accounts['process_uids'])
                         mounts = mounts_provider()
                         for path in paths:
                             remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, expected=record['directories'][path], generation_matches=generation_matches)
@@ -1471,7 +1602,7 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                         journal.state['phase'] = 'packages_absent'
                         journal.save()
                         try:
-                            if account_lookup is not None and record is not None:
+                            if account_lookup is not None and record is not None and not legacy:
                                 journal.state['steps']['account'] = 'intent'
                                 journal.save()
                                 remove_account(record, runner, account_lookup)
@@ -1494,7 +1625,8 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                                     journal.save()
                             journal.state['steps']['apt'] = 'intent'
                             journal.save()
-                            source_removed, key_removed = remove_apt_config(root, mounts=mounts_provider(), owner=owner)
+                            source_removed, key_removed = ((False, False) if legacy else
+                                                           remove_apt_config(root, mounts=mounts_provider(), owner=owner))
                             journal.state['steps']['apt'] = 'done'
                             journal.save()
                             plan.update(source_removed=source_removed, key_removed=key_removed)
@@ -1523,7 +1655,7 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                                 raise RuntimeError('Package purge succeeded, but nginx provenance is preserved: ' + str(error)) from error
                         if record is not None:
                             try:
-                                if ownership._read(ownership_fd) != record:
+                                if ownership._read(ownership_fd) != original_record:
                                     raise ValueError('ownership journal changed')
                                 journal.state['metadata']['ownership']['intent'] = True
                                 journal.save()
@@ -1866,17 +1998,27 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
             with ExitStack() as stack:
                 if state['record'] is not None:
                     ownership_fd = stack.enter_context(ownership._locked(create=False))
-                    if ownership._read(ownership_fd) != state['record']:
+                    legacy = state['record'].get('format') == 3
+                    expected_record = {'format': 2, 'directories': {}} if legacy else state['record']
+                    if ownership._read(ownership_fd) != expected_record:
                         raise ValueError('ownership journal changed before retry')
+                    if legacy:
+                        import hashlib
+                        item = state['metadata']['ownership']
+                        if (_journal_identities(ownership_fd, owner) != {k: tuple(v) for k, v in item['identities'].items()}
+                                or hashlib.sha256(_journal_bytes(ownership_fd)).hexdigest() != item['sha256']):
+                            raise ValueError('legacy ownership journal changed before retry')
                 else:
+                    legacy = False
                     stack.enter_context(ownership.hold_lock())
                     directory = root / 'var/lib/pxe-tools-ownership'
                     if directory.exists() or directory.is_symlink():
                         raise ValueError('ownership journal appeared before retry')
-                matches = generation_matches or ownership.generation.matches
+                matches = generation_matches or (legacy_identity_matches if legacy else ownership.generation.matches)
                 proven_tree_paths(root, owner=owner, record=state['record'], generation_matches=matches)
+                excluded = set(state['record']['preserved']) if legacy else set()
                 if any(((root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink())
-                       for path in TREES if path not in state['paths']):
+                       for path in TREES if path not in state['paths'] and path not in excluded):
                     raise ValueError('unproven instance paths appeared before retry')
                 stack.enter_context(installer_lock(lifecycle.home / 'lock', owner=owner))
                 required = (state['worker'] is not None or bool(state['masks'])) and state['restore'] != 'done'
@@ -1902,7 +2044,7 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
                     journal.save()
                 remove_legacy()
                 journal.finish(aborted=True)
-            return 'retry'
+            return 'retry-legacy' if legacy else 'retry'
         if not packages_absent(runner):
             recovery_masks(root, runner, journal, units, owner=owner, mounts=mounts_provider(), dry_run=True)
             for unit in units:
@@ -1913,8 +2055,8 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
             raise RuntimeError('Package purge is incomplete. Inspect sudo dpkg --audit; after resolving errors, '
                                'run sudo dpkg --purge pxe-tools-ansible pxe-tools, then retry --resume. '
                                'Keep the PXE Tools services masked until recovery finishes.')
-        generation_matches = generation_matches or recorded_generation_matches
         record = state['record']
+        generation_matches = generation_matches or (legacy_identity_matches if record is not None and record.get('format') == 3 else recorded_generation_matches)
         paths = state['paths']
         with ExitStack() as stack:
             for key in ('ownership', 'nginx'):
@@ -1984,7 +2126,8 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
                 state['steps'][path] = 'done'; journal.save()
             if state['steps']['apt'] != 'done':
                 state['steps']['apt'] = 'intent'; journal.save()
-                remove_apt_config(root, mounts=mounts_provider(), owner=owner)
+                if record is None or record.get('format') != 3:
+                    remove_apt_config(root, mounts=mounts_provider(), owner=owner)
                 state['steps']['apt'] = 'done'; journal.save()
             for key, item in state['metadata'].items():
                 item['intent'] = True; journal.save()
@@ -1997,6 +2140,7 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
 
 def parse_arguments(argv):
     import argparse
+    import re
     parser = argparse.ArgumentParser(description=(
         'Remove the native APT packages and recognised PXE Tools instance data. '
         'Data, database, local secrets, TLS/MOK files and local upgrade snapshots '
@@ -2006,7 +2150,16 @@ def parse_arguments(argv):
     choice.add_argument('--dry-run', action='store_true', help='inspect the proposed removal (default)')
     choice.add_argument('--yes', action='store_true', help='explicitly authorise destructive removal')
     choice.add_argument('--resume', action='store_true', help='resume an interrupted, authorised removal')
-    return parser.parse_args(argv)
+    parser.add_argument('--allow-legacy', action='store_true',
+                        help='include legacy paths explicitly reviewed by the operator')
+    parser.add_argument('--legacy-plan-sha256', help='SHA-256 printed by the legacy preview')
+    result = parser.parse_args(argv)
+    if result.resume and result.allow_legacy:
+        parser.error('--resume uses the existing receipt and cannot accept --allow-legacy')
+    if result.legacy_plan_sha256 and (not result.yes or not result.allow_legacy or
+                                     not re.fullmatch(r'[0-9a-f]{64}', result.legacy_plan_sha256)):
+        parser.error('--legacy-plan-sha256 requires --yes, --allow-legacy and a full SHA-256')
+    return result
 
 
 def read_package_helper(root, filename, *, owner=0):
@@ -2656,6 +2809,32 @@ def validate_account(record, accounts, groups, process_uids):
     return proof
 
 
+def validate_legacy_account(accounts, groups, process_uids):
+    """Preserve the legacy account, refusing a shared or in-use workspace."""
+    name = 'pxe-tools-ansible'
+    if not isinstance(accounts, list) or not isinstance(groups, list):
+        raise ValueError('incomplete legacy account inventory')
+    matches = [entry for entry in accounts if entry.pw_name == name]
+    named_groups = [group for group in groups if group.gr_name == name]
+    if len(matches) > 1 or len(named_groups) > 1:
+        raise ValueError('duplicate legacy account or group')
+    if not matches:
+        if named_groups and (named_groups[0].gr_mem or
+                             any(entry.pw_gid == named_groups[0].gr_gid for entry in accounts)):
+            raise ValueError('legacy group is shared')
+        return
+    account = matches[0]
+    if (account.pw_uid <= 0 or account.pw_gid <= 0 or account.pw_uid in process_uids or
+            account.pw_dir != '/var/lib/pxe-tools-ansible/home' or account.pw_shell != '/usr/sbin/nologin'
+            or len(named_groups) != 1 or named_groups[0].gr_gid != account.pw_gid
+            or set(named_groups[0].gr_mem) - {name}
+            or any(other.pw_name != name and (other.pw_uid == account.pw_uid or other.pw_gid == account.pw_gid)
+                   for other in accounts)
+            or any(group.gr_name != name and (group.gr_gid == account.pw_gid or name in group.gr_mem)
+                   for group in groups)):
+        raise ValueError('legacy Ansible account or workspace is shared, changed or in use')
+
+
 def _validate_userdel_configuration(snapshot):
     import re
     text = snapshot.get('login_defs')
@@ -3044,6 +3223,9 @@ def main(argv):
                 run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=True,
                               record=record, ownership=ownership, reconciler=reconciler,
                               account_lookup=account_lookup)
+            if result == 'retry-legacy':
+                print('Legacy interruption safely reverted; run a new preview and confirmation.')
+                return 0
         print('No interrupted removal was found.' if result == 'nothing' else 'Interrupted removal resumed.')
         return 0
     lifecycle = load_lifecycle(Path('/'))
@@ -3053,18 +3235,25 @@ def main(argv):
         record = ownership.read() if ownership is not None else None
     except FileNotFoundError:
         record = None
-    preview = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=False, record=record, ownership=ownership, reconciler=reconciler)
+    preview = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=False, record=record, ownership=ownership, reconciler=reconciler, allow_legacy=args.allow_legacy)
     outside = external_paths(lifecycle, preview['trees']) if lifecycle is not None else ()
     outside = tuple(path for path in outside if Path(path).exists() or Path(path).is_symlink())
     print('WARNING: removal destroys the PXE Tools database, configuration, local keys, certificates,')
     print('boot files and local upgrade snapshots in recognised paths. Keep a verified external backup.')
     print('Package removal: pxe-tools-ansible and pxe-tools; dependencies are retained.')
+    if preview['legacy']:
+        print('LEGACY INSTALLATION: listed paths have no creation proof; explicit operator approval is required.')
+        print('The existing Ansible account and group will be preserved.')
+        print('Legacy plan SHA256:', preview['legacy_plan_sha256'])
     for path in preview['trees']:
         print('Candidate data path, if present:', path)
     for path in sorted(set(preview['preserved']) | set(outside)):
         print('Preserved for manual review:', path)
-    print('APT source recognised:', 'yes' if preview['source'] else 'no; absent or preserved')
-    print('APT key unshared:', 'yes' if preview['key'] else 'no; absent or preserved')
+    if preview['legacy']:
+        print('APT source and signing key are preserved for this legacy installation.')
+    else:
+        print('APT source recognised:', 'yes' if preview['source'] else 'no; absent or preserved')
+        print('APT key unshared:', 'yes' if preview['key'] else 'no; absent or preserved')
     print('Externally enrolled firmware keys and external backups are not modified.')
     if not args.yes:
         print('Preview only. Service state and active tasks will be checked during removal.')
@@ -3075,7 +3264,7 @@ def main(argv):
         raise RuntimeError('Configured paths outside recognised roots require review; no package was removed')
     with installer_lock(Path('/run/lock/pxe-tools-apt-install.lock')):
         account_lookup = lambda: account_snapshot(Path('/'), list(pwd.getpwall()), list(grp.getgrall()))
-        result = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=True, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup)
+        result = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=True, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy, legacy_expected=args.legacy_plan_sha256)
     print('Requested package purge completed; recognised data paths were removed where present.')
     print('APT source removed:', 'yes' if result['source_removed'] else 'no')
     print('APT key removed:', 'yes' if result['key_removed'] else 'no')

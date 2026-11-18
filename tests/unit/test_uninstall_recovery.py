@@ -47,6 +47,71 @@ class InterruptedRemoval(unittest.TestCase):
             account_lookup=self.fixture.accounts.snapshot,
             generation_matches=self.store.generation.matches)
 
+    def prepare_legacy(self):
+        with self.store._locked(create=False) as directory:
+            self.store._write(directory, {'format': 2, 'directories': {}})
+        def identity(fd):
+            st = os.fstat(fd)
+            return {'dev': st.st_dev, 'ino': st.st_ino, 'btime_sec': 1, 'btime_nsec': 1}
+        def matches(fd, proof):
+            st = os.fstat(fd)
+            return (st.st_dev, st.st_ino) == (proof['dev'], proof['ino'])
+        def opener(fd, name):
+            return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        def snapshot(root, *, mounts, owner):
+            return uninstall.snapshot_legacy_paths(root, mounts=mounts, owner=owner,
+                                                   opener=opener, identity=identity)
+        common = {'owner': os.geteuid(), 'record': self.store.read(), 'ownership': self.store,
+                  'account_lookup': self.fixture.accounts.snapshot, 'allow_legacy': True,
+                  'legacy_snapshotter': snapshot, 'legacy_matcher': matches}
+        preview = uninstall.run_uninstall(self.root, self.fixture.runner, self.fixture.life,
+                                         UNITS, lambda: (), apply=False, **common)
+        return common, preview, matches
+
+    def test_legacy_interruption_after_purge_can_resume_without_claiming_account(self):
+        common, preview, matches = self.prepare_legacy()
+        original = uninstall.remove_tree
+        def interrupt(root, path, **kwargs):
+            if path == '/etc/pxe-tools' and not kwargs.get('dry_run', False):
+                raise OSError('simulated interruption')
+            return original(root, path, **kwargs)
+        with patch.object(uninstall, 'remove_tree', side_effect=interrupt):
+            with self.assertRaisesRegex(RuntimeError, 'purge succeeded'):
+                uninstall.run_uninstall(self.root, self.fixture.runner, self.fixture.life, UNITS, lambda: (),
+                                        apply=True, legacy_expected=preview['legacy_plan_sha256'], **common)
+        self.assertTrue(self.receipt.is_file())
+        self.assertTrue(self.data.is_file())
+        self.assertIsNotNone(self.fixture.accounts.account)
+        state = json.loads(self.receipt.read_text())
+        self.assertEqual(state['record']['source'], 'explicit-legacy-consent')
+        uninstall.resume_uninstall(self.root, self.fixture.runner, UNITS, lambda: (),
+                                   owner=os.geteuid(), account_lookup=self.fixture.accounts.snapshot,
+                                   generation_matches=matches, lifecycle=self.fixture.life)
+        self.assertFalse(self.data.exists())
+        self.assertIsNotNone(self.fixture.accounts.account)
+        self.fixture.assert_external_survives()
+
+    def test_legacy_interruption_before_purge_requires_fresh_preview(self):
+        common, preview, matches = self.prepare_legacy()
+        original = os.symlink
+        def interrupt(source, destination, *args, **kwargs):
+            if os.fspath(destination).startswith('.pxe-uninstall-'):
+                raise uninstall.BarrierRecoveryRequired('simulated interruption')
+            return original(source, destination, *args, **kwargs)
+        with patch.object(os, 'symlink', side_effect=interrupt):
+            with self.assertRaises(uninstall.BarrierRecoveryRequired):
+                uninstall.run_uninstall(self.root, self.fixture.runner, self.fixture.life, UNITS, lambda: (),
+                                        apply=True, legacy_expected=preview['legacy_plan_sha256'], **common)
+        self.assertTrue(self.receipt.is_file())
+        self.assertTrue(self.data.is_file())
+        self.assertEqual(uninstall.resume_uninstall(
+            self.root, self.fixture.runner, UNITS, lambda: (), owner=os.geteuid(),
+            lifecycle=self.fixture.life, ownership=self.store,
+            account_lookup=self.fixture.accounts.snapshot, generation_matches=matches), 'retry-legacy')
+        self.assertFalse(self.receipt.exists())
+        self.assertTrue(self.data.is_file())
+        self.assertIn('pxe-tools', self.fixture.package_states)
+
     def assert_barrier_held(self):
         for unit in UNITS:
             path = self.root / 'etc/systemd/system' / unit

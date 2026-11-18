@@ -823,6 +823,74 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue((self.data / 'db').exists())
         self.assertEqual(self.events, [])
 
+    def prepare_legacy(self):
+        self.record = {'format': 2, 'directories': {}}
+        with self.ownership._locked(create=False) as directory:
+            self.ownership._write(directory, self.record)
+        def identity(fd):
+            info = os.fstat(fd)
+            return {'dev': info.st_dev, 'ino': info.st_ino, 'btime_sec': 1, 'btime_nsec': 1}
+        def opener(parent, name):
+            return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        def snapshot(root, *, mounts, owner):
+            return uninstall.snapshot_legacy_paths(root, mounts=mounts, owner=owner,
+                                                   opener=opener, identity=identity)
+        return {'allow_legacy': True, 'legacy_snapshotter': snapshot, 'legacy_matcher': fixture_matches,
+                'account_lookup': lambda: {'accounts': [], 'groups': [], 'process_uids': set()}}
+
+    def test_legacy_requires_opt_in_and_matching_approved_preview(self):
+        options = self.prepare_legacy()
+        with self.assertRaisesRegex(ValueError, 'ownership journal'):
+            self.execute(apply=False)
+        preview = self.execute(apply=False, **options)
+        self.assertTrue(preview['legacy'])
+        self.assertIn('/var/lib/pxe-tools-http', preview['trees'])
+        self.assertTrue((self.data / 'db').exists())
+        with self.assertRaisesRegex(ValueError, 'not approved'):
+            self.execute(apply=True, **options)
+        self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
+        self.execute(apply=True, legacy_expected=preview['legacy_plan_sha256'], **options)
+        self.assertTrue(any(command[0] == 'dpkg' for command in self.events))
+        self.assertFalse(self.data.exists())
+        self.assertFalse((self.root / 'var/lib/pxe-tools-ownership').exists())
+
+    def test_legacy_changed_directory_after_preview_refuses_before_purge(self):
+        options = self.prepare_legacy()
+        preview = self.execute(apply=False, **options)
+        self.data.rename(self.root / 'var/lib/old-http')
+        self.data.mkdir()
+        with self.assertRaisesRegex(ValueError, 'changed or were not approved'):
+            self.execute(apply=True, legacy_expected=preview['legacy_plan_sha256'], **options)
+        self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
+        self.assertTrue((self.root / 'var/lib/old-http/db').exists())
+
+    def test_legacy_untrusted_log_parent_is_preserved_during_removal(self):
+        options = self.prepare_legacy()
+        self.unproven.mkdir()
+        (self.unproven / 'keep').write_text('preserved log')
+        snapshot = options['legacy_snapshotter']
+        def preserve_log(root, *, mounts, owner):
+            result = snapshot(root, mounts=mounts, owner=owner)
+            result['directories'].pop('/var/log/pxe-tools')
+            result['preserved'].append('/var/log/pxe-tools')
+            return result
+        options['legacy_snapshotter'] = preserve_log
+        preview = self.execute(apply=False, **options)
+        self.assertEqual(preview['preserved'], ('/var/log/pxe-tools',))
+        self.execute(apply=True, legacy_expected=preview['legacy_plan_sha256'], **options)
+        self.assertFalse(self.data.exists())
+        self.assertEqual((self.unproven / 'keep').read_text(), 'preserved log')
+
+    def test_legacy_always_preserves_apt_even_if_new_witnesses_appear(self):
+        options = self.prepare_legacy()
+        with patch.object(uninstall, 'apt_cleanup_plan', return_value=(True, True)), \
+             patch.object(uninstall, 'remove_apt_config') as cleanup:
+            preview = self.execute(apply=False, **options)
+            self.assertFalse(preview['source'])
+            self.assertFalse(preview['key'])
+            self.execute(apply=True, legacy_expected=preview['legacy_plan_sha256'], **options)
+            cleanup.assert_not_called()
+
     def test_unfinished_upgrade_journal_refuses_before_purge(self):
         self.lifecycle.load = lambda: {'phase': 'prepared'}
         with self.assertRaisesRegex(RuntimeError, 'upgrade'):
