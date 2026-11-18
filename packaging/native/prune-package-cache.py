@@ -10,9 +10,12 @@ import sys
 # Package-owned Python modules only. No user data or unrecognised entry may be
 # removed. The parent and all directories must be private to the caller (root
 # when run by dpkg), so an unprivileged user cannot change entries during scan.
-DIRECTORIES = {'', 'app', 'app/__pycache__', 'app/backup',
+DIRECTORIES = {'', 'native', 'native/__pycache__', 'app', 'app/__pycache__', 'app/backup',
                'app/backup/__pycache__', 'app/cli', 'app/cli/__pycache__'}
 MODULES = {
+    'native/__pycache__': {'configure-secure-tftp', 'ownership-provenance',
+                           'reconcile-nginx', 'render-pxe-http', 'start-worker',
+                           'uninstall-apt', 'upgrade-lifecycle'},
     'app/__pycache__': {'worker', 'ansible_vault', 'database_selection',
                          'repository_scope', 'crypto', 'ansible_runtime',
                          'image_delete', 'pxe_menu_lock'},

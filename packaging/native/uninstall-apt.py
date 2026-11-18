@@ -35,6 +35,73 @@ def _openat2_no_mount(parent, name):
     return int(result)
 
 
+PACKAGE_CACHE_MODULES = {
+    'usr/lib/pxe-tools/native/__pycache__': {'configure-secure-tftp', 'ownership-provenance',
+        'reconcile-nginx', 'render-pxe-http', 'start-worker', 'uninstall-apt', 'upgrade-lifecycle'},
+    'usr/lib/pxe-tools/app/__pycache__': {'worker', 'ansible_vault', 'database_selection',
+        'repository_scope', 'crypto', 'ansible_runtime', 'image_delete', 'pxe_menu_lock'},
+    'usr/lib/pxe-tools/app/backup/__pycache__': {'__init__', 'recovery', 'assets', 'openpgp'},
+    'usr/lib/pxe-tools/app/cli/__pycache__': {'recovery-backup'},
+    'opt/pxe-tools/scripts/__pycache__': {'atomic_publish', 'prepare-debian-shim', 'build-initrd-ca'},
+}
+
+
+def clean_package_caches(root, *, owner=0, opener=_openat2_no_mount):
+    """Remove only known bytecode under trusted package directories before dpkg.
+
+    Refuse all cleanup if a cache contains unknown or unsafe entries. The
+    package purge can still proceed; dpkg will report any directories retained.
+    """
+    import re
+    opened, caches, files = {}, [], []
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        opened[''] = fd
+        def directory(path):
+            if path in opened:
+                return opened[path]
+            parent, _, name = path.rpartition('/')
+            child = opener(directory(parent), name)
+            info = os.fstat(child)
+            if info.st_uid != owner or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022:
+                os.close(child)
+                raise ValueError('untrusted package cache directory: ' + path)
+            opened[path] = child
+            return child
+        info = os.fstat(fd)
+        if info.st_uid != owner or info.st_mode & 0o022:
+            raise ValueError('untrusted package cache root')
+        for path, modules in PACKAGE_CACHE_MODULES.items():
+            try:
+                cache_fd = directory(path)
+            except FileNotFoundError:
+                continue
+            caches.append(path)
+            for name in os.listdir(cache_fd):
+                match = re.fullmatch(r'([A-Za-z0-9_-]+)\.cpython-[0-9]+(?:\.opt-[012])?\.pyc', name)
+                item = os.stat(name, dir_fd=cache_fd, follow_symlinks=False)
+                if (not match or match.group(1) not in modules or not stat.S_ISREG(item.st_mode)
+                        or item.st_uid != owner or item.st_mode & 0o022 or item.st_nlink != 1):
+                    raise ValueError('unrecognised package cache entry: ' + path + '/' + name)
+                files.append((path, name, item.st_dev, item.st_ino))
+        for path, name, device, inode in files:
+            item = os.stat(name, dir_fd=opened[path], follow_symlinks=False)
+            if (item.st_dev, item.st_ino) != (device, inode):
+                raise ValueError('package cache entry changed: ' + path + '/' + name)
+            os.unlink(name, dir_fd=opened[path])
+        for path in caches:
+            parent, _, name = path.rpartition('/')
+            item = os.stat(name, dir_fd=opened[parent], follow_symlinks=False)
+            held = os.fstat(opened[path])
+            if (item.st_dev, item.st_ino) != (held.st_dev, held.st_ino):
+                raise ValueError('package cache directory changed: ' + path)
+            os.rmdir(name, dir_fd=opened[parent])
+        return len(files)
+    finally:
+        for fd in reversed(list(opened.values())):
+            os.close(fd)
+
+
 def remove_tree(root, name, *, mounts, owner=0, dry_run=False, expected=None, opener=None, generation_matches=None):
     """Delete an allowlisted tree by FD without following a mount or symlink.
 
@@ -1595,6 +1662,12 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                         mounts = mounts_provider()
                         for path in paths:
                             remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, expected=record['directories'][path], generation_matches=generation_matches)
+                        try:
+                            clean_package_caches(root, owner=owner)
+                        except (OSError, ValueError, RuntimeError) as error:
+                            # Bytecode is optional and unknown files are never
+                            # a reason to remove an unrecognised directory.
+                            print('Package caches preserved for review: ' + str(error))
                         transaction.begin_purge()
                         purge_packages(runner, frontend_locked=True)
                         if not packages_absent(runner):
