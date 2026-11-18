@@ -7,6 +7,10 @@ on:
         description: First publication only, when no prior snapshot exists
         type: boolean
         default: false
+      transition_rehearsal:
+        description: Disposable transition rehearsal only; never publish
+        type: boolean
+        default: false
   schedule:
     - cron: '17 3 */2 * *'
 
@@ -15,12 +19,34 @@ permissions:
   actions: read
 
 concurrency:
-  group: pxe-apt-publication
+  # Rehearsals cannot delay or cancel the production renewal group.
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.transition_rehearsal == true && format('pxe-apt-rehearsal-{0}', github.run_id) || 'pxe-apt-publication' }}
   cancel-in-progress: false
 
 jobs:
+  transition-rehearsal:
+    # Explicit manual input: isolated fixtures only, no production environment,
+    # secrets, artifact publication, Worker deployment or real certificates.
+    if: github.event_name == 'workflow_dispatch' && inputs.transition_rehearsal == true
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install fixture dependencies
+        run: sudo apt-get update && sudo apt-get install -y apt-utils dpkg-dev gnupg gpgv python3
+      - name: Rehearse client certificate and static APT staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          PXE_APT_ROTATION_FIXTURE=1 bash tests/integration/test_apt_rotation_rehearsal.sh
+
   prepare:
-    if: github.ref == 'refs/heads/main' && github.ref_protected
+    # Rehearsal must never sign, upload or deploy, even on protected main.
+    if: github.ref == 'refs/heads/main' && github.ref_protected && !(github.event_name == 'workflow_dispatch' && inputs.transition_rehearsal == true)
     environment: production
     runs-on: ubuntu-24.04
     timeout-minutes: 30
