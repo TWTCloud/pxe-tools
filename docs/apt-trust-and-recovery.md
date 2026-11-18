@@ -75,6 +75,48 @@ compromission exigent des plans distincts ; un certificat compromis ne doit pas
    modification des secrets et l'exécution de la transition de production
    nécessitent une autorisation ciblée ; ne pas contourner les protections.
 
+### Préparer la distribution aux clients existants
+
+Cette séquence est un cahier des charges à recevoir, pas une commande de
+rotation disponible. Elle concerne uniquement l'ajout d'une sous-clé certifiée
+par une primaire non compromise ; le cas d'une nouvelle primaire ou d'une clé
+compromise exige un autre modèle de confiance.
+
+1. Obtenir par un canal indépendant les empreintes complètes de la primaire et
+   des deux sous-clés, ainsi que l'identité et l'empreinte du certificat public
+   proposé. Contrôler les signatures de certification, les dates et révocations
+   dans un trousseau GnuPG isolé. Un téléchargement HTTPS depuis le même dépôt
+   ne constitue pas à lui seul une vérification indépendante.
+2. Vérifier sans modifier le système la source APT effective, son `Signed-By`,
+   les éventuels autres dépôts ou alias qui utilisent le même fichier, les liens
+   symboliques et les témoins de création. Si la propriété, la configuration ou
+   l'usage exclusif ne peuvent pas être établis, préserver le fichier et demander
+   une inspection : ajouter une sous-clé à un trousseau partagé pourrait élargir
+   la confiance d'un autre dépôt.
+3. Préparer une mise à jour atomique et récupérable : conserver l'ancien
+   certificat, vérifier les octets attendus immédiatement avant remplacement,
+   écrire un nouveau fichier protégé et contrôler ses permissions et son
+   empreinte. Définir un journal et une reprise pour chaque interruption. Le
+   témoin par lien physique et empreinte créé par l'installateur doit être
+   traité explicitement ; il ne faut ni le réécrire aveuglément ni prétendre
+   que le désinstallateur est autorisé à effacer un nouveau certificat inconnu.
+4. Prouver sur un client isolé l'acceptation des métadonnées signées par
+   l'ancienne puis la nouvelle sous-clé, et le refus en cas d'empreinte,
+   certificat ou signature erronés. Tester aussi le remplacement interrompu,
+   les configurations partagées et la désinstallation. Ne pas interpréter
+   `apt update` seul comme une installation ou un boot PXE réussis.
+5. Définir la gestion des clients absents ou hors ligne et la période de
+   coexistence avant toute signature exclusive par la nouvelle sous-clé. Une
+   propagation partielle des versions du Worker doit être prise en compte ;
+   le maintien de la seule nouvelle signature peut interrompre les anciens
+   clients. La révocation de l'ancienne sous-clé et toute intervention réelle
+   suivent une décision de production distincte.
+
+Aucun outil de mise à jour client ni basculement de production n'est livré par
+la présente préparation. Les fixtures ne modifient que leurs répertoires
+jetables ; elles ne prouvent pas le déploiement du certificat sur les machines
+existantes.
+
 ## Instantanés : ce qui est vérifié
 
 Le [run planifié 44077918347](https://github.com/williamboglietti/pxe-tools/actions/runs/44077918347)
