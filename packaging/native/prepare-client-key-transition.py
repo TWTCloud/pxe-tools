@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-only
-"""Rehearse an APT client certificate replacement in a disposable fixture root.
+"""Inspect APT client trust or rehearse replacement in a disposable fixture.
 
-This preparation is deliberately limited to fixture roots. It cannot modify
-an actual client's APT configuration and is not a production migration tool.
+The system inspection is read-only. Replacement is deliberately limited to
+fixture roots and is not a production migration tool.
 """
 from __future__ import annotations
 import argparse
@@ -33,6 +33,39 @@ CONFIG = {'SOURCE': '/etc/apt/sources.list', 'PARTS': '/etc/apt/sources.list.d',
           'TRUSTED': '/etc/apt/trusted.gpg', 'TRUSTEDPARTS': '/etc/apt/trusted.gpg.d', 'ROOT': ''}
 
 
+def inspect_candidate(root: Path, new_certificate: Path, old_release: Path, new_release: Path,
+                      primary: str, old_signer: str, new_signer: str, *, owner, apt_config):
+    key = root / KEY_RELATIVE
+    # The existing uninstall guard proves the source and original key witness,
+    # and rejects shared, redirected, symlinked or ambiguous configurations.
+    if uninstall.apt_cleanup_plan(root, owner=owner, apt_config=apt_config) != (True, True):
+        raise ValueError('source or key ownership and exclusive use are not established')
+    report = inspector.inspect(key, new_certificate, primary, old_signer, new_signer)
+    old_bytes = inspector.read_regular(key)
+    new_bytes = inspector.read_regular(new_certificate)
+    if hashlib.sha256(old_bytes).hexdigest() != report['old_certificate_sha256'] or \
+       hashlib.sha256(new_bytes).hexdigest() != report['new_certificate_sha256']:
+        raise ValueError('certificate changed after inspection')
+    # Test both signers against the exact candidate bytes. This prevents a
+    # certificate which cannot still authenticate the old index from being
+    # installed during the overlap. This does not check freshness or deployability.
+    old_release_bytes = inspector.read_regular(old_release)
+    new_release_bytes = inspector.read_regular(new_release)
+    with tempfile.TemporaryDirectory(prefix='pxe-client-proof-', dir='/tmp') as temporary:
+        proof_root = Path(temporary)
+        old_cert_copy, new_cert_copy = proof_root / 'old.gpg', proof_root / 'new.gpg'
+        old_index_copy, new_index_copy = proof_root / 'old.InRelease', proof_root / 'new.InRelease'
+        for path, data in ((old_cert_copy, old_bytes), (new_cert_copy, new_bytes),
+                           (old_index_copy, old_release_bytes), (new_index_copy, new_release_bytes)):
+            path.write_bytes(data)
+        inspector.proof.verify_signature(old_cert_copy, old_index_copy, old_signer.upper(), primary.upper())
+        inspector.proof.verify_signature(new_cert_copy, old_index_copy, old_signer.upper(), primary.upper())
+        inspector.proof.verify_signature(new_cert_copy, new_index_copy, new_signer.upper(), primary.upper())
+    report['applied'] = False
+    report['inspection_only'] = True
+    return report, old_bytes, new_bytes
+
+
 def rehearse(root: Path, new_certificate: Path, old_release: Path, new_release: Path,
              primary: str, old_signer: str, new_signer: str, *, apply: bool = False) -> dict:
     if os.environ.get('PXE_APT_ROTATION_FIXTURE') != '1':
@@ -46,31 +79,9 @@ def rehearse(root: Path, new_certificate: Path, old_release: Path, new_release: 
             or marker.read_bytes() != b'PXE_TOOLS_ROTATION_DISPOSABLE\n'):
         raise ValueError('an explicitly marked disposable fixture root is required')
     key = root / KEY_RELATIVE
-    # The existing uninstall guard proves the source and original key witness,
-    # and rejects shared, redirected, symlinked or ambiguous configurations.
-    if uninstall.apt_cleanup_plan(root, owner=None, apt_config=CONFIG) != (True, True):
-        raise ValueError('source or key ownership and exclusive use are not established')
-    report = inspector.inspect(key, new_certificate, primary, old_signer, new_signer)
-    old_bytes = inspector.read_regular(key)
-    new_bytes = inspector.read_regular(new_certificate)
-    if hashlib.sha256(old_bytes).hexdigest() != report['old_certificate_sha256'] or \
-       hashlib.sha256(new_bytes).hexdigest() != report['new_certificate_sha256']:
-        raise ValueError('certificate changed after inspection')
-    # Test both signers against the exact candidate bytes. This prevents a
-    # certificate which cannot still authenticate the old index from being
-    # installed during the overlap. These are fixture releases only.
-    old_release_bytes = inspector.read_regular(old_release)
-    new_release_bytes = inspector.read_regular(new_release)
-    with tempfile.TemporaryDirectory(prefix='pxe-client-proof-', dir='/tmp') as temporary:
-        proof_root = Path(temporary)
-        old_cert_copy, new_cert_copy = proof_root / 'old.gpg', proof_root / 'new.gpg'
-        old_index_copy, new_index_copy = proof_root / 'old.InRelease', proof_root / 'new.InRelease'
-        for path, data in ((old_cert_copy, old_bytes), (new_cert_copy, new_bytes),
-                           (old_index_copy, old_release_bytes), (new_index_copy, new_release_bytes)):
-            path.write_bytes(data)
-        inspector.proof.verify_signature(old_cert_copy, old_index_copy, old_signer.upper(), primary.upper())
-        inspector.proof.verify_signature(new_cert_copy, old_index_copy, old_signer.upper(), primary.upper())
-        inspector.proof.verify_signature(new_cert_copy, new_index_copy, new_signer.upper(), primary.upper())
+    report, old_bytes, new_bytes = inspect_candidate(root, new_certificate, old_release, new_release,
+                                                     primary, old_signer, new_signer,
+                                                     owner=None, apt_config=CONFIG)
     report['applied'] = False
     if not apply:
         return report
@@ -106,6 +117,7 @@ def rehearse(root: Path, new_certificate: Path, old_release: Path, new_release: 
         except OSError as exc:
             raise RuntimeError('certificate was replaced but directory durability is uncertain; inspect before retrying') from exc
         report['applied'] = True
+        report['inspection_only'] = False
         return report
     finally:
         if created:
@@ -118,7 +130,9 @@ def rehearse(root: Path, new_certificate: Path, old_release: Path, new_release: 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--fixture-root', required=True, type=Path)
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument('--fixture-root', type=Path)
+    target.add_argument('--inspect-system', action='store_true', help='read-only inspection; never apply')
     parser.add_argument('--new-certificate', required=True, type=Path)
     parser.add_argument('--old-inrelease', required=True, type=Path)
     parser.add_argument('--new-inrelease', required=True, type=Path)
@@ -127,9 +141,19 @@ def main():
     parser.add_argument('--new-signing-fingerprint', required=True)
     parser.add_argument('--apply-to-fixture', action='store_true')
     args = parser.parse_args()
-    result = rehearse(args.fixture_root, args.new_certificate, args.old_inrelease, args.new_inrelease,
-                      args.primary_fingerprint, args.old_signing_fingerprint, args.new_signing_fingerprint,
-                      apply=args.apply_to_fixture)
+    if args.inspect_system:
+        if args.apply_to_fixture:
+            raise ValueError('system inspection cannot apply a replacement')
+        # Read-only: no installer lock, APT configuration or keyring is modified.
+        # A later migration would need to lock and revalidate the whole state.
+        result, _, _ = inspect_candidate(Path('/'), args.new_certificate, args.old_inrelease,
+                                         args.new_inrelease, args.primary_fingerprint,
+                                         args.old_signing_fingerprint, args.new_signing_fingerprint,
+                                         owner=0, apt_config=uninstall._apt_effective_config())
+    else:
+        result = rehearse(args.fixture_root, args.new_certificate, args.old_inrelease, args.new_inrelease,
+                          args.primary_fingerprint, args.old_signing_fingerprint, args.new_signing_fingerprint,
+                          apply=args.apply_to_fixture)
     print(json.dumps(result, indent=2))
 
 

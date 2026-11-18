@@ -136,16 +136,26 @@ compromise exige un autre modèle de confiance.
    suivent une décision de production distincte.
 
 Le prototype `packaging/native/prepare-client-key-transition.py` permet de
-répéter l'inspection et le remplacement atomique **uniquement** dans un arbre
-jetable marqué sous `/tmp`, avec `PXE_APT_ROTATION_FIXTURE=1`. Avant tout
-remplacement, il vérifie les signatures des deux index de fixture et confirme
-que le nouveau certificat vérifie encore l'ancienne signature. Il refuse les
-sources partagées ou ambiguës, conserve le témoin de la clé initiale et
-signale un état incertain si la synchronisation échoue après remplacement. La
-fixture vérifie notamment les refus et les interruptions. Elle ne constitue
-pas un programme utilisable sur les clients existants : les contrôles de
-propriété réels, montages, concurrence et reprise durable restent à réaliser
-et recevoir avant toute distribution.
+répéter le remplacement atomique **uniquement** dans un arbre jetable marqué
+sous `/tmp`, avec `PXE_APT_ROTATION_FIXTURE=1`. Avant tout remplacement, il
+vérifie les signatures des deux index de fixture et confirme que le nouveau
+certificat vérifie encore l'ancienne signature. Il refuse les sources partagées
+ou ambiguës, conserve le témoin de la clé initiale et signale un état incertain
+si la synchronisation échoue après remplacement.
+
+Un mode `--inspect-system` prépare une vérification **en lecture seule** d'une
+installation existante : il lit la configuration APT effective, les témoins et
+les certificats et index fournis ; il ne remplace rien. L'inspection ne prend
+pas de verrou, ne garantit pas que l'état restera inchangé et ne détecte pas les
+usages éventuels d'un fichier par une invocation APT avec configuration
+alternative. Ce mode n'a été vérifié que sur fixtures ; il ne remplace pas la
+vérification indépendante des empreintes et n'a pas été exécuté sur les
+machines de William.
+
+La fixture vérifie les refus, les interruptions et l'accès APT après
+remplacement. Elle ne constitue pas un programme de migration utilisable sur
+les clients existants : les contrôles de propriété réels, montages, concurrence
+et reprise durable restent à réaliser et recevoir avant toute distribution.
 
 Le workflow de vérification des PR répète localement la construction, la
 signature et la préparation des assets statiques avec des clés jetables. La

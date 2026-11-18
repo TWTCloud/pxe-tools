@@ -6,6 +6,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -48,6 +49,31 @@ class ClientTransitionFixture(unittest.TestCase):
     def run_transition(self, *, apply=False, new=None, signer=NEW_SIGNER):
         return transition.rehearse(self.root, new or self.new, FIXTURE / 'old/dists/stable/InRelease',
                                    FIXTURE / 'new/dists/stable/InRelease', PRIMARY, OLD_SIGNER, signer, apply=apply)
+
+    def test_read_only_candidate_inspection_leaves_client_files_unchanged(self):
+        before = (self.key.read_bytes(), self.source.read_bytes(), self.key.stat().st_ino,
+                  self.anchor.stat().st_ino, self.key.stat().st_mtime_ns)
+        report, _, _ = transition.inspect_candidate(
+            self.root, self.new, FIXTURE / 'old/dists/stable/InRelease',
+            FIXTURE / 'new/dists/stable/InRelease', PRIMARY, OLD_SIGNER, NEW_SIGNER,
+            owner=None, apt_config=transition.CONFIG)
+        self.assertTrue(report['inspection_only'])
+        self.assertFalse(report['applied'])
+        self.assertEqual((self.key.read_bytes(), self.source.read_bytes(), self.key.stat().st_ino,
+                          self.anchor.stat().st_ino, self.key.stat().st_mtime_ns), before)
+        self.assertFalse(list(self.key.parent.glob('.pxe-key-transition-*')))
+
+    def test_system_inspection_rejects_fixture_apply_before_querying_system(self):
+        argv = ['prepare-client-key-transition.py', '--inspect-system', '--apply-to-fixture',
+                '--new-certificate', str(self.new),
+                '--old-inrelease', str(FIXTURE / 'old/dists/stable/InRelease'),
+                '--new-inrelease', str(FIXTURE / 'new/dists/stable/InRelease'),
+                '--primary-fingerprint', PRIMARY, '--old-signing-fingerprint', OLD_SIGNER,
+                '--new-signing-fingerprint', NEW_SIGNER]
+        with patch.object(sys, 'argv', argv), patch.object(transition.uninstall, '_apt_effective_config') as query:
+            with self.assertRaisesRegex(ValueError, 'cannot apply'):
+                transition.main()
+            query.assert_not_called()
 
     def test_preview_and_atomic_apply_preserve_original_witness(self):
         before = self.key.stat()
