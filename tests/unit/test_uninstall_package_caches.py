@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 """Check removal of known bytecode without touching other package files."""
 import importlib.util
+import errno
 import os
 from pathlib import Path
 import sys
@@ -67,6 +68,23 @@ class PackageCacheTest(unittest.TestCase):
         (self.scripts/'atomic_publish.cpython-312.pyc').unlink()
         self.scripts.chmod(0o777)
         with self.assertRaises(ValueError): self.clean()
+
+    def test_mount_boundary_failure_preserves_all_caches(self):
+        def refuses_mount(parent, name):
+            if name == 'scripts': raise OSError(errno.EXDEV, 'mount boundary')
+            return fixture_open(parent, name)
+        with self.assertRaises(OSError):
+            module.clean_package_caches(self.root, owner=self.owner, opener=refuses_mount)
+        self.assertTrue((self.native/'uninstall-apt.cpython-312.pyc').exists())
+        self.assertTrue((self.app/'image_delete.cpython-312.pyc').exists())
+
+    def test_package_installer_and_uninstaller_recognise_same_modules(self):
+        other_spec = importlib.util.spec_from_file_location('package_cleanup', ROOT/'packaging/native/prune-package-cache.py')
+        other = importlib.util.module_from_spec(other_spec)
+        other_spec.loader.exec_module(other)
+        installer = {'usr/lib/pxe-tools/' + key: value for key, value in other.MODULES.items()}
+        installer.update({'opt/pxe-tools/' + key: value for key, value in other.OPT_MODULES.items()})
+        self.assertEqual(module.PACKAGE_CACHE_MODULES, installer)
 
 
 if __name__ == '__main__': unittest.main()
