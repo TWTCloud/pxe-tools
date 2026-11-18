@@ -193,7 +193,11 @@ réelle exige donc un scénario, une revue et une autorisation ciblée.
   conserve les liens immuables lors d'un changement de version et refuse les
   index ou paquets altérés. Le run planifié ci-dessus l'a exécuté en CI. La
   répétition de transition utilise également un état APT vide, des clés
-  jetables et une simulation d'installation du paquet synthétique.
+  jetables et une simulation d'installation du paquet synthétique. Elle simule
+  le remplacement atomique d'un trousseau à un emplacement fixe : une
+  interruption avant remplacement laisse l'ancienne clé active et le témoin
+  de l'ancienne clé est conservé. Cette fixture ne fournit pas de programme
+  de mise à jour destiné aux clients existants.
 - La [réception bêta 7 sur Zorin](apt-upgrade-lifecycle.md#réception-des-paquets-canoniques-sur-zorin)
   et les essais des versions antérieures ont des périmètres propres. La bêta 8
   n'a pas bénéficié d'une nouvelle campagne native multi-OS, d'une installation
