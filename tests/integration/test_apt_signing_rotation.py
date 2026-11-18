@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 """Characterize signing-subkey rotation using temporary keys and no APT state."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -11,6 +12,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SIGNER = ROOT / 'packaging/native/ci-sign-apt-candidate.py'
+INSPECTOR = ROOT / 'packaging/native/check-apt-key-transition.py'
 spec = importlib.util.spec_from_file_location('pxe_apt_rotation_proof', ROOT / 'packaging/ci/apt-proof.py')
 proof = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proof)
@@ -90,6 +92,30 @@ class SigningRotationFixture(unittest.TestCase):
             proof.validate_keyring(self.new_key, self.primary, self.new_signer, '0' * 40)
         with self.assertRaises(ValueError):
             proof.validate_keyring(self.new_key, self.primary, self.new_signer, self.new_signer)
+
+    def test_read_only_inspector_pins_certificate_shapes_and_rejects_wrong_material(self):
+        def check(old_key, new_key, primary, old, new):
+            return subprocess.run([sys.executable, str(INSPECTOR),
+                                   '--old-certificate', str(old_key), '--new-certificate', str(new_key),
+                                   '--primary-fingerprint', primary, '--old-signing-fingerprint', old,
+                                   '--new-signing-fingerprint', new], capture_output=True, text=True)
+        before = (self.old_key.read_bytes(), self.new_key.read_bytes())
+        result = check(self.old_key, self.new_key, self.primary, self.old_signer, self.new_signer)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        import hashlib
+        report = json.loads(result.stdout)
+        self.assertEqual(report['new_certificate_sha256'], hashlib.sha256(before[1]).hexdigest())
+        self.assertTrue(report['independent_fingerprint_verification_required'])
+        self.assertFalse(report['client_keyring_modified'])
+        self.assertEqual((self.old_key.read_bytes(), self.new_key.read_bytes()), before)
+        self.assertNotEqual(check(self.old_key, self.new_key, self.primary, self.old_signer, '0' * 40).returncode, 0)
+        self.assertNotEqual(check(self.old_key, self.old_key, self.primary, self.old_signer, self.new_signer).returncode, 0)
+        secret = self.root / 'secret-old.gpg'
+        secret.write_bytes(self.run_checked(*self.gpg, '--export-secret-keys', self.primary))
+        self.assertNotEqual(check(secret, self.new_key, self.primary, self.old_signer, self.new_signer).returncode, 0)
+        link = self.root / 'old-link.gpg'
+        link.symlink_to(self.old_key)
+        self.assertNotEqual(check(link, self.new_key, self.primary, self.old_signer, self.new_signer).returncode, 0)
 
     def test_transition_imports_only_old_public_subkey_before_calling_builder(self):
         secret = self.run_checked(*self.gpg, '--armor', '--export-secret-subkeys',

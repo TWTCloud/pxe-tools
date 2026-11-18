@@ -77,6 +77,27 @@ compromission exigent des plans distincts ; un certificat compromis ne doit pas
    modification des secrets et l'exécution de la transition de production
    nécessitent une autorisation ciblée ; ne pas contourner les protections.
 
+### Inspecter les certificats avant une transition
+
+`packaging/native/check-apt-key-transition.py` examine deux fichiers publics
+locaux dans un environnement GnuPG temporaire. Il exige trois empreintes
+complètes distinctes et compare les structures : ancien certificat contenant la
+primaire et l'ancienne sous-clé, nouveau contenant la même primaire et les deux
+sous-clés épinglées. Il refuse notamment fichiers de clé secrète et liens
+symboliques, et affiche les SHA-256 des octets inspectés. Les empreintes doivent
+avoir été obtenues par un canal indépendant ; l'outil ne les authentifie pas.
+Il ne vérifie pas l'usage des fichiers par APT, ne modifie aucun trousseau client
+et ne constitue pas une procédure de révocation ou de migration.
+
+```sh
+python3 packaging/native/check-apt-key-transition.py \
+  --old-certificate /chemin/vers/ancien-public.gpg \
+  --new-certificate /chemin/vers/nouveau-public.gpg \
+  --primary-fingerprint EMPREINTE_PRIMAIRE_VERIFIEE \
+  --old-signing-fingerprint EMPREINTE_ANCIENNE_SOUS_CLE \
+  --new-signing-fingerprint EMPREINTE_NOUVELLE_SOUS_CLE
+```
+
 ### Préparer la distribution aux clients existants
 
 Cette séquence est un cahier des charges à recevoir, pas une commande de
