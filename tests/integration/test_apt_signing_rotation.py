@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-only
 """Characterize signing-subkey rotation using temporary keys and no APT state."""
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -10,6 +11,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SIGNER = ROOT / 'packaging/native/ci-sign-apt-candidate.py'
+spec = importlib.util.spec_from_file_location('pxe_apt_rotation_proof', ROOT / 'packaging/ci/apt-proof.py')
+proof = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(proof)
 
 
 class SigningRotationFixture(unittest.TestCase):
@@ -76,6 +80,16 @@ class SigningRotationFixture(unittest.TestCase):
         self.assertNotEqual(self.verify(self.old_key, self.new_signature).returncode, 0)
         self.assert_signer(self.verify(self.new_key, self.new_signature), self.new_signer)
         self.assert_signer(self.verify(self.new_key, self.old_signature), self.old_signer)
+
+    def test_provenance_keyring_requires_an_explicit_exact_transition_pair(self):
+        proof.validate_keyring(self.old_key, self.primary, self.old_signer)
+        with self.assertRaises(ValueError):
+            proof.validate_keyring(self.new_key, self.primary, self.new_signer)
+        proof.validate_keyring(self.new_key, self.primary, self.new_signer, self.old_signer)
+        with self.assertRaises(ValueError):
+            proof.validate_keyring(self.new_key, self.primary, self.new_signer, '0' * 40)
+        with self.assertRaises(ValueError):
+            proof.validate_keyring(self.new_key, self.primary, self.new_signer, self.new_signer)
 
     def test_transition_imports_only_old_public_subkey_before_calling_builder(self):
         secret = self.run_checked(*self.gpg, '--armor', '--export-secret-subkeys',

@@ -45,9 +45,14 @@ Description: Synthetic package for APT rotation rehearsal
 CONTROL
 dpkg-deb --build --root-owner-group "$pkg" "$fixture/old.deb" >/dev/null
 builder="$root/packaging/native/build-apt-release-candidate.py"
-python3 "$builder" "$fixture/old.deb" "$fixture/old" --gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$old_signer" --valid-days 1 >/dev/null
+old_sha=$(sha256sum "$fixture/old.deb" | awk '{print $1}')
+old_source=$(printf 'a%.0s' {1..40})
+python3 "$builder" "$fixture/old.deb" "$fixture/old" --gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$old_signer" --valid-days 1 \
+  --source-commit "$old_source" --build-run-id 123 --approved-package-sha256 "$old_sha" >/dev/null
 sed -i 's/Version: 1.0~fixture1/Version: 1.0~fixture2/' "$pkg/DEBIAN/control"
 dpkg-deb --build --root-owner-group "$pkg" "$fixture/new.deb" >/dev/null
+new_sha=$(sha256sum "$fixture/new.deb" | awk '{print $1}')
+new_source=$(printf 'b%.0s' {1..40})
 
 # The existing default remains fail-closed when the previous signer differs.
 if python3 "$builder" "$fixture/new.deb" "$fixture/no-transition" --gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$new_signer" --previous "$fixture/old" > "$fixture/default.log" 2>&1; then
@@ -57,7 +62,8 @@ test ! -e "$fixture/no-transition"
 
 # Explicit transition pins the old signer and primary, retaining old objects.
 args=(--gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$new_signer" --previous "$fixture/old" --valid-days 1
-      --previous-signing-fingerprint "$old_signer" --previous-primary-fingerprint "$primary")
+      --previous-signing-fingerprint "$old_signer" --previous-primary-fingerprint "$primary"
+      --source-commit "$new_source" --build-run-id 456 --approved-package-sha256 "$new_sha")
 python3 "$builder" "$fixture/new.deb" "$fixture/new" "${args[@]}" >/dev/null
 old_index="$fixture/old/dists/stable/main/binary-amd64/Packages.gz"
 old_sha256=$(sha256sum "$old_index" | awk '{print $1}')
@@ -82,6 +88,34 @@ ci_args=(--primary-fingerprint "$primary" --signing-fingerprint "$new_signer" --
 python3 "$ci_signer" "$fixture/new.deb" "$fixture/ci-new" "${ci_args[@]}" --public-key-output "$fixture/ci-public.gpg" >/dev/null
 gpgv --keyring "$fixture/ci-public.gpg" "$fixture/old/dists/stable/InRelease" >/dev/null 2>&1
 gpgv --keyring "$fixture/ci-public.gpg" "$fixture/ci-new/dists/stable/InRelease" >/dev/null 2>&1
+
+# Exact provenance checks allow only the explicitly pinned pair of subkeys.
+python3 - "$fixture" "$old_sha" "$new_sha" "$old_source" "$new_source" <<'PYJSON'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for name, version, sha, source, run in (
+        ('old', '1.0~fixture1', sys.argv[2], sys.argv[4], '123'),
+        ('new', '1.0~fixture2', sys.argv[3], sys.argv[5], '456')):
+    (root / f'{name}-manifest.json').write_text(json.dumps({
+        'version': version, 'package_sha256': sha, 'source_commit': source, 'build_run_id': run}))
+PYJSON
+proof="$root/packaging/ci/verify-published-provenance.py"
+python3 "$proof" --inrelease "$fixture/old/dists/stable/InRelease" --keyring "$fixture/old-public.gpg" \
+  --manifest "$fixture/old-manifest.json" --primary-fingerprint "$primary" --signing-fingerprint "$old_signer" \
+  --packages "$fixture/old/dists/stable/main/binary-amd64/Packages" >/dev/null
+python3 "$proof" --inrelease "$fixture/new/dists/stable/InRelease" --keyring "$fixture/new-public.gpg" \
+  --manifest "$fixture/new-manifest.json" --primary-fingerprint "$primary" --signing-fingerprint "$new_signer" \
+  --additional-signing-fingerprint "$old_signer" --packages "$fixture/new/dists/stable/main/binary-amd64/Packages" >/dev/null
+if python3 "$proof" --inrelease "$fixture/new/dists/stable/InRelease" --keyring "$fixture/new-public.gpg" \
+  --manifest "$fixture/new-manifest.json" --primary-fingerprint "$primary" --signing-fingerprint "$old_signer" \
+  --additional-signing-fingerprint "$new_signer" --packages "$fixture/new/dists/stable/main/binary-amd64/Packages" > "$fixture/proof-wrong-signer.log" 2>&1; then
+  echo 'Provenance unexpectedly accepted the wrong signing subkey' >&2; exit 1
+fi
+if python3 "$proof" --inrelease "$fixture/new/dists/stable/InRelease" --keyring "$fixture/new-public.gpg" \
+  --manifest "$fixture/new-manifest.json" --primary-fingerprint "$primary" --signing-fingerprint "$new_signer" \
+  --packages "$fixture/new/dists/stable/main/binary-amd64/Packages" > "$fixture/proof-no-transition.log" 2>&1; then
+  echo 'Provenance unexpectedly accepted a second subkey without explicit pinning' >&2; exit 1
+fi
 if python3 "$ci_signer" "$fixture/new.deb" "$fixture/ci-wrong-old" --primary-fingerprint "$primary" --signing-fingerprint "$new_signer" --previous "$fixture/old" --transition-previous-signing-fingerprint "$(printf '%040d' 0)" --transition-previous-public-key "$fixture/old-public.gpg" > "$fixture/ci-wrong-old.log" 2>&1; then
   echo 'CI signer unexpectedly accepted the wrong previous signer' >&2; exit 1
 fi
