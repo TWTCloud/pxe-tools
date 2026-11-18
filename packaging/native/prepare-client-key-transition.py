@@ -7,6 +7,8 @@ metadata. No automatic download, publication or key rotation is performed.
 """
 from __future__ import annotations
 import argparse
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import importlib.util
 import json
@@ -33,6 +35,35 @@ CONFIG = {'SOURCE': '/etc/apt/sources.list', 'PARTS': '/etc/apt/sources.list.d',
           'TRUSTED': '/etc/apt/trusted.gpg', 'TRUSTEDPARTS': '/etc/apt/trusted.gpg.d', 'ROOT': ''}
 
 
+def require_fresh_release(signed: bytes, *, now: datetime | None = None) -> None:
+    """Check dates only after the caller has verified the cleartext signature."""
+    text = signed.decode('utf-8').replace('\r\n', '\n')
+    if not text.startswith('-----BEGIN PGP SIGNED MESSAGE-----\n'):
+        raise ValueError('new signed index is not a clear-signed InRelease')
+    header, separator, remainder = text.partition('\n\n')
+    content, marker, _ = remainder.partition('\n-----BEGIN PGP SIGNATURE-----')
+    if not separator or not marker or '\r' in header or '\r' in content:
+        raise ValueError('new signed index has an unsupported format')
+    fields = {}
+    for line in content.splitlines():
+        if line.startswith(('Date:', 'Valid-Until:')):
+            name, value = line.split(':', 1)
+            if name in fields:
+                raise ValueError('new signed index has duplicate date fields')
+            fields[name] = value.strip()
+    if set(fields) != {'Date', 'Valid-Until'}:
+        raise ValueError('new signed index must have Date and Valid-Until')
+    try:
+        issued, expires = (parsedate_to_datetime(fields[name]) for name in ('Date', 'Valid-Until'))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError('invalid new signed index dates') from exc
+    if issued.tzinfo is None or expires.tzinfo is None:
+        raise ValueError('new signed index dates must include a timezone')
+    current = now or datetime.now(timezone.utc)
+    if issued > current + timedelta(minutes=10) or expires <= current or expires <= issued:
+        raise ValueError('new signed index is expired or not yet valid')
+
+
 def inspect_candidate(root: Path, new_certificate: Path, old_release: Path, new_release: Path,
                       primary: str, old_signer: str, new_signer: str, *, owner, apt_config):
     key = root / KEY_RELATIVE
@@ -48,7 +79,7 @@ def inspect_candidate(root: Path, new_certificate: Path, old_release: Path, new_
         raise ValueError('certificate changed after inspection')
     # Test both signers against the exact candidate bytes. This prevents a
     # certificate which cannot still authenticate the old index from being
-    # installed during the overlap. This does not check freshness or deployability.
+    # installed during the overlap. The new proof must also be timely below.
     old_release_bytes = inspector.read_regular(old_release)
     new_release_bytes = inspector.read_regular(new_release)
     with tempfile.TemporaryDirectory(prefix='pxe-client-proof-', dir='/tmp') as temporary:
@@ -61,6 +92,9 @@ def inspect_candidate(root: Path, new_certificate: Path, old_release: Path, new_
         inspector.proof.verify_signature(old_cert_copy, old_index_copy, old_signer.upper(), primary.upper())
         inspector.proof.verify_signature(new_cert_copy, old_index_copy, old_signer.upper(), primary.upper())
         inspector.proof.verify_signature(new_cert_copy, new_index_copy, new_signer.upper(), primary.upper())
+        # The historical old proof may have expired while a client was offline;
+        # require a fresh new-signer proof before changing client trust.
+        require_fresh_release(new_release_bytes)
     report['applied'] = False
     report['inspection_only'] = True
     return report, old_bytes, new_bytes

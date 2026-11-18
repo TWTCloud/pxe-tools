@@ -166,10 +166,11 @@ test reproduit une alternance locale des index, sans mesurer une propagation
 réelle du Worker. Les essais du chemin d'application utilisent uniquement des
 arbres jetables, avec des interruptions et des conflits de verrous simulés. Le
 candidat ne détecte pas tous les usages de configurations APT alternatives,
-ne vérifie pas la fraîcheur des index fournis et ne coordonne pas les
-processus qui ignorent ses verrous. Il ne prend pas en charge automatiquement
-les clients hors ligne ; la procédure, les garanties de reprise, les dates et
-révocations et la réception sur systèmes représentatifs restent à revoir.
+vérifie pas les révocations à partir d'une source extérieure et ne coordonne pas
+les processus qui ignorent ses verrous. Il exige désormais un index récent signé
+par la nouvelle sous-clé ; l'ancienne preuve peut être expirée. Le contrôle de
+fraîcheur dépend de l'horloge du client. La procédure, les garanties de reprise
+et la réception sur systèmes représentatifs restent à revoir.
 
 Le workflow de vérification des PR répète localement la construction, la
 signature et la préparation des assets statiques avec des clés jetables. La
@@ -183,6 +184,39 @@ Il ne contient ni certificat ni secret ; ses sommes seules n'authentifient pas
 sa provenance. Ce mode ne raccorde pas encore une rotation réelle au signataire
 de publication et ne déploie ni certificat ni Worker. Aucun basculement de
 production n'est livré.
+
+Le job de publication prépare aussi les données listées dans
+`packaging/ci/client-transitions.json`. Cette liste est vide par défaut : le
+chemin actuel et les assets restent inchangés. Pour une transition future, un
+changement de dépôt séparé devrait ajouter les fichiers publics et leurs
+identités vérifiées à cette liste, après revue et décision ciblée. Le hook
+vérifie les certificats et signatures et n'accepte que les quatre fichiers
+attendus. Il publie les données sous un chemin contenant un condensat de leur
+contenu et de leurs identités ; toute modification exige donc un nouveau chemin.
+Les entrées précédentes doivent rester dans la liste et les fichiers conservés
+aux publications suivantes, tant que les clients hors ligne en ont besoin.
+Une suppression ou un retour à une version antérieure peut rendre une preuve
+indisponible : conserver aussi une copie vérifiée hors Worker. Les sommes et le
+chemin ne remplacent pas une vérification indépendante des empreintes.
+
+#### Client resté hors ligne
+
+1. Vérifier la date du client et, par un canal indépendant actuel, la primaire,
+   les deux sous-clés, leur état de révocation et l'identité du dossier de
+   transition. Une clé révoquée ou compromise exige un autre plan.
+2. Récupérer les données publiées, ou une copie archivée préalablement vérifiée,
+   et le programme client par un canal vérifié. Les transporter sur un support
+   de confiance si le client reste déconnecté. La preuve de l'ancienne
+   signature peut être historique et expirée.
+3. Fournir également un `InRelease` récent signé par la nouvelle sous-clé. Si
+   l'index du dossier archivé a expiré, obtenir l'index courant par un canal de
+   confiance et le transférer ; ne pas contourner le contrôle de date. Sans
+   preuve récente vérifiable, laisser la clé installée inchangée et attendre.
+4. Sur une machine autorisée, inspecter puis appliquer explicitement le
+   candidat avec les empreintes vérifiées. En cas d'état incertain ou de refus,
+   conserver les témoins et demander une inspection. Après reconnexion, un
+   `apt update` séparé valide le dépôt courant ; la migration seule ne prouve
+   ni sa disponibilité, ni l'installation d'un paquet.
 
 Le candidat contient aussi `stage-client-transition-data.py`, qui prépare
 localement un dossier de deux certificats publics et deux index signés après

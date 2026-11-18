@@ -8,6 +8,7 @@ set -euo pipefail
   exit 1
 }
 root=$(cd "$(dirname "$0")/../.." && pwd)
+python3 "$root/tests/test_client_transition_policy.py" -v
 fixture=$(mktemp -d /tmp/pxe-rotation-apt-XXXXXXXX)
 home="$fixture/gnupg"
 mkdir -m 0700 "$home"
@@ -65,6 +66,13 @@ args=(--gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$new_sig
       --previous-signing-fingerprint "$old_signer" --previous-primary-fingerprint "$primary"
       --source-commit "$new_source" --build-run-id 456 --approved-package-sha256 "$new_sha")
 python3 "$builder" "$fixture/new.deb" "$fixture/new" "${args[@]}" >/dev/null
+
+# A client can have been offline beyond the old index's validity. Retain a
+# genuinely signed historical proof while requiring a fresh new-signer index.
+sed 's/^Valid-Until:.*/Valid-Until: Thu, 01 Jan 1970 00:00:00 UTC/' \
+  "$fixture/old/dists/stable/Release" > "$fixture/expired-old-release"
+"${gpg_base[@]}" --local-user "${old_signer}!" --clearsign \
+  --output "$fixture/expired-old.InRelease" "$fixture/expired-old-release"
 
 # Prepare the public client data using the same copied tool that the workflow
 # retains. Neither this fixture nor the output contains production material.
@@ -126,6 +134,49 @@ gpgv --keyring "$fixture/static-transition/pxe-tools-archive-keyring.gpg" \
   "$fixture/old/dists/stable/InRelease" >/dev/null 2>&1
 gpgv --keyring "$fixture/static-transition/pxe-tools-archive-keyring.gpg" \
   "$fixture/static-transition/apt/dists/stable/InRelease" >/dev/null 2>&1
+
+# Exercise the exact publication hook with an empty default configuration and
+# with separately reviewed fixture-only transition data. No Worker is deployed.
+publication_hook="$root/packaging/ci/stage-published-client-transitions.py"
+cp "$fixture/static-transition/_headers" "$fixture/original-headers"
+python3 "$publication_hook" --assets "$fixture/static-transition" \
+  --config "$root/packaging/ci/client-transitions.json" --data-root "$fixture/no-data" \
+  --primary-fingerprint "$primary" >/dev/null
+cmp "$fixture/original-headers" "$fixture/static-transition/_headers"
+test ! -e "$fixture/static-transition/apt-transition"
+transition_id=$(python3 - "$root" "$fixture" "$primary" "$old_signer" "$new_signer" <<'PY'
+import hashlib, importlib.util, json, pathlib, sys
+root, fixture = map(pathlib.Path, sys.argv[1:3])
+primary, old, new = sys.argv[3:]
+spec = importlib.util.spec_from_file_location('publication_hook', root / 'packaging/ci/stage-published-client-transitions.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+files = {name: hashlib.sha256((fixture / 'client-data' / name).read_bytes()).hexdigest() for name in module.NAMES}
+ident = module.identity(primary, old, new, files)
+(fixture / 'client-transitions.json').write_text(json.dumps({'version': 1, 'transitions': [
+    {'id': ident, 'primary': primary, 'old': old, 'new': new}]}))
+print(ident)
+PY
+)
+mkdir -p "$fixture/published-data/$transition_id"
+for name in old-public.gpg new-public.gpg old.InRelease new.InRelease; do
+  cp "$fixture/client-data/$name" "$fixture/published-data/$transition_id/$name"
+done
+python3 "$publication_hook" --assets "$fixture/static-transition" \
+  --config "$fixture/client-transitions.json" --data-root "$fixture/published-data" \
+  --primary-fingerprint "$primary" >/dev/null
+cmp "$fixture/client-data/new-public.gpg" "$fixture/static-transition/apt-transition/sha256/$transition_id/new-public.gpg"
+test "$(find "$fixture/static-transition/apt-transition/sha256/$transition_id" -type f | wc -l | tr -d ' ')" = 4
+grep -q 'Cache-Control: public, max-age=31536000, immutable' "$fixture/static-transition/_headers"
+mkdir "$fixture/invalid-publication-assets"
+cp "$fixture/original-headers" "$fixture/invalid-publication-assets/_headers"
+printf 'tampered\n' >> "$fixture/published-data/$transition_id/new.InRelease"
+if python3 "$publication_hook" --assets "$fixture/invalid-publication-assets" \
+    --config "$fixture/client-transitions.json" --data-root "$fixture/published-data" \
+    --primary-fingerprint "$primary" > "$fixture/invalid-publication.log" 2>&1; then
+  echo 'Unexpected acceptance of altered transition data' >&2; exit 1
+fi
+test ! -e "$fixture/invalid-publication-assets/apt-transition"
 
 # Exact provenance checks allow only the explicitly pinned pair of subkeys.
 python3 - "$fixture" "$old_sha" "$new_sha" "$old_source" "$new_source" <<'PYJSON'

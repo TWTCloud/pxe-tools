@@ -249,6 +249,12 @@ jobs:
             --keyring packaging/ci/pxe-tools-public.gpg \
             --primary-fingerprint CD8B4493876B4FBD1009FE2DB195E5DE026807EC \
             --signing-fingerprint 76CA2883C9DACEB52D9E806A1F2D96C9062271AB
+          # The checked-in list is empty by default. Each future entry needs
+          # independently reviewed public material and a separate release decision.
+          python3 packaging/ci/stage-published-client-transitions.py \
+            --assets "$RUNNER_TEMP/assets" --config packaging/ci/client-transitions.json \
+            --data-root packaging/ci/client-transition-data \
+            --primary-fingerprint CD8B4493876B4FBD1009FE2DB195E5DE026807EC
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24

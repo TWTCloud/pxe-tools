@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 if os.environ.get('PXE_APT_ROTATION_FIXTURE') != '1':
@@ -134,6 +135,26 @@ class ClientTransitionFixture(unittest.TestCase):
         updated = update('updated', 'new')
         self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
         self.assertEqual(self.anchor.read_bytes(), self.old)
+
+    def test_offline_recovery_uses_transferred_signed_data_without_network(self):
+        media = self.root / 'transferred-media'
+        media.mkdir()
+        shutil.copyfile(self.new, media / 'new-public.gpg')
+        shutil.copyfile(FIXTURE / 'expired-old.InRelease', media / 'old.InRelease')
+        shutil.copyfile(FIXTURE / 'new/dists/stable/InRelease', media / 'new.InRelease')
+        with patch('socket.socket', side_effect=AssertionError('network access prohibited')):
+            report = transition.rehearse(self.root, media / 'new-public.gpg', media / 'old.InRelease',
+                                         media / 'new.InRelease', PRIMARY, OLD_SIGNER, NEW_SIGNER, apply=True)
+        self.assertTrue(report['applied'])
+        self.assertEqual(self.key.read_bytes(), self.new.read_bytes())
+        self.assertEqual(self.anchor.read_bytes(), self.old)
+
+    def test_expired_new_index_refuses_without_modification(self):
+        with patch.object(transition, 'datetime', wraps=datetime) as clock:
+            clock.now.return_value = datetime.now(timezone.utc) + timedelta(days=3)
+            with self.assertRaisesRegex(ValueError, 'expired or not yet valid'):
+                self.run_transition(apply=True)
+        self.assertEqual(self.key.read_bytes(), self.old)
 
     def test_modified_or_wrong_signed_release_is_rejected_without_writes(self):
         altered = self.root / 'bad.InRelease'
