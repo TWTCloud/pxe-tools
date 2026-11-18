@@ -80,7 +80,8 @@ PXE_ROTATION_FIXTURE_DIR="$fixture" python3 "$root/tests/integration/test_apt_ke
 
 # CI transition uses only the new secret subkey; the old certificate is public.
 "${gpg_base[@]}" --armor --export-secret-subkeys "${new_signer}!" > "$fixture/new-secret.asc"
-export APT_SIGNING_KEY="$(cat "$fixture/new-secret.asc")"
+APT_SIGNING_KEY=$(< "$fixture/new-secret.asc")
+export APT_SIGNING_KEY
 export APT_SIGNING_PASSPHRASE='temporary-fixture-passphrase'
 ci_signer="$root/packaging/native/ci-sign-apt-candidate.py"
 ci_args=(--primary-fingerprint "$primary" --signing-fingerprint "$new_signer" --previous "$fixture/old"
@@ -125,6 +126,10 @@ if python3 "$ci_signer" "$fixture/new.deb" "$fixture/ci-secret" --primary-finger
   echo 'CI signer unexpectedly accepted private material as a previous certificate' >&2; exit 1
 fi
 test ! -e "$fixture/ci-secret"
+if python3 "$ci_signer" "$fixture/new.deb" "$fixture/ci-extra-subkey" --primary-fingerprint "$primary" --signing-fingerprint "$new_signer" --previous "$fixture/old" --transition-previous-signing-fingerprint "$old_signer" --transition-previous-public-key "$fixture/new-public.gpg" > "$fixture/ci-extra-subkey.log" 2>&1; then
+  echo 'CI signer unexpectedly accepted an extra previous public subkey' >&2; exit 1
+fi
+test ! -e "$fixture/ci-extra-subkey"
 unset APT_SIGNING_KEY APT_SIGNING_PASSPHRASE
 
 # Wrong identities and incomplete transitions must not publish an output tree.

@@ -31,8 +31,10 @@ Par ailleurs :
   précédent soit signé par la même sous-clé que le suivant. Un mode explicite
   de répétition permet de distinguer les deux sous-clés sous une primaire
   épinglée ; il n'est pas raccordé au workflow de production ;
-- la récupération de l'instantané, la vérification de provenance et les
-  workflows épinglent les empreintes de la primaire et de la sous-clé courantes ;
+- la récupération de l'instantané et les workflows épinglent encore les
+  empreintes courantes. La vérification de provenance préparée accepte une
+  deuxième sous-clé uniquement si elle est explicitement épinglée ; la
+  signature reste vérifiée contre le signataire attendu ;
 - le désinstallateur suit la provenance du trousseau par une empreinte du
   contenu. Les fixtures testent la mise à jour en place et le remplacement
   atomique : dans les deux cas le trousseau modifié est conservé, car son
@@ -112,6 +114,11 @@ réelle exige donc un scénario, une revue et une autorisation ciblée.
 
 ## Réception APT : portée des preuves
 
+- Le [contrôle APT en lecture seule du 18 novembre](https://github.com/williamboglietti/pxe-tools/actions/runs/44379836320)
+  utilise un état client vide et la clé suivie : APT a vérifié les métadonnées
+  publiques puis téléchargé les deux paquets bêta 8, dont les empreintes
+  correspondent au manifeste. Aucun paquet n'a été installé et ce résultat ne
+  reçoit ni l'installateur complet ni toutes les distributions.
 - La [CI du site](https://github.com/williamboglietti/pxetools.com/actions/runs/44358444883)
   a exécuté l'installateur contre une fixture signée isolée. Elle couvre des
   refus d'empreinte et d'objets altérés ; il s'agit d'un paquet synthétique,
