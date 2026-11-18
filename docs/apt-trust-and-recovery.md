@@ -24,8 +24,10 @@ python3 tests/integration/test_apt_signing_rotation.py -v
 Le même test confirme que `ci-sign-apt-candidate.py` refuse actuellement un
 trousseau CI contenant deux sous-clés. Par ailleurs :
 
-- `build-local-apt-repository.py` exige que la signature de l'instantané
-  précédent provienne de la **même sous-clé** que celle choisie pour le nouveau ;
+- `build-local-apt-repository.py` exige **par défaut** que l'instantané
+  précédent soit signé par la même sous-clé que le suivant. Un mode explicite
+  de répétition permet de distinguer les deux sous-clés sous une primaire
+  épinglée ; il n'est pas raccordé au workflow de production ;
 - la récupération de l'instantané, la vérification de provenance et les
   workflows épinglent les empreintes de la primaire et de la sous-clé courantes ;
 - le désinstallateur suit la provenance du trousseau par une empreinte du
@@ -34,7 +36,12 @@ trousseau CI contenant deux sous-clés. Par ailleurs :
 Changer la clé de production, le secret CI ou une seule empreinte entraînerait
 donc un blocage de publication ou des clients incapables de vérifier le dépôt.
 **La rotation transparente n'est pas implémentée et aucune rotation réelle n'a
-été effectuée.** Une nouvelle primaire, une sous-clé renouvelée et une
+été effectuée.** La répétition isolée peut être lancée sur un environnement
+Linux jetable avec `PXE_APT_ROTATION_FIXTURE=1 bash
+tests/integration/test_apt_rotation_rehearsal.sh`. Elle génère ses propres
+clés et paquets ; elle ne modifie aucun état APT système ni aucun secret. Le
+workflow de vérification des PR l'exécute sans accès à l'environnement de
+production ; le workflow de publication reste inchangé. Une nouvelle primaire, une sous-clé renouvelée et une
 compromission exigent des plans distincts ; un certificat compromis ne doit pas
 être utilisé pour authentifier sans examen sa propre relève.
 
