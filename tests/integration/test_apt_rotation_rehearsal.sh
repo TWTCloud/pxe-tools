@@ -65,6 +65,31 @@ args=(--gnupg-home "$home" --passphrase-file "$passfile" --fingerprint "$new_sig
       --previous-signing-fingerprint "$old_signer" --previous-primary-fingerprint "$primary"
       --source-commit "$new_source" --build-run-id 456 --approved-package-sha256 "$new_sha")
 python3 "$builder" "$fixture/new.deb" "$fixture/new" "${args[@]}" >/dev/null
+
+# Prepare the public client data using the same copied tool that the workflow
+# retains. Neither this fixture nor the output contains production material.
+client_tool=${PXE_CLIENT_TRANSITION_TOOL:-$root/packaging/native/prepare-client-key-transition.py}
+client_data="$(dirname "$client_tool")/stage-client-transition-data.py"
+data_args=(--old-certificate "$fixture/old-public.gpg" --new-certificate "$fixture/new-public.gpg"
+           --old-inrelease "$fixture/old/dists/stable/InRelease" --new-inrelease "$fixture/new/dists/stable/InRelease"
+           --primary-fingerprint "$primary" --old-signing-fingerprint "$old_signer" --new-signing-fingerprint "$new_signer")
+python3 "$client_data" "$fixture/client-data" "${data_args[@]}" >/dev/null
+cmp "$fixture/client-data/new-public.gpg" "$fixture/new-public.gpg"
+cmp "$fixture/client-data/old.InRelease" "$fixture/old/dists/stable/InRelease"
+cmp "$fixture/client-data/new.InRelease" "$fixture/new/dists/stable/InRelease"
+python3 - "$fixture/client-data" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+manifest = json.loads((root / 'manifest.json').read_text())
+for name, expected in manifest['files'].items():
+    assert hashlib.sha256((root / name).read_bytes()).hexdigest() == expected
+assert set(manifest['files']) == {'old-public.gpg', 'new-public.gpg', 'old.InRelease', 'new.InRelease'}
+PY
+if python3 "$client_data" "$fixture/invalid-client-data" "${data_args[@]}" --new-inrelease "$fixture/old/dists/stable/InRelease" > "$fixture/invalid-client-data.log" 2>&1; then
+  echo 'Unexpected acceptance of the wrong new index signer' >&2; exit 1
+fi
+test ! -e "$fixture/invalid-client-data"
 old_index="$fixture/old/dists/stable/main/binary-amd64/Packages.gz"
 old_sha256=$(sha256sum "$old_index" | awk '{print $1}')
 old_sha512=$(sha512sum "$old_index" | awk '{print $1}')

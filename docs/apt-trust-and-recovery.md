@@ -184,6 +184,14 @@ sa provenance. Ce mode ne raccorde pas encore une rotation réelle au signataire
 de publication et ne déploie ni certificat ni Worker. Aucun basculement de
 production n'est livré.
 
+Le candidat contient aussi `stage-client-transition-data.py`, qui prépare
+localement un dossier de deux certificats publics et deux index signés après
+vérification des empreintes et des trois signatures attendues. Le manifeste
+indique les empreintes des fichiers, mais n'authentifie ni sa provenance ni les
+identités qu'il contient : elles doivent être vérifiées indépendamment. La
+répétition crée et vérifie ce dossier avec des clés jetables ; aucun de ces
+fichiers ne constitue un certificat de production ou une distribution réelle.
+
 ## Instantanés : ce qui est vérifié
 
 Le [run planifié 44077918347](https://github.com/williamboglietti/pxe-tools/actions/runs/44077918347)

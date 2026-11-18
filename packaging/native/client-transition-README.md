@@ -15,3 +15,10 @@ il ne télécharge rien et ne déclenche pas de signature ni de rotation serveur
 La prise en charge des clients hors ligne, des configurations APT alternatives,
 des reprises après interruption et la procédure de production doivent encore
 être revues avant une utilisation réelle.
+
+`python3 packaging/native/stage-client-transition-data.py --help` décrit la
+préparation d'un dossier local contenant les deux certificats publics, les
+deux index signés et leurs empreintes. Le programme vérifie les signatures
+avant de produire le dossier ; il n'envoie rien. Son manifeste n'authentifie
+pas ses propres empreintes et ne démontre pas la fraîcheur des index : les
+vérifications indépendantes restent nécessaires côté opérateur et client.

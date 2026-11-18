@@ -11,10 +11,12 @@ output=$1
 mkdir "$output"
 mkdir -p "$output/packaging/native" "$output/packaging/ci"
 for file in packaging/native/prepare-client-key-transition.py packaging/native/check-apt-key-transition.py \
+            packaging/native/stage-client-transition-data.py \
             packaging/native/uninstall-apt.py packaging/ci/apt-proof.py \
             packaging/native/client-transition-README.md; do
   cp "$root/$file" "$output/$file"
 done
 (cd "$output" && sha256sum packaging/native/prepare-client-key-transition.py \
   packaging/native/check-apt-key-transition.py packaging/native/uninstall-apt.py \
-  packaging/ci/apt-proof.py packaging/native/client-transition-README.md > SHA256SUMS)
+  packaging/native/stage-client-transition-data.py packaging/ci/apt-proof.py \
+  packaging/native/client-transition-README.md > SHA256SUMS)
