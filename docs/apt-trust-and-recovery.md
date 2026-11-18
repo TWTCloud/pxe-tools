@@ -21,8 +21,11 @@ comportement avec des clés jetables :
 python3 tests/integration/test_apt_signing_rotation.py -v
 ```
 
-Le même test confirme que `ci-sign-apt-candidate.py` refuse actuellement un
-trousseau CI contenant deux sous-clés. Par ailleurs :
+Le même test confirme que `ci-sign-apt-candidate.py` refuse par défaut un
+trousseau CI contenant deux sous-clés privées. Le mode de transition préparé
+importe séparément l'ancien certificat public, contrôle les deux empreintes et
+refuse tout ajout de matériel privé ; il n'est pas raccordé à la publication.
+Par ailleurs :
 
 - `build-local-apt-repository.py` exige **par défaut** que l'instantané
   précédent soit signé par la même sous-clé que le suivant. Un mode explicite
@@ -31,7 +34,9 @@ trousseau CI contenant deux sous-clés. Par ailleurs :
 - la récupération de l'instantané, la vérification de provenance et les
   workflows épinglent les empreintes de la primaire et de la sous-clé courantes ;
 - le désinstallateur suit la provenance du trousseau par une empreinte du
-  contenu. Son comportement après modification du trousseau doit être évalué.
+  contenu. Les fixtures testent la mise à jour en place et le remplacement
+  atomique : dans les deux cas le trousseau modifié est conservé, car son
+  témoin d'origine ne prouve plus les nouveaux octets.
 
 Changer la clé de production, le secret CI ou une seule empreinte entraînerait
 donc un blocage de publication ou des clients incapables de vérifier le dépôt.
@@ -76,7 +81,11 @@ signature, conservation persistante, déploiement et contrôle public. Le script
 `packaging/ci/worker-snapshot.py` sélectionne l'asset le plus récent de la
 release `apt-snapshots`, exige sa concordance exacte avec l'`InRelease` public,
 puis vérifie l'archive, les signatures, le manifeste et les objets ; il refuse
-un retour automatique à un instantané plus ancien. Les tests
+un retour automatique à un instantané plus ancien. La préparation de la PR
+valide l'extraction dans un répertoire temporaire avant de rendre la destination
+disponible ; une signature ou un objet invalide ne laisse pas d'instantané
+partiel utilisable. Une fixture signée répète l'interruption avant déploiement,
+le refus d'un état public ancien, puis la reprise après concordance. Les tests
 `tests/test_worker_snapshot.py` couvrent notamment les archives dangereuses,
 une réponse publique ancienne et le refus d'amorcer sur erreur réseau.
 
@@ -110,7 +119,9 @@ réelle exige donc un scénario, une revue et une autorisation ciblée.
 - Le test `tests/integration/test_apt_release_candidate.sh` construit des
   dépôts et paquets jetables, utilise un état APT distinct, simule l'installation,
   conserve les liens immuables lors d'un changement de version et refuse les
-  index ou paquets altérés. Le run planifié ci-dessus l'a exécuté en CI.
+  index ou paquets altérés. Le run planifié ci-dessus l'a exécuté en CI. La
+  répétition de transition utilise également un état APT vide, des clés
+  jetables et une simulation d'installation du paquet synthétique.
 - La [réception bêta 7 sur Zorin](apt-upgrade-lifecycle.md#réception-des-paquets-canoniques-sur-zorin)
   et les essais des versions antérieures ont des périmètres propres. La bêta 8
   n'a pas bénéficié d'une nouvelle campagne native multi-OS, d'une installation

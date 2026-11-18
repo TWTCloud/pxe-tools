@@ -77,6 +77,25 @@ class SigningRotationFixture(unittest.TestCase):
         self.assert_signer(self.verify(self.new_key, self.new_signature), self.new_signer)
         self.assert_signer(self.verify(self.new_key, self.old_signature), self.old_signer)
 
+    def test_transition_imports_only_old_public_subkey_before_calling_builder(self):
+        secret = self.run_checked(*self.gpg, '--armor', '--export-secret-subkeys',
+                                  self.new_signer + '!').decode()
+        env = dict(os.environ, APT_SIGNING_KEY=secret, APT_SIGNING_PASSPHRASE=self.passphrase,
+                   TMPDIR='/tmp')
+        result = subprocess.run([sys.executable, str(SIGNER), str(self.root / 'missing.deb'),
+                                 str(self.root / 'unused-transition'),
+                                 '--primary-fingerprint', self.primary,
+                                 '--signing-fingerprint', self.new_signer,
+                                 '--previous', str(self.root),
+                                 '--transition-previous-signing-fingerprint', self.old_signer,
+                                 '--transition-previous-public-key', str(self.old_key)],
+                                env=env, capture_output=True, text=True)
+        # The deliberately absent package makes the builder fail only after the
+        # signer has accepted the public-only transition and invoked it.
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('python3 failed', result.stderr)
+        self.assertFalse((self.root / 'unused-transition').exists())
+
     def test_current_ci_signer_refuses_a_bundle_with_two_signing_subkeys(self):
         secret = self.run_checked(*self.gpg, '--armor', '--export-secret-subkeys', self.primary).decode()
         env = dict(os.environ, APT_SIGNING_KEY=secret, APT_SIGNING_PASSPHRASE=self.passphrase)

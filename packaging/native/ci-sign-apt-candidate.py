@@ -123,8 +123,21 @@ def main() -> None:
                         or set(combined_fprs) != {primary, old_signing, signing}):
                     raise ValueError('transition public keyring contains an unexpected key')
                 after_secret = records('--list-secret-keys', primary)
-                if ([x[9].upper() for x in after_secret if x[0] == 'fpr'] != [primary, signing]
-                        or len([x for x in after_secret if x[0] == 'ssb']) != 1):
+                # GnuPG may list the imported public-only subkey as an ssb
+                # stub. The '#' marker proves its secret material is absent.
+                subkey_secrets = {}
+                for index, row in enumerate(after_secret):
+                    if row[0] != 'ssb':
+                        continue
+                    if (len(row) <= 14 or index + 1 >= len(after_secret)
+                            or after_secret[index + 1][0] != 'fpr'):
+                        raise ValueError('cannot classify transition subkey material')
+                    subkey_secrets[after_secret[index + 1][9].upper()] = row[14]
+                primary_rows = [row for row in after_secret if row[0] == 'sec']
+                if (len(primary_rows) != 1 or len(primary_rows[0]) <= 14 or primary_rows[0][14] != '#'
+                        or len([row for row in after_secret if row[0] == 'ssb']) != 2
+                        or set(subkey_secrets) != {old_signing, signing}
+                        or subkey_secrets[old_signing] != '#' or subkey_secrets[signing] == '#'):
                     raise ValueError('transition added unexpected secret material')
             builder = Path(__file__).with_name('build-apt-release-candidate.py')
             build_args = ['python3', str(builder), str(args.package), str(args.destination),
