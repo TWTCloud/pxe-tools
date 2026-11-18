@@ -93,6 +93,15 @@ python3 "$ci_signer" "$fixture/new.deb" "$fixture/ci-new" "${ci_args[@]}" --publ
 gpgv --keyring "$fixture/ci-public.gpg" "$fixture/old/dists/stable/InRelease" >/dev/null 2>&1
 gpgv --keyring "$fixture/ci-public.gpg" "$fixture/ci-new/dists/stable/InRelease" >/dev/null 2>&1
 
+# Stage the same static asset layout used by the publication workflow, locally.
+python3 "$root/packaging/native/prepare-static-apt.py" "$fixture/ci-new" "$fixture/static-transition" \
+  --keyring "$fixture/ci-public.gpg" --primary-fingerprint "$primary" --signing-fingerprint "$new_signer" >/dev/null
+cmp "$fixture/ci-new/dists/stable/InRelease" "$fixture/static-transition/apt/dists/stable/InRelease"
+gpgv --keyring "$fixture/static-transition/pxe-tools-archive-keyring.gpg" \
+  "$fixture/old/dists/stable/InRelease" >/dev/null 2>&1
+gpgv --keyring "$fixture/static-transition/pxe-tools-archive-keyring.gpg" \
+  "$fixture/static-transition/apt/dists/stable/InRelease" >/dev/null 2>&1
+
 # Exact provenance checks allow only the explicitly pinned pair of subkeys.
 python3 - "$fixture" "$old_sha" "$new_sha" "$old_source" "$new_source" <<'PYJSON'
 import json, pathlib, sys

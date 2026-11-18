@@ -135,10 +135,20 @@ compromise exige un autre modèle de confiance.
    clients. La révocation de l'ancienne sous-clé et toute intervention réelle
    suivent une décision de production distincte.
 
-Aucun outil de mise à jour client ni basculement de production n'est livré par
-la présente préparation. Les fixtures ne modifient que leurs répertoires
-jetables ; elles ne prouvent pas le déploiement du certificat sur les machines
-existantes.
+Le prototype `packaging/native/prepare-client-key-transition.py` permet de
+répéter l'inspection et le remplacement atomique **uniquement** dans un arbre
+jetable marqué sous `/tmp`, avec `PXE_APT_ROTATION_FIXTURE=1`. Il refuse les
+sources partagées ou ambiguës, conserve le témoin de la clé initiale et
+signale un état incertain si la synchronisation échoue après remplacement. La
+fixture vérifie notamment les refus et les interruptions. Elle ne constitue
+pas un programme utilisable sur les clients existants : les contrôles de
+propriété réels, montages, concurrence et reprise durable restent à réaliser
+et recevoir avant toute distribution.
+
+Le workflow de vérification des PR répète localement la construction, la
+signature et la préparation des assets statiques avec des clés jetables. Cette
+répétition ne raccorde pas encore une transition au workflow de publication et
+ne déploie ni certificat ni Worker. Aucun basculement de production n'est livré.
 
 ## Instantanés : ce qui est vérifié
 

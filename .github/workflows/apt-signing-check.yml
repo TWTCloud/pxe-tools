@@ -24,7 +24,7 @@ jobs:
         run: npm ci --prefix packaging/cloudflare
       - name: Verify APT candidate with disposable keys
         run: PXE_RELEASE_APT_FIXTURE=1 bash tests/integration/test_apt_release_candidate.sh
-      - name: Rehearse signing-subkey transition with disposable APT state
+      - name: Rehearse client certificate and APT publication staging
         shell: bash
         run: |
           set -euo pipefail

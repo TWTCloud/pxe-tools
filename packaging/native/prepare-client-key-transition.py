@@ -85,7 +85,10 @@ def rehearse(root: Path, new_certificate: Path, primary: str, old_signer: str,
             raise ValueError('installed key changed during staging')
         os.replace(temporary, key.name, src_dir_fd=directory, dst_dir_fd=directory)
         created = False
-        os.fsync(directory)
+        try:
+            os.fsync(directory)
+        except OSError as exc:
+            raise RuntimeError('certificate was replaced but directory durability is uncertain; inspect before retrying') from exc
         report['applied'] = True
         return report
     finally:

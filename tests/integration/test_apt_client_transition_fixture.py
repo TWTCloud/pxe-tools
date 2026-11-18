@@ -80,6 +80,38 @@ class ClientTransitionFixture(unittest.TestCase):
         self.assertTrue(os.path.samefile(self.key, self.anchor))
         self.assertFalse(list(self.key.parent.glob('.pxe-key-transition-*')))
 
+    def test_failure_after_replace_reports_uncertain_state_and_keeps_witness(self):
+        real_fsync = os.fsync
+        calls = 0
+        def fail_on_directory(descriptor):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError('fixture directory flush failed')
+            return real_fsync(descriptor)
+        with patch.object(transition.os, 'fsync', side_effect=fail_on_directory):
+            with self.assertRaisesRegex(RuntimeError, 'replaced.*durability is uncertain'):
+                self.run_transition(apply=True)
+        self.assertEqual(self.key.read_bytes(), self.new.read_bytes())
+        self.assertEqual(self.anchor.read_bytes(), self.old)
+        self.assertFalse(list(self.key.parent.glob('.pxe-key-transition-*')))
+
+    def test_source_symlink_and_changed_witness_are_refused(self):
+        source_content = self.source.read_bytes()
+        self.source.unlink()
+        outside = self.root / 'other-source'
+        outside.write_bytes(source_content)
+        self.source.symlink_to(outside)
+        with self.assertRaises(ValueError):
+            self.run_transition(apply=True)
+        self.assertEqual(self.key.read_bytes(), self.old)
+        self.source.unlink()
+        self.source.write_bytes(source_content)
+        self.anchor.write_bytes(b'changed witness')
+        with self.assertRaises(ValueError):
+            self.run_transition(apply=True)
+        self.assertEqual(self.key.read_bytes(), b'changed witness')
+
     def test_only_explicitly_marked_fixture_in_tmp_is_allowed(self):
         with self.assertRaises(ValueError):
             transition.rehearse(Path('/'), self.new, PRIMARY, OLD_SIGNER, NEW_SIGNER, apply=True)
