@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import tarfile
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -117,11 +118,21 @@ def recover(destination: Path, bootstrap: bool) -> None:
                 continue
             if signed is None or signed.read(1024 * 1024 + 1) != live:
                 continue
-            if destination.exists():
+            if destination.exists() or destination.is_symlink():
                 raise ValueError('snapshot destination already exists')
-            destination.mkdir(parents=True)
-            archive.extractall(destination, filter='data')
-            validate_recovered(destination / 'snapshot')
+            # Never expose an extracted snapshot until every signature and object
+            # has passed validation. A failed check leaves no recovery directory.
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix='.pxe-recover-', dir=destination.parent) as temporary:
+                staging = Path(temporary)
+                archive.extractall(staging, filter='data')
+                validate_recovered(staging / 'snapshot')
+                destination.mkdir(mode=0o700)
+                try:
+                    os.rename(staging / 'snapshot', destination / 'snapshot')
+                except BaseException:
+                    destination.rmdir()
+                    raise
             print('Recovered the snapshot matching the live signed metadata.')
             return
     raise ValueError('no persistent snapshot matches the live InRelease')

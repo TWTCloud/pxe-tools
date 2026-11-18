@@ -63,6 +63,10 @@ cmp "$fixture/old/dists/stable/main/binary-amd64/by-hash/SHA256/$old_sha256" "$f
 cmp "$fixture/old/dists/stable/main/binary-amd64/by-hash/SHA512/$old_sha512" "$fixture/new/dists/stable/main/binary-amd64/by-hash/SHA512/$old_sha512"
 old_package=$(find "$fixture/old/pool" -name '*.deb' -print -quit)
 cmp "$old_package" "$fixture/new/pool/main/p/pxe-tools/$(basename "$old_package")"
+# Recover genuine signed fixture snapshots and exercise failure/retry ordering.
+PXE_ROTATION_FIXTURE_DIR="$fixture" PXE_ROTATION_PRIMARY="$primary" \
+  PXE_ROTATION_OLD_SIGNER="$old_signer" PXE_ROTATION_NEW_SIGNER="$new_signer" \
+  python3 "$root/tests/integration/test_apt_snapshot_recovery_fixture.py" -v
 
 # Wrong identities and incomplete transitions must not publish an output tree.
 if python3 "$builder" "$fixture/new.deb" "$fixture/wrong-old" --gnupg-home "$home" --fingerprint "$new_signer" --previous "$fixture/old" --previous-signing-fingerprint "$new_signer" --previous-primary-fingerprint "$primary" > "$fixture/wrong-old.log" 2>&1; then

@@ -51,6 +51,24 @@ class RecoveryTests(unittest.TestCase):
                         with self.assertRaises(ValueError): module.recover(target, False)
                         self.assertFalse(target.exists())
 
+    def test_failed_validation_leaves_no_partial_recovery(self):
+        data = archive()
+        assets = [{'name': 'snapshot-1-1.tar.gz', 'id': 42, 'size': len(data),
+                   'digest': 'sha256:' + hashlib.sha256(data).hexdigest()}]
+        metadata = {'tag_name': 'apt-snapshots', 'draft': False, 'id': 123}
+        result = subprocess.CompletedProcess([], 0, json.dumps(metadata).encode())
+        with tempfile.TemporaryDirectory() as d, \
+             patch.dict(os.environ, {'GITHUB_REPOSITORY': 'example/project'}), \
+             patch.object(module.subprocess, 'run', return_value=result), \
+             patch.object(module, 'live_release', return_value=b'signed release'), \
+             patch.object(module, 'gh', side_effect=[json.dumps([assets]).encode(), data]), \
+             patch.object(module, 'validate_recovered', side_effect=ValueError('invalid signature')):
+            target = Path(d) / 'previous'
+            with self.assertRaisesRegex(ValueError, 'invalid signature'):
+                module.recover(target, False)
+            self.assertFalse(target.exists())
+            self.assertFalse(list(Path(d).glob('.pxe-recover-*')))
+
     def test_stale_live_release_cannot_select_an_older_snapshot(self):
         older = archive(content=b'old release')
         newer = archive(content=b'new release')
