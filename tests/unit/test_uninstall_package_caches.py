@@ -5,6 +5,8 @@ import importlib.util
 import errno
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -85,6 +87,41 @@ class PackageCacheTest(unittest.TestCase):
         installer = {'usr/lib/pxe-tools/' + key: value for key, value in other.MODULES.items()}
         installer.update({'opt/pxe-tools/' + key: value for key, value in other.OPT_MODULES.items()})
         self.assertEqual(module.PACKAGE_CACHE_MODULES, installer)
+
+
+@unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0 and shutil.which('dpkg-deb'),
+                     'isolated dpkg test needs root on Linux')
+class DpkgPackageCacheTest(unittest.TestCase):
+    def test_real_dpkg_purge_after_cache_cleanup(self):
+        previous_umask = os.umask(0o022)
+        self.addCleanup(os.umask, previous_umask)
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            package = temp/'package'; control = package/'DEBIAN'; control.mkdir(parents=True)
+            (control/'control').write_text('Package: pxe-cache-fixture\nVersion: 1\nArchitecture: all\n'
+                                           'Maintainer: Test <test@example.invalid>\nDescription: fixture\n')
+            for path in ('usr/lib/pxe-tools/native/uninstall-apt.py',
+                         'usr/lib/pxe-tools/app/image_delete.py',
+                         'opt/pxe-tools/scripts/atomic_publish.py'):
+                payload = package/path; payload.parent.mkdir(parents=True, exist_ok=True)
+                payload.write_text('# fixture\n')
+            archive = temp/'fixture.deb'
+            subprocess.run(['dpkg-deb', '--build', '--root-owner-group', str(package), str(archive)],
+                           check=True, capture_output=True)
+            root = temp/'root'; (root/'var/lib/dpkg').mkdir(parents=True)
+            (root/'var/lib/dpkg/status').touch()
+            subprocess.run(['dpkg', '--root=' + str(root), '--unpack', str(archive)],
+                           check=True, capture_output=True)
+            for path in ('usr/lib/pxe-tools/native/__pycache__/uninstall-apt.cpython-312.pyc',
+                         'usr/lib/pxe-tools/app/__pycache__/image_delete.cpython-312.pyc',
+                         'opt/pxe-tools/scripts/__pycache__/atomic_publish.cpython-312.pyc'):
+                cache = root/path; cache.parent.mkdir(); cache.write_bytes(b'cache')
+            self.assertEqual(module.clean_package_caches(root), 3)
+            result = subprocess.run(['dpkg', '--root=' + str(root), '--purge', 'pxe-cache-fixture'],
+                                    check=True, capture_output=True, text=True)
+            self.assertNotIn('not empty', result.stderr)
+            self.assertFalse((root/'usr/lib/pxe-tools').exists())
+            self.assertFalse((root/'opt/pxe-tools').exists())
 
 
 if __name__ == '__main__': unittest.main()
