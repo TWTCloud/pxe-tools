@@ -4,6 +4,8 @@
 import hashlib
 import importlib.util
 import os
+import shutil
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -71,6 +73,32 @@ class ClientTransitionFixture(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.run_transition(apply=True, signer='0' * 40)
         self.assertEqual(self.key.read_bytes(), self.old)
+
+    @unittest.skipUnless(shutil.which('apt-get'), 'requires a disposable Linux APT client')
+    def test_updated_fixture_keyring_accepts_new_signed_repository(self):
+        client = self.root / 'client'
+        (client / 'parts').mkdir(parents=True)
+        (client / 'status').write_text('')
+        def update(label, repo):
+            lists = client / ('lists-' + label)
+            (lists / 'partial').mkdir(parents=True)
+            source = client / (label + '.list')
+            source.write_text(f'deb [signed-by={self.key}] file:{FIXTURE / repo} stable main\n')
+            user = subprocess.check_output(['id', '-un'], text=True).strip()
+            options = ['-o', f'APT::Sandbox::User={user}', '-o', f'Dir::Etc::sourcelist={source}',
+                       '-o', f'Dir::Etc::sourceparts={client / "parts"}',
+                       '-o', f'Dir::State::lists={lists}', '-o', f'Dir::State::status={client / "status"}',
+                       '-o', 'Dir::Cache::pkgcache=', '-o', 'Dir::Cache::srcpkgcache=',
+                       '-o', 'APT::Update::Error-Mode=any']
+            return subprocess.run(['apt-get', *options, 'update'], capture_output=True, text=True)
+        old = update('old', 'old')
+        self.assertEqual(old.returncode, 0, old.stdout + old.stderr)
+        stale = update('stale', 'new')
+        self.assertNotEqual(stale.returncode, 0, stale.stdout + stale.stderr)
+        self.run_transition(apply=True)
+        updated = update('updated', 'new')
+        self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
+        self.assertEqual(self.anchor.read_bytes(), self.old)
 
     def test_interrupted_replace_cleans_staging_and_preserves_key_and_anchor(self):
         with patch.object(transition.os, 'replace', side_effect=OSError('fixture interruption')):
