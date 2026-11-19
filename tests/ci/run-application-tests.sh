@@ -80,6 +80,7 @@ python3 tests/unit/test_native_ownership_provenance.py
 python3 tests/unit/test_uninstall_apt.py
 python3 tests/unit/test_uninstall_package_caches.py
 python3 tests/unit/test_uninstall_legacy.py
+python3 -W error::ResourceWarning tests/unit/test_uninstall_residual_purge.py
 python3 tests/unit/test_uninstall_account.py
 python3 tests/unit/test_uninstall_metadata.py
 python3 tests/unit/test_uninstall_persistent_masks.py
