@@ -245,6 +245,8 @@ class PackageFixture:
             ' sys.modules[spec.name]=module\n spec.loader.exec_module(module)\n'
             ' result=module.Reconciler(root=root, run=FixtureRunner(root), configuring=True).reconcile()\n'
             ' print(json.dumps(result))\n'
+            'elif Path(sys.argv[1]).name == "ownership-provenance.py" and sys.argv[2] == "recover-initialization":\n'
+            ' print("unchanged")\n'
             'elif Path(sys.argv[1]).name == "configure-secure-tftp.py":\n'
             ' spec=importlib.util.spec_from_file_location("fixture_secure_setup", '
             + repr(str(ROOT / 'packaging/native/configure-secure-tftp.py')) + ')\n'
