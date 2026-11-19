@@ -217,7 +217,7 @@ def _installer_source_bytes_valid(data):
     return isinstance(data, bytes) and b'..' not in data and re.fullmatch(pattern, data) is not None
 
 
-def apt_cleanup_plan(root, *, owner=0, apt_config=None):
+def apt_cleanup_plan(root, *, owner=0, apt_config=None, allow_reviewed=False):
     """Identify the installer source and a proven key unused by system APT.
 
     APT invocations with a later, explicitly supplied alternative configuration
@@ -244,26 +244,51 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None):
         return (info.st_nlink == links and (owner is None or info.st_uid == owner)
                 and not info.st_mode & 0o022)
 
+    def safe_reference(path):
+        if safe_file(path):
+            return True
+        if not allow_reviewed or path.is_symlink() or not path.is_file():
+            return False
+        info = path.stat()
+        if (owner != 0 or info.st_uid != 0 or info.st_gid != 0 or info.st_nlink != 1 or
+                info.st_mode & 0o002 or not info.st_mode & 0o020):
+            return False
+        import grp
+        import pwd
+        try:
+            group = grp.getgrgid(0)
+            return (group.gr_name == 'root' and not group.gr_mem and
+                    all(entry.pw_uid == 0 for entry in pwd.getpwall() if entry.pw_gid == 0))
+        except (KeyError, OSError):
+            return False
+
     try:
         if not all(safe_dir(path) for path in (root, root / 'etc', root / 'etc/apt', source.parent)):
             return False, False
         source_exists = source.exists() or source.is_symlink()
         source_anchors = list(source.parent.glob('.pxe-tools-sources.*.created'))
         if source_exists or source_anchors:
-            if len(source_anchors) != 1:
-                return False, False
-            source_anchor = source_anchors[0]
-            source_proof = re.fullmatch(r'\.pxe-tools-sources\.([0-9a-f]{64})\.created', source_anchor.name)
-            if source_proof is None or not safe_file(source_anchor, links=2 if source_exists else 1):
-                return False, False
-            if source_anchor.stat().st_size > 1048576:
-                return False, False
-            source_bytes = source_anchor.read_bytes()
-            if (not _installer_source_bytes_valid(source_bytes) or
-                    hashlib.sha256(source_bytes).hexdigest() != source_proof.group(1)):
-                return False, False
-            if source_exists and (not safe_file(source, links=2) or not os.path.samefile(source, source_anchor)):
-                return False, False
+            if allow_reviewed and not source_anchors and source_exists:
+                canonical = (b'Types: deb\nURIs: https://packages.pxetools.com/apt\nSuites: stable\n'
+                             b'Components: main\nArchitectures: amd64\n'
+                             b'Signed-By: /etc/apt/keyrings/pxe-tools-archive-keyring.gpg\n')
+                if not safe_file(source) or source.stat().st_size != len(canonical) or source.read_bytes() != canonical:
+                    return False, False
+            else:
+                if len(source_anchors) != 1:
+                    return False, False
+                source_anchor = source_anchors[0]
+                source_proof = re.fullmatch(r'\.pxe-tools-sources\.([0-9a-f]{64})\.created', source_anchor.name)
+                if source_proof is None or not safe_file(source_anchor, links=2 if source_exists else 1):
+                    return False, False
+                if source_anchor.stat().st_size > 1048576:
+                    return False, False
+                source_bytes = source_anchor.read_bytes()
+                if (not _installer_source_bytes_valid(source_bytes) or
+                        hashlib.sha256(source_bytes).hexdigest() != source_proof.group(1)):
+                    return False, False
+                if source_exists and (not safe_file(source, links=2) or not os.path.samefile(source, source_anchor)):
+                    return False, False
             # An active source symlink elsewhere could use the same inode.
             # Preserve the source if such an alias is present or unclear.
             candidate_sources = [root / 'etc/apt/sources.list'] + [
@@ -287,20 +312,26 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None):
         if not safe_dir(key.parent):
             return source_ok, False
         anchors = list(key.parent.glob('.pxe-tools-archive-keyring.*.created'))
-        if len(anchors) != 1:
-            return source_ok, False
-        anchor = anchors[0]
-        proof = re.fullmatch(r'\.pxe-tools-archive-keyring\.([0-9a-f]{64})\.created', anchor.name)
-        if proof is None:
-            return source_ok, False
         key_exists = key.exists() or key.is_symlink()
-        if key_exists:
-            if not safe_file(key, links=2) or not safe_file(anchor, links=2) or not os.path.samefile(key, anchor):
+        if allow_reviewed and not anchors and key_exists:
+            anchor = key
+            if (not safe_file(key) or key.stat().st_size > 1048576 or
+                    hashlib.sha256(key.read_bytes()).hexdigest() != '567738b56ab1d566a2d943012fd3f43c1814e0a98c9afc7da2a873207c5dff47'):
                 return source_ok, False
-        elif not safe_file(anchor):
-            return source_ok, False
-        if anchor.stat().st_size > 1048576 or hashlib.sha256(anchor.read_bytes()).hexdigest() != proof.group(1):
-            return source_ok, False
+        else:
+            if len(anchors) != 1:
+                return source_ok, False
+            anchor = anchors[0]
+            proof = re.fullmatch(r'\.pxe-tools-archive-keyring\.([0-9a-f]{64})\.created', anchor.name)
+            if proof is None:
+                return source_ok, False
+            if key_exists:
+                if not safe_file(key, links=2) or not safe_file(anchor, links=2) or not os.path.samefile(key, anchor):
+                    return source_ok, False
+            elif not safe_file(anchor):
+                return source_ok, False
+            if anchor.stat().st_size > 1048576 or hashlib.sha256(anchor.read_bytes()).hexdigest() != proof.group(1):
+                return source_ok, False
 
         if apt_config is None:
             if root != Path('/'):
@@ -338,7 +369,7 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None):
                 return source_ok, False
             if not other.exists():
                 continue
-            if not safe_file(other) or other.stat().st_size > 1048576:
+            if not safe_reference(other) or other.stat().st_size > 1048576:
                 return source_ok, False
             text = other.read_text(encoding='utf-8')
             if ('\\' in text or any(('signed-by' in line.lower() and any(c in line for c in "\"'"))
@@ -2272,9 +2303,16 @@ def parse_arguments(argv):
     parser.add_argument('--allow-legacy', action='store_true',
                         help='include legacy paths explicitly reviewed by the operator')
     parser.add_argument('--legacy-plan-sha256', help='SHA-256 printed by the legacy preview')
+    parser.add_argument('--purge-residuals', action='store_true', help='review eligible legacy logs and APT files')
+    parser.add_argument('--residual-plan-sha256', help='SHA-256 printed by the residual preview')
     result = parser.parse_args(argv)
     if result.resume and result.allow_legacy:
         parser.error('--resume uses the existing receipt and cannot accept --allow-legacy')
+    if result.resume and (result.purge_residuals or result.residual_plan_sha256):
+        parser.error('--resume uses the existing residual receipt')
+    if result.residual_plan_sha256 and (not result.yes or not result.purge_residuals or
+                                       not re.fullmatch(r'[0-9a-f]{64}', result.residual_plan_sha256)):
+        parser.error('--residual-plan-sha256 requires --yes, --purge-residuals and a full SHA-256')
     if result.legacy_plan_sha256 and (not result.yes or not result.allow_legacy or
                                      not re.fullmatch(r'[0-9a-f]{64}', result.legacy_plan_sha256)):
         parser.error('--legacy-plan-sha256 requires --yes, --allow-legacy and a full SHA-256')
@@ -3216,6 +3254,367 @@ def remaining_package_paths(root):
                  if (root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink())
 
 
+RESIDUAL_SOURCE = '/etc/apt/sources.list.d/pxe-tools.sources'
+RESIDUAL_KEY = '/etc/apt/keyrings/pxe-tools-archive-keyring.gpg'
+RESIDUAL_LOG = '/var/log/pxe-tools'
+RESIDUAL_JOURNAL = 'pxe-tools-residual-purge'
+
+
+def _residual_directory(root, parts, *, owner=0, writable_log_parent=False, opener=None):
+    """Pin trusted ancestors; only /var/log may have a writable group."""
+    import sys
+    if opener is None:
+        if sys.platform == 'linux':
+            opener = _openat2_no_mount
+        elif Path(root) != Path('/') and owner != 0:
+            opener = lambda fd, part: os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        else:
+            raise RuntimeError('Linux openat2 is required for residual cleanup')
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for index in range(len(parts) + 1):
+            info = os.fstat(fd)
+            allow_group = writable_log_parent and tuple(parts[:index]) == ('var', 'log')
+            if owner is not None and (info.st_uid != owner or info.st_mode & (0o002 if allow_group else 0o022)):
+                raise ValueError('untrusted residual cleanup ancestor')
+            if index < len(parts):
+                child = opener(fd, parts[index])
+                os.close(fd)
+                fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _residual_file_snapshot(root, path, *, owner=0, opener=None):
+    import hashlib
+    parts = Path(path).parts[1:]
+    parent = _residual_directory(root, parts[:-1], owner=owner, opener=opener)
+    fd = None
+    try:
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1048576 or
+                (owner is not None and (info.st_uid != owner or info.st_mode & 0o022))):
+            raise ValueError('untrusted residual APT file')
+        with os.fdopen(os.dup(fd), 'rb') as stream:
+            data = stream.read(1048577)
+        if len(data) > 1048576:
+            raise ValueError('residual APT file too large')
+        current = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        if (current.st_dev, current.st_ino, current.st_nlink) != (info.st_dev, info.st_ino, 1):
+            raise ValueError('residual APT file changed')
+        return {'dev': info.st_dev, 'ino': info.st_ino, 'sha256': hashlib.sha256(data).hexdigest()}
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent)
+
+
+def residual_plan(root, preview, mounts, *, owner=0, apt_config=None, opener=None, identity=None):
+    """Inspect three bounded legacy resources; never claim creation provenance."""
+    root = Path(root)
+    identity = identity or legacy_birth_identity
+    plan = {'format': 1, 'source': None, 'key': None, 'log': None}
+    if (root / 'var/lib' / RESIDUAL_JOURNAL).exists() or (root / 'var/lib' / RESIDUAL_JOURNAL).is_symlink():
+        raise RuntimeError('An interrupted residual purge requires --resume')
+    source_ok, key_ok = apt_cleanup_plan(root, owner=owner, apt_config=apt_config, allow_reviewed=True)
+    for field, path, eligible in (('source', RESIDUAL_SOURCE, source_ok and not preview['source']),
+                                  ('key', RESIDUAL_KEY, key_ok and not preview['key'])):
+        target = root / path.lstrip('/')
+        anchors = ('.pxe-tools-sources.*.created' if field == 'source'
+                   else '.pxe-tools-archive-keyring.*.created')
+        if target.parent.exists() and list(target.parent.glob(anchors)):
+            continue
+        if eligible and (target.exists() or target.is_symlink()):
+            if any(m != '/' and (path == m or path.startswith(m + '/')) for m in mounts):
+                continue
+            plan[field] = _residual_file_snapshot(root, path, owner=owner, opener=opener)
+    if RESIDUAL_LOG in preview['preserved']:
+        if not any(m == RESIDUAL_LOG or m.startswith(RESIDUAL_LOG + '/') for m in mounts):
+            parent = _residual_directory(root, ('var', 'log'), owner=owner,
+                                         writable_log_parent=True, opener=opener)
+            fd = None
+            try:
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                if opener is not None:
+                    open_child = opener
+                elif root != Path('/') and owner != 0 and __import__('sys').platform != 'linux':
+                    open_child = lambda parent_fd, name: os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                else:
+                    open_child = _openat2_no_mount
+                fd = open_child(parent, 'pxe-tools')
+                info = os.fstat(fd)
+                if (owner is not None and (info.st_uid != owner or info.st_mode & 0o022)):
+                    raise ValueError('untrusted legacy log directory')
+                plan['log'] = identity(fd)
+            finally:
+                if fd is not None:
+                    os.close(fd)
+                os.close(parent)
+    return plan
+
+
+def residual_plan_hash(plan):
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+class ResidualJournal:
+    """Durable, private authorisation for the three reviewed legacy resources."""
+    def __init__(self, root, *, owner=0, opener=None):
+        self.root, self.owner, self.opener = Path(root), owner, opener
+        self.state = None
+
+    def base(self):
+        return _residual_directory(self.root, ('var', 'lib'), owner=self.owner, opener=self.opener)
+
+    def directory(self):
+        base = self.base()
+        try:
+            fd = os.open(RESIDUAL_JOURNAL, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=base)
+            info = os.fstat(fd)
+            if stat.S_IMODE(info.st_mode) != 0o700 or (self.owner is not None and info.st_uid != self.owner):
+                os.close(fd)
+                raise ValueError('untrusted residual purge receipt')
+            return fd
+        finally:
+            os.close(base)
+
+
+    @staticmethod
+    def validate(value):
+        import re
+        if (not isinstance(value, dict) or set(value) != {'format', 'plan', 'steps'} or value['format'] != 1 or
+                not isinstance(value['plan'], dict) or set(value['plan']) != {'format', 'source', 'key', 'log'} or
+                value['plan']['format'] != 1 or not isinstance(value['steps'], dict) or
+                set(value['steps']) != {'source', 'key', 'log'} or
+                any(step not in ('pending', 'intent', 'moved', 'done') for step in value['steps'].values())):
+            raise ValueError('invalid residual purge receipt')
+        for name in ('source', 'key'):
+            item = value['plan'][name]
+            if item is not None and (not isinstance(item, dict) or set(item) != {'dev', 'ino', 'sha256'} or
+                    any(type(item[k]) is not int or item[k] < 0 for k in ('dev', 'ino')) or
+                    item['ino'] == 0 or not isinstance(item['sha256'], str) or
+                    not re.fullmatch(r'[0-9a-f]{64}', item['sha256'])):
+                raise ValueError('invalid residual file identity')
+        item = value['plan']['log']
+        if item is not None and (not isinstance(item, dict) or set(item) != {'dev', 'ino', 'btime_sec', 'btime_nsec'} or
+                any(type(item[k]) is not int or item[k] < 0 for k in item) or item['ino'] == 0 or
+                item['btime_nsec'] >= 1000000000):
+            raise ValueError('invalid residual log identity')
+        for name, step in value['steps'].items():
+            if (name != 'log' and step == 'moved') or (value['plan'][name] is None and step != 'done'):
+                raise ValueError('invalid residual purge step')
+        return value
+
+    def save(self):
+        import json
+        import secrets
+        data = (json.dumps(self.validate(self.state), sort_keys=True, separators=(',', ':')) + '\n').encode()
+        directory = self.directory()
+        try:
+            name = '.state-' + secrets.token_hex(16)
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+            try:
+                with os.fdopen(fd, 'wb', closefd=False) as stream:
+                    stream.write(data)
+                    stream.flush()
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(name, 'state.json', src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def create(self, plan):
+        self.state = self.validate({'format': 1, 'plan': plan,
+                                    'steps': {name: 'pending' if plan[name] is not None else 'done'
+                                              for name in ('source', 'key', 'log')}})
+        base = self.base()
+        try:
+            os.mkdir(RESIDUAL_JOURNAL, 0o700, dir_fd=base)
+            os.fsync(base)
+        finally:
+            os.close(base)
+        self.save()
+
+    def read(self):
+        import json
+        directory = self.directory()
+        try:
+            names = os.listdir(directory)
+            if any(name not in ('state.json', 'logs') and not name.startswith('.state-') for name in names):
+                raise ValueError('unexpected file in residual purge receipt')
+            fd = os.open('state.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 100000 or
+                        stat.S_IMODE(info.st_mode) != 0o600 or (self.owner is not None and info.st_uid != self.owner)):
+                    raise ValueError('untrusted residual purge state')
+                with os.fdopen(os.dup(fd), 'rb') as stream:
+                    data = stream.read(100001)
+            finally:
+                os.close(fd)
+            def unique(pairs):
+                result = {}
+                for key, item in pairs:
+                    if key in result:
+                        raise ValueError('duplicate residual purge state')
+                    result[key] = item
+                return result
+            self.state = self.validate(json.loads(data, object_pairs_hook=unique))
+            return self.state
+        finally:
+            os.close(directory)
+
+    def finish(self):
+        directory = self.directory()
+        try:
+            for name in os.listdir(directory):
+                if name == 'logs' or (name != 'state.json' and not name.startswith('.state-')):
+                    raise ValueError('residual purge receipt is not empty')
+                info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                        (self.owner is not None and info.st_uid != self.owner)):
+                    raise ValueError('untrusted residual purge receipt entry')
+                os.unlink(name, dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        base = self.base()
+        try:
+            os.rmdir(RESIDUAL_JOURNAL, dir_fd=base)
+            os.fsync(base)
+        finally:
+            os.close(base)
+
+def _residual_unlink(root, path, expected, *, owner=0, opener=None):
+    """Unlink only the exact reviewed regular file in a trusted directory."""
+    if _residual_file_snapshot(root, path, owner=owner, opener=opener) != expected:
+        raise ValueError('reviewed APT file changed; preserved: ' + path)
+    parts = Path(path).parts[1:]
+    parent = _residual_directory(root, parts[:-1], owner=owner, opener=opener)
+    try:
+        current = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or
+                (current.st_dev, current.st_ino) != (expected['dev'], expected['ino'])):
+            raise ValueError('reviewed APT file was replaced; preserved: ' + path)
+        os.unlink(parts[-1], dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+def _clear_residual_directory(fd, opener):
+    """Clear an already quarantined directory without following mounts or symlinks."""
+    for name in os.listdir(fd):
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISDIR(info.st_mode):
+            child = opener(fd, name)
+            try:
+                opened = os.fstat(child)
+                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    raise ValueError('legacy log directory changed during removal')
+                _clear_residual_directory(child, opener)
+            finally:
+                os.close(child)
+            os.rmdir(name, dir_fd=fd)
+        else:
+            os.unlink(name, dir_fd=fd)
+    os.fsync(fd)
+
+
+def complete_residual_purge(journal, mounts, *, apt_config=None, opener=None, identity_matches=None):
+    """Resume a confirmed plan; a shared or changed resource is never deleted."""
+    import sys
+    root, owner = journal.root, journal.owner
+    state = journal.state or journal.read()
+    if opener is None:
+        if sys.platform == 'linux':
+            opener = _openat2_no_mount
+        elif root != Path('/') and owner != 0:
+            opener = lambda fd, part: os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        else:
+            raise RuntimeError('Linux openat2 is required for residual cleanup')
+    identity_matches = identity_matches or legacy_identity_matches
+    for name, path in (('source', RESIDUAL_SOURCE), ('key', RESIDUAL_KEY)):
+        expected = state['plan'][name]
+        if expected is None or state['steps'][name] == 'done':
+            continue
+        target = root / path.lstrip('/')
+        if not target.exists() and not target.is_symlink():
+            if state['steps'][name] != 'intent':
+                raise ValueError('reviewed APT file disappeared before removal: ' + path)
+            state['steps'][name] = 'done'; journal.save()
+            continue
+        if any(m != '/' and (path == m or path.startswith(m + '/')) for m in mounts):
+            raise ValueError('reviewed APT file crosses a mount: ' + path)
+        source_ok, key_ok = apt_cleanup_plan(root, owner=owner, apt_config=apt_config, allow_reviewed=True)
+        if not (source_ok if name == 'source' else key_ok):
+            raise ValueError('APT file is changed or shared; preserved: ' + path)
+        state['steps'][name] = 'intent'; journal.save()
+        _residual_unlink(root, path, expected, owner=owner, opener=opener)
+        state['steps'][name] = 'done'; journal.save()
+
+    proof = state['plan']['log']
+    if proof is not None and state['steps']['log'] != 'done':
+        staged_path = '/var/lib/' + RESIDUAL_JOURNAL + '/logs'
+        if any(m == RESIDUAL_LOG or m.startswith(RESIDUAL_LOG + '/') or
+               m == staged_path or m.startswith(staged_path + '/') for m in mounts):
+            raise ValueError('mount within legacy logs; preserved')
+        directory = journal.directory()
+        parent = _residual_directory(root, ('var', 'log'), owner=owner,
+                                     writable_log_parent=True, opener=opener)
+        try:
+            try:
+                staged = os.stat('logs', dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                staged = None
+            if staged is None and state['steps']['log'] in ('pending', 'intent'):
+                source_fd = opener(parent, 'pxe-tools')
+                try:
+                    info = os.fstat(source_fd)
+                    if ((owner is not None and (info.st_uid != owner or info.st_mode & 0o022)) or
+                            not identity_matches(source_fd, proof)):
+                        raise ValueError('legacy log identity changed; preserved')
+                    if os.fstat(directory).st_dev != info.st_dev:
+                        raise ValueError('legacy logs cannot be quarantined across filesystems')
+                    state['steps']['log'] = 'intent'; journal.save()
+                    os.rename('pxe-tools', 'logs', src_dir_fd=parent, dst_dir_fd=directory)
+                    os.fsync(parent); os.fsync(directory)
+                    moved = os.stat('logs', dir_fd=directory, follow_symlinks=False)
+                    if (moved.st_dev, moved.st_ino) != (info.st_dev, info.st_ino):
+                        try:
+                            os.stat('pxe-tools', dir_fd=parent, follow_symlinks=False)
+                        except FileNotFoundError:
+                            os.rename('logs', 'pxe-tools', src_dir_fd=directory, dst_dir_fd=parent)
+                            os.fsync(parent); os.fsync(directory)
+                        raise ValueError('legacy logs were replaced during quarantine; preserved')
+                finally:
+                    os.close(source_fd)
+                staged = os.stat('logs', dir_fd=directory, follow_symlinks=False)
+            if staged is not None:
+                log_fd = opener(directory, 'logs')
+                try:
+                    if not identity_matches(log_fd, proof):
+                        raise ValueError('quarantined log identity changed; preserved')
+                    state['steps']['log'] = 'moved'; journal.save()
+                    _clear_residual_directory(log_fd, opener)
+                finally:
+                    os.close(log_fd)
+                os.rmdir('logs', dir_fd=directory)
+                os.fsync(directory)
+            state['steps']['log'] = 'done'; journal.save()
+        finally:
+            os.close(parent)
+            os.close(directory)
+    journal.finish()
+
+
 UNITS = ('pxe-tools.target', 'pxe-tools-admin.target', 'pxe-tools-worker.service',
          'pxe-tools-dnsmasq-tail.service', 'pxe-tools-nginx.service',
          'pxe-tools-pxe-http.service', 'pxe-tools-php.service',
@@ -3353,7 +3752,23 @@ def main(argv):
     if args.resume:
         with installer_lock(Path('/run/lock/pxe-tools-apt-install.lock')):
             account_lookup = lambda: account_snapshot(Path('/'), list(pwd.getpwall()), list(grp.getgrall()))
-            result = resume_uninstall(Path('/'), subprocess.run, UNITS, mounts, account_lookup=account_lookup)
+            residual = ResidualJournal(Path('/'))
+            receipt = Path('/var/lib') / RESIDUAL_JOURNAL
+            has_residual = receipt.exists() or receipt.is_symlink()
+            core_receipts = [Path('/var/lib') / name for name in
+                             ('pxe-tools-uninstall', 'pxe-tools-uninstall-complete', 'pxe-tools-uninstall-aborted')]
+            if has_residual:
+                residual.read()
+            if has_residual and packages_intact(subprocess.run) and not any(p.exists() or p.is_symlink() for p in core_receipts):
+                if any(step not in ('pending', 'done') for step in residual.state['steps'].values()):
+                    raise RuntimeError('Packages are installed but residual cleanup has started; inspect the receipt')
+                residual.finish()
+                print('Removal had not begun; run a new preview and confirmation.')
+                return 0
+            if has_residual and packages_absent(subprocess.run) and not any(p.exists() or p.is_symlink() for p in core_receipts):
+                result = None
+            else:
+                result = resume_uninstall(Path('/'), subprocess.run, UNITS, mounts, account_lookup=account_lookup)
             if result == 'retry':
                 lifecycle = load_lifecycle(Path('/'))
                 ownership = load_ownership(Path('/'))
@@ -3366,8 +3781,16 @@ def main(argv):
                               record=record, ownership=ownership, reconciler=reconciler,
                               account_lookup=account_lookup)
             if result == 'retry-legacy':
+                if has_residual:
+                    if any(step not in ('pending', 'done') for step in residual.state['steps'].values()):
+                        raise RuntimeError('Residual cleanup already began; inspect its receipt')
+                    residual.finish()
                 print('Legacy interruption safely reverted; run a new preview and confirmation.')
                 return 0
+            if has_residual:
+                if not packages_absent(subprocess.run):
+                    raise RuntimeError('Packages are still installed; residual cleanup was not run')
+                complete_residual_purge(residual, mounts())
         print('No interrupted removal was found.' if result == 'nothing' else 'Interrupted removal resumed.')
         return 0
     lifecycle = load_lifecycle(Path('/'))
@@ -3379,6 +3802,7 @@ def main(argv):
         record = None
     account_lookup = lambda: account_snapshot(Path('/'), list(pwd.getpwall()), list(grp.getgrall()))
     preview = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=False, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy)
+    residual = residual_plan(Path('/'), preview, mounts()) if args.purge_residuals else None
     outside = external_paths(lifecycle, preview['trees']) if lifecycle is not None else ()
     outside = tuple(path for path in outside if Path(path).exists() or Path(path).is_symlink())
     print('WARNING: removal destroys the PXE Tools database, configuration, local keys, certificates,')
@@ -3400,13 +3824,19 @@ def main(argv):
     for path in preview['trees']:
         print('Candidate data path, if present:', path)
     apt_preserved = remaining_apt_resources(Path('/'), source_removed=preview['source'], key_removed=preview['key'])
-    for path in sorted(set(preview['preserved']) | set(outside) | set(apt_preserved)):
+    residual_paths = {path for name, path in (('source', RESIDUAL_SOURCE), ('key', RESIDUAL_KEY), ('log', RESIDUAL_LOG))
+                      if residual is not None and residual[name] is not None}
+    for path in sorted(residual_paths):
+        print('Candidate legacy residual, if confirmed:', path)
+    if residual is not None:
+        print('Residual plan SHA256:', residual_plan_hash(residual))
+    for path in sorted((set(preview['preserved']) | set(outside) | set(apt_preserved)) - residual_paths):
         print('Preserved for manual review:', path)
     if preview['legacy']:
-        print('APT source and signing key are preserved for this legacy installation.')
+        print('Legacy APT files not listed as candidates are preserved.')
     else:
-        print('APT source recognised:', 'yes' if preview['source'] else 'no; absent or preserved')
-        print('APT key unshared:', 'yes' if preview['key'] else 'no; absent or preserved')
+        print('APT source recognised:', 'yes' if preview['source'] or RESIDUAL_SOURCE in residual_paths else 'no; absent or preserved')
+        print('APT key unshared:', 'yes' if preview['key'] or RESIDUAL_KEY in residual_paths else 'no; absent or preserved')
     print('Externally enrolled firmware keys and external backups are not modified.')
     if not args.yes:
         print('Preview only. Service state and active tasks will be checked during removal.')
@@ -3416,13 +3846,27 @@ def main(argv):
     if outside:
         raise RuntimeError('Configured paths outside recognised roots require review; no package was removed')
     with installer_lock(Path('/run/lock/pxe-tools-apt-install.lock')):
-        result = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=True, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy, legacy_expected=args.legacy_plan_sha256)
+        receipt = None
+        if residual is not None and args.residual_plan_sha256 != residual_plan_hash(residual):
+            raise ValueError('residual resources changed or were not approved; inspect a fresh preview')
+        if residual_paths:
+            receipt = ResidualJournal(Path('/'))
+            receipt.create(residual)
+        try:
+            result = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=True, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy, legacy_expected=args.legacy_plan_sha256)
+        except BaseException:
+            if receipt is not None and packages_intact(subprocess.run) and not (Path('/var/lib/pxe-tools-uninstall').exists()):
+                receipt.finish()
+            raise
+        if receipt is not None:
+            complete_residual_purge(receipt, mounts())
     print('Requested package purge completed; recognised data paths were removed where present.')
     print('APT source removed:', 'yes' if result['source_removed'] else 'no')
     print('APT key removed:', 'yes' if result['key_removed'] else 'no')
     remaining_apt = remaining_apt_resources(Path('/'))
     remaining_package = remaining_package_paths(Path('/'))
-    if result['preserved'] or outside or remaining_apt or remaining_package:
+    remaining_preserved = [p for p in result['preserved'] if Path(p).exists() or Path(p).is_symlink()]
+    if remaining_preserved or outside or remaining_apt or remaining_package:
         for path in remaining_apt + remaining_package:
             print('Preserved for manual review:', path)
         print('Some resources were preserved or their provenance could not be established; inspect them manually.')

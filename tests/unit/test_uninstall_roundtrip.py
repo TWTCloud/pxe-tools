@@ -411,6 +411,43 @@ class SyntheticRoundTrip(unittest.TestCase):
                 account_lookup=self.accounts.snapshot, allow_legacy=True)
         self.assertIn('pxe-tools', self.package_states)
 
+    def test_full_confirmed_removal_includes_legacy_residuals(self):
+        store = self.install_fixture(False)
+        self.accounts.account = SimpleNamespace(pw_name=NAME, pw_uid=self.accounts.uid,
+            pw_gid=self.accounts.gid, pw_gecos='', pw_dir=HOME, pw_shell=SHELL)
+        self.accounts.group = SimpleNamespace(gr_name=NAME, gr_gid=self.accounts.gid, gr_mem=[])
+        for anchor in self.source.parent.glob('.pxe-tools-sources.*.created'):
+            anchor.unlink()
+        self.key.write_bytes((ROOT / 'packaging/ci/pxe-tools-public.gpg').read_bytes())
+        self.third_party.write_text('deb [signed-by=/usr/share/keyrings/other.gpg] https://example.invalid stable main\n')
+        logs = self.root / 'var/log/pxe-tools'
+        logs.mkdir()
+        (logs / 'old.log').write_text('fixture')
+        options = dict(owner=os.geteuid(), record=store.read(), ownership=store,
+                       account_lookup=self.accounts.snapshot, allow_legacy=True)
+        plan = uninstall.run_uninstall(self.root, self.runner, self.life, UNITS, lambda: (), **options)
+        config = {'SOURCE': '/etc/apt/sources.list', 'PARTS': '/etc/apt/sources.list.d/',
+                  'TRUSTED': '/etc/apt/trusted.gpg', 'TRUSTEDPARTS': '/etc/apt/trusted.gpg.d/', 'ROOT': ''}
+        def opener(fd, name):
+            return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        def identity(fd):
+            s = os.fstat(fd)
+            return {'dev': s.st_dev, 'ino': s.st_ino, 'btime_sec': 1, 'btime_nsec': 2}
+        residual = uninstall.residual_plan(self.root, plan, (), owner=os.geteuid(), apt_config=config,
+                                            opener=opener, identity=identity)
+        self.assertTrue(all(residual[k] is not None for k in ('source', 'key', 'log')))
+        receipt = uninstall.ResidualJournal(self.root, owner=os.geteuid(), opener=opener)
+        receipt.create(residual)
+        uninstall.run_uninstall(self.root, self.runner, self.life, UNITS, lambda: (),
+                                apply=True, legacy_expected=plan['legacy_plan_sha256'], **options)
+        uninstall.complete_residual_purge(receipt, (), apt_config=config, opener=opener,
+                                           identity_matches=lambda fd, expected: identity(fd) == expected)
+        for p in (self.source, self.key, logs, self.root / 'opt/pxe-tools', self.root / 'var/lib/pxe-tools'):
+            self.assertFalse(p.exists(), str(p))
+        self.assertIsNone(self.accounts.account)
+        self.assertTrue(self.third_party.exists())
+        self.assertTrue(self.human_keys.exists())
+
     def test_unproven_account_can_resume_after_purge_interruption(self):
         store = self.install_fixture(False)
         self.accounts.account = SimpleNamespace(pw_name=NAME, pw_uid=self.accounts.uid,
