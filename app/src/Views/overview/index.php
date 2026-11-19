@@ -26,7 +26,7 @@ $http = match ($overview['http_state']) {
       <div class="overview-row"><strong>HTTP PXE</strong><span><?= View::e($http[2]) ?></span><span class="overview-state is-<?= View::e($http[1]) ?>"><?= View::e($http[0]) ?></span></div>
       <div class="overview-row"><strong>Proxy DHCP</strong><span>Configuration enregistrée</span><span class="overview-state is-neutral"><?= $overview['pxe_enabled'] === 'off' ? 'Non demandé' : ($overview['pxe_enabled'] !== 'on' ? 'Indéterminé' : ($overview['proxy_enabled'] === 'on' ? 'Demandé' : ($overview['proxy_enabled'] === 'off' ? 'Non demandé' : 'Indéterminé'))) ?></span></div>
       <div class="overview-row"><strong>Worker</strong><span>Acquisition et traitements</span><span class="overview-state is-neutral">Non confirmé</span></div>
-      <p class="overview-note">La configuration du proxy ne confirme pas à elle seule que le service répond.</p>
+      <p class="overview-note">État à l’ouverture de la page. La configuration du proxy ne confirme pas que le service répond ; <a href="/">actualiser</a>.</p>
     </section>
     <section class="overview-panel" aria-labelledby="overview-activity-title">
       <header><h2 id="overview-activity-title">Activité récente</h2><a href="/activity">Tout voir</a></header>
