@@ -508,6 +508,22 @@ class OwnershipFixture(unittest.TestCase):
             store.resume_missing_runtime(mounts=[])
         self.assertFalse(http.exists())
 
+    def test_resume_does_not_adopt_unrecorded_directory_after_write_failure(self):
+        spec = importlib.util.spec_from_file_location('resume_runtime_failed_write', ROOT/'packaging/native/configure-secure-tftp.py')
+        runtime = importlib.util.module_from_spec(spec); spec.loader.exec_module(runtime)
+        store = self.store()
+        runtime.prepare(base=self.root/'var/lib', root=self.root, owner=os.geteuid(), journal=store)
+        missing = self.root/'var/lib/pxe-tools-http'
+        info = missing.stat(); missing.rmdir()
+        self.generation.xattrs.pop((info.st_dev, info.st_ino, ownership.XATTR_NAME), None)
+        self.generation.birth.pop((info.st_dev, info.st_ino), None)
+        with patch.object(store, '_write', side_effect=OSError('fixture sync failure')):
+            with self.assertRaises(OSError): store.resume_missing_runtime(mounts=[])
+        self.assertTrue(missing.is_dir())
+        with self.assertRaisesRegex(ValueError, 'generation'):
+            store.resume_missing_runtime(mounts=[])
+        self.assertEqual(store.read()['base_phase'], 'runtime-prepared')
+
     def test_existing_data_refuses_without_claiming_or_changing_it(self):
         data = self.root / 'var/lib/pxe-tools'
         data.mkdir()
