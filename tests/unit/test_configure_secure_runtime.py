@@ -64,9 +64,10 @@ class ConfigureSecureRuntime(unittest.TestCase):
                 self.skipTest('strong generation proofs unavailable on fixture filesystem')
             (root/'var/lib/pxe-tools-http').rmdir()
             (root/'var/lib/pxe-tools-tftp').rmdir()
-            self.assertEqual(set(store.resume_missing_runtime()),
-                             {'/var/lib/pxe-tools-http', '/var/lib/pxe-tools-tftp'})
-            store.create_base(require_runtime=True, activate=lambda: None)
+            self.assertTrue(store.recover_initialization())
+            self.assertEqual(store.read()['base_phase'], 'prepared')
+            self.assertTrue(store.recover_initialization())
+            store.finish_base()
             self.assertEqual(store.read()['base_phase'], 'complete')
 
 

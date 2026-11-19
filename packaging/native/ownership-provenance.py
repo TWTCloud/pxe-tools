@@ -563,7 +563,26 @@ class Store:
         if record.get('base_phase') in ('runtime-preparing', 'runtime-prepared', 'preparing', 'prepared'):
             raise ValueError('incomplete initial PXE Tools setup; inspect ownership journal before retry')
 
-    def _finish_base(self, directory, record, *, held=None):
+    def recover_initialization(self):
+        """Prepare or verify a witnessed initial setup before service start."""
+        try:
+            record = self.read()
+        except FileNotFoundError:
+            return False
+        phase = record.get('base_phase')
+        if phase not in ('runtime-prepared', 'prepared'):
+            return False
+        if phase == 'runtime-prepared':
+            self.resume_missing_runtime()
+            # Keep the durable prepared phase until services have been started.
+            self.create_base(require_runtime=True)
+        with self._locked(create=False) as directory:
+            record = self._read(directory)
+            self._verify_runtime(record)
+            self._finish_base(directory, record, finalize=False)
+        return True
+
+    def _finish_base(self, directory, record, *, held=None, finalize=True):
         if record is None or record.get('base_phase') != 'prepared':
             raise ValueError('initial PXE Tools setup was not prepared')
         if record['format'] != 2:
@@ -589,8 +608,9 @@ class Store:
                     os.close(child)
             finally:
                 os.close(parent)
-        record['base_phase'] = 'complete'
-        self._write(directory, record)
+        if finalize:
+            record['base_phase'] = 'complete'
+            self._write(directory, record)
 
     def finish_base(self):
         with self._locked(create=False) as directory:
@@ -733,7 +753,8 @@ def main():
     import argparse
     import sys
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('check-base', 'create-base', 'finish-base', 'resume-runtime', 'configure-ansible'))
+    parser.add_argument('action', choices=('check-base', 'create-base', 'finish-base', 'resume-runtime',
+                                           'recover-initialization', 'configure-ansible'))
     options = parser.parse_args()
     if sys.platform != 'linux' or os.geteuid() != 0:
         raise ValueError('native ownership setup requires root on Linux')
@@ -749,6 +770,8 @@ def main():
     elif options.action == 'resume-runtime':
         created = store.resume_missing_runtime()
         print('Recreated securely witnessed runtime directories:', ', '.join(created) or 'none')
+    elif options.action == 'recover-initialization':
+        print('recovered' if store.recover_initialization() else 'unchanged')
     else:
         store.configure_ansible()
 

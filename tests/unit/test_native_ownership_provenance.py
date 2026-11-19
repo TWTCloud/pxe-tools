@@ -481,6 +481,37 @@ class OwnershipFixture(unittest.TestCase):
         store.create_base(require_runtime=True, activate=lambda: None)
         self.assertEqual(store.read()['base_phase'], 'complete')
 
+    def test_recover_initialization_retries_until_base_is_finalized(self):
+        spec = importlib.util.spec_from_file_location('automatic_runtime_recovery', ROOT/'packaging/native/configure-secure-tftp.py')
+        runtime = importlib.util.module_from_spec(spec); spec.loader.exec_module(runtime)
+        store = self.store()
+        self.assertFalse(store.recover_initialization())
+        runtime.prepare(base=self.root/'var/lib', root=self.root, owner=os.geteuid(), journal=store)
+        for name in ('pxe-tools-http', 'pxe-tools-tftp'):
+            directory = self.root/'var/lib'/name
+            info = directory.stat(); directory.rmdir()
+            self.generation.xattrs.pop((info.st_dev, info.st_ino, ownership.XATTR_NAME), None)
+            self.generation.birth.pop((info.st_dev, info.st_ino), None)
+        with patch.object(store, 'resume_missing_runtime', wraps=lambda: ownership.Store.resume_missing_runtime(store, mounts=[])):
+            self.assertTrue(store.recover_initialization())
+        self.assertEqual(store.read()['base_phase'], 'prepared')
+        self.assertTrue(store.recover_initialization())
+        self.assertEqual(store.read()['base_phase'], 'prepared')
+        store.finish_base()
+        self.assertFalse(store.recover_initialization())
+        self.assertEqual(store.read()['base_phase'], 'complete')
+
+    def test_recovery_refuses_replaced_prepared_base(self):
+        spec = importlib.util.spec_from_file_location('prepared_runtime_recovery', ROOT/'packaging/native/configure-secure-tftp.py')
+        runtime = importlib.util.module_from_spec(spec); spec.loader.exec_module(runtime)
+        store = self.store()
+        runtime.prepare(base=self.root/'var/lib', root=self.root, owner=os.geteuid(), journal=store)
+        store.create_base(require_runtime=True)
+        target = self.root/'etc/pxe-tools'
+        target.rename(self.root/'etc/pxe-tools-old'); target.mkdir()
+        with self.assertRaises(ValueError): store.recover_initialization()
+        self.assertEqual(store.read()['base_phase'], 'prepared')
+
     def test_resume_missing_runtime_rejects_changed_native_content(self):
         spec = importlib.util.spec_from_file_location('resume_runtime_changed', ROOT/'packaging/native/configure-secure-tftp.py')
         runtime = importlib.util.module_from_spec(spec); spec.loader.exec_module(runtime)
@@ -651,8 +682,37 @@ class BuilderHooksTests(unittest.TestCase):
         postinst = self.builder('build-local-package.py').POSTINST
         self.assertLess(postinst.index('check-removal'), postinst.index('reconcile-nginx.py'))
         self.assertLess(postinst.index('check-base'), postinst.index('reconcile-nginx.py'))
+        self.assertLess(postinst.index('recover-initialization'), postinst.index('reconcile-nginx.py'))
+        self.assertLess(postinst.index('reconcile-nginx.py'), postinst.index('finish-base'))
         self.assertIn('configure-secure-tftp.py --initialize-instance', postinst)
         self.assertLess(postinst.index('reconcile-nginx.py'), postinst.index('configure-secure-tftp.py --initialize-instance'))
+
+    def test_postinst_finishes_recovered_setup_after_service_start(self):
+        postinst = self.builder('build-local-package.py').POSTINST
+        with tempfile.TemporaryDirectory(prefix='pxe-postinst-recovery-') as temp:
+            root = Path(temp); binaries = root/'bin'; binaries.mkdir()
+            systemd = root/'systemd'; systemd.mkdir()
+            trace = root/'trace'
+            python = binaries/'python3'
+            python.write_text('#!/bin/sh\nprintf "python %s\\n" "$*" >> "$TRACE"\n'
+                              'if [ "$2" = recover-initialization ]; then echo recovered; fi\n')
+            python.chmod(0o755)
+            systemctl = binaries/'systemctl'
+            systemctl.write_text('#!/bin/sh\nprintf "systemctl %s\\n" "$*" >> "$TRACE"\n')
+            systemctl.chmod(0o755)
+            postinst = postinst.replace('[ -d /run/systemd/system ]', '[ -d "$FIXTURE_SYSTEMD" ]')
+            script = root/'postinst'; script.write_text(postinst)
+            environment = dict(os.environ, PATH=str(binaries) + os.pathsep + os.defpath,
+                               TRACE=str(trace), FIXTURE_SYSTEMD=str(systemd))
+            subprocess.run(['/bin/sh', str(script), 'configure'], env=environment,
+                           check=True, capture_output=True, text=True)
+            lines = trace.read_text().splitlines()
+            find = lambda text: next(index for index, line in enumerate(lines) if text in line)
+            self.assertLess(find('check-removal'), find('recover-initialization'))
+            self.assertLess(find('recover-initialization'), find('reconcile-nginx.py'))
+            self.assertLess(find('reconcile-nginx.py'), find('systemctl start pxe-tools-admin.target'))
+            self.assertLess(find('systemctl start pxe-tools-admin.target'), find('finish-base'))
+            self.assertFalse(any(' check-base' in line for line in lines))
 
     def test_preinst_checks_removal_before_unpack_for_both_packages(self):
         for name in ('build-local-package.py', 'build-local-ansible-package.py'):

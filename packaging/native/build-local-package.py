@@ -73,7 +73,11 @@ if [ "$1" = configure ]; then
 fi
 if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
     systemctl daemon-reload
-    python3 /usr/lib/pxe-tools/native/ownership-provenance.py check-base
+    recovered=$(python3 /usr/lib/pxe-tools/native/ownership-provenance.py recover-initialization)
+    [ "$recovered" = recovered ] || [ "$recovered" = unchanged ] || { echo 'Invalid initialization recovery result.' >&2; exit 1; }
+    if [ "$recovered" = unchanged ]; then
+        python3 /usr/lib/pxe-tools/native/ownership-provenance.py check-base
+    fi
     # Dependencies are configured before us and may have started stock nginx.
     # Preserve any preexisting/custom service unless ownership is proven.
     python3 /usr/lib/pxe-tools/native/reconcile-nginx.py --configure
@@ -82,7 +86,14 @@ if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
     python3 /usr/lib/pxe-tools/native/upgrade-lifecycle.py configure
     # Existing instance data may contain queued jobs or an enabled DHCP setup.
     # Leave its startup under the administrator's control.
-    if [ -z "${2:-}" ] && [ ! -e /var/lib/pxe-tools ] && [ ! -L /var/lib/pxe-tools ] \
+    if [ "$recovered" = recovered ]; then
+        if systemctl enable pxe-tools-admin.target; then
+            systemctl start pxe-tools-admin.target || echo 'PXE Tools: inspect administration service status.' >&2
+        else
+            echo 'PXE Tools: could not enable administration; inspect systemd status.' >&2
+        fi
+        python3 /usr/lib/pxe-tools/native/ownership-provenance.py finish-base
+    elif [ -z "${2:-}" ] && [ ! -e /var/lib/pxe-tools ] && [ ! -L /var/lib/pxe-tools ] \
        && [ ! -e /etc/pxe-tools ] && [ ! -L /etc/pxe-tools ]; then
         # Only truly new native installations receive the protected TFTP root.
         # Existing paths are never overwritten or silently migrated.
