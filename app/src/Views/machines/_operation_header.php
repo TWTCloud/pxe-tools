@@ -1,13 +1,19 @@
 <?php
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 use Admin\Models\Machine;
 $operationRule = $summary['state']['rules']['operation'];
 $powerRule = $summary['state']['rules']['power'];
 $ansibleRule = ['ok'=>$summary['state']['rules']['ansible']['allowed'], 'message'=>$summary['state']['rules']['ansible']['reason']];
+// Translate only this known interface message; the operation signature remains unchanged.
+$displayState = $summary['state'];
+if ($ansibleRule['message'] === 'Aucun rôle Ansible configuré pour cette machine.') {
+    $ansibleRule['message'] = Term::format('Aucun rôle Ansible configuré pour {ce}.');
+    $displayState['rules']['ansible']['reason'] = $ansibleRule['message'];
+}
 $inventory = $summary['state']['has_inventory'];
 ?>
 <div id="machine-operation-header" data-poll-scope data-sig="<?= View::e($summary['signature']) ?>"
-     data-operation-state="<?= View::e(json_encode($summary['state'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) ?>"
+     data-operation-state="<?= View::e(json_encode($displayState, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) ?>"
      hx-get="/machines/<?= (int)$machine['id'] ?>/operation-fragment" hx-trigger="every 5s" hx-swap="outerHTML">
 <?php
 $headerState = View::stateLabel($machine);
@@ -51,8 +57,8 @@ $headerState = View::stateLabel($machine);
           $isConfigured = $machine['status'] === 'configured';
           $wakeLabel    = $isConfigured ? 'Réveiller et installer' : 'Réveiller (WoL)';
           $wakeConfirm  = $isConfigured
-            ? 'Réveiller la machine et lancer l\'install ?'
-            : 'Envoyer un magic packet WoL à cette machine ?';
+            ? Term::format('Réveiller {le} et lancer l’installation ?')
+            : Term::format('Envoyer un magic packet WoL à {ce} ?');
         ?>
           <li>
             <form method="post" action="/machines/<?= (int)$machine['id'] ?>/wake" id="machine-menu-wake" onsubmit="return confirm(<?= View::e(json_encode($wakeConfirm)) ?>);">
@@ -76,19 +82,19 @@ $headerState = View::stateLabel($machine);
           <?php endif; ?>
         <?php endif; ?>
         <li>
-          <form method="post" action="/machines/<?= (int)$machine['id'] ?>/reboot" id="machine-menu-reboot" onsubmit="return confirm('Redémarrer cette machine ?');">
+          <form method="post" action="/machines/<?= (int)$machine['id'] ?>/reboot" id="machine-menu-reboot" onsubmit="return confirm(<?= View::e(json_encode(Term::format('Redémarrer {ce} ?'))) ?>);">
             <button type="submit" class="actions-dropdown__item" <?= $powerRule['allowed'] ? '' : 'disabled' ?> title="<?= View::e($powerRule['reason']) ?>" id="machine-command-reboot">Redémarrer</button>
           </form>
         </li>
         <li>
-          <form method="post" action="/machines/<?= (int)$machine['id'] ?>/shutdown" id="machine-menu-shutdown" onsubmit="return confirm('Arrêter cette machine ?');">
+          <form method="post" action="/machines/<?= (int)$machine['id'] ?>/shutdown" id="machine-menu-shutdown" onsubmit="return confirm(<?= View::e(json_encode(Term::format('Arrêter {ce} ?'))) ?>);">
             <button type="submit" class="actions-dropdown__item" <?= $powerRule['allowed'] ? '' : 'disabled' ?> title="<?= View::e($powerRule['reason']) ?>" id="machine-command-shutdown">Arrêter</button>
           </form>
         </li>
         <li>
           <form method="post" action="/machines/<?= (int)$machine['id'] ?>/ansible/redeploy" id="machine-menu-ansible"
-                onsubmit="return confirm('Récupérer la dernière version du dépôt Ansible et redéployer la configuration sur cette machine ?');">
-            <button type="submit" class="actions-dropdown__item" <?= $ansibleRule['ok'] ? '' : 'disabled' ?> title="<?= View::e($ansibleRule['message']) ?>" id="machine-command-ansible">Appliquer Ansible à cette machine</button>
+                onsubmit="return confirm(<?= View::e(json_encode(Term::format('Récupérer la dernière version du dépôt Ansible et redéployer la configuration sur {ce} ?'))) ?>);">
+            <button type="submit" class="actions-dropdown__item" <?= $ansibleRule['ok'] ? '' : 'disabled' ?> title="<?= View::e($ansibleRule['message']) ?>" id="machine-command-ansible"><?= View::e(Term::format('Appliquer Ansible à {ce}')) ?></button>
           </form>
         </li>
         <?php if (!empty($machine['rescue_mode'])): ?>

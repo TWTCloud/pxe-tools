@@ -1,12 +1,13 @@
+<?php use Admin\View; use Admin\Ui\DeviceTerminology as Term; ?>
 <header class="row-flex-spread mb-1">
-  <h2>Nouvelle machine (saisie manuelle)</h2>
+  <h2><?= View::e(ucfirst(Term::format('{nouveau}')) . ' (saisie manuelle)') ?></h2>
   <a href="/machines" class="btn btn-secondary">← Retour</a>
 </header>
 
 <div class="card">
   <p class="muted">
-    Normalement, les machines apparaissent automatiquement après leur premier boot PXE (discovery).
-    Cette page permet d'ajouter manuellement une machine si son adresse MAC est déjà connue.
+    <?= View::e(Term::format('Normalement, les {many} apparaissent automatiquement après leur premier démarrage PXE.')) ?>
+    <?= View::e(Term::format('Cette page permet d’ajouter manuellement {un} si son adresse MAC est déjà connue.')) ?>
   </p>
   <form method="post" action="/machines">
     <label>

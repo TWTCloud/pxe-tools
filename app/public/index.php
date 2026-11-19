@@ -304,6 +304,7 @@ $router->get('/api/monitoring/installs',              [$monitoring, 'installs'])
 $sc = new SettingsController();
 $router->get('/settings',  [$sc, 'index']);
 $router->post('/settings', [$sc, 'update']);
+$router->post('/settings/terminology', [$sc, 'updateTerminology']);
 $router->post('/settings/default-dns', [$sc, 'updateDefaultDns']);
 $router->post('/settings/regenerate-mok', [$sc, 'regenerateMok']);
 $router->post('/settings/rebuild-grub',   [$sc, 'rebuildGrub']);

@@ -10,7 +10,7 @@ final class Navigation
     {
         return [
             'overview' => ['label' => 'Vue d’ensemble', 'icon' => 'home', 'href' => '/', 'children' => []],
-            'machines' => ['label' => 'Machines', 'icon' => 'hard-drive', 'href' => '/machines', 'children' => []],
+            'machines' => ['label' => DeviceTerminology::format('{Many}'), 'icon' => 'hard-drive', 'href' => '/machines', 'children' => []],
             'presets' => ['label' => 'Modèles', 'icon' => 'package', 'href' => '/presets', 'children' => []],
             'activity' => ['label' => 'Activité', 'icon' => 'zap', 'href' => '/activity', 'children' => [
                 ['/activity', 'Toute l’activité'], ['/installations', 'Installations'],
@@ -49,14 +49,14 @@ final class Navigation
 
         if (preg_match('~^/machines/(\d+)(/install)?$~', $path, $matches)) {
             $machine = $data['machine'] ?? [];
-            $label = trim((string)($machine['hostname'] ?? '')) ?: (string)($machine['mac'] ?? 'Machine #' . $matches[1]);
+            $label = trim((string)($machine['hostname'] ?? '')) ?: (string)($machine['mac'] ?? DeviceTerminology::format('{One}') . ' #' . $matches[1]);
             $crumbs[] = ['label' => $label, 'href' => '/machines/' . $matches[1]];
             if (isset($matches[2])) $crumbs[] = ['label' => 'Préparer l’installation', 'href' => $path];
         } elseif (preg_match('~^/presets/(\d+)$~', $path)) {
             $crumbs[] = ['label' => (string)($data['preset']['name'] ?? 'Éditer le modèle'), 'href' => $path];
         } else {
             $labels = [
-                '/machines/new' => 'Ajouter une machine', '/presets/new' => 'Nouveau modèle',
+                '/machines/new' => DeviceTerminology::format('Ajouter {un}'), '/presets/new' => 'Nouveau modèle',
                 '/presets/import' => 'Importer', '/presets/duplicate' => 'Dupliquer',
                 '/installations' => 'Installations', '/settings/images' => 'Images système',
                 '/settings/images/add' => 'Ajouter une image', '/settings/ansible' => 'Ansible',

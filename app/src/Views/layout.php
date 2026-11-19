@@ -15,7 +15,7 @@ $navigation = Navigation::sections();
 $pageContext = Navigation::context($path, $title ?? 'PXE Tools', $data ?? []);
 $activeSection = $pageContext['section'];
 ?><!doctype html>
-<html lang="fr">
+<html lang="fr" data-device-one="<?= View::e(\Admin\Ui\DeviceTerminology::format('{one}')) ?>" data-device-many="<?= View::e(\Admin\Ui\DeviceTerminology::format('{many}')) ?>" data-device-du="<?= View::e(\Admin\Ui\DeviceTerminology::format('{du}')) ?>" data-device-ce="<?= View::e(\Admin\Ui\DeviceTerminology::format('{ce}')) ?>" data-device-one-title="<?= View::e(\Admin\Ui\DeviceTerminology::format('{One}')) ?>" data-device-installed-one="<?= View::e(\Admin\Ui\DeviceTerminology::format('{installe}')) ?>" data-device-installed-many="<?= View::e(\Admin\Ui\DeviceTerminology::format('{installees}')) ?>">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">

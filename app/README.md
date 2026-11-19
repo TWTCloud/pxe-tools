@@ -37,6 +37,12 @@ Interface web + API pour piloter le serveur PXE.
 └── discover.sh                # Script discovery boot (déployé aussi dans /srv/http/)
 ```
 
+## Appellation des équipements
+
+Dans **Appliance → Vue d’ensemble → Appellation des machines clientes**, un administrateur peut choisir « Machine » (défaut), « Client PXE », « Ordinateur » ou « Serveur ». Le réglage est partagé par l’instance et modifie les libellés de la console. Les onglets déjà ouverts peuvent nécessiter un rechargement.
+
+Les noms d’hôte, les notes et les données existantes restent identiques, ainsi que les URL, les formats des API et les messages déjà enregistrés dans l’historique. Ce choix ne modifie pas la configuration PXE et ne demande aucun redémarrage de service.
+
 ## Endpoints
 
 ### UI (port 8080)

@@ -1,5 +1,5 @@
 <?php
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 use Admin\Models\Setting;
 $step = $step ?? 5;
 $stepLabel = 'Validation';
@@ -18,7 +18,7 @@ $contentRender = function () use ($step, $stepLabel) {
   <dt>Démarrage réseau</dt><dd><?= !$enabled ? 'Désactivé — console uniquement' : ($proxy ? 'À activer avec le DHCP existant — proxy DHCP sans attribution d’adresses' : 'À activer avec votre DHCP déjà configuré — HTTP et TFTP, sans proxy DHCP') ?></dd>
   <dt>Console d’administration</dt><dd><?= Setting::get(Setting::KEY_HTTPS_ENABLED, 'off') === 'on' ? 'HTTPS après application' : 'HTTP local ou chiffrement par votre reverse proxy' ?></dd>
 </dl>
-<p class="muted"><?= $enabled ? 'Le résultat des traitements confirmera l’application de la configuration. Il faudra ensuite vérifier une image disponible et le démarrage d’une machine sur ce réseau ; la fin de l’assistant ne prouve pas à elle seule que PXE fonctionne.' : 'Vous pourrez activer PXE dans Paramètres › Réseau PXE, puis appliquer la configuration. Les systèmes peuvent être téléchargés pendant que vous préparez le réseau.' ?></p>
+<p class="muted"><?= $enabled ? Term::format('Le résultat des traitements confirmera l’application de la configuration. Il faudra ensuite vérifier une image disponible et le démarrage {du} sur ce réseau ; la fin de l’assistant ne prouve pas à elle seule que PXE fonctionne.') : 'Vous pourrez activer PXE dans Paramètres › Réseau PXE, puis appliquer la configuration. Les systèmes peuvent être téléchargés pendant que vous préparez le réseau.' ?></p>
 <form method="post" action="/init/complete">
   <div class="wizard-actions">
     <a href="/init/images" class="btn btn-secondary">Retour</a>

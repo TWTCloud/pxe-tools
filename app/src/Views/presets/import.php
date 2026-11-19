@@ -1,3 +1,4 @@
+<?php use Admin\Ui\DeviceTerminology as Term; ?>
 <?php
 /**
  * View : import d'un modèle depuis un fichier JSON (upload) ou un copier-coller.
@@ -9,7 +10,7 @@ use Admin\View;
 <header class="row-flex-spread mb-1">
   <hgroup>
     <h2>Importer un modèle</h2>
-    <p class="muted">Depuis un fichier JSON (export précédent) ou un copier-coller. Si le nom existe déjà, le modèle est mis à jour sur place (les machines qui l'utilisent restent liées).</p>
+    <p class="muted"><?= View::e(Term::format('Depuis un fichier JSON (export précédent) ou un copier-coller. Si le nom existe déjà, le modèle est mis à jour sur place ; l’association des {many} à ce modèle est conservée.')) ?></p>
   </hgroup>
   <a href="/presets" class="btn btn-secondary">← Retour</a>
 </header>
