@@ -10,6 +10,11 @@ cat > "$fixture/wrangler" <<'MOCK'
 set -euo pipefail
 printf '%s\n' "$*" >> "$CALL_LOG"
 if [[ "${FAIL_UPLOAD:-0}" == 1 && "$1 $2" == 'versions upload' ]]; then exit 1; fi
+if [[ "$1 $2" == 'versions deploy' && "${DEPLOY_FAILURES:-0}" -gt 0 ]]; then
+    count=$(cat "$CALL_LOG.deploy" 2>/dev/null || echo 0)
+    echo $((count + 1)) > "$CALL_LOG.deploy"
+    if [[ "$count" -lt "$DEPLOY_FAILURES" ]]; then echo "${DEPLOY_ERROR:-code: 100146}" >&2; exit 1; fi
+fi
 MOCK
 chmod +x "$fixture/wrangler"
 export CALL_LOG="$fixture/log" GITHUB_RUN_ID=123456 GITHUB_RUN_ATTEMPT=1
@@ -28,4 +33,18 @@ if GITHUB_RUN_ID=bad bash packaging/ci/deploy-worker-version.sh "$fixture/wrangl
     echo 'Invalid run identifier unexpectedly accepted' >&2; exit 1
 fi
 test ! -s "$CALL_LOG"
+export DEPLOY_RETRY_SECONDS=0
+: > "$CALL_LOG"; rm -f "$CALL_LOG.deploy"
+DEPLOY_FAILURES=2 bash packaging/ci/deploy-worker-version.sh "$fixture/wrangler" "$fixture/assets" >/dev/null 2>&1
+test "$(grep -c '^versions deploy' "$CALL_LOG")" = 3
+: > "$CALL_LOG"; rm -f "$CALL_LOG.deploy"
+if DEPLOY_FAILURES=9 bash packaging/ci/deploy-worker-version.sh "$fixture/wrangler" "$fixture/assets" >/dev/null 2>&1; then
+    echo 'Persistent 100146 unexpectedly succeeded' >&2; exit 1
+fi
+test "$(grep -c '^versions deploy' "$CALL_LOG")" = 5
+: > "$CALL_LOG"; rm -f "$CALL_LOG.deploy"
+if DEPLOY_FAILURES=9 DEPLOY_ERROR='code: 10000' bash packaging/ci/deploy-worker-version.sh "$fixture/wrangler" "$fixture/assets" >/dev/null 2>&1; then
+    echo 'Unrelated deploy error unexpectedly succeeded' >&2; exit 1
+fi
+test "$(grep -c '^versions deploy' "$CALL_LOG")" = 1
 echo 'Version upload/deploy ordering and failures verified without Cloudflare.'
