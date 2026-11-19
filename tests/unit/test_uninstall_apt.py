@@ -823,6 +823,53 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue((self.data / 'db').exists())
         self.assertEqual(self.events, [])
 
+    def prepare_incomplete_initial_install(self):
+        (self.root / 'etc/pxe-tools').rmdir()
+        (self.root / 'var/lib/pxe-tools').rmdir()
+        missing = self.root / 'var/lib/pxe-tools-tftp'
+        missing.mkdir()
+        missing_proof = fixture_proof(missing)
+        missing.rmdir()
+        self.record = {'format': 2, 'base_phase': 'runtime-prepared', 'directories': {
+            '/var/lib/pxe-tools-native': fixture_proof(self.root / 'var/lib/pxe-tools-native'),
+            '/var/lib/pxe-tools-http': fixture_proof(self.data),
+            '/var/lib/pxe-tools-tftp': missing_proof,
+        }}
+        with self.ownership._locked(create=False) as directory:
+            self.ownership._write(directory, self.record)
+        return missing
+
+    def test_incomplete_initial_install_removes_only_witnessed_existing_paths(self):
+        missing = self.prepare_incomplete_initial_install()
+        self.unproven.mkdir()
+        (self.unproven / 'keep').write_text('old logs')
+        preview = self.execute(apply=False)
+        self.assertTrue(preview['initial_incomplete'])
+        self.assertIn('/var/lib/pxe-tools-native', preview['trees'])
+        self.assertNotIn('/var/lib/pxe-tools-tftp', preview['trees'])
+        self.assertEqual(preview['preserved'], ('/var/log/pxe-tools',))
+        self.execute(apply=True, account_lookup=lambda: {'accounts': [], 'groups': [], 'process_uids': set()})
+        self.assertFalse(self.data.exists())
+        self.assertFalse(missing.exists())
+        self.assertFalse((self.root / 'var/lib/pxe-tools-ownership').exists())
+        self.assertEqual((self.unproven / 'keep').read_text(), 'old logs')
+
+    def test_incomplete_initial_install_refuses_replaced_runtime_path(self):
+        missing = self.prepare_incomplete_initial_install()
+        missing.mkdir()
+        (missing / 'foreign').write_text('preserve')
+        with self.assertRaises(ValueError): self.execute(apply=True)
+        self.assertEqual((missing / 'foreign').read_text(), 'preserve')
+        self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
+
+    def test_incomplete_initial_install_refuses_unwitnessed_instance_data(self):
+        self.prepare_incomplete_initial_install()
+        outside = self.root / 'var/lib/pxe-tools'
+        outside.mkdir(); (outside / 'foreign').write_text('preserve')
+        with self.assertRaisesRegex(RuntimeError, 'ownership'): self.execute(apply=True)
+        self.assertEqual((outside / 'foreign').read_text(), 'preserve')
+        self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
+
     def prepare_legacy(self):
         self.record = {'format': 2, 'directories': {}}
         with self.ownership._locked(create=False) as directory:

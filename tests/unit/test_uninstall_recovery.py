@@ -329,6 +329,33 @@ def stable_nginx_lock(root=Path('/'), *, owner=0):
             self.assertFalse((self.root / 'etc/systemd/system' / unit).is_symlink())
         self.fixture.assert_external_survives()
 
+    def test_incomplete_install_resumes_after_package_purge(self):
+        import shutil
+        original = self.store.read()
+        record = {'format': 2, 'base_phase': 'runtime-prepared', 'directories': {
+            path: original['directories'][path] for path in uninstall.INITIAL_RUNTIME_TREES}}
+        for relative in ('etc/pxe-tools', 'var/lib/pxe-tools', 'var/lib/pxe-tools-ansible',
+                         'var/lib/pxe-tools-tftp'):
+            shutil.rmtree(self.root / relative)
+        with self.store._locked(create=False) as directory:
+            self.store._write(directory, record)
+        old_log = self.root / 'var/log/pxe-tools/service.log'
+        original_remove = uninstall.remove_tree
+        def interrupt(root, path, **kwargs):
+            if path == '/var/lib/pxe-tools-http' and not kwargs.get('dry_run', False):
+                raise OSError('simulated interruption after package purge')
+            return original_remove(root, path, **kwargs)
+        with patch.object(uninstall, 'remove_tree', side_effect=interrupt):
+            with self.assertRaises(RuntimeError): self.fixture.uninstall_fixture(self.store)
+        self.assertNotIn('pxe-tools', self.fixture.package_states)
+        self.assertTrue(self.receipt.is_file())
+        self.resume()
+        self.assertFalse(self.receipt.exists())
+        self.assertFalse((self.root / 'var/lib/pxe-tools-native').exists())
+        self.assertFalse((self.root / 'var/lib/pxe-tools-http').exists())
+        self.assertEqual(old_log.read_text(), 'synthetic-log')
+        self.assertIsNotNone(self.fixture.accounts.account)
+
     def test_resume_revalidates_nginx_using_saved_verifier_after_payload_removal(self):
         self.interrupt_with_nginx_after_purge()
         with patch.object(uninstall, 'load_package_helper', side_effect=AssertionError('installed helper used')):
