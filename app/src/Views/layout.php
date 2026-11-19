@@ -20,8 +20,8 @@ $activeSection = $pageContext['section'];
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title><?= View::e($title ?? 'PXE Tools') ?></title>
-<!-- Anti-FOUC : pose data-theme AVANT le CSS (choix stocké, sinon préférence système). -->
-<script>(function(){var r=document.documentElement,t='system';try{t=localStorage.getItem('theme')||'system';}catch(e){}if(t!=='light'&&t!=='dark')t='system';r.dataset.themeMode=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'):t;try{r.dataset.sidebarCollapsed=localStorage.getItem('pxe.sidebar.collapsed')==='true'?'true':'false';}catch(e){}})();</script>
+<!-- Applique le choix d'apparence avant la feuille de style. -->
+<script src="/theme-init.js?v=<?= @filemtime(__DIR__ . '/../../public/theme-init.js') ?: time() ?>"></script>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">

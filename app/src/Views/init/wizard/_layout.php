@@ -22,7 +22,7 @@ $wide = $wide ?? false;
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title><?= View::e($title ?? 'Initialisation') ?> · PXE Tools</title>
-<script>(function(){var t;try{t=localStorage.getItem('theme');}catch(e){}document.documentElement.dataset.theme=t==='light'||t==='dark'?t:(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');})();</script>
+<script src="/theme-init.js?v=<?= @filemtime(__DIR__ . '/../../../../public/theme-init.js') ?: time() ?>"></script>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
