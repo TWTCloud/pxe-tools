@@ -40,6 +40,36 @@ class CacheCleanupTest(unittest.TestCase):
             self.assertFalse(root.exists())
             self.assertFalse(opt.exists())
 
+    def test_reinstall_after_legacy_uninstall_cleans_native_caches(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, opt = Path(temp)/'usr', Path(temp)/'opt'
+            native = root/'native/__pycache__'
+            app = root/'app/__pycache__'
+            scripts = opt/'scripts/__pycache__'
+            for path in (native, app, scripts): path.mkdir(parents=True)
+            for path in (root, root/'native', native, root/'app', app, opt, opt/'scripts', scripts):
+                path.chmod(0o755)
+            for path in (native/'upgrade-lifecycle.cpython-312.pyc',
+                         native/'ownership-provenance.cpython-312.pyc',
+                         native/'uninstall-apt.cpython-312.pyc',
+                         app/'image_delete.cpython-312.pyc',
+                         scripts/'atomic_publish.cpython-312.pyc'):
+                path.write_bytes(b'fixture bytecode'); path.chmod(0o644)
+            module.prune(root, opt)
+            self.assertFalse(root.exists())
+            self.assertFalse(opt.exists())
+
+    def test_unknown_native_cache_preserves_both_roots(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, opt = Path(temp)/'usr', Path(temp)/'opt'
+            native = root/'native/__pycache__'; native.mkdir(parents=True)
+            scripts = opt/'scripts/__pycache__'; scripts.mkdir(parents=True)
+            known = scripts/'atomic_publish.cpython-312.pyc'; known.write_bytes(b'known')
+            unknown = native/'custom.cpython-312.pyc'; unknown.write_bytes(b'keep')
+            with self.assertRaises(ValueError): module.prune(root, opt)
+            self.assertEqual(known.read_bytes(), b'known')
+            self.assertEqual(unknown.read_bytes(), b'keep')
+
     def test_unknown_opt_content_preserves_both_roots(self):
         with tempfile.TemporaryDirectory() as temp:
             root, opt = Path(temp)/'usr', Path(temp)/'opt'

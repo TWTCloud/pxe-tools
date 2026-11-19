@@ -329,6 +329,35 @@ def stable_nginx_lock(root=Path('/'), *, owner=0):
             self.assertFalse((self.root / 'etc/systemd/system' / unit).is_symlink())
         self.fixture.assert_external_survives()
 
+    def test_incomplete_install_resumes_after_package_purge(self):
+        import shutil
+        original = self.store.read()
+        record = {'format': 2, 'base_phase': 'runtime-prepared', 'directories': {
+            path: original['directories'][path] for path in uninstall.INITIAL_RUNTIME_TREES}}
+        for relative in ('etc/pxe-tools', 'var/lib/pxe-tools', 'var/lib/pxe-tools-ansible',
+                         'var/lib/pxe-tools-tftp'):
+            shutil.rmtree(self.root / relative)
+        with self.store._locked(create=False) as directory:
+            self.store._write(directory, record)
+        old_log = self.root / 'var/log/pxe-tools/service.log'
+        old_log.parent.mkdir(parents=True, exist_ok=True)
+        old_log.write_text('synthetic-log')
+        original_remove = uninstall.remove_tree
+        def interrupt(root, path, **kwargs):
+            if path == '/var/lib/pxe-tools-http' and not kwargs.get('dry_run', False):
+                raise OSError('simulated interruption after package purge')
+            return original_remove(root, path, **kwargs)
+        with patch.object(uninstall, 'remove_tree', side_effect=interrupt):
+            with self.assertRaises(RuntimeError): self.fixture.uninstall_fixture(self.store)
+        self.assertNotIn('pxe-tools', self.fixture.package_states)
+        self.assertTrue(self.receipt.is_file())
+        self.resume()
+        self.assertFalse(self.receipt.exists())
+        self.assertFalse((self.root / 'var/lib/pxe-tools-native').exists())
+        self.assertFalse((self.root / 'var/lib/pxe-tools-http').exists())
+        self.assertEqual(old_log.read_text(), 'synthetic-log')
+        self.assertIsNotNone(self.fixture.accounts.account)
+
     def test_resume_revalidates_nginx_using_saved_verifier_after_payload_removal(self):
         self.interrupt_with_nginx_after_purge()
         with patch.object(uninstall, 'load_package_helper', side_effect=AssertionError('installed helper used')):
@@ -973,6 +1002,21 @@ def stable_nginx_lock(root=Path('/'), *, owner=0):
         self.assertFalse(any(Path(command[0]).name in ('dpkg', 'userdel', 'groupdel')
                              for command in self.fixture.calls))
         self.fixture.assert_external_survives()
+
+    def test_pre_purge_resume_preserves_unproven_old_logs(self):
+        with self.store._locked(create=False) as directory:
+            record = self.store._read(directory)
+            record['directories'].pop('/var/log/pxe-tools', None)
+            self.store._write(directory, record)
+        logs = self.root / 'var/log/pxe-tools/service.log'
+        logs.parent.mkdir(parents=True, exist_ok=True)
+        if not logs.exists(): logs.write_text('synthetic-log')
+        self.assertEqual(logs.read_text(), 'synthetic-log')
+        self.interrupt_mask_publication(after_link=False)
+        self.assertEqual(self.resume_pre_purge(), 'retry')
+        self.assertEqual(logs.read_text(), 'synthetic-log')
+        self.assertTrue(self.data.exists())
+        self.assertFalse(any(Path(command[0]).name == 'dpkg' for command in self.fixture.calls))
 
     def test_resume_before_temporary_symlink_creation_allows_safe_retry(self):
         temporary = self.interrupt_mask_creation(after_symlink=False)
