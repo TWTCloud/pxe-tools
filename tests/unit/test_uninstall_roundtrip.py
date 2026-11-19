@@ -433,6 +433,27 @@ class SyntheticRoundTrip(unittest.TestCase):
         self.assertFalse((self.root / 'var/lib/pxe-tools').exists())
         self.assert_external_survives()
 
+    def test_unproven_account_interruption_before_purge_requires_new_preview(self):
+        store = self.install_fixture(False)
+        self.accounts.account = SimpleNamespace(pw_name=NAME, pw_uid=self.accounts.uid,
+            pw_gid=self.accounts.gid, pw_gecos='', pw_dir=HOME, pw_shell=SHELL)
+        self.accounts.group = SimpleNamespace(gr_name=NAME, gr_gid=self.accounts.gid, gr_mem=[])
+        options = dict(owner=os.geteuid(), record=store.read(), ownership=store,
+                       account_lookup=self.accounts.snapshot, allow_legacy=True)
+        plan = uninstall.run_uninstall(self.root, self.runner, self.life, UNITS, lambda: (), **options)
+        with patch.object(uninstall, 'quiesced_lifecycle',
+                          side_effect=uninstall.BarrierRecoveryRequired('interrupted')):
+            with self.assertRaisesRegex(uninstall.BarrierRecoveryRequired, 'interrupted'):
+                uninstall.run_uninstall(self.root, self.runner, self.life, UNITS, lambda: (),
+                    apply=True, legacy_expected=plan['legacy_plan_sha256'], **options)
+        result = uninstall.resume_uninstall(self.root, self.runner, UNITS, lambda: (),
+            owner=os.geteuid(), account_lookup=self.accounts.snapshot,
+            generation_matches=store.generation.matches, lifecycle=self.life, ownership=store)
+        self.assertEqual(result, 'retry-legacy')
+        self.assertIn('pxe-tools', self.package_states)
+        self.assertIsNotNone(self.accounts.account)
+        self.assertTrue((self.root / 'var/lib/pxe-tools/instance.sqlite').exists())
+
     def assert_external_survives(self):
         self.assertEqual((self.external / 'backup').read_text(), 'external-backup')
         self.assertEqual(self.human_keys.read_text(), 'human-key')
