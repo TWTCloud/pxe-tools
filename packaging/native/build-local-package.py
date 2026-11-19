@@ -73,7 +73,11 @@ if [ "$1" = configure ]; then
 fi
 if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
     systemctl daemon-reload
-    python3 /usr/lib/pxe-tools/native/ownership-provenance.py check-base
+    recovered=$(python3 /usr/lib/pxe-tools/native/ownership-provenance.py recover-initialization)
+    [ "$recovered" = recovered ] || [ "$recovered" = unchanged ] || { echo 'Invalid initialization recovery result.' >&2; exit 1; }
+    if [ "$recovered" = unchanged ]; then
+        python3 /usr/lib/pxe-tools/native/ownership-provenance.py check-base
+    fi
     # Dependencies are configured before us and may have started stock nginx.
     # Preserve any preexisting/custom service unless ownership is proven.
     python3 /usr/lib/pxe-tools/native/reconcile-nginx.py --configure
@@ -82,7 +86,14 @@ if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
     python3 /usr/lib/pxe-tools/native/upgrade-lifecycle.py configure
     # Existing instance data may contain queued jobs or an enabled DHCP setup.
     # Leave its startup under the administrator's control.
-    if [ -z "${2:-}" ] && [ ! -e /var/lib/pxe-tools ] && [ ! -L /var/lib/pxe-tools ] \
+    if [ "$recovered" = recovered ]; then
+        if systemctl enable pxe-tools-admin.target; then
+            systemctl start pxe-tools-admin.target || echo 'PXE Tools: inspect administration service status.' >&2
+        else
+            echo 'PXE Tools: could not enable administration; inspect systemd status.' >&2
+        fi
+        python3 /usr/lib/pxe-tools/native/ownership-provenance.py finish-base
+    elif [ -z "${2:-}" ] && [ ! -e /var/lib/pxe-tools ] && [ ! -L /var/lib/pxe-tools ] \
        && [ ! -e /etc/pxe-tools ] && [ ! -L /etc/pxe-tools ]; then
         # Only truly new native installations receive the protected TFTP root.
         # Existing paths are never overwritten or silently migrated.
@@ -177,7 +188,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             data=checked(ROOT/'docker/pxe-tools/nginx'/name).read_text()
             data=data.replace('/app/public','/usr/lib/pxe-tools/app/public')
             data=data.replace('/run/php/php8.4-fpm.sock','/run/pxe-tools-php/fpm.sock')
-            data=data.replace('/var/log/nginx/','/var/log/pxe-tools/')
+            data=data.replace('/var/log/nginx/','/var/lib/pxe-tools-native/log/')
             data=data.replace('include fastcgi_params;', 'include /etc/nginx/fastcgi_params;')
             if name == 'admin-https.conf.tmpl':
                 data = replace_exact(data, '/var/lib/pxe-tools/tls/', '/var/lib/pxe-tools-native/tls/')
@@ -188,7 +199,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         pxe=replace_exact(pxe,'/app/public','/usr/lib/pxe-tools/app/public')
         pxe=replace_exact(pxe,'    root /srv/http;', '    root @@HTTP_ROOT@@;')
         pxe=replace_exact(pxe,'/run/php/php8.4-fpm.sock','/run/pxe-tools-php/fpm.sock')
-        pxe=pxe.replace('/var/log/nginx/','/var/log/pxe-tools/')
+        pxe=pxe.replace('/var/log/nginx/','/var/lib/pxe-tools-native/log/')
         pxe=replace_exact(pxe,'include fastcgi_params;','include /etc/nginx/fastcgi_params;')
         (native/'pxe.conf').write_text(pxe)
         dns=root/'opt/pxe-tools/dnsmasq'; dns.mkdir(parents=True)

@@ -296,7 +296,9 @@ class SyntheticRoundTrip(unittest.TestCase):
         (data / 'instance.sqlite').write_text('synthetic-database')
         (data / 'external-link').symlink_to(self.external, target_is_directory=True)
         (self.root / 'etc/pxe-tools/master.key').write_text('synthetic-secret')
-        (self.root / 'var/log/pxe-tools/service.log').write_text('synthetic-log')
+        logs = self.root / 'var/lib/pxe-tools-native/log'
+        logs.mkdir()
+        (logs / 'service.log').write_text('synthetic-log')
         (self.root / 'var/lib/pxe-tools-http/boot').write_text('synthetic-boot')
         (self.root / 'var/lib/pxe-tools-native/local-snapshot').write_text('synthetic-local-backup')
         package_units = self.root / 'usr/lib/systemd/system'

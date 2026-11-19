@@ -154,7 +154,7 @@ final class AnsibleRepoWebhookController
             }
         }
 
-        // 9. Log fichier best-effort (append, ignore si /var/log/pxe-tools absent)
+        // 9. Log fichier best-effort, à l'emplacement configuré pour le runtime.
         $logLine = sprintf(
             "[%s] commit=%s files=%d hostnames_impacted=%d triggered=%d skipped=%d\n",
             date('c'),
@@ -164,7 +164,8 @@ final class AnsibleRepoWebhookController
             count($triggered),
             count($skipped)
         );
-        @file_put_contents('/var/log/pxe-tools/webhook.log', $logLine, FILE_APPEND);
+        $logDir = getenv('PXE_LOG_DIR') ?: '/var/log/pxe-tools';
+        @file_put_contents($logDir . '/webhook.log', $logLine, FILE_APPEND);
 
         // 10. Réponse JSON
         http_response_code(202);
