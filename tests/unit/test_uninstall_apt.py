@@ -870,6 +870,16 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual((outside / 'foreign').read_text(), 'preserve')
         self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
 
+    def test_incomplete_initial_install_refuses_weak_generation_evidence(self):
+        self.prepare_incomplete_initial_install()
+        proof = self.record['directories']['/var/lib/pxe-tools-native']
+        proof.update(btime_sec=None, btime_nsec=None, nonce=None)
+        with self.ownership._locked(create=False) as directory:
+            self.ownership._write(directory, self.record)
+        with self.assertRaises(ValueError): self.execute(apply=True)
+        self.assertTrue((self.data / 'db').exists())
+        self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
+
     def prepare_legacy(self):
         self.record = {'format': 2, 'directories': {}}
         with self.ownership._locked(create=False) as directory:
