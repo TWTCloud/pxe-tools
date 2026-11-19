@@ -177,7 +177,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             data=checked(ROOT/'docker/pxe-tools/nginx'/name).read_text()
             data=data.replace('/app/public','/usr/lib/pxe-tools/app/public')
             data=data.replace('/run/php/php8.4-fpm.sock','/run/pxe-tools-php/fpm.sock')
-            data=data.replace('/var/log/nginx/','/var/log/pxe-tools/')
+            data=data.replace('/var/log/nginx/','/var/lib/pxe-tools-native/log/')
             data=data.replace('include fastcgi_params;', 'include /etc/nginx/fastcgi_params;')
             if name == 'admin-https.conf.tmpl':
                 data = replace_exact(data, '/var/lib/pxe-tools/tls/', '/var/lib/pxe-tools-native/tls/')
@@ -188,7 +188,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         pxe=replace_exact(pxe,'/app/public','/usr/lib/pxe-tools/app/public')
         pxe=replace_exact(pxe,'    root /srv/http;', '    root @@HTTP_ROOT@@;')
         pxe=replace_exact(pxe,'/run/php/php8.4-fpm.sock','/run/pxe-tools-php/fpm.sock')
-        pxe=pxe.replace('/var/log/nginx/','/var/log/pxe-tools/')
+        pxe=pxe.replace('/var/log/nginx/','/var/lib/pxe-tools-native/log/')
         pxe=replace_exact(pxe,'include fastcgi_params;','include /etc/nginx/fastcgi_params;')
         (native/'pxe.conf').write_text(pxe)
         dns=root/'opt/pxe-tools/dnsmasq'; dns.mkdir(parents=True)

@@ -82,7 +82,7 @@ def run():
                     hostile.mkdir(mode=0o700)
                     os.chown(hostile, nobody, -1)
                     text = original.replace('/run/' + runtime, str(run_dir))
-                    text = text.replace('/var/log/pxe-tools/nginx-access.log', str(case/'access.log'))
+                    text = text.replace('/var/lib/pxe-tools-native/log/nginx-access.log', str(case/'access.log'))
                     if broken:
                         # Substitute the compiled-in default with a separate hostile fixture.
                         text = re.sub(r'client_body_temp_path [^;]+;', f'client_body_temp_path {hostile};', text)

@@ -195,12 +195,13 @@ class OwnershipFixture(unittest.TestCase):
         record = store.read()
         self.assertEqual(record['format'], 2)
         self.assertEqual(record['base_phase'], 'prepared')
-        for path in ('/etc/pxe-tools', '/var/lib/pxe-tools', '/var/log/pxe-tools'):
+        for path in ('/etc/pxe-tools', '/var/lib/pxe-tools'):
             info = (self.root / path.lstrip('/')).stat()
             self.assertEqual((record['directories'][path]['dev'], record['directories'][path]['ino']),
                              (info.st_dev, info.st_ino))
             self.assertRegex(record['directories'][path]['nonce'], r'^[0-9a-f]{64}$')
         self.assertNotIn('account', record)
+        self.assertNotIn('/var/log/pxe-tools', record['directories'])
         self.assertEqual((self.root / 'var/lib/pxe-tools-ownership').stat().st_mode & 0o777, 0o700)
         self.assertEqual((self.root / 'var/lib/pxe-tools-ownership/state.json').stat().st_mode & 0o777, 0o600)
 
@@ -436,6 +437,76 @@ class OwnershipFixture(unittest.TestCase):
         store.create_base()
         self.assertNotIn('/var/log/pxe-tools', store.read()['directories'])
         self.assertEqual((logs / 'outside').read_text(), 'keep')
+
+    def test_group_writable_system_log_parent_is_not_used_for_creation(self):
+        log_parent = self.root / 'var/log'
+        log_parent.chmod(0o775)
+        logs = log_parent / 'pxe-tools'; logs.mkdir()
+        witness = logs / 'outside'; witness.write_text('keep')
+        store = self.store()
+        store.create_base()
+        self.assertNotIn('/var/log/pxe-tools', store.read()['directories'])
+        self.assertEqual(witness.read_text(), 'keep')
+        self.assertEqual(log_parent.stat().st_mode & 0o777, 0o775)
+
+    def test_first_native_install_with_group_writable_system_log_parent(self):
+        spec = importlib.util.spec_from_file_location('secure_runtime_group_writable_log',
+                                                     ROOT / 'packaging/native/configure-secure-tftp.py')
+        runtime = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runtime)
+        log_parent = self.root/'var/log'; log_parent.chmod(0o775)
+        existing = log_parent/'pxe-tools'; existing.mkdir()
+        witness = existing/'old.log'; witness.write_text('keep')
+        store = self.store()
+        def initialize(held):
+            store.create_base(require_runtime=True, native_fds=held, activate=lambda: None)
+        runtime.prepare(base=self.root/'var/lib', root=self.root, owner=os.geteuid(),
+                        journal=store, after_create=initialize)
+        self.assertEqual(store.read()['base_phase'], 'complete')
+        self.assertEqual(witness.read_text(), 'keep')
+        self.assertEqual(log_parent.stat().st_mode & 0o777, 0o775)
+
+    def test_resume_missing_runtime_creates_new_proofs_without_adopting_data(self):
+        spec = importlib.util.spec_from_file_location('resume_runtime_fixture', ROOT/'packaging/native/configure-secure-tftp.py')
+        runtime = importlib.util.module_from_spec(spec); spec.loader.exec_module(runtime)
+        store = self.store()
+        runtime.prepare(base=self.root/'var/lib', root=self.root, owner=os.geteuid(), journal=store)
+        for name in ('pxe-tools-http', 'pxe-tools-tftp'):
+            directory = self.root/'var/lib'/name
+            info = directory.stat(); directory.rmdir()
+            # The fake xattr store must discard attributes when an inode dies.
+            self.generation.xattrs.pop((info.st_dev, info.st_ino, ownership.XATTR_NAME), None)
+            self.generation.birth.pop((info.st_dev, info.st_ino), None)
+        self.assertEqual(set(store.resume_missing_runtime(mounts=[])), {'/var/lib/pxe-tools-http', '/var/lib/pxe-tools-tftp'})
+        store.create_base(require_runtime=True, activate=lambda: None)
+        self.assertEqual(store.read()['base_phase'], 'complete')
+
+    def test_resume_missing_runtime_rejects_changed_native_content(self):
+        spec = importlib.util.spec_from_file_location('resume_runtime_changed', ROOT/'packaging/native/configure-secure-tftp.py')
+        runtime = importlib.util.module_from_spec(spec); spec.loader.exec_module(runtime)
+        store = self.store()
+        runtime.prepare(base=self.root/'var/lib', root=self.root, owner=os.geteuid(), journal=store)
+        missing = self.root/'var/lib/pxe-tools-http'; missing.rmdir()
+        witness = self.root/'var/lib/pxe-tools-native/unknown'; witness.write_text('keep')
+        with self.assertRaises(ValueError): store.resume_missing_runtime(mounts=[])
+        self.assertEqual(witness.read_text(), 'keep')
+        self.assertFalse(missing.exists())
+        self.assertEqual(store.read()['base_phase'], 'runtime-prepared')
+
+    def test_resume_missing_runtime_rejects_mount_and_replaced_directory(self):
+        spec = importlib.util.spec_from_file_location('resume_runtime_replaced', ROOT/'packaging/native/configure-secure-tftp.py')
+        runtime = importlib.util.module_from_spec(spec); spec.loader.exec_module(runtime)
+        store = self.store()
+        runtime.prepare(base=self.root/'var/lib', root=self.root, owner=os.geteuid(), journal=store)
+        http = self.root/'var/lib/pxe-tools-http'; http.rmdir()
+        tftp = self.root/'var/lib/pxe-tools-tftp'
+        with self.assertRaisesRegex(ValueError, 'mount'):
+            store.resume_missing_runtime(mounts=[str(tftp/'nested')])
+        self.assertFalse(http.exists())
+        tftp.rename(self.root/'var/lib/old-tftp'); tftp.mkdir()
+        with self.assertRaisesRegex(ValueError, 'generation'):
+            store.resume_missing_runtime(mounts=[])
+        self.assertFalse(http.exists())
 
     def test_existing_data_refuses_without_claiming_or_changing_it(self):
         data = self.root / 'var/lib/pxe-tools'

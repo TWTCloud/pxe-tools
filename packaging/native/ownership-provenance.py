@@ -402,15 +402,106 @@ class Store:
             record['base_phase'] = 'runtime-prepared'
             self._write(directory, record)
 
+    def resume_missing_runtime(self, *, mounts=None):
+        """Recreate only absent, formerly journalled runtime directories.
+
+        A strong generation witness and the exact native marker must survive.
+        No existing directory is adopted and no file is deleted. A failure
+        between mkdir and recording leaves the new path for manual inspection.
+        """
+        if mounts is None:
+            import sys
+            if sys.platform != 'linux':
+                raise ValueError('mount inspection requires Linux')
+            with open('/proc/self/mountinfo', encoding='utf-8') as stream:
+                mounts = [re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), line.split()[4])
+                          for line in stream]
+        for path in NATIVE_DIRECTORIES:
+            target = str(self.root / path.lstrip('/'))
+            if any(mount == target or mount.startswith(target + '/') for mount in mounts):
+                raise ValueError('mount in native runtime; preserved')
+        self.refuse_unfinished_uninstall()
+        parent = self._parent(('var', 'lib'))
+        try:
+            with self._locked(create=False) as journal:
+                record = self._read(journal)
+                if record is None or record.get('format') != 2 or record.get('base_phase') != 'runtime-prepared':
+                    raise ValueError('no resumable native runtime proof')
+                if any(item.get('nonce') is None for item in record['directories'].values()):
+                    raise ValueError('weak runtime generation proof; preserved')
+                missing = []
+                for path in sorted(NATIVE_DIRECTORIES):
+                    try:
+                        child = os.open(Path(path).name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                    except FileNotFoundError:
+                        if path == '/var/lib/pxe-tools-native':
+                            raise ValueError('native runtime anchor is absent; preserved')
+                        missing.append(path)
+                        continue
+                    try:
+                        info = os.fstat(child)
+                        if (info.st_uid != self.owner or info.st_mode & 0o022
+                                or not self.generation.matches(child, record['directories'][path])):
+                            raise ValueError('native runtime generation changed; preserved')
+                        if path != '/var/lib/pxe-tools-native' and os.listdir(child):
+                            raise ValueError('native runtime data is not empty; preserved')
+                        if path == '/var/lib/pxe-tools-native':
+                            if set(os.listdir(child)) != {'runtime.env', 'network.env', 'rendered'}:
+                                raise ValueError('native runtime has additional content; preserved')
+                            marker = os.open('runtime.env', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=child)
+                            try:
+                                info = os.fstat(marker)
+                                if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.owner
+                                        or info.st_nlink != 1 or info.st_mode & 0o022
+                                        or os.read(marker, len(RUNTIME_MARKER) + 1) != RUNTIME_MARKER):
+                                    raise ValueError('native runtime marker differs; preserved')
+                            finally:
+                                os.close(marker)
+                            network = os.open('network.env', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=child)
+                            try:
+                                info = os.fstat(network)
+                                if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.owner
+                                        or info.st_nlink != 1 or info.st_mode & 0o022 or os.read(network, 1)):
+                                    raise ValueError('native network configuration changed; preserved')
+                            finally:
+                                os.close(network)
+                            rendered = os.open('rendered', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=child)
+                            try:
+                                info = os.fstat(rendered)
+                                if info.st_uid != self.owner or info.st_mode & 0o022 or os.listdir(rendered):
+                                    raise ValueError('native rendered data is not empty; preserved')
+                            finally:
+                                os.close(rendered)
+                    finally:
+                        os.close(child)
+                for path in missing:
+                    name = Path(path).name
+                    os.mkdir(name, 0o755, dir_fd=parent)
+                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                    try:
+                        os.fchmod(child, 0o755)
+                        proof = self.generation.capture(child)
+                        if proof['nonce'] is None or not self.generation.matches(child, proof):
+                            raise ValueError('new runtime generation could not be proved; preserved')
+                        os.fsync(child)
+                        os.fsync(parent)
+                        record['directories'][path] = proof
+                        self._write(journal, record)
+                    finally:
+                        os.close(child)
+                self._verify_runtime(record)
+                return tuple(missing)
+        finally:
+            os.close(parent)
+
     def create_base(self, *, require_runtime=False, native_fds=None, activate=None):
         # Check both pre-existing data roots before creating anything. Parent
         # directories cannot be replaced by unprivileged users during this step.
-        etc = lib = log = None
+        etc = lib = None
         held = {}
         try:
             etc = self._parent(('etc',))
             lib = self._parent(('var', 'lib'))
-            log = self._parent(('var', 'log'))
             if self._exists(etc, 'pxe-tools') or self._exists(lib, 'pxe-tools'):
                 raise FileExistsError('existing instance roots were preserved')
             with self._locked(create=not require_runtime) as directory:
@@ -429,14 +520,8 @@ class Store:
                     raise FileExistsError('existing ownership journal was preserved')
                 self._write(directory, record)
                 for parent, name, path in ((etc, 'pxe-tools', '/etc/pxe-tools'),
-                                            (lib, 'pxe-tools', '/var/lib/pxe-tools'),
-                                            (log, 'pxe-tools', '/var/log/pxe-tools')):
-                    try:
-                        os.mkdir(name, 0o755, dir_fd=parent)
-                    except FileExistsError:
-                        if path == '/var/log/pxe-tools':
-                            continue
-                        raise
+                                            (lib, 'pxe-tools', '/var/lib/pxe-tools')):
+                    os.mkdir(name, 0o755, dir_fd=parent)
                     child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
                     try:
                         os.fchmod(child, 0o755)
@@ -461,7 +546,7 @@ class Store:
         finally:
             for descriptor in held.values():
                 os.close(descriptor)
-            for descriptor in (log, lib, etc):
+            for descriptor in (lib, etc):
                 if descriptor is not None:
                     os.close(descriptor)
 
@@ -648,7 +733,7 @@ def main():
     import argparse
     import sys
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('check-base', 'create-base', 'finish-base', 'configure-ansible'))
+    parser.add_argument('action', choices=('check-base', 'create-base', 'finish-base', 'resume-runtime', 'configure-ansible'))
     options = parser.parse_args()
     if sys.platform != 'linux' or os.geteuid() != 0:
         raise ValueError('native ownership setup requires root on Linux')
@@ -661,6 +746,9 @@ def main():
         store.create_base(require_runtime=True)
     elif options.action == 'finish-base':
         store.finish_base()
+    elif options.action == 'resume-runtime':
+        created = store.resume_missing_runtime()
+        print('Recreated securely witnessed runtime directories:', ', '.join(created) or 'none')
     else:
         store.configure_ansible()
 
