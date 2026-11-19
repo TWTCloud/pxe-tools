@@ -44,6 +44,23 @@ class LegacySnapshotTests(unittest.TestCase):
         self.assertEqual((self.data / 'data').read_text(), 'must survive preview')
         self.assertEqual((self.outside / 'data').read_text(), 'external')
 
+    def test_remaining_unowned_apt_and_package_paths_are_reported(self):
+        source = self.root / 'etc/apt/sources.list.d/pxe-tools.sources'
+        source.parent.mkdir(parents=True)
+        source.write_text('pre-existing source')
+        key = self.root / 'etc/apt/keyrings/pxe-tools-archive-keyring.gpg'
+        key.parent.mkdir(parents=True)
+        key.write_text('pre-existing key')
+        payload = self.root / 'opt/pxe-tools'
+        payload.mkdir(parents=True)
+        (payload / 'unknown-file').write_text('not dpkg-owned')
+        self.assertEqual(set(module.remaining_apt_resources(self.root)), {
+            '/etc/apt/sources.list.d/pxe-tools.sources',
+            '/etc/apt/keyrings/pxe-tools-archive-keyring.gpg'})
+        self.assertEqual(module.remaining_package_paths(self.root), ('/opt/pxe-tools',))
+        self.assertEqual(module.remaining_apt_resources(self.root, source_removed=True, key_removed=True), ())
+        self.assertTrue((payload / 'unknown-file').exists())
+
     def test_legacy_account_is_preserved_and_shared_or_active_account_is_refused(self):
         account = SimpleNamespace(pw_name='pxe-tools-ansible', pw_uid=997, pw_gid=997,
                                   pw_dir='/var/lib/pxe-tools-ansible/home', pw_shell='/usr/sbin/nologin')

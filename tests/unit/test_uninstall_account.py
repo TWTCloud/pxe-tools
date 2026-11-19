@@ -117,6 +117,26 @@ class AccountValidation(unittest.TestCase):
             self.validate()
         self.assertIn(NAME, [a.pw_name for a in self.state['accounts']])
 
+    def test_explicit_legacy_identity_is_exact_and_cannot_be_shared(self):
+        self.state['accounts'][0].pw_gecos = ''
+        self.record['account']['gecos'] = ''
+        self.record['account']['source'] = 'explicit-legacy-consent'
+        self.assertEqual(self.validate(), self.record['account'])
+        self.state['accounts'][0].pw_uid += 1
+        with self.assertRaisesRegex(ValueError, 'identity changed'):
+            self.validate()
+        self.state['accounts'][0].pw_uid -= 1
+        self.state['groups'][0].gr_mem.append('someone-else')
+        with self.assertRaisesRegex(ValueError, 'shared'):
+            self.validate()
+
+    def test_unrecognised_or_malformed_legacy_approval_is_rejected(self):
+        for source, gecos in (('other', ''), ('explicit-legacy-consent', 'bad:comment')):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                self.record['account']['source'] = source
+                self.record['account']['gecos'] = gecos
+                self.validate()
+
     def test_changed_gecos_or_invalid_nonce_refuses(self):
         for changed in ('', GECOS.upper(), 'pxe-tools-' + 'f' * 31,
                         'pxe-tools-' + 'f' * 32, 'pxe-tools:' + 'f' * 32):
