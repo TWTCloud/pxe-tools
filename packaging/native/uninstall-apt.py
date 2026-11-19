@@ -1534,6 +1534,14 @@ def legacy_plan_hash(record, source, key):
     return hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
 
 
+def original_ownership_record(record):
+    """Remove the explicitly approved legacy account from a recovery receipt."""
+    if (isinstance(record, dict) and isinstance(record.get('account'), dict) and
+            record['account'].get('source') == 'explicit-legacy-consent'):
+        return {key: value for key, value in record.items() if key != 'account'}
+    return record
+
+
 def recorded_generation_matches(fd, proof):
     """Recheck the creation proof without depending on removed package files."""
     import ctypes
@@ -1576,6 +1584,23 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
         record = legacy_snapshotter(root, mounts=mounts_provider(), owner=owner)
     generation_matches = legacy_matcher if legacy else ownership.generation.matches if ownership is not None else None
     paths = proven_tree_paths(root, owner=owner, record=record, generation_matches=generation_matches)
+    # A previous installation may have left the dedicated Ansible identity even
+    # though the current installation never created it. Its removal requires a
+    # fresh, explicit preview bound to the exact unshared identity.
+    approved_account = None
+    if (allow_legacy and not legacy and isinstance(record, dict) and
+            record.get('base_phase') == 'complete' and record.get('account') is None and account_lookup is not None):
+        accounts = account_lookup()
+        named = [entry for entry in accounts['accounts'] if entry.pw_name == 'pxe-tools-ansible']
+        if named:
+            validate_legacy_account(accounts['accounts'], accounts['groups'], accounts['process_uids'])
+            entry = named[0]
+            approved_account = {'name': entry.pw_name, 'uid': entry.pw_uid, 'gid': entry.pw_gid,
+                                'gecos': entry.pw_gecos, 'home': entry.pw_dir, 'shell': entry.pw_shell,
+                                'source': 'explicit-legacy-consent'}
+            record = dict(record, account=approved_account)
+        elif any(group.gr_name == 'pxe-tools-ansible' for group in accounts['groups']):
+            raise ValueError('unproven Ansible group has no matching account; inspect before removal')
     mounts = mounts_provider()
     for path in paths:
         remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, expected=record['directories'][path], generation_matches=generation_matches)
@@ -1584,7 +1609,8 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
         # The preview explicitly preserves APT configuration for this legacy
         # path, even if a witness appears before cleanup or during recovery.
         source = key = False
-    if legacy and apply and legacy_expected != legacy_plan_hash(record, source, key):
+    explicit_plan = legacy or approved_account is not None
+    if explicit_plan and apply and legacy_expected != legacy_plan_hash(record, source, key):
         raise ValueError('legacy paths or APT plan changed or were not approved; inspect a fresh preview')
     preserved = tuple(path for path in sorted(TREES) if path not in paths and
                       ((root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink()))
@@ -1602,7 +1628,8 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
     initial = isinstance(record, dict) and record.get('base_phase') == 'runtime-prepared'
     plan = {'trees': paths, 'source': source, 'key': key, 'preserved': preserved, 'legacy': legacy,
             'initial_incomplete': initial,
-            'legacy_plan_sha256': legacy_plan_hash(record, source, key) if legacy else None}
+            'approved_account': approved_account,
+            'legacy_plan_sha256': legacy_plan_hash(record, source, key) if explicit_plan else None}
     if not apply:
         return plan
     allowed_preserved = set(record['preserved']) if legacy else {'/var/log/pxe-tools'}
@@ -2091,7 +2118,7 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
                 if state['record'] is not None:
                     ownership_fd = stack.enter_context(ownership._locked(create=False))
                     legacy = state['record'].get('format') == 3
-                    expected_record = {'format': 2, 'directories': {}} if legacy else state['record']
+                    expected_record = {'format': 2, 'directories': {}} if legacy else original_ownership_record(state['record'])
                     if ownership._read(ownership_fd) != expected_record:
                         raise ValueError('ownership journal changed before retry')
                     if legacy:
@@ -2136,7 +2163,7 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
                     journal.save()
                 remove_legacy()
                 journal.finish(aborted=True)
-            return 'retry-legacy' if legacy else 'retry'
+            return 'retry-legacy' if legacy or original_ownership_record(state['record']) != state['record'] else 'retry'
         if not packages_absent(runner):
             recovery_masks(root, runner, journal, units, owner=owner, mounts=mounts_provider(), dry_run=True)
             for unit in units:
@@ -2875,10 +2902,13 @@ def validate_account(record, accounts, groups, process_uids):
         if matches or named_groups:
             raise ValueError('pre-existing Ansible account or group has no creation proof')
         return None
-    if (not isinstance(proof, dict) or set(proof) != {'name', 'uid', 'gid', 'gecos', 'home', 'shell'} or
+    explicit = isinstance(proof, dict) and proof.get('source') == 'explicit-legacy-consent'
+    fields = {'name', 'uid', 'gid', 'gecos', 'home', 'shell'} | ({'source'} if explicit else set())
+    if (not isinstance(proof, dict) or set(proof) != fields or
             proof['name'] != name or proof['home'] != '/var/lib/pxe-tools-ansible/home' or
             proof['shell'] != '/usr/sbin/nologin' or not isinstance(proof['gecos'], str) or
-            not re.fullmatch(r'pxe-tools-[0-9a-f]{32}', proof['gecos']) or
+            (not explicit and not re.fullmatch(r'pxe-tools-[0-9a-f]{32}', proof['gecos'])) or
+            (explicit and (len(proof['gecos']) > 255 or any(ord(c) < 32 or c in ':\n' for c in proof['gecos']))) or
             any(type(proof[key]) is not int or proof[key] <= 0 for key in ('uid', 'gid'))):
         raise ValueError('invalid Ansible account creation proof')
     uid, gid = proof['uid'], proof['gid']
@@ -3166,6 +3196,26 @@ def external_paths(lifecycle, recognised):
     return tuple(sorted(result))
 
 
+def remaining_apt_resources(root, *, source_removed=False, key_removed=False):
+    """Report existing PXE-specific APT files that are not approved for removal."""
+    root = Path(root)
+    candidates = []
+    if not source_removed:
+        candidates.append('/etc/apt/sources.list.d/pxe-tools.sources')
+    candidates.append('/etc/apt/sources.list.d/pxe-tools.list')
+    if not key_removed:
+        candidates.append('/etc/apt/keyrings/pxe-tools-archive-keyring.gpg')
+    return tuple(path for path in candidates
+                 if (root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink())
+
+
+def remaining_package_paths(root):
+    """Detect payload directories dpkg could not remove because files remain."""
+    root = Path(root)
+    return tuple(path for path in ('/opt/pxe-tools', '/usr/lib/pxe-tools')
+                 if (root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink())
+
+
 UNITS = ('pxe-tools.target', 'pxe-tools-admin.target', 'pxe-tools-worker.service',
          'pxe-tools-dnsmasq-tail.service', 'pxe-tools-nginx.service',
          'pxe-tools-pxe-http.service', 'pxe-tools-php.service',
@@ -3327,7 +3377,8 @@ def main(argv):
         record = ownership.read() if ownership is not None else None
     except FileNotFoundError:
         record = None
-    preview = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=False, record=record, ownership=ownership, reconciler=reconciler, allow_legacy=args.allow_legacy)
+    account_lookup = lambda: account_snapshot(Path('/'), list(pwd.getpwall()), list(grp.getgrall()))
+    preview = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=False, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy)
     outside = external_paths(lifecycle, preview['trees']) if lifecycle is not None else ()
     outside = tuple(path for path in outside if Path(path).exists() or Path(path).is_symlink())
     print('WARNING: removal destroys the PXE Tools database, configuration, local keys, certificates,')
@@ -3336,13 +3387,20 @@ def main(argv):
     if preview['legacy']:
         print('LEGACY INSTALLATION: listed paths have no creation proof; explicit operator approval is required.')
         print('The existing Ansible account and group will be preserved.')
-        print('Legacy plan SHA256:', preview['legacy_plan_sha256'])
     elif preview['initial_incomplete']:
         print('INCOMPLETE INITIAL INSTALLATION: only creation-witnessed paths will be removed.')
         print('Any existing Ansible account and group will be preserved.')
+    if preview['approved_account'] is not None:
+        print('Pre-existing Ansible account and group will be removed if confirmed:',
+              preview['approved_account']['name'], 'UID', preview['approved_account']['uid'],
+              'GID', preview['approved_account']['gid'])
+        print('The account has no creation proof; the confirmed plan is bound to its identity.')
+    if preview['legacy_plan_sha256'] is not None:
+        print('Legacy plan SHA256:', preview['legacy_plan_sha256'])
     for path in preview['trees']:
         print('Candidate data path, if present:', path)
-    for path in sorted(set(preview['preserved']) | set(outside)):
+    apt_preserved = remaining_apt_resources(Path('/'), source_removed=preview['source'], key_removed=preview['key'])
+    for path in sorted(set(preview['preserved']) | set(outside) | set(apt_preserved)):
         print('Preserved for manual review:', path)
     if preview['legacy']:
         print('APT source and signing key are preserved for this legacy installation.')
@@ -3358,13 +3416,15 @@ def main(argv):
     if outside:
         raise RuntimeError('Configured paths outside recognised roots require review; no package was removed')
     with installer_lock(Path('/run/lock/pxe-tools-apt-install.lock')):
-        account_lookup = lambda: account_snapshot(Path('/'), list(pwd.getpwall()), list(grp.getgrall()))
         result = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=True, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy, legacy_expected=args.legacy_plan_sha256)
     print('Requested package purge completed; recognised data paths were removed where present.')
     print('APT source removed:', 'yes' if result['source_removed'] else 'no')
     print('APT key removed:', 'yes' if result['key_removed'] else 'no')
-    remaining_source = Path('/etc/apt/sources.list.d/pxe-tools.sources')
-    if result['preserved'] or outside or remaining_source.exists() or remaining_source.is_symlink():
+    remaining_apt = remaining_apt_resources(Path('/'))
+    remaining_package = remaining_package_paths(Path('/'))
+    if result['preserved'] or outside or remaining_apt or remaining_package:
+        for path in remaining_apt + remaining_package:
+            print('Preserved for manual review:', path)
         print('Some resources were preserved or their provenance could not be established; inspect them manually.')
         return 1
     return 0

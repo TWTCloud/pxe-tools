@@ -372,6 +372,67 @@ class SyntheticRoundTrip(unittest.TestCase):
         return uninstall.run_uninstall(self.root, self.runner, self.life, UNITS,
                                       lambda: (), **kwargs)
 
+    def test_confirmed_unproven_dedicated_account_can_be_removed(self):
+        store = self.install_fixture(False)
+        self.accounts.account = SimpleNamespace(pw_name=NAME, pw_uid=self.accounts.uid,
+            pw_gid=self.accounts.gid, pw_gecos='', pw_dir=HOME, pw_shell=SHELL)
+        self.accounts.group = SimpleNamespace(gr_name=NAME, gr_gid=self.accounts.gid, gr_mem=[])
+        options = dict(owner=os.geteuid(), record=store.read(), ownership=store,
+                       account_lookup=self.accounts.snapshot, allow_legacy=True)
+        plan = uninstall.run_uninstall(self.root, self.runner, self.life, UNITS, lambda: (), **options)
+        self.assertEqual(plan['approved_account']['name'], NAME)
+        self.assertEqual(len(plan['legacy_plan_sha256']), 64)
+        with self.assertRaisesRegex(ValueError, 'not approved'):
+            uninstall.run_uninstall(self.root, self.runner, self.life, UNITS, lambda: (),
+                                    apply=True, legacy_expected='0' * 64, **options)
+        self.assertIn('pxe-tools', self.package_states)
+        self.accounts.account.pw_gecos = 'changed'
+        with self.assertRaisesRegex(ValueError, 'changed or were not approved'):
+            uninstall.run_uninstall(self.root, self.runner, self.life, UNITS, lambda: (),
+                                    apply=True, legacy_expected=plan['legacy_plan_sha256'], **options)
+        self.accounts.account.pw_gecos = ''
+        uninstall.run_uninstall(self.root, self.runner, self.life, UNITS, lambda: (),
+                                apply=True, legacy_expected=plan['legacy_plan_sha256'], **options)
+        self.assertNotIn('pxe-tools', self.package_states)
+        self.assertIsNone(self.accounts.account)
+        self.assertIsNone(self.accounts.group)
+        self.assertFalse((self.root / 'opt/pxe-tools').exists())
+        self.assertFalse((self.root / 'var/lib/pxe-tools').exists())
+        self.assert_external_survives()
+
+    def test_unproven_shared_account_is_rejected_before_confirmation(self):
+        store = self.install_fixture(False)
+        self.accounts.account = SimpleNamespace(pw_name=NAME, pw_uid=self.accounts.uid,
+            pw_gid=self.accounts.gid, pw_gecos='', pw_dir=HOME, pw_shell=SHELL)
+        self.accounts.group = SimpleNamespace(gr_name=NAME, gr_gid=self.accounts.gid, gr_mem=['someone'])
+        with self.assertRaisesRegex(ValueError, 'shared'):
+            uninstall.run_uninstall(self.root, self.runner, self.life, UNITS, lambda: (),
+                owner=os.geteuid(), record=store.read(), ownership=store,
+                account_lookup=self.accounts.snapshot, allow_legacy=True)
+        self.assertIn('pxe-tools', self.package_states)
+
+    def test_unproven_account_can_resume_after_purge_interruption(self):
+        store = self.install_fixture(False)
+        self.accounts.account = SimpleNamespace(pw_name=NAME, pw_uid=self.accounts.uid,
+            pw_gid=self.accounts.gid, pw_gecos='', pw_dir=HOME, pw_shell=SHELL)
+        self.accounts.group = SimpleNamespace(gr_name=NAME, gr_gid=self.accounts.gid, gr_mem=[])
+        options = dict(owner=os.geteuid(), record=store.read(), ownership=store,
+                       account_lookup=self.accounts.snapshot, allow_legacy=True)
+        plan = uninstall.run_uninstall(self.root, self.runner, self.life, UNITS, lambda: (), **options)
+        with patch.object(uninstall, 'remove_account', side_effect=RuntimeError('interrupted')):
+            with self.assertRaisesRegex(RuntimeError, 'interrupted'):
+                uninstall.run_uninstall(self.root, self.runner, self.life, UNITS, lambda: (),
+                    apply=True, legacy_expected=plan['legacy_plan_sha256'], **options)
+        self.assertNotIn('pxe-tools', self.package_states)
+        self.assertIsNotNone(self.accounts.account)
+        uninstall.resume_uninstall(self.root, self.runner, UNITS, lambda: (),
+            owner=os.geteuid(), account_lookup=self.accounts.snapshot,
+            generation_matches=store.generation.matches)
+        self.assertIsNone(self.accounts.account)
+        self.assertIsNone(self.accounts.group)
+        self.assertFalse((self.root / 'var/lib/pxe-tools').exists())
+        self.assert_external_survives()
+
     def assert_external_survives(self):
         self.assertEqual((self.external / 'backup').read_text(), 'external-backup')
         self.assertEqual(self.human_keys.read_text(), 'human-key')
