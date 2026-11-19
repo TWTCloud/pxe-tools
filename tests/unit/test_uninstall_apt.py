@@ -1037,12 +1037,23 @@ class TransactionTests(unittest.TestCase):
         self.assertFalse(any(command[0] == 'systemctl' and command[-1] == 'nginx.service' for command in self.events))
 
     def test_unproven_instance_data_aborts_before_package_removal(self):
-        self.unproven.mkdir()
-        (self.unproven / 'preserve').write_text('unproven')
+        unproven = self.root / 'var/lib/pxe-tools-ansible'
+        unproven.mkdir()
+        (unproven / 'preserve').write_text('unproven')
         with self.assertRaisesRegex(RuntimeError, 'ownership'):
             self.execute(apply=True)
-        self.assertEqual((self.unproven / 'preserve').read_text(), 'unproven')
+        self.assertEqual((unproven / 'preserve').read_text(), 'unproven')
         self.assertFalse(any(command[0] == 'dpkg' for command in self.events))
+
+    def test_unproven_old_logs_are_preserved_while_other_data_is_removed(self):
+        self.unproven.mkdir()
+        (self.unproven / 'preserve').write_text('old log')
+        preview = self.execute(apply=False)
+        self.assertEqual(preview['preserved'], ('/var/log/pxe-tools',))
+        self.execute(apply=True)
+        self.assertEqual((self.unproven / 'preserve').read_text(), 'old log')
+        self.assertFalse(self.data.exists())
+        self.assertTrue(any(command[0] == 'dpkg' for command in self.events))
 
     def test_partial_install_with_unverifiable_jobs_keeps_all_data(self):
         self.lifecycle = None

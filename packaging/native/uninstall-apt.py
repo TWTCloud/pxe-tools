@@ -1587,7 +1587,8 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
             'legacy_plan_sha256': legacy_plan_hash(record, source, key) if legacy else None}
     if not apply:
         return plan
-    if preserved and (not legacy or set(preserved) != set(record['preserved'])):
+    allowed_preserved = set(record['preserved']) if legacy else {'/var/log/pxe-tools'}
+    if set(preserved) - allowed_preserved or (legacy and set(preserved) != allowed_preserved):
         raise RuntimeError('Cannot establish ownership of all instance paths; no package was removed')
     critical = ('/etc/pxe-tools', '/var/lib/pxe-tools', '/var/lib/pxe-tools-native')
     if lifecycle is None and any((root / p.lstrip('/')).exists() or
@@ -1608,7 +1609,7 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
             if record is not None and ownership._read(ownership_fd) != original_record:
                 raise RuntimeError('ownership journal changed; no package was removed')
             if any(((root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink())
-                   for path in TREES if path not in paths and (not legacy or path not in record['preserved'])):
+                   for path in TREES if path not in paths and path not in allowed_preserved):
                 raise RuntimeError('Unproven instance paths appeared; no package was removed')
             ownership_identities = _journal_identities(ownership_fd, owner) if record is not None else None
             ownership_contents = _journal_bytes(ownership_fd) if record is not None else None
@@ -2089,7 +2090,7 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
                         raise ValueError('ownership journal appeared before retry')
                 matches = generation_matches or (legacy_identity_matches if legacy else ownership.generation.matches)
                 proven_tree_paths(root, owner=owner, record=state['record'], generation_matches=matches)
-                excluded = set(state['record']['preserved']) if legacy else set()
+                excluded = set(state['record']['preserved']) if legacy else {'/var/log/pxe-tools'}
                 if any(((root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink())
                        for path in TREES if path not in state['paths'] and path not in excluded):
                     raise ValueError('unproven instance paths appeared before retry')

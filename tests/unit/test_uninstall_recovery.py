@@ -974,6 +974,19 @@ def stable_nginx_lock(root=Path('/'), *, owner=0):
                              for command in self.fixture.calls))
         self.fixture.assert_external_survives()
 
+    def test_pre_purge_resume_preserves_unproven_old_logs(self):
+        with self.store._locked(create=False) as directory:
+            record = self.store._read(directory)
+            record['directories'].pop('/var/log/pxe-tools')
+            self.store._write(directory, record)
+        logs = self.root / 'var/log/pxe-tools/service.log'
+        self.assertEqual(logs.read_text(), 'synthetic-log')
+        self.interrupt_mask_publication(after_link=False)
+        self.assertEqual(self.resume_pre_purge(), 'retry')
+        self.assertEqual(logs.read_text(), 'synthetic-log')
+        self.assertTrue(self.data.exists())
+        self.assertFalse(any(Path(command[0]).name == 'dpkg' for command in self.fixture.calls))
+
     def test_resume_before_temporary_symlink_creation_allows_safe_retry(self):
         temporary = self.interrupt_mask_creation(after_symlink=False)
         self.assertFalse(temporary.exists())
