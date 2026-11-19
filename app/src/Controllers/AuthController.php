@@ -76,11 +76,11 @@ final class AuthController
     /** Only same-origin absolute paths; reject browser-normalized slashes and header controls. */
     private static function localNext(mixed $value): string
     {
-        if (!is_string($value) || $value === '') return '/machines';
+        if (!is_string($value) || $value === '') return '/';
         $decoded = rawurldecode($value);
         if (!str_starts_with($decoded, '/') || str_starts_with($decoded, '//')
             || str_contains($decoded, '\\') || preg_match('/[\x00-\x20\x7f]/', $decoded)
-            || parse_url($decoded, PHP_URL_HOST) !== null) return '/machines';
+            || parse_url($decoded, PHP_URL_HOST) !== null) return '/';
         return $value;
     }
 
