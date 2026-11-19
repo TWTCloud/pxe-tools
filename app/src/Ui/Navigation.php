@@ -9,6 +9,7 @@ final class Navigation
     public static function sections(): array
     {
         return [
+            'overview' => ['label' => 'Vue d’ensemble', 'icon' => 'home', 'href' => '/', 'children' => []],
             'machines' => ['label' => 'Machines', 'icon' => 'hard-drive', 'href' => '/machines', 'children' => []],
             'presets' => ['label' => 'Modèles', 'icon' => 'package', 'href' => '/presets', 'children' => []],
             'activity' => ['label' => 'Activité', 'icon' => 'zap', 'href' => '/activity', 'children' => [
@@ -24,6 +25,7 @@ final class Navigation
 
     public static function section(string $path): string
     {
+        if ($path === '/') return 'overview';
         if (preg_match('~^/(?:activity|installations|tasks|jobs|wipes|disktests|init)(?:/|$)~', $path)) return 'activity';
         if (preg_match('~^/settings(?:/|$)~', $path)) return 'settings';
         if (preg_match('~^/presets(?:/|$)~', $path)) return 'presets';
@@ -32,7 +34,8 @@ final class Navigation
 
     public static function current(string $path, string $href): bool
     {
-        if ($href === '/machines') return $path === '/' || $path === $href;
+        if ($href === '/') return $path === '/';
+        if ($href === '/machines') return $path === $href;
         if (in_array($href, ['/settings', '/activity'], true)) return $path === $href;
         return $path === $href || str_starts_with($path, $href . '/');
     }

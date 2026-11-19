@@ -1,7 +1,7 @@
 <?php
 use Admin\View;
 $error      = $error ?? null;
-$next = $next ?? '/machines';
+$next = $next ?? '/';
 $errorMsg = match ($error) {
     'invalid' => 'Identifiants incorrects.',
     'missing' => 'Renseignez votre nom d\'utilisateur et votre mot de passe.',

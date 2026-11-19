@@ -198,8 +198,9 @@ $activity = new Admin\Controllers\ActivityController();
 $router->get('/activity', [$activity, 'index']);
 $router->get('/activity/list', [$activity, 'fragment']);
 
-// Dashboard = liste machines
-$router->get('/',                    [$fc, 'index']);
+// Vue d'ensemble et liste des machines
+$overview = new Admin\Controllers\OverviewController();
+$router->get('/',                    [$overview, 'index']);
 $router->get('/machines',            [$fc, 'index']);
 $router->get('/machines/new',        [$mc, 'newForm']);
 $router->post('/machines',           [$mc, 'create']);
