@@ -1,3 +1,4 @@
+<?php use Admin\Ui\DeviceTerminology as Term; ?>
 <?php
 /**
  * Partial — terminal d'événements machine (polled HTMX 2s).
@@ -8,7 +9,7 @@
 use Admin\View;
 ?>
 <?php if (empty($events)): ?>
-  <pre class="log events-log events-log--empty">(aucun événement enregistré pour cette machine)</pre>
+  <pre class="log events-log events-log--empty"><?= View::e(Term::format('(aucun événement enregistré pour {ce})')) ?></pre>
 <?php else: ?>
   <pre class="log events-log"><?php foreach ($events as $ev):
     $level = $ev['level'] ?? 'info';

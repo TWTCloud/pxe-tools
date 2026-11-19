@@ -1,3 +1,4 @@
+<?php use Admin\Ui\DeviceTerminology as Term; ?>
 <?php
 use Admin\View;
 /** @var bool $enabled */
@@ -29,7 +30,7 @@ use Admin\View;
         Activé. Les menus pxelinux et GRUB exposent une entrée <strong>"Chainload iPXE"</strong>.
         L'admin peut sélectionner cette entrée pour booter via iPXE → /boot.ipxe (HTTP).
       <?php else: ?>
-        Désactivé (par défaut). Les machines bootent uniquement via pxelinux (BIOS)
+        Désactivé (par défaut). <?= View::e(Term::format('Les {many} démarrent uniquement via pxelinux (BIOS)')) ?>
         ou GRUB EFI (UEFI), avec kernel/initrd en TFTP. Pas d'option iPXE proposée
         dans les menus.
       <?php endif; ?>
@@ -38,7 +39,7 @@ use Admin\View;
 
   <article class="flash flash-warning" data-persistent style="margin-top:1rem;">
     <strong><?= View::icon('warning') ?> Note Secure Boot UEFI</strong> : ipxe.efi n'est pas signé Microsoft.
-    Sur une machine UEFI avec Secure Boot activé, l'option chainload iPXE échouera
+    <?= View::e(Term::format('Sur {un} UEFI avec Secure Boot activé, l’option chainload iPXE échouera')) ?>
     (sauf si l'image iPXE est signée avec votre MOK custom — ce qui n'est pas
     encore implémenté). Sur BIOS legacy ou UEFI sans SB, ça marche directement.
   </article>
@@ -52,5 +53,5 @@ use Admin\View;
 <p class="hint-row muted text-small" style="margin-top:1rem;">
   <?= View::icon('lightbulb') ?>
   <span>Les menus PXE sont régénérés automatiquement à l'enregistrement&nbsp;: le
-  changement s'applique au prochain démarrage réseau des machines.</span>
+  <?= View::e(Term::format('changement s’applique au prochain démarrage réseau des {many}.')) ?></span>
 </p>

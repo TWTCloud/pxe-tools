@@ -5,7 +5,7 @@
  * @var array $install
  * @var array $machine
  */
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 ?>
 
 <header class="row-flex-spread mb-1">
@@ -20,7 +20,7 @@ use Admin\View;
   <div style="display:flex; gap:.5rem;">
     <?php if (($install['install_status'] ?? '') === 'in_progress'): ?>
       <form method="post" action="/installations/<?= (int)$install['id'] ?>/cancel" style="margin:0;"
-            onsubmit="return confirm('Clôturer le suivi de cette installation ? Aucun arrêt du processus distant ne peut être garanti. L\'action parente et tous ses sous-jobs (wipe, install, ansible) seront marqués comme annulés. La machine devra être réinstallée manuellement pour repartir.');">
+            onsubmit="return confirm(<?= View::e(json_encode(Term::format('Clôturer le suivi de cette installation ? Aucun arrêt du processus distant ne peut être garanti. L’action parente et tous ses sous-jobs (wipe, install, ansible) seront marqués comme annulés. Une réinstallation manuelle de {ce} sera nécessaire pour repartir.'))) ?>);">
         <button type="submit" class="btn danger">Clôturer le suivi</button>
       </form>
     <?php endif; ?>

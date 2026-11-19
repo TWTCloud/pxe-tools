@@ -1,3 +1,4 @@
+<?php use Admin\Ui\DeviceTerminology as Term; ?>
 <?php
 use Admin\View;
 /**
@@ -37,8 +38,7 @@ $remainingSec  = $awaitingEpoch > 0 ? max(0, $awaitingEpoch - time()) : 0;
 <article class="panel">
   <header><h3>Contrôle alimentation à distance</h3></header>
   <p class="muted">
-    La machine reste allumée en attente d'instruction (après l'inventaire ou un
-    test de disques). Utilisez le menu <strong>Actions → Redémarrer / Arrêter</strong> —
+    <?= View::e(Term::format('{One} : le système reste allumé en attente d’instruction après l’inventaire ou un test de disques.')) ?> Utilisez le menu <strong>Actions → Redémarrer / Arrêter</strong> —
     l'ordre prend effet en ≤ 5 secondes.
   </p>
   <?php if ($nextActionLabel !== null): ?>
@@ -58,7 +58,7 @@ $remainingSec  = $awaitingEpoch > 0 ? max(0, $awaitingEpoch - time()) : 0;
     </p>
   <?php endif; ?>
   <small class="form-hint">
-    Sécurité : si aucune action n'est reçue dans l'heure, la machine s'éteint
+    <?= View::e(Term::format('Sécurité : si aucune action n’est reçue dans l’heure, {le} s’éteint')) ?>
     automatiquement.
   </small>
   <?php /* Les boutons d'action vivent dans le menu Actions (point unique,

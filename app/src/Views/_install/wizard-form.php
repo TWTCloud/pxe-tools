@@ -17,6 +17,7 @@
 use Admin\View;
 use Admin\Models\Preset;
 use Admin\Models\Machine;
+use Admin\Ui\DeviceTerminology as Term;
 use Admin\Models\CatalogEntry;
 use Admin\Models\Setting;
 use Admin\Catalog\DistroCatalog;
@@ -52,7 +53,7 @@ $verb = $hasExistingConfig ? 'Réinstaller' : 'Installer';
 $restorableConfig = $hasExistingConfig ? (Machine::installConfig($machine) ?? $config) : $config;
 $restorableConfig['disk_identity_selection_confirmed'] = $diskIdentitySelectionConfirmed;
 $restorableConfig += ['hostname' => $machine['hostname'] ?? '', 'domain' => $machine['domain'] ?? ''];
-$restoreLabel = $hasExistingConfig ? 'Copie enregistrée pour cette machine' : (!empty($errors) ? 'Saisie reçue, non enregistrée' : 'Valeurs initiales');
+$restoreLabel = $hasExistingConfig ? Term::format('Copie enregistrée pour {ce}') : (!empty($errors) ? 'Saisie reçue, non enregistrée' : 'Valeurs initiales');
 ?>
 
 <form id="install-wizard-form" method="post" action="/machines/<?= (int)$machine['id'] ?>/install" novalidate data-preview-url="/machines/<?= (int)$machine['id'] ?>/install-preview" data-restore-label="<?= View::e($restoreLabel) ?>">
@@ -95,7 +96,7 @@ $restoreLabel = $hasExistingConfig ? 'Copie enregistrée pour cette machine' : (
         <option value="" selected>Restaurer · <?= View::e($restoreLabel) ?></option>
         <option value="__reset__">Nouvelle configuration (valeurs par défaut)</option>
         <?php if (!empty($_pg['compatible'])): ?>
-          <optgroup label="Modèles pour cette machine">
+          <optgroup label="<?= View::e(Term::format('Modèles pour {ce}')) ?>">
             <?php foreach ($_pg['compatible'] as $preset): ?>
               <option value="<?= (int)$preset['id'] ?>"><?= View::e($preset['name']) ?> (<?= View::e($preset['distro']) ?>)</option>
             <?php endforeach; ?>
@@ -115,7 +116,7 @@ $restoreLabel = $hasExistingConfig ? 'Copie enregistrée pour cette machine' : (
     </label>
     <p class="config-source-badge" data-config-source-badge>
       Configuration en cours :
-      <strong class="config-source-badge__label" data-config-source-label><?= !empty($errors) ? 'Saisie à corriger (non enregistrée)' : (!empty($hasExistingConfig) ? 'Copie enregistrée pour cette machine' : 'Valeurs initiales') ?></strong>
+      <strong class="config-source-badge__label" data-config-source-label><?= !empty($errors) ? 'Saisie à corriger (non enregistrée)' : (!empty($hasExistingConfig) ? Term::format('Copie enregistrée pour {ce}') : 'Valeurs initiales') ?></strong>
     </p>
 
     <?php
@@ -371,12 +372,12 @@ $restoreLabel = $hasExistingConfig ? 'Copie enregistrée pour cette machine' : (
     <section id="root-password-section" <?= ($p['root_login_mode'] ?? 'disabled') === 'disabled' ? 'hidden' : '' ?>>
       <h4>Mot de passe root <span class="muted text-small">(optionnel)</span></h4>
       <label>
-        Mot de passe root pour cette machine
+        <?= View::e(Term::format('Mot de passe root pour {ce}')) ?>
         <input type="password" name="root_password" minlength="8" autocomplete="new-password" <?= ($p['root_login_mode'] ?? 'disabled') === 'disabled' ? 'disabled' : '' ?>
                placeholder="<?= $hasExistingRootPwd ? '••• (déjà défini, modifiable)' : 'Vide = compte root verrouillé (recommandé)' ?>">
         <small class="form-hint">
           <?php if ($hasExistingRootPwd): ?>
-            Mot de passe spécifique défini pour cette machine. Vide = conserver l'existant.
+            <?= View::e(Term::format('Mot de passe spécifique défini pour {ce}. Vide = conserver l’existant.')) ?>
           <?php else: ?>
             Vide : root reste verrouillé. Utilisez le compte administrateur avec sudo. Au moins 8 caractères si renseigné.
           <?php endif; ?>
@@ -390,7 +391,7 @@ $restoreLabel = $hasExistingConfig ? 'Copie enregistrée pour cette machine' : (
                value="<?= View::e($config['root_password_cipher'] ?? $machine['root_password_cipher'] ?? '') ?>">
       <?php endif; ?>
       <small class="form-hint muted" style="display:block; margin-top:.4rem;">
-        Stocké chiffré et consultable depuis la fiche machine.
+        <?= View::e(Term::format('Stocké chiffré et consultable depuis la fiche {du}.')) ?>
       </small>
     </section>
 
@@ -484,7 +485,7 @@ $restoreLabel = $hasExistingConfig ? 'Copie enregistrée pour cette machine' : (
       <legend>Quand démarrer ?</legend>
       <label><input type="radio" name="wake_now" value="0" <?= empty($config['wake_now']) ? 'checked' : '' ?>> Maintenant — demander un redémarrage SSH ou un réveil réseau</label>
       <label><input type="radio" name="wake_now" value="1" <?= !empty($config['wake_now']) ? 'checked' : '' ?>> Au prochain démarrage PXE — aucun redémarrage demandé</label>
-      <p class="form-hint">L’installation remplace les données des disques indiqués. La demande de redémarrage ne garantit pas que la machine démarre immédiatement.</p>
+      <p class="form-hint"><?= View::e(Term::format('L’installation remplace les données des disques indiqués. La demande de redémarrage ne garantit pas que {le} démarre immédiatement.')) ?></p>
     </fieldset>
 
     <div class="actions" style="justify-content:space-between;margin-top:1rem;">

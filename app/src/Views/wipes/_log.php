@@ -4,7 +4,7 @@
  *
  * @var array $wipe
  */
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 $disks = json_decode($wipe['disks_json'] ?? '[]', true) ?: [];
 // disks_json est [{name, mode}] depuis le passage au mode per-disque (commit c66d1de) ;
 // implode direct sortait "Array" parce que chaque entrée est un sous-array.
@@ -27,5 +27,5 @@ $disksLabel = implode(', ', array_map(
       · Terminé <?= View::e($wipe['ended_at'] ?? '–') ?>
     </small>
   </header>
-  <pre class="log"><?= View::e($wipe['log'] ?? '(en attente du démarrage de l\'effacement sur la machine cible…)') ?></pre>
+  <pre class="log"><?= View::e($wipe['log'] ?? Term::format('(en attente du démarrage de l’effacement sur {le}…)')) ?></pre>
 </article>

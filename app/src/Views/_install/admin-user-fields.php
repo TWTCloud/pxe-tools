@@ -1,3 +1,4 @@
+<?php use Admin\Ui\DeviceTerminology as Term; ?>
 <?php
 /**
  * Partial — bloc user admin (login + groups + password + pubkeys).
@@ -9,7 +10,7 @@
 use Admin\View;
 $rootMode = $p['root_login_mode'] ?? 'disabled';
 ?>
-<p class="form-hint">Ce compte permet d’administrer la machine, avec <code>sudo</code> par défaut.</p>
+<p class="form-hint"><?= View::e(Term::format('Ce compte permet d’administrer {le}, avec')) ?> <code>sudo</code> par défaut.</p>
 <div class="form-row form-row--2col">
   <label>
     Identifiant <span class="required-marker">*</span>
@@ -18,7 +19,7 @@ $rootMode = $p['root_login_mode'] ?? 'disabled';
   <label>
     Mot de passe
     <input type="password" name="admin_user_password" placeholder="<?= $isNew ? 'optionnel — la clé SSH suffit' : 'laisser vide pour conserver le mot de passe existant' ?>">
-    <small class="form-hint">Stocké chiffré et consultable depuis la fiche machine. Facultatif avec une clé SSH.</small>
+    <small class="form-hint"><?= View::e(Term::format('Stocké chiffré et consultable depuis la fiche {du}. Facultatif avec une clé SSH.')) ?></small>
   </label>
 </div>
 <label>

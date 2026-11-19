@@ -1,7 +1,7 @@
-<?php use Admin\View; use Admin\InitGuard; ?>
+<?php use Admin\View; use Admin\Ui\DeviceTerminology as Term; use Admin\InitGuard; ?>
 <section id="activity-list" data-poll-scope data-sig="<?= View::e($sig) ?>" hx-get="/activity/list" hx-include="#activity-filters" hx-trigger="every 5s" hx-swap="outerHTML">
 <header class="section-heading"><h2><?= $total ?> opération<?= $total>1?'s':'' ?></h2><span>Dates en UTC</span></header>
-<?php if(!$items): ?><div class="card empty-state"><h3>Aucune opération à afficher</h3><p>Les résultats des actions machine et des jobs de l’appliance apparaîtront ici.</p><a href="/activity">Effacer les filtres</a></div><?php else: ?>
+<?php if(!$items): ?><div class="card empty-state"><h3>Aucune opération à afficher</h3><p><?= View::e(Term::format('Les résultats des actions sur les {many} et des jobs de l’appliance apparaîtront ici.')) ?></p><a href="/activity">Effacer les filtres</a></div><?php else: ?>
 <div class="activity-list">
 <?php foreach($items as $item): $label=match($item['type']){'install','install_only','reinstall'=>'Installation','wipe','wipe_only'=>'Effacement des disques','disktest'=>'Test des disques','discovery'=>'Inventaire',default=>InitGuard::JOB_TITLES[$item['type']]??$item['type']}; ?>
 <article class="activity-row" id="activity-<?= View::e($item['source']) ?>-<?= (int)$item['id'] ?>">

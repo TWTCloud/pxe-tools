@@ -18,6 +18,16 @@ PXE_RECOVERY_ASSET_TEST=1 python3 tests/integration/test_recovery_asset_trees.py
 python3 tests/unit/test_prune_package_cache.py
 echo '::endgroup::'
 
+echo '::group::Read-only overview and authenticated HTTP'
+php tests/unit/test_overview.php
+python3 tests/integration/test_overview_http.py
+echo '::endgroup::'
+
+echo '::group::Shared device terminology'
+php tests/unit/test_device_terminology.php
+python3 tests/integration/test_device_terminology_http.py
+echo '::endgroup::'
+
 echo '::group::Concurrent image selection and real onboarding HTTP'
 php tests/unit/test_wizard_image_race.php
 php tests/unit/test_network_onboarding.php

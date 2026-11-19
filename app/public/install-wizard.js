@@ -7,6 +7,7 @@
  */
 (() => {
   'use strict';
+  const deviceTerms = document.documentElement.dataset;
 
   if (!window.builderShared) {
     console.warn('install-wizard.js: builder-shared.js doit être chargé avant');
@@ -343,7 +344,7 @@
     });
     let msg = 'Le modèle ciblait un autre disque ; appliqué au disque détecté : ' + parts.join(', ') + '.';
     if (info.dropped && info.dropped.length) {
-      msg += ' Disque(s) du modèle ignoré(s) (absent(s) de la machine) : ' + info.dropped.join(', ') + '.';
+      msg += ' Disque(s) du modèle ignoré(s) (absent(s) ' + (deviceTerms.deviceDu || 'de la machine') + ') : ' + info.dropped.join(', ') + '.';
     }
     return msg;
   }
@@ -579,7 +580,7 @@
           const res = window.builderShared.remapPlanToInventory(plan);
           if (res.info && res.info.fatal) {
             showDiskRemapNotice('error',
-              "Le modèle nécessite au moins un disque mais aucun n'a été détecté sur cette machine.");
+              "Le modèle nécessite au moins un disque mais aucun n’a été détecté sur " + (deviceTerms.deviceCe || "cette machine") + ".");
             toApply = Object.assign({}, plan, { target_disks: [], disks: [] });
           } else {
             toApply = res.plan;
