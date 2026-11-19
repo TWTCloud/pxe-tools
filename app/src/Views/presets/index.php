@@ -1,3 +1,4 @@
+<?php use Admin\Ui\DeviceTerminology as Term; ?>
 <?php
 /**
  * View : liste des modèles (presets).
@@ -37,7 +38,7 @@ $hasRepo = trim((string) (Setting::get(Setting::KEY_ANSIBLE_REPO_URL, '') ?? '')
 <?php if (empty($presets)): ?>
   <article>
     <p>Aucun modèle défini.</p>
-    <p class="muted">Créez un modèle pour pouvoir l'assigner aux machines (distro, réseau, partition, utilisateur admin, rôle Ansible) via le bouton <strong>+ Nouveau modèle</strong> en haut à droite.</p>
+    <p class="muted"><?= View::e(Term::format('Créez un modèle pour pouvoir l’assigner aux {many} (distro, réseau, partition, utilisateur admin, rôle Ansible) via le bouton')) ?> <strong>+ Nouveau modèle</strong> en haut à droite.</p>
   </article>
 <?php else: ?>
 <div class="table-scroll" role="region" aria-label="Modèles d’installation" tabindex="0" style="max-width:100%;overflow-x:auto;">

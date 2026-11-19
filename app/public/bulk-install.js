@@ -3,6 +3,9 @@
   // Layout/fragment re-evaluation must never duplicate operational handlers.
   if (window.__pxeBulkInstallBound) return;
   window.__pxeBulkInstallBound = true;
+  const vocabulary = document.documentElement.dataset;
+  const device = (count) => count === 1 ? vocabulary.deviceOne : vocabulary.deviceMany;
+  const installed = (count) => count === 1 ? vocabulary.deviceInstalledOne : vocabulary.deviceInstalledMany;
 
   // Sélection groupée des machines. Le polling HTMX (#machines-section, every 5s,
   // hx-swap="outerHTML") remplace toute la section — header (avec ses actions),
@@ -89,14 +92,14 @@
 
     const names  = sel.map((c) => c.dataset.hostname).join(', ');
     const active = sel.filter((c) => ACTIVE_STATUSES.includes(c.dataset.status));
-    let prompt = `Supprimer ${sel.length} machine(s) ?\n\n${names}\n\n` +
+    let prompt = `Supprimer ${sel.length} ${device(sel.length)} ?\n\n${names}\n\n` +
                  `Les fiches, inventaires, configurations enregistrées et historiques liés seront supprimés. Cela n’efface pas les disques et ne garantit pas l’arrêt des processus distants.`;
     if (active.length > 0) {
       const activeNames = active.map((c) => `  • ${c.dataset.hostname} (${c.dataset.status})`).join('\n');
-      prompt = `⚠️ ATTENTION : ${active.length} machine(s) sont en cours d'opération :\n\n${activeNames}\n\n` +
-               `Si vous confirmez, elles seront supprimées en plein milieu de leur tâche. ` +
-               `Elles continueront leur opération côté machine mais ne seront plus suivies depuis l'UI. ` +
-               `Au prochain poll, elles seront recréées automatiquement avec une demande d'action.\n\n` +
+      prompt = `⚠️ ATTENTION : ${active.length} ${device(active.length)} ${active.length === 1 ? 'est' : 'sont'} en cours d'opération :\n\n${activeNames}\n\n` +
+               `Si vous confirmez, les fiches seront supprimées en plein milieu de leur tâche. ` +
+               `Les opérations distantes continueront sans être suivies depuis l’interface. ` +
+               `Au prochain échange, les fiches seront recréées automatiquement avec une demande d’action.\n\n` +
                `--- Détails complets ---\n` + prompt;
     }
     if (!window.confirm(prompt)) return;
@@ -117,12 +120,14 @@
     }));
 
     $('bulk-modal-count').textContent = machines.length;
+    $('bulk-modal-term').textContent = device(machines.length);
     $('bulk-modal-list').textContent  = machines.map((m) => m.hostname).join(', ');
 
     const reinstall = machines.filter((m) => REINSTALL_STATUSES.includes(m.status));
     const warn = $('bulk-modal-warning');
     if (reinstall.length > 0) {
       $('bulk-modal-warning-count').textContent = reinstall.length;
+      $('bulk-modal-warning-term').textContent = `${device(reinstall.length)} déjà ${installed(reinstall.length)}`;
       $('bulk-modal-warning-list').textContent  = reinstall.map((m) => m.hostname).join(', ');
       warn.hidden = false;
     } else {
@@ -220,7 +225,7 @@
       const result = await jsonRequest(form.action, data);
       const container = $('bulk-preflight-results'); container.replaceChildren();
       result.results.forEach((target) => {
-        const p = paragraph(container, 'Machine #' + target.id + ' : ' + (target.ok ? 'programmée. ' : target.reason));
+        const p = paragraph(container, vocabulary.deviceOneTitle + ' #' + target.id + ' : ' + (target.ok ? 'programmation possible. ' : target.reason));
         if (target.ok) { const a = document.createElement('a'); a.href = '/tasks/' + target.action_id; a.textContent = 'Suivre l’opération'; p.append(a); }
       });
       $('bulk-preflight-status').textContent = result.started_count + ' installation(s) programmée(s). Les résultats restent disponibles dans Activité.';

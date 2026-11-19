@@ -1,11 +1,12 @@
 <?php
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 $title = 'Bienvenue';
 $centerOnPage = true;
 $contentRender = function () { ?>
   <h2 style="margin-top:0;text-align:center;">Bienvenue sur PXE Tools</h2>
 
   <p style="text-align:center;">
-    Cet outil installe et gère des systèmes d'exploitation sur vos machines
+    <?= View::e(Term::format('Cet outil installe et gère des systèmes d’exploitation sur vos {many}')) ?>
     directement par le réseau, sans clé USB ni DVD. Tout se fait automatiquement,
     en démarrage sécurisé, depuis cette interface.
   </p>

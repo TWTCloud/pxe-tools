@@ -1,5 +1,5 @@
 <?php
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 use Admin\Models\ActionCheckpoints;
 use Admin\Models\MachineEvent;
 use Admin\Support\Format;
@@ -91,7 +91,7 @@ if ($isActionMode) {
         }) ?> <?= View::e($typeLabel($actionType)) ?> #<?= $actionId ?></h2>
         <p class="text-mono"><?= View::e($machine['mac'] ?? '') ?> · <?= View::e($machine['hostname'] ?? 'non assigné') ?></p>
       </hgroup>
-      <a href="/machines/<?= (int)$machine['id'] ?>" class="btn btn-secondary">← Retour fiche machine</a>
+      <a href="/machines/<?= (int)$machine['id'] ?>" class="btn btn-secondary">← <?= View::e(Term::format('Retour à la fiche {du}')) ?></a>
     </header>
 
     <div hx-get="/machines/<?= (int)$machine['id'] ?>/boot-fragment"
@@ -127,13 +127,13 @@ if ($isActionMode) {
           <button type="submit" class="btn btn-secondary" style="width:auto;">Appliquer</button>
         </form>
         <form method="post" action="/machines/<?= $dtMachineId ?>/disktest-cancel" style="margin:0;"
-              onsubmit="return confirm('Annuler le test en cours ?\n\nLa machine arrête le test dans les secondes qui viennent<?= (int)($dtSub['in_session'] ?? 0) === 1 ? ' et revient à l\'écran d\'attente' : ' puis s\'éteint' ?>.');">
+              onsubmit="return confirm(<?= View::e(json_encode(Term::format('Annuler le test en cours ? Le test s’arrêtera dans les secondes qui viennent ; {le} ') . ((int)($dtSub['in_session'] ?? 0) === 1 ? 'reviendra à l’écran d’attente.' : 's’éteindra.'))) ?>);">
           <button type="submit" class="btn btn-danger" style="width:auto;">Annuler le test</button>
         </form>
       </div>
       <small class="muted text-small" style="display:block; margin-top:.6rem;">
-        Astuce : vous pouvez configurer l'installation de cette machine dès maintenant
-        (fiche machine → Installer) — elle démarrera automatiquement si les tests
+        <?= View::e(Term::format('Astuce : vous pouvez configurer l’installation de {ce} dès maintenant')) ?>
+        <?= View::e(Term::format('(fiche {du} → Installer) — l’installation démarrera automatiquement si les tests')) ?>
         réussissent, et sera annulée s'ils détectent des défauts.
       </small>
     </article>
@@ -186,7 +186,7 @@ if ($isActionMode) {
         <h2><?= $typeHtml ?> #<?= (int)$task['id'] ?></h2>
         <p class="text-mono"><?= View::e($machine['mac'] ?? '') ?> · <?= View::e($machine['hostname'] ?? 'non assigné') ?></p>
       </hgroup>
-      <a href="/machines/<?= (int)$machine['id'] ?>" class="btn btn-secondary">← Retour fiche machine</a>
+      <a href="/machines/<?= (int)$machine['id'] ?>" class="btn btn-secondary">← <?= View::e(Term::format('Retour à la fiche {du}')) ?></a>
     </header>
 
     <article>

@@ -1,12 +1,12 @@
 <?php
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 $title = 'HTTP de démarrage';
 $suppressPxeHttpWarning = true;
 $contentRender = function () use ($job, $diagnosis, $nonce, $missingConsent, $identityUnavailable) {
     $state = $diagnosis['state'];
 ?>
 <h2>HTTP de démarrage sur le port 80</h2>
-<p>Les machines téléchargent leurs fichiers de démarrage sur le port 80. La console d’administration utilise son propre port, généralement 8080.</p>
+<p><?= View::e(Term::format('Les {many} téléchargent leurs fichiers de démarrage sur le port 80.')) ?> La console d’administration utilise son propre port, généralement 8080.</p>
 <?php View::partial('_partials/pxe-http-status', ['diagnosis' => $diagnosis]); ?>
 <?php if ($diagnosis['address'] !== ''): ?><p>Adresse vérifiée : <code><?= View::e($diagnosis['address']) ?>:80</code>, ainsi que l’accès local nécessaire au service.</p><?php endif; ?>
 <?php if ($diagnosis['listeners'] !== []): ?><p>Écoutes concernées : <?= View::e(implode(', ', array_map(static fn(array $listener): string => ($listener['family'] === 6 ? '[' . $listener['address'] . ']' : $listener['address']) . ':80', $diagnosis['listeners']))) ?>.</p><?php endif; ?>

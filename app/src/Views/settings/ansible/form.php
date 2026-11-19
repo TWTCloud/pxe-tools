@@ -1,3 +1,4 @@
+<?php use Admin\Ui\DeviceTerminology as Term; ?>
 <?php
 use Admin\View;
 /** @var bool   $enabled */
@@ -28,7 +29,7 @@ use Admin\View;
     <p class="muted">
       Provisioning post-installation (création utilisateurs, déploiement
       configs, exécution de playbooks). Optionnel — désactivé par défaut.
-      Les machines reçoivent juste l'install Debian de base si désactivé.
+      <?= View::e(Term::format('Les {many} reçoivent l’installation Debian de base si cette option est désactivée.')) ?>
     </p>
   </hgroup>
 </header>
@@ -86,8 +87,8 @@ use Admin\View;
         Activé. Le worker utilisera les playbooks demandés lorsque l’environnement
         Ansible est disponible. Le suivi reste disponible dans Activité.
       <?php else: ?>
-        Désactivé (par défaut). Les machines installées reçoivent juste l'OS de base.
-        Aucun compte Ansible n'est ajouté aux machines installées. Le suivi reste disponible dans Activité.
+        <?= View::e(Term::format('Désactivé (par défaut). Les {many} {installees} reçoivent uniquement l’OS de base.')) ?>
+        <?= View::e(Term::format('Aucun compte Ansible n’est ajouté aux {many} {installees}.')) ?> Le suivi reste disponible dans Activité.
       <?php endif; ?>
     </small>
   </fieldset>
@@ -96,7 +97,7 @@ use Admin\View;
     <legend><strong>Configuration SSH</strong></legend>
 
     <label>
-      Clé publique SSH (déployée dans <code>authorized_keys</code> des machines installées)
+      Clé publique SSH (déployée dans <code>authorized_keys</code> <?= View::e(Term::format('des {many} {installees}')) ?>)
       <?php if ($ssh_pubkey !== ''): ?>
         <input type="text" name="ssh_pubkey" id="ansible-pubkey" readonly
                value="<?= View::e($ssh_pubkey) ?>"
@@ -111,7 +112,7 @@ use Admin\View;
                   placeholder="ssh-ed25519 AAAA... admin@pxe-tools"></textarea>
         <small class="muted">
           Sera déployée dans <code>authorized_keys</code> du user créé par
-          preseed sur chaque machine installée. Permet au worker de SSH-er
+          <?= View::e(Term::format('preseed sur chaque {one} {installe}.')) ?> Permet au worker de SSH-er
           sans password.
         </small>
       <?php endif; ?>
@@ -325,9 +326,9 @@ use Admin\View;
 
     <p class="muted" style="margin:0.25rem 0 0.75rem;">
       Lorsque vous activez le webhook, chaque push sur le dépôt Ansible déclenche
-      un redéploiement automatique sur les machines ayant l'option
+      <?= View::e(Term::format('un redéploiement automatique sur les {many} ayant l’option')) ?>
       <em>« Redéployer automatiquement »</em> activée dans leurs paramètres.
-      Le mapping fichier → machine prend en compte <code>host_vars/{hostname}.yml</code>,
+      <?= View::e(Term::format('Le mapping fichier → {one} prend en compte')) ?> <code>host_vars/{hostname}.yml</code>,
       <code>group_vars/{group}.yml</code>, et la cible <code>hosts:</code> des playbooks.
     </p>
 

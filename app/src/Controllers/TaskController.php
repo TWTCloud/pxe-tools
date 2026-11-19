@@ -14,6 +14,7 @@ use Admin\Models\MachineEvent;
 use Admin\Models\MachineTask;
 use Admin\Models\Wipe;
 use Admin\View;
+use Admin\Ui\DeviceTerminology as Term;
 
 /**
  * Spec C — Endpoints unifiés des tâches d'une machine.
@@ -65,7 +66,7 @@ final class TaskController
         $machine = Machine::find((int)$action['machine_id']);
         if (!$machine) {
             http_response_code(404);
-            echo "Machine introuvable\n";
+            echo Term::format('{One} introuvable') . "\n";
             return;
         }
 
@@ -124,7 +125,7 @@ final class TaskController
         $machine = Machine::find($machineId);
         if (!$machine) {
             http_response_code(404);
-            echo "Machine introuvable\n";
+            echo Term::format('{One} introuvable') . "\n";
             return;
         }
 
@@ -146,7 +147,7 @@ final class TaskController
         // Sécurité : la tâche doit appartenir à la machine de l'URL
         if ((int)($task['machine_id'] ?? 0) !== $machineId) {
             http_response_code(404);
-            echo "Tâche non trouvée pour cette machine\n";
+            echo Term::format('Tâche non trouvée pour {ce}') . "\n";
             return;
         }
 
@@ -221,7 +222,7 @@ final class TaskController
         $machine = Machine::find((int)($action['machine_id'] ?? 0));
         if (!$machine) {
             http_response_code(404);
-            echo "Machine introuvable\n";
+            echo Term::format('{One} introuvable') . "\n";
             return;
         }
 
@@ -339,7 +340,7 @@ final class TaskController
         $machine = Machine::find($machineId);
         if (!$machine) {
             http_response_code(404);
-            echo "Machine introuvable\n";
+            echo Term::format('{One} introuvable') . "\n";
             return;
         }
 

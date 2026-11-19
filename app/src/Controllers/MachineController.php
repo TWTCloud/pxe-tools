@@ -21,6 +21,7 @@ use Admin\Util\InstallConfigBuilder;
 use Admin\Util\MachineOperation;
 use Admin\Util\InstallPreflight;
 use Admin\View;
+use Admin\Ui\DeviceTerminology as Term;
 
 final class MachineController
 {
@@ -74,13 +75,13 @@ final class MachineController
             'wizardMachineHw'   => self::extractHardwareHints($machine),
             'wizardAllPresets'  => $presets,
             'wizardPresetsGrouped' => $presetsGrouped,
-        ], 'Machine ' . ($machine['hostname'] ?: $machine['mac']));
+        ], Term::format('{One}') . ' ' . ($machine['hostname'] ?: $machine['mac']));
     }
 
     public function operationFragment(array $params): void
     {
         $machine = Machine::find((int)$params['id']);
-        if (!$machine) { http_response_code(404); echo 'Machine introuvable'; return; }
+        if (!$machine) { http_response_code(404); echo Term::format('{One} introuvable'); return; }
         $summary = \Admin\Util\MachineOperationSummary::forMachine($machine);
         if (hash_equals($summary['signature'], (string)($_GET['sig'] ?? ''))) {
             http_response_code(204);
@@ -92,7 +93,7 @@ final class MachineController
 
     public function newForm(array $params): void
     {
-        View::render('machines/new', [], 'Nouvelle machine');
+        View::render('machines/new', [], ucfirst(Term::format('{nouveau}')));
     }
 
     public function create(array $params): void
@@ -113,7 +114,7 @@ final class MachineController
             View::redirect('/machines/new');
             return;
         }
-        View::flash('success', 'Machine créée');
+        View::flash('success', Term::format('{One} {cree}'));
         View::redirect('/machines/' . $id);
     }
 
@@ -175,7 +176,7 @@ final class MachineController
         $flashMsg = match (true) {
             $touched === ['notes']                                 => 'Notes enregistrées',
             count($touched) === 1 && $touched[0] === 'boot_mode'   => 'Mode de boot mis à jour',
-            default                                                 => 'Machine mise à jour',
+            default                                                 => Term::format('{One} {mis_a_jour}'),
         };
         View::flash('success', $flashMsg);
         View::redirect('/machines/' . $id);
@@ -219,8 +220,8 @@ final class MachineController
         MachineEvent::log($id, MachineEvent::LEVEL_ACTION, $eventMsg);
         $label = match ($action) {
             'cancel'   => 'Action programmée annulée',
-            'poweroff' => 'Extinction programmée — sera appliquée au prochain poll de la machine (≤5s)',
-            'reboot'   => 'Redémarrage programmé — sera appliqué au prochain poll de la machine (≤5s)',
+            'poweroff' => Term::format('Extinction programmée — sera appliquée au prochain échange {du} (≤5s)'),
+            'reboot'   => Term::format('Redémarrage programmé — sera appliqué au prochain échange {du} (≤5s)'),
         };
         View::flash('success', $label);
         View::redirect('/machines/' . $id);
@@ -299,7 +300,7 @@ final class MachineController
                 MachineEvent::log($id,MachineEvent::LEVEL_ACTION,'Nouvel inventaire demandé par admin.');
                 $this->enqueueMachinePower($id,'reboot','Redémarrage pour inventaire machine '.$id);
             });
-            View::flash('success','Nouvel inventaire programmé. La machine va redémarrer.');
+            View::flash('success',Term::format('Nouvel inventaire programmé. Redémarrage {du} à venir.'));
         } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); }
         View::redirect('/machines/'.$id);
     }
@@ -342,7 +343,7 @@ final class MachineController
     {
         $id = (int) $params['id'];
         Machine::delete($id);
-        View::flash('success', 'Machine supprimée');
+        View::flash('success', Term::format('{One} {supprime}'));
         View::redirect('/');
     }
 
@@ -433,7 +434,7 @@ final class MachineController
     {
         $id=(int)$params['id'];
         $machine=Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine introuvable'; return; }
+        if (!$machine) { http_response_code(404); echo Term::format('{One} introuvable'); return; }
         // Building a preview never writes keys or config; validation precedes encryption.
         $config=$this->postedInstallConfig(true, $machine);
         $preWipe=$_POST['pre_wipe_mode']??'aucun';
@@ -474,7 +475,7 @@ final class MachineController
     public function installPreview(array $params): void
     {
         $machine=Machine::find((int)$params['id']);
-        if (!$machine) { View::json(['error'=>'Machine introuvable.'],404); return; }
+        if (!$machine) { View::json(['error'=>Term::format('{One} introuvable.')],404); return; }
         $config=$this->postedInstallConfig(true, $machine);
         $target=InstallPreflight::target($machine,$config,$_POST['pre_wipe_mode']??'aucun',self::allowedDistros(),true);
         $config['review_disks']=$target['disks'];
@@ -508,7 +509,7 @@ final class MachineController
             }
             $target=InstallPreflight::target($machine,$config,$preWipe,self::allowedDistros(),$individual);
             if ($target['state']!=='ready') throw new \RuntimeException(implode(' ',$target['reasons']),409);
-            if ($fingerprint!==null && !hash_equals($target['fingerprint'],$fingerprint)) throw new \RuntimeException('La machine ou le modèle a changé. Relancez le contrôle préalable.',409);
+            if ($fingerprint!==null && !hash_equals($target['fingerprint'],$fingerprint)) throw new \RuntimeException(Term::format('L’état {du} ou le modèle a changé. Relancez le contrôle préalable.'),409);
             $hasWipe=$target['pre_wipe']!==[];
             if (!empty($config['version_full']) && !OsImage::ensureForDistroVersion($config['distro'],$config['version_full'],$machine['boot_arch']?:'amd64')) {
                 throw new \RuntimeException('Version système inconnue du catalogue. Vérifiez les images disponibles.',422);
@@ -583,7 +584,7 @@ final class MachineController
     public function bulkInstall(array $params): void
     {
         [$preset,$config,$ids]=$this->bulkInput();
-        if (!$preset || !$ids) { View::flash('error','Sélectionnez un modèle et au moins une machine.'); View::redirect('/machines'); return; }
+        if (!$preset || !$ids) { View::flash('error',Term::format('Sélectionnez un modèle et au moins {un}.')); View::redirect('/machines'); return; }
         $results=[]; $done=0;
         foreach ($ids as $id) {
             $fingerprint=(string)($_POST['fingerprints'][$id]??'');
@@ -603,11 +604,11 @@ final class MachineController
     public function bulkPreflight(array $params): void
     {
         [$preset,$config,$ids]=$this->bulkInput();
-        if (!$preset || !$ids) { View::json(['error'=>'Sélectionnez un modèle et au moins une machine.'],422); return; }
+        if (!$preset || !$ids) { View::json(['error'=>Term::format('Sélectionnez un modèle et au moins {un}.')],422); return; }
         $targets=[];
         foreach ($ids as $id) {
             $machine=Machine::find($id);
-            if (!$machine) { $targets[]=['id'=>$id,'label'=>'Machine #'.$id,'state'=>'blocked','reasons'=>['Machine introuvable.'],'network'=>[],'disks'=>[],'pre_wipe'=>[]]; continue; }
+            if (!$machine) { $targets[]=['id'=>$id,'label'=>'Machine #'.$id,'state'=>'blocked','reasons'=>[Term::format('{One} introuvable.')],'network'=>[],'disks'=>[],'pre_wipe'=>[]]; continue; }
             $target=InstallPreflight::target($machine,$config,$preset['pre_wipe_mode']??'aucun',self::allowedDistros());
             try { $this->rejectSharedStaticAddress($config,count($ids)); } catch (\RuntimeException $e) { if ($target['state']!=='blocked') $target['state']='adapt'; $target['reasons'][]=$e->getMessage(); }
             $targets[]=$target;
@@ -646,7 +647,7 @@ final class MachineController
     {
         $id = (int)$params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); View::json(['error' => 'Machine introuvable']); return; }
+        if (!$machine) { http_response_code(404); View::json(['error' => Term::format('{One} introuvable')]); return; }
 
         $type = (string)($_POST['type'] ?? 'root');
         if (!in_array($type, ['root', 'admin_user'], true)) {
@@ -702,7 +703,7 @@ final class MachineController
             return;
         }
 
-        View::json(['error' => 'Aucun mot de passe stocké pour cette machine']);
+        View::json(['error' => Term::format('Aucun mot de passe stocké pour {ce}')]);
     }
 
     /**
@@ -866,8 +867,8 @@ final class MachineController
             $enabled ? 'Auto-déploiement Ansible activé' : 'Auto-déploiement Ansible désactivé');
         View::flash('success',
             $enabled
-                ? 'Auto-déploiement Ansible activé pour cette machine.'
-                : 'Auto-déploiement Ansible désactivé pour cette machine.');
+                ? Term::format('Auto-déploiement Ansible activé pour {ce}.')
+                : Term::format('Auto-déploiement Ansible désactivé pour {ce}.'));
         View::redirect('/machines/' . $id);
     }
 
@@ -898,10 +899,10 @@ final class MachineController
         }
 
         $msgByReason = [
-            'machine_not_found'     => 'Machine introuvable.',
-            'hostname_missing'      => 'Hostname manquant — la machine n\'a pas encore été inventoriée.',
-            'ansible_role_missing'  => 'Aucun rôle Ansible configuré pour cette machine — installez-la d\'abord avec un preset incluant ansible_role.',
-            'machine_busy'          => 'La machine est en cours d\'opération (installation, wipe ou test) — attendez la fin avant de redéployer.',
+            'machine_not_found'     => Term::format('{One} introuvable.'),
+            'hostname_missing'      => Term::format('Nom d’hôte manquant — aucun inventaire n’a encore été reçu pour {ce}.'),
+            'ansible_role_missing'  => Term::format('Aucun rôle Ansible configuré pour {ce} — effectuez d’abord une installation avec un modèle incluant ansible_role.'),
+            'machine_busy'          => Term::format('Une opération est en cours sur {ce} (installation, wipe ou test) — attendez la fin avant de redéployer.'),
         ];
         View::flash('error', $msgByReason[$r['reason']] ?? 'Redéploiement Ansible refusé.');
         View::redirect('/machines/' . $id);
@@ -992,7 +993,7 @@ final class MachineController
     {
         $ids = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['machine_ids'] ?? [])))));
         if (empty($ids)) {
-            View::flash('error', 'Aucune machine sélectionnée');
+            View::flash('error', ucfirst(Term::format('{aucun} {selectionne}')));
             View::redirect('/machines');
             return;
         }
@@ -1119,7 +1120,7 @@ final class MachineController
 
         // Conflits d'état
         if ($machine['status'] === 'wiping') {
-            View::flash('error', 'Impossible : machine en cours d\'effacement');
+            View::flash('error', Term::format('Impossible : {one} en cours d’effacement'));
             View::redirect('/machines/' . $id);
             return;
         }
@@ -1173,7 +1174,7 @@ final class MachineController
             }
         }
         if (empty($jobs)) {
-            View::flash('error', 'Aucun disque valide (doit faire partie de l\'inventory de la machine)');
+            View::flash('error', Term::format('Aucun disque valide (il doit faire partie de l’inventaire {du})'));
             View::redirect('/machines/' . $id);
             return;
         }
@@ -1217,7 +1218,7 @@ final class MachineController
         $msg = "Tests de disque lancés sur $count disque(s)" . ($parallel ? ' (parallèle)' : ' (séquentiel)');
         if ($hasDestructive) $msg .= ' — modes destructifs inclus';
         $msg .= $inSession
-            ? ' · La machine en attente démarre dans quelques secondes (sans redémarrage)'
+            ? Term::format(' · {One} en attente : démarrage dans quelques secondes (sans redémarrage)')
             : ' · Redémarrage programmé via le worker';
         View::flash('success', $msg);
         View::redirect('/tasks/' . (int)$action['id']);
@@ -1254,7 +1255,7 @@ final class MachineController
         });
         View::flash($test ? 'success' : 'info', $test
             ? 'Suivi du test annulé et installation dépendante déprogrammée. L’agent recevra la demande d’arrêt à son prochain contact.'
-            : 'Aucun test de disque en cours sur cette machine.');
+            : Term::format('Aucun test de disque en cours sur {ce}.'));
         View::redirect('/machines/' . $id);
     }
 
@@ -1277,7 +1278,7 @@ final class MachineController
         }
         $t = DiskTest::activeByMac((string)$machine['mac']);
         if ($t === null) {
-            View::flash('info', 'Aucun test de disque en cours sur cette machine.');
+            View::flash('info', Term::format('Aucun test de disque en cours sur {ce}.'));
             View::redirect('/machines/' . $id);
             return;
         }

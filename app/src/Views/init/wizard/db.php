@@ -1,5 +1,5 @@
 <?php
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 
 $step    = $step ?? 1;
 $current = $current ?? ['driver' => 'sqlite'];
@@ -33,7 +33,7 @@ $contentRender = function () use ($current, $errorMsg, $step, $selectedDriver, $
   <?php endif; ?>
 
   <p class="muted">
-    L'outil enregistre ses données (machines, modèles, réglages, tâches).
+    <?= View::e(Term::format('L’outil enregistre ses données ({many}, modèles, réglages, tâches).')) ?>
     Le stockage intégré (par défaut) ne demande aucune installation : tout
     tient dans un simple fichier, sur place. MySQL et MariaDB ne sont pas encore
     disponibles pour les tâches de cette version.
@@ -93,7 +93,7 @@ GRANT ALL PRIVILEGES ON pxe_tools.* TO 'pxe_tools'@'%';
 FLUSH PRIVILEGES;</code></pre>
         <p class="muted">
           Remplacez <code>&lt;changeme&gt;</code> par un mot de passe robuste.
-          Le serveur doit être joignable depuis cette machine (port 3306 ouvert
+          Le serveur de base de données doit être joignable depuis le serveur PXE (port 3306 ouvert
           si un pare-feu est en place).
         </p>
       </details>

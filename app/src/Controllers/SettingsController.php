@@ -8,6 +8,7 @@ use Admin\InitGuard;
 use Admin\Models\Setting;
 use Admin\Models\Machine;
 use Admin\View;
+use Admin\Ui\DeviceTerminology as Term;
 
 /**
  * Paramètres globaux du serveur PXE. Une page, un form, persistance
@@ -27,6 +28,20 @@ final class SettingsController
             'settings' => Setting::allKnown(),
             'jobs' => \Admin\Util\ApplianceJobs::tracked(),
         ], 'Paramètres');
+    }
+
+    /** Save the instance-wide display vocabulary without applying network configuration. */
+    public function updateTerminology(array $params): void
+    {
+        $value = $_POST['ui_device_term'] ?? null;
+        if (!is_string($value) || !isset(\Admin\Ui\DeviceTerminology::OPTIONS[$value])) {
+            View::flash('error', 'Choisissez une appellation proposée.');
+            View::redirect('/settings');
+            return;
+        }
+        Setting::set(Setting::KEY_UI_DEVICE_TERM, $value);
+        View::flash('success', 'Appellation enregistrée pour cette instance.');
+        View::redirect('/settings');
     }
 
     public function update(array $params): void
@@ -92,7 +107,7 @@ final class SettingsController
             'bootstrap:rebuild_grub' => 'Reconstruction du GRUB EFI avec la nouvelle MOK',
         ]);
         InitGuard::resetCache();
-        View::flash('warning', 'Régénération MOK demandée. Après succès, les machines Secure Boot devront enrôler la nouvelle clé.', '/init?jobs=' . implode(',', $ids), 'Suivre les traitements');
+        View::flash('warning', Term::format('Régénération MOK demandée. Après succès, les {many} utilisant Secure Boot devront enrôler la nouvelle clé.'), '/init?jobs=' . implode(',', $ids), 'Suivre les traitements');
         View::redirect('/init?jobs=' . implode(',', $ids));
     }
 
@@ -171,7 +186,7 @@ final class SettingsController
             'success',
             $count > 0
                 ? "$count machine(s) supprimée(s). Nettoyage des fichiers PXE demandé."
-                : 'Aucune machine à supprimer. Nettoyage des fichiers PXE demandé.',
+                : ucfirst(Term::format('{aucun} à supprimer. Nettoyage des fichiers PXE demandé.')),
             '/jobs/' . $jobId, 'Suivre le nettoyage'
         );
         View::redirect('/settings');

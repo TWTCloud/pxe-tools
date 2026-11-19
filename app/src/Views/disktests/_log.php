@@ -5,7 +5,7 @@
  *
  * @var array $test  DiskTest::find($id)
  */
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 use Admin\Models\DiskTest;
 
 $jobs = json_decode($test['jobs_json'] ?? '[]', true) ?: [];
@@ -104,5 +104,5 @@ $htmxAttrs = $pollInterval !== null
   </table>
 
   <h4 style="margin-top:1rem;">Log</h4>
-  <pre class="log"><?= View::e($test['log'] ?? '(en attente du démarrage des tests sur la machine cible…)') ?></pre>
+  <pre class="log"><?= View::e($test['log'] ?? Term::format('(en attente du démarrage des tests sur {le}…)')) ?></pre>
 </article>

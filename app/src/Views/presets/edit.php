@@ -7,7 +7,7 @@
  * @var array $machineHw  HardwareContext de la machine de réf (ou empty())
  * @var array|null $cloneSeed  Si non-null, on est en mode "dupliquer depuis un modèle"
  */
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 use Admin\Models\Preset;
 use Admin\Models\CatalogEntry;
 use Admin\Util\InstallConfigBuilder;
@@ -110,7 +110,7 @@ if (is_string($pwjRaw) && trim($pwjRaw) !== '') {
     <?php endforeach; ?></ul>
   </div>
 <?php endif; ?>
-<p class="form-hint">Ce modèle prépare une configuration réutilisable. L’appliquer crée une copie indépendante sur chaque machine ; modifier le modèle ne modifie pas les copies déjà enregistrées.</p>
+<p class="form-hint">Ce modèle prépare une configuration réutilisable. <?= View::e(Term::format('L’appliquer crée une copie indépendante sur chaque {one} ;')) ?> modifier le modèle ne modifie pas les copies déjà enregistrées.</p>
 <form id="edit-preset" method="post" action="<?= View::e($action) ?>">
   <?php View::partial('_install/disk-constraints-fields', ['diskConstraints' => \Admin\Util\DiskIdentity::constraintsForPreset($p)]); ?>
   <?php if (!$isNew): ?>
@@ -126,7 +126,7 @@ if (is_string($pwjRaw) && trim($pwjRaw) !== '') {
   <fieldset class="section">
     <legend>Inventaire matériel <span class="muted text-small">(optionnel)</span></legend>
     <p class="muted text-small">
-      Importez l'inventaire matériel d'une machine déjà découverte pour ancrer ce
+      <?= View::e(Term::format('Importez l’inventaire matériel existant {du} pour ancrer ce')) ?>
       modèle à un matériel réel : disques, interfaces réseau et mode BIOS/UEFI seront
       présentés depuis l’inventaire, et le partitionnement sera validé contre les capacités
       effectives. Sans inventaire lié, le modèle reste générique et permet l'ajout
@@ -412,7 +412,7 @@ if (is_string($pwjRaw) && trim($pwjRaw) !== '') {
     </form>
     <form method="post" action="/presets/<?= (int)$preset['id'] ?>" style="display:inline;">
       <input type="hidden" name="_method" value="DELETE">
-      <button type="submit" class="btn btn-danger" onclick="return confirm('Supprimer ce modèle ? Les machines qui l\'utilisent perdront leur association.')">Supprimer</button>
+      <button type="submit" class="btn btn-danger" onclick="return confirm(<?= View::e(json_encode(Term::format('Supprimer ce modèle ? Les {many} qui l’utilisent perdront leur association.'))) ?>)">Supprimer</button>
     </form>
   <?php endif; ?>
   <button type="submit" form="edit-preset" class="btn btn-primary"><?= $isNew ? 'Créer' : 'Enregistrer' ?></button>

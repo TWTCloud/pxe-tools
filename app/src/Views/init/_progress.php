@@ -1,5 +1,5 @@
 <?php
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 $jobIds = $jobIds ?? [];
 $selection = $jobIds !== [] ? '?jobs=' . implode(',', $jobIds) : '';
 $working = count(array_filter($jobs, static fn(array $job): bool => in_array($job['status'], ['pending', 'running'], true))) > 0
@@ -165,7 +165,7 @@ $working = count(array_filter($jobs, static fn(array $job): bool => in_array($jo
     </ol>
     <p class="muted small">
         Un système de base est téléchargé : il sert à détecter automatiquement
-        vos machines et à les dépanner en cas de besoin. Vous pouvez continuer à
+        <?= View::e(Term::format('vos {many} et à les dépanner en cas de besoin.')) ?> Vous pouvez continuer à
         utiliser l’outil pendant le téléchargement.
     </p>
     <?php endif; ?>

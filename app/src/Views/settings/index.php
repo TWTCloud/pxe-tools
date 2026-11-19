@@ -1,6 +1,7 @@
 <?php
 use Admin\View;
 use Admin\Models\Setting;
+use Admin\Ui\DeviceTerminology as Term;
 $groups = [
     ['title' => 'Préparer les déploiements', 'links' => [
         ['/settings/images', 'Images système', 'Catalogue, téléchargements et fichiers disponibles'],
@@ -30,6 +31,21 @@ $groups = [
 <?php endforeach; ?>
 </div>
 <?php View::partial('settings/_application_status', ['jobs' => $jobs ?? []]); ?>
+<section class="card mb-6" aria-labelledby="terminology-title">
+  <h3 id="terminology-title">Appellation des machines clientes</h3>
+  <p class="muted text-small">Choisissez le terme affiché pour tous les utilisateurs de cette instance. Les noms d’hôte et les données des équipements ne changent pas.</p>
+  <form method="post" action="/settings/terminology">
+    <div class="field mb-4"><label for="ui-device-term">Appellation dans la console</label>
+      <select id="ui-device-term" name="ui_device_term">
+      <?php foreach (\Admin\Ui\DeviceTerminology::OPTIONS as $value => $label): ?>
+        <option value="<?= View::e($value) ?>"<?= \Admin\Ui\DeviceTerminology::selected() === $value ? ' selected' : '' ?>><?= View::e($label) ?></option>
+      <?php endforeach ?>
+      </select>
+    </div>
+    <button type="submit" class="btn btn-primary">Enregistrer l’appellation</button>
+  </form>
+</section>
+
 <details class="card mb-6">
   <summary><strong>Valeurs par défaut des déploiements</strong> — DNS et découverte</summary>
 <div class="card mb-6">
@@ -37,7 +53,9 @@ $groups = [
     <?php foreach ($settings as $key => $meta): ?>
       <div class="field mb-4">
         <label class="field-label" for="setting-<?= View::e($key) ?>"><strong><?= View::e($meta['label']) ?></strong></label>
-        <p class="muted text-small"><?= View::e($meta['help']) ?></p>
+        <p class="muted text-small"><?= View::e($key === Setting::KEY_DISCOVERY_BOOT_PROTO
+          ? Term::format('Protocole utilisé par GRUB pour télécharger le kernel/initrd au premier démarrage PXE {du} sans inventaire ou lors d’un nouvel inventaire. HTTP est plus rapide ; TFTP reste utile sur les firmwares ou VM plus anciens. Ce réglage ne concerne que la découverte ; le mode de démarrage des autres opérations reste configurable pour chaque {one}.')
+          : $meta['help']) ?></p>
         <select id="setting-<?= View::e($key) ?>" name="<?= View::e($key) ?>" class="select">
           <?php foreach ($meta['options'] as $val => $lbl): ?>
             <option value="<?= View::e($val) ?>"<?= $meta['current'] === $val ? ' selected' : '' ?>>
@@ -70,8 +88,8 @@ $dnsRowHtml = function ($val): string {
 <div class="card mb-6">
   <h3 style="margin:0 0 .5rem 0; display:inline-flex; align-items:center; gap:.5rem;"><?= View::icon('globe') ?> DNS par défaut</h3>
   <p class="muted text-small">
-    Serveurs DNS proposés par défaut lors d'une nouvelle installation de machine ou
-    d'un nouveau modèle (modifiables ensuite par configuration). Aucun serveur n'est proposé
+    Serveurs DNS proposés par défaut lors d’une nouvelle installation ou
+    d’un nouveau modèle (modifiables ensuite par configuration). Aucun serveur n'est proposé
     tant que vous n'en avez pas enregistré ; deux serveurs peuvent améliorer la redondance.
   </p>
   <form method="post" action="/settings/default-dns">
@@ -152,12 +170,12 @@ $dnsRowHtml = function ($val): string {
     <h4 style="margin:0 0 .5rem 0;">Régénérer la clé MOK</h4>
     <p class="muted text-small">
       Génère un nouveau keypair RSA 2048-bit et reconstruit le GRUB EFI signé.
-      <strong>Toutes les machines déjà enrôlées en Secure Boot devront ré-enrôler la nouvelle clé</strong>
+      <strong><?= View::e(Term::format('Les {many} dont la clé Secure Boot est déjà enregistrée devront ré-enrôler la nouvelle clé')) ?></strong>
       via <code>mokutil --import http://&lt;IP&gt;/MOK.der</code> avant leur prochain PXE boot.
       L'ancienne paire de clés est conservée dans un sous-répertoire <code>backup-&lt;timestamp&gt;</code> du répertoire MOK de l'instance.
     </p>
     <form method="post" action="/settings/regenerate-mok"
-          onsubmit="return confirm('Régénérer la clé MOK ? Les machines en Secure Boot devront ré-enrôler la nouvelle clé.');">
+          onsubmit="return confirm('Régénérer la clé MOK ? Les systèmes en Secure Boot devront ré-enrôler la nouvelle clé.');">
       <div class="actions mt-4 justify-end">
         <button type="submit" class="btn btn-danger"><?= View::icon('warning') ?> Régénérer la clé MOK</button>
       </div>
@@ -169,7 +187,7 @@ $dnsRowHtml = function ($val): string {
     <p class="muted text-small">
       Reconstruit <code>grubx64.efi</code> avec la MOK existante et l'IP serveur PXE courante.
       Utile si l'IP du serveur PXE a changé (l'IP est embedded dans le binaire EFI).
-      Pas d'impact sur les machines déjà enrôlées en SB.
+      <?= View::e(Term::format('Pas d’impact sur les {many} dont la clé Secure Boot est déjà enregistrée.')) ?>
     </p>
     <form method="post" action="/settings/rebuild-grub"
           onsubmit="return confirm('Reconstruire le GRUB EFI ?');">
@@ -191,7 +209,7 @@ $dnsRowHtml = function ($val): string {
   </h3>
 
   <p class="danger-zone__desc muted text-small">
-    <strong>Réinitialiser les machines</strong> — supprime les machines découvertes,
+    <strong><?= View::e(Term::format('Réinitialiser les {many}')) ?></strong> — <?= View::e(Term::format('supprime les fiches des {many}')) ?>,
     installations, wipes et fichiers de boot per-MAC. Modèles, paramètres et
     comptes admin <strong>préservés</strong>.
   </p>
@@ -203,7 +221,7 @@ $dnsRowHtml = function ($val): string {
 
   <div class="danger-zone__actions">
     <button type="button" id="open-reset-modal" class="btn btn-danger">
-      Réinitialiser les machines
+      <?= View::e(Term::format('Réinitialiser les {many}')) ?>
     </button>
     <button type="button" id="open-factory-modal" class="btn btn-danger">
       Réinitialisation complète
@@ -226,7 +244,7 @@ $dnsRowHtml = function ($val): string {
         Les éléments suivants seront supprimés&nbsp;:
       </p>
       <ul class="danger-list">
-        <li>Toutes les machines découvertes</li>
+        <li><?= View::e(Term::format('L’ensemble des fiches du parc')) ?></li>
         <li>L'historique des installations</li>
         <li>L'historique des effacements de disques</li>
         <li>L'historique des sessions de découverte</li>
@@ -310,7 +328,7 @@ $dnsRowHtml = function ($val): string {
         et remet l'appliance à l'état d'<strong>install neuve</strong>. Seront supprimés&nbsp;:
       </p>
       <ul class="danger-list">
-        <li>Toute la base : machines, modèles, paramètres serveur PXE</li>
+        <li><?= View::e(Term::format('Toute la base : {many}, modèles, paramètres serveur PXE')) ?></li>
         <li>Les comptes admin (vous devrez en recréer un)</li>
         <li>Les images netboot téléchargées (~1,5&nbsp;Go) + le catalogue</li>
         <li>Les bootloaders TFTP et la clé MOK (régénérés au bootstrap)</li>

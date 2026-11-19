@@ -1,3 +1,4 @@
+<?php use Admin\Ui\DeviceTerminology as Term; ?>
 <?php
 /**
  * View : liste des installations (100 dernières).
@@ -12,14 +13,14 @@ use Admin\View;
 <?php if (empty($installations)): ?>
   <article>
     <p>Aucune installation enregistrée.</p>
-    <p class="muted">Configurez un modèle puis lancez une machine en PXE — les installations apparaîtront ici.</p>
+    <p class="muted"><?= View::e(Term::format('Configurez un modèle puis lancez {un} en PXE — les installations apparaîtront ici.')) ?></p>
   </article>
 <?php else: ?>
 <div class="table-card card"><table>
   <thead>
     <tr>
       <th>#</th>
-      <th>Machine</th>
+      <th><?= View::e(Term::format('{One}')) ?></th>
       <th>Démarrée</th>
       <th>Terminée</th>
       <th>Installation</th>
