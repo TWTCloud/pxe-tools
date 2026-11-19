@@ -340,6 +340,8 @@ def stable_nginx_lock(root=Path('/'), *, owner=0):
         with self.store._locked(create=False) as directory:
             self.store._write(directory, record)
         old_log = self.root / 'var/log/pxe-tools/service.log'
+        old_log.parent.mkdir(parents=True, exist_ok=True)
+        old_log.write_text('synthetic-log')
         original_remove = uninstall.remove_tree
         def interrupt(root, path, **kwargs):
             if path == '/var/lib/pxe-tools-http' and not kwargs.get('dry_run', False):
@@ -1004,9 +1006,11 @@ def stable_nginx_lock(root=Path('/'), *, owner=0):
     def test_pre_purge_resume_preserves_unproven_old_logs(self):
         with self.store._locked(create=False) as directory:
             record = self.store._read(directory)
-            record['directories'].pop('/var/log/pxe-tools')
+            record['directories'].pop('/var/log/pxe-tools', None)
             self.store._write(directory, record)
         logs = self.root / 'var/log/pxe-tools/service.log'
+        logs.parent.mkdir(parents=True, exist_ok=True)
+        if not logs.exists(): logs.write_text('synthetic-log')
         self.assertEqual(logs.read_text(), 'synthetic-log')
         self.interrupt_mask_publication(after_link=False)
         self.assertEqual(self.resume_pre_purge(), 'retry')
