@@ -12,5 +12,7 @@ foreach ($expected as $key => $forms) {
     $actual = Term::format('{un}|{le}|{du}|{ce}|{nouveau}|{many}|{installees}', $key);
     if ($actual !== implode('|',$forms)) throw new RuntimeException("Incorrect forms: $key: $actual");
 }
+if (Term::format('{dun} {decouvert}', 'machine') !== 'd’une machine découverte') throw new RuntimeException('feminine reference');
+if (Term::format('{dun} {decouvert}', 'ordinateur') !== 'd’un ordinateur découvert') throw new RuntimeException('masculine reference');
 if (Term::format('{one}|{many}', 'invalid') !== 'machine|machines') throw new RuntimeException('invalid choice must fall back');
 echo "Device terminology and French agreement: OK\n";

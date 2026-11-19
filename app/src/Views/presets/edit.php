@@ -126,7 +126,7 @@ if (is_string($pwjRaw) && trim($pwjRaw) !== '') {
   <fieldset class="section">
     <legend>Inventaire matériel <span class="muted text-small">(optionnel)</span></legend>
     <p class="muted text-small">
-      <?= View::e(Term::format('Importez l’inventaire matériel existant {du} pour ancrer ce')) ?>
+      <?= View::e(Term::format('Importez l’inventaire matériel {dun} déjà {decouvert} pour ancrer ce')) ?>
       modèle à un matériel réel : disques, interfaces réseau et mode BIOS/UEFI seront
       présentés depuis l’inventaire, et le partitionnement sera validé contre les capacités
       effectives. Sans inventaire lié, le modèle reste générique et permet l'ajout
