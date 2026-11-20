@@ -12,6 +12,9 @@ TREES = frozenset({
     '/var/lib/pxe-tools-http', '/var/lib/pxe-tools-tftp',
     '/var/lib/pxe-tools-ansible', '/var/log/pxe-tools',
 })
+INITIAL_RUNTIME_TREES = frozenset({
+    '/var/lib/pxe-tools-native', '/var/lib/pxe-tools-http', '/var/lib/pxe-tools-tftp',
+})
 
 
 def _openat2_no_mount(parent, name):
@@ -33,6 +36,73 @@ def _openat2_no_mount(parent, name):
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), name)
     return int(result)
+
+
+PACKAGE_CACHE_MODULES = {
+    'usr/lib/pxe-tools/native/__pycache__': {'configure-secure-tftp', 'ownership-provenance',
+        'reconcile-nginx', 'render-pxe-http', 'start-worker', 'uninstall-apt', 'upgrade-lifecycle'},
+    'usr/lib/pxe-tools/app/__pycache__': {'worker', 'ansible_vault', 'database_selection',
+        'repository_scope', 'crypto', 'ansible_runtime', 'image_delete', 'pxe_menu_lock'},
+    'usr/lib/pxe-tools/app/backup/__pycache__': {'__init__', 'recovery', 'assets', 'openpgp'},
+    'usr/lib/pxe-tools/app/cli/__pycache__': {'recovery-backup'},
+    'opt/pxe-tools/scripts/__pycache__': {'atomic_publish', 'prepare-debian-shim', 'build-initrd-ca'},
+}
+
+
+def clean_package_caches(root, *, owner=0, opener=_openat2_no_mount):
+    """Remove only known bytecode under trusted package directories before dpkg.
+
+    Refuse all cleanup if a cache contains unknown or unsafe entries. The
+    package purge can still proceed; dpkg will report any directories retained.
+    """
+    import re
+    opened, caches, files = {}, [], []
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        opened[''] = fd
+        def directory(path):
+            if path in opened:
+                return opened[path]
+            parent, _, name = path.rpartition('/')
+            child = opener(directory(parent), name)
+            info = os.fstat(child)
+            if info.st_uid != owner or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022:
+                os.close(child)
+                raise ValueError('untrusted package cache directory: ' + path)
+            opened[path] = child
+            return child
+        info = os.fstat(fd)
+        if info.st_uid != owner or info.st_mode & 0o022:
+            raise ValueError('untrusted package cache root')
+        for path, modules in PACKAGE_CACHE_MODULES.items():
+            try:
+                cache_fd = directory(path)
+            except FileNotFoundError:
+                continue
+            caches.append(path)
+            for name in os.listdir(cache_fd):
+                match = re.fullmatch(r'([A-Za-z0-9_-]+)\.cpython-[0-9]+(?:\.opt-[012])?\.pyc', name)
+                item = os.stat(name, dir_fd=cache_fd, follow_symlinks=False)
+                if (not match or match.group(1) not in modules or not stat.S_ISREG(item.st_mode)
+                        or item.st_uid != owner or item.st_mode & 0o022 or item.st_nlink != 1):
+                    raise ValueError('unrecognised package cache entry: ' + path + '/' + name)
+                files.append((path, name, item.st_dev, item.st_ino))
+        for path, name, device, inode in files:
+            item = os.stat(name, dir_fd=opened[path], follow_symlinks=False)
+            if (item.st_dev, item.st_ino) != (device, inode):
+                raise ValueError('package cache entry changed: ' + path + '/' + name)
+            os.unlink(name, dir_fd=opened[path])
+        for path in caches:
+            parent, _, name = path.rpartition('/')
+            item = os.stat(name, dir_fd=opened[parent], follow_symlinks=False)
+            held = os.fstat(opened[path])
+            if (item.st_dev, item.st_ino) != (held.st_dev, held.st_ino):
+                raise ValueError('package cache directory changed: ' + path)
+            os.rmdir(name, dir_fd=opened[parent])
+        return len(files)
+    finally:
+        for fd in reversed(list(opened.values())):
+            os.close(fd)
 
 
 def remove_tree(root, name, *, mounts, owner=0, dry_run=False, expected=None, opener=None, generation_matches=None):
@@ -147,7 +217,7 @@ def _installer_source_bytes_valid(data):
     return isinstance(data, bytes) and b'..' not in data and re.fullmatch(pattern, data) is not None
 
 
-def apt_cleanup_plan(root, *, owner=0, apt_config=None):
+def apt_cleanup_plan(root, *, owner=0, apt_config=None, allow_reviewed=False):
     """Identify the installer source and a proven key unused by system APT.
 
     APT invocations with a later, explicitly supplied alternative configuration
@@ -174,26 +244,51 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None):
         return (info.st_nlink == links and (owner is None or info.st_uid == owner)
                 and not info.st_mode & 0o022)
 
+    def safe_reference(path):
+        if safe_file(path):
+            return True
+        if not allow_reviewed or path.is_symlink() or not path.is_file():
+            return False
+        info = path.stat()
+        if (owner != 0 or info.st_uid != 0 or info.st_gid != 0 or info.st_nlink != 1 or
+                info.st_mode & 0o002 or not info.st_mode & 0o020):
+            return False
+        import grp
+        import pwd
+        try:
+            group = grp.getgrgid(0)
+            return (group.gr_name == 'root' and not group.gr_mem and
+                    all(entry.pw_uid == 0 for entry in pwd.getpwall() if entry.pw_gid == 0))
+        except (KeyError, OSError):
+            return False
+
     try:
         if not all(safe_dir(path) for path in (root, root / 'etc', root / 'etc/apt', source.parent)):
             return False, False
         source_exists = source.exists() or source.is_symlink()
         source_anchors = list(source.parent.glob('.pxe-tools-sources.*.created'))
         if source_exists or source_anchors:
-            if len(source_anchors) != 1:
-                return False, False
-            source_anchor = source_anchors[0]
-            source_proof = re.fullmatch(r'\.pxe-tools-sources\.([0-9a-f]{64})\.created', source_anchor.name)
-            if source_proof is None or not safe_file(source_anchor, links=2 if source_exists else 1):
-                return False, False
-            if source_anchor.stat().st_size > 1048576:
-                return False, False
-            source_bytes = source_anchor.read_bytes()
-            if (not _installer_source_bytes_valid(source_bytes) or
-                    hashlib.sha256(source_bytes).hexdigest() != source_proof.group(1)):
-                return False, False
-            if source_exists and (not safe_file(source, links=2) or not os.path.samefile(source, source_anchor)):
-                return False, False
+            if allow_reviewed and not source_anchors and source_exists:
+                canonical = (b'Types: deb\nURIs: https://packages.pxetools.com/apt\nSuites: stable\n'
+                             b'Components: main\nArchitectures: amd64\n'
+                             b'Signed-By: /etc/apt/keyrings/pxe-tools-archive-keyring.gpg\n')
+                if not safe_file(source) or source.stat().st_size != len(canonical) or source.read_bytes() != canonical:
+                    return False, False
+            else:
+                if len(source_anchors) != 1:
+                    return False, False
+                source_anchor = source_anchors[0]
+                source_proof = re.fullmatch(r'\.pxe-tools-sources\.([0-9a-f]{64})\.created', source_anchor.name)
+                if source_proof is None or not safe_file(source_anchor, links=2 if source_exists else 1):
+                    return False, False
+                if source_anchor.stat().st_size > 1048576:
+                    return False, False
+                source_bytes = source_anchor.read_bytes()
+                if (not _installer_source_bytes_valid(source_bytes) or
+                        hashlib.sha256(source_bytes).hexdigest() != source_proof.group(1)):
+                    return False, False
+                if source_exists and (not safe_file(source, links=2) or not os.path.samefile(source, source_anchor)):
+                    return False, False
             # An active source symlink elsewhere could use the same inode.
             # Preserve the source if such an alias is present or unclear.
             candidate_sources = [root / 'etc/apt/sources.list'] + [
@@ -217,20 +312,26 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None):
         if not safe_dir(key.parent):
             return source_ok, False
         anchors = list(key.parent.glob('.pxe-tools-archive-keyring.*.created'))
-        if len(anchors) != 1:
-            return source_ok, False
-        anchor = anchors[0]
-        proof = re.fullmatch(r'\.pxe-tools-archive-keyring\.([0-9a-f]{64})\.created', anchor.name)
-        if proof is None:
-            return source_ok, False
         key_exists = key.exists() or key.is_symlink()
-        if key_exists:
-            if not safe_file(key, links=2) or not safe_file(anchor, links=2) or not os.path.samefile(key, anchor):
+        if allow_reviewed and not anchors and key_exists:
+            anchor = key
+            if (not safe_file(key) or key.stat().st_size > 1048576 or
+                    hashlib.sha256(key.read_bytes()).hexdigest() != '567738b56ab1d566a2d943012fd3f43c1814e0a98c9afc7da2a873207c5dff47'):
                 return source_ok, False
-        elif not safe_file(anchor):
-            return source_ok, False
-        if anchor.stat().st_size > 1048576 or hashlib.sha256(anchor.read_bytes()).hexdigest() != proof.group(1):
-            return source_ok, False
+        else:
+            if len(anchors) != 1:
+                return source_ok, False
+            anchor = anchors[0]
+            proof = re.fullmatch(r'\.pxe-tools-archive-keyring\.([0-9a-f]{64})\.created', anchor.name)
+            if proof is None:
+                return source_ok, False
+            if key_exists:
+                if not safe_file(key, links=2) or not safe_file(anchor, links=2) or not os.path.samefile(key, anchor):
+                    return source_ok, False
+            elif not safe_file(anchor):
+                return source_ok, False
+            if anchor.stat().st_size > 1048576 or hashlib.sha256(anchor.read_bytes()).hexdigest() != proof.group(1):
+                return source_ok, False
 
         if apt_config is None:
             if root != Path('/'):
@@ -268,7 +369,7 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None):
                 return source_ok, False
             if not other.exists():
                 continue
-            if not safe_file(other) or other.stat().st_size > 1048576:
+            if not safe_reference(other) or other.stat().st_size > 1048576:
                 return source_ok, False
             text = other.read_text(encoding='utf-8')
             if ('\\' in text or any(('signed-by' in line.lower() and any(c in line for c in "\"'"))
@@ -605,14 +706,31 @@ class RemovalJournal:
             raise ValueError('invalid removal journal')
         record = value['record']
         if record is not None:
-            if (not isinstance(record, dict) or record.get('format') != 2 or record.get('base_phase') != 'complete'
-                    or not isinstance(record.get('directories'), dict) or set(value['paths']) - set(record['directories'])):
+            legacy = isinstance(record, dict) and record.get('format') == 3
+            initial = (isinstance(record, dict) and record.get('format') == 2
+                       and record.get('base_phase') == 'runtime-prepared')
+            if (not isinstance(record, dict) or not isinstance(record.get('directories'), dict)
+                    or set(value['paths']) - set(record['directories'])
+                    or (legacy and (set(record) != {'format', 'source', 'directories', 'preserved'}
+                                    or record.get('source') != 'explicit-legacy-consent'
+                                    or not isinstance(record.get('preserved'), list)
+                                    or any(not isinstance(path, str) for path in record['preserved'])
+                                    or len(record['preserved']) != len(set(record['preserved']))
+                                    or set(record['preserved']) - {'/var/log/pxe-tools'}
+                                    or set(record['preserved']) & set(record['directories'])
+                                    or set(value['paths']) != set(record['directories'])
+                                    or 'ownership' not in value['metadata']))
+                    or (initial and (set(record) != {'format', 'base_phase', 'directories'}
+                                     or set(record['directories']) != INITIAL_RUNTIME_TREES))
+                    or (not legacy and not initial and (record.get('format') != 2 or record.get('base_phase') != 'complete'))):
                 raise ValueError('invalid removal ownership record')
-            for path in value['paths']:
+            for path in (record['directories'] if initial else value['paths']):
                 proof = record['directories'][path]
-                if (not isinstance(proof, dict) or set(proof) != {'dev', 'ino', 'btime_sec', 'btime_nsec', 'nonce'}
+                fields = {'dev', 'ino', 'btime_sec', 'btime_nsec'} | (set() if legacy else {'nonce'})
+                if (not isinstance(proof, dict) or set(proof) != fields
                         or any(type(proof[k]) is not int or proof[k] < 0 for k in ('dev', 'ino', 'btime_sec', 'btime_nsec'))
-                        or not re.fullmatch('[0-9a-f]{64}', proof['nonce'] or '')):
+                        or proof['ino'] == 0 or proof['btime_nsec'] >= 1000000000
+                        or (not legacy and not re.fullmatch('[0-9a-f]{64}', proof['nonce'] or ''))):
                     raise ValueError('invalid removal generation proof')
         elif value['paths']:
             raise ValueError('removal paths have no ownership record')
@@ -1316,11 +1434,35 @@ def proven_tree_paths(root, *, owner=0, record=None, generation_matches=None):
     """Identify only directories recorded by the creation transaction."""
     if record is None:
         return ()
+    if isinstance(record, dict) and record.get('format') == 3:
+        if (set(record) != {'format', 'source', 'directories', 'preserved'} or
+                record.get('source') != 'explicit-legacy-consent' or generation_matches is None or
+                not isinstance(record.get('directories'), dict) or not isinstance(record.get('preserved'), list) or
+                any(not isinstance(path, str) for path in record['preserved']) or
+                len(record['preserved']) != len(set(record['preserved'])) or
+                set(record['preserved']) - {'/var/log/pxe-tools'} or
+                set(record['preserved']) & set(record['directories'])):
+            raise ValueError('invalid explicitly authorised legacy identity snapshot')
+        for path, expected in record['directories'].items():
+            if (path not in TREES or not isinstance(expected, dict) or
+                    set(expected) != {'dev', 'ino', 'btime_sec', 'btime_nsec'} or
+                    any(type(expected[key]) is not int or expected[key] < 0 for key in expected) or
+                    expected['ino'] == 0 or expected['btime_nsec'] >= 1000000000):
+                raise ValueError('invalid legacy directory identity')
+            remove_tree(root, path, mounts=(), owner=owner, dry_run=True,
+                        expected=expected, generation_matches=generation_matches)
+        return tuple(sorted(p for p in record['directories'] if p != '/var/lib/pxe-tools-native') +
+                     (['/var/lib/pxe-tools-native'] if '/var/lib/pxe-tools-native' in record['directories'] else []))
     if (not isinstance(record, dict) or record.get('format') != 2 or generation_matches is None or
-            record.get('base_phase') != 'complete' or not isinstance(record.get('directories'), dict)):
+            record.get('base_phase') not in ('complete', 'runtime-prepared') or not isinstance(record.get('directories'), dict)):
         raise ValueError('ownership journal is incomplete or invalid')
     directories = record['directories']
-    if not {'/etc/pxe-tools', '/var/lib/pxe-tools'} <= directories.keys():
+    initial = record.get('base_phase') == 'runtime-prepared'
+    if initial and (set(record) != {'format', 'base_phase', 'directories'}
+                    or set(directories) != INITIAL_RUNTIME_TREES
+                    or not (Path(root)/'var/lib/pxe-tools-native').is_dir()):
+        raise ValueError('initial runtime provenance is incomplete')
+    if not initial and not {'/etc/pxe-tools', '/var/lib/pxe-tools'} <= directories.keys():
         raise ValueError('base directory provenance is incomplete')
     for path, expected in directories.items():
         if (path not in TREES or not isinstance(expected, dict) or
@@ -1332,11 +1474,103 @@ def proven_tree_paths(root, *, owner=0, record=None, generation_matches=None):
         remove_tree(root, path, mounts=(), owner=owner, dry_run=True, expected=expected, generation_matches=generation_matches)
     # A workspace used by a pre-existing, unproven account may be shared.
     eligible = set(directories)
+    if initial:
+        # Previously recorded empty directories may have been removed by the
+        # failing installer. Never adopt an absent path if it appears later.
+        eligible = {path for path in eligible if os.path.lexists(Path(root) / path.lstrip('/'))}
     if 'account' not in record:
         eligible.discard('/var/lib/pxe-tools-ansible')
     # Keep the runtime, which contains the removal journal and lock, until last.
     return tuple(sorted((p for p in eligible if p != '/var/lib/pxe-tools-native')) +
                  (['/var/lib/pxe-tools-native'] if '/var/lib/pxe-tools-native' in eligible else []))
+
+
+def legacy_birth_identity(fd):
+    """Snapshot identity for an operator-approved legacy path; not proof of creation."""
+    import ctypes
+    import struct
+    try:
+        info = os.fstat(fd)
+        libc = ctypes.CDLL(None, use_errno=True)
+        call = libc.statx
+        call.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p)
+        call.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(256)
+        if call(fd, b'', 0x1000, 0x100 | 0x800, ctypes.byref(buffer)) != 0:
+            raise ValueError('cannot inspect legacy directory generation')
+        data = buffer.raw
+        mask = struct.unpack_from('=I', data, 0)[0]
+        ino = struct.unpack_from('=Q', data, 32)[0]
+        sec, nsec = struct.unpack_from('=qI', data, 80)
+        major, minor = struct.unpack_from('=II', data, 136)
+        if (mask & (0x100 | 0x800) != (0x100 | 0x800) or
+                (os.makedev(major, minor), ino) != (info.st_dev, info.st_ino) or
+                sec < 0 or not 0 <= nsec < 1000000000):
+            raise ValueError('legacy directory birth identity is unavailable')
+        return {'dev': info.st_dev, 'ino': info.st_ino, 'btime_sec': sec, 'btime_nsec': nsec}
+    except (AttributeError, OSError, struct.error) as exc:
+        raise ValueError('legacy directory birth identity is unavailable') from exc
+
+
+def legacy_identity_matches(fd, expected):
+    try:
+        return legacy_birth_identity(fd) == expected
+    except (OSError, ValueError):
+        return False
+
+
+def snapshot_legacy_paths(root, *, mounts, owner=0, opener=None, identity=legacy_birth_identity):
+    """Inspect only allowlisted directories, without writing or claiming provenance."""
+    import sys
+    root = Path(root)
+    if opener is None:
+        if sys.platform == 'linux':
+            opener = _openat2_no_mount
+        elif root != Path('/') and owner != 0:
+            opener = lambda fd, name: os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        else:
+            raise RuntimeError('Linux openat2 is required for legacy removal')
+    records = {}
+    preserved = []
+    for path in sorted(TREES):
+        target = root / path.lstrip('/')
+        if not target.exists() and not target.is_symlink():
+            continue
+        # Ubuntu commonly has root:syslog 0775 on /var/log. A writable parent
+        # can rename this target while removal is in progress, so preserve it.
+        if path == '/var/log/pxe-tools' and owner is not None:
+            parent = root / 'var/log'
+            info = parent.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or info.st_mode & 0o022):
+                preserved.append(path)
+                continue
+        remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, opener=opener)
+        parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for name in Path(path).parts[1:]:
+                child = opener(parent, name)
+                os.close(parent)
+                parent = child
+            records[path] = identity(parent)
+        finally:
+            os.close(parent)
+    return {'format': 3, 'source': 'explicit-legacy-consent', 'directories': records, 'preserved': preserved}
+
+
+def legacy_plan_hash(record, source, key):
+    """Bind previewed legacy paths, preserved paths and APT cleanup decisions."""
+    import hashlib
+    import json
+    plan = {'record': record, 'apt_source': source, 'apt_key': key}
+    return hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def original_ownership_record(record):
+    """Remove the explicitly approved legacy account from a recovery receipt."""
+    if (isinstance(record, dict) and isinstance(record.get('account'), dict) and
+            record['account'].get('source') == 'explicit-legacy-consent'):
+        return {key: value for key, value in record.items() if key != 'account'}
+    return record
 
 
 def recorded_generation_matches(fd, proof):
@@ -1370,15 +1604,45 @@ def recorded_generation_matches(fd, proof):
         return False
 
 
-def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, apply=False, record=None, ownership=None, reconciler=None, account_lookup=None):
+def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, apply=False, record=None, ownership=None, reconciler=None, account_lookup=None, allow_legacy=False, legacy_expected=None, legacy_snapshotter=snapshot_legacy_paths, legacy_matcher=legacy_identity_matches):
     """Prepare a bounded transaction. The root override is internal for tests."""
     root = Path(root)
-    generation_matches = ownership.generation.matches if ownership is not None else None
+    original_record = record
+    legacy = allow_legacy and record == {'format': 2, 'directories': {}}
+    if legacy:
+        if ownership is None:
+            raise RuntimeError('legacy ownership journal is unavailable')
+        record = legacy_snapshotter(root, mounts=mounts_provider(), owner=owner)
+    generation_matches = legacy_matcher if legacy else ownership.generation.matches if ownership is not None else None
     paths = proven_tree_paths(root, owner=owner, record=record, generation_matches=generation_matches)
+    # A previous installation may have left the dedicated Ansible identity even
+    # though the current installation never created it. Its removal requires a
+    # fresh, explicit preview bound to the exact unshared identity.
+    approved_account = None
+    if (allow_legacy and not legacy and isinstance(record, dict) and
+            record.get('base_phase') == 'complete' and record.get('account') is None and account_lookup is not None):
+        accounts = account_lookup()
+        named = [entry for entry in accounts['accounts'] if entry.pw_name == 'pxe-tools-ansible']
+        if named:
+            validate_legacy_account(accounts['accounts'], accounts['groups'], accounts['process_uids'])
+            entry = named[0]
+            approved_account = {'name': entry.pw_name, 'uid': entry.pw_uid, 'gid': entry.pw_gid,
+                                'gecos': entry.pw_gecos, 'home': entry.pw_dir, 'shell': entry.pw_shell,
+                                'source': 'explicit-legacy-consent'}
+            record = dict(record, account=approved_account)
+        elif any(group.gr_name == 'pxe-tools-ansible' for group in accounts['groups']):
+            raise ValueError('unproven Ansible group has no matching account; inspect before removal')
     mounts = mounts_provider()
     for path in paths:
         remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, expected=record['directories'][path], generation_matches=generation_matches)
     source, key = apt_cleanup_plan(root, owner=owner)
+    if legacy:
+        # The preview explicitly preserves APT configuration for this legacy
+        # path, even if a witness appears before cleanup or during recovery.
+        source = key = False
+    explicit_plan = legacy or approved_account is not None
+    if explicit_plan and apply and legacy_expected != legacy_plan_hash(record, source, key):
+        raise ValueError('legacy paths or APT plan changed or were not approved; inspect a fresh preview')
     preserved = tuple(path for path in sorted(TREES) if path not in paths and
                       ((root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink()))
     # Issue #61 records nginx state outside the application runtime. Until its
@@ -1392,10 +1656,15 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
     elif nginx_present and not apply:
         with nginx_journal_guard(root, reconciler, owner=owner, mounts=mounts):
             pass
-    plan = {'trees': paths, 'source': source, 'key': key, 'preserved': preserved}
+    initial = isinstance(record, dict) and record.get('base_phase') == 'runtime-prepared'
+    plan = {'trees': paths, 'source': source, 'key': key, 'preserved': preserved, 'legacy': legacy,
+            'initial_incomplete': initial,
+            'approved_account': approved_account,
+            'legacy_plan_sha256': legacy_plan_hash(record, source, key) if explicit_plan else None}
     if not apply:
         return plan
-    if preserved:
+    allowed_preserved = set(record['preserved']) if legacy else {'/var/log/pxe-tools'}
+    if set(preserved) - allowed_preserved or (legacy and set(preserved) != allowed_preserved):
         raise RuntimeError('Cannot establish ownership of all instance paths; no package was removed')
     critical = ('/etc/pxe-tools', '/var/lib/pxe-tools', '/var/lib/pxe-tools-native')
     if lifecycle is None and any((root / p.lstrip('/')).exists() or
@@ -1413,10 +1682,10 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                 directory = root / 'var/lib/pxe-tools-ownership'
                 if directory.exists() or directory.is_symlink():
                     raise RuntimeError('Ownership journal appeared; no package was removed')
-            if record is not None and ownership._read(ownership_fd) != record:
+            if record is not None and ownership._read(ownership_fd) != original_record:
                 raise RuntimeError('ownership journal changed; no package was removed')
             if any(((root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink())
-                   for path in TREES if path not in paths):
+                   for path in TREES if path not in paths and path not in allowed_preserved):
                 raise RuntimeError('Unproven instance paths appeared; no package was removed')
             ownership_identities = _journal_identities(ownership_fd, owner) if record is not None else None
             ownership_contents = _journal_bytes(ownership_fd) if record is not None else None
@@ -1439,7 +1708,7 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                 with upgrade_guard(lifecycle, owner=owner), removal_journal(
                         root, record, paths, ownership_identities, ownership_contents,
                         nginx_journal, owner=owner) as journal:
-                    if record is not None and record.get('account') is not None and account_lookup is None:
+                    if (legacy or initial or (record is not None and record.get('account') is not None)) and account_lookup is None:
                         raise RuntimeError('Ansible account inventory is unavailable; no package was removed')
                     storage = storage_snapshot(lifecycle)
                     outside = external_paths(lifecycle, paths)
@@ -1447,7 +1716,10 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                         raise RuntimeError('external storage requires review; no package was removed')
                     if account_lookup is not None:
                         accounts = account_lookup()
-                        validate_account(record or {}, accounts['accounts'], accounts['groups'], accounts['process_uids'])
+                        if legacy or initial:
+                            validate_legacy_account(accounts['accounts'], accounts['groups'], accounts['process_uids'])
+                        else:
+                            validate_account(record or {}, accounts['accounts'], accounts['groups'], accounts['process_uids'])
                     def after_stop(transaction):
                         return persistent_masks(root, runner, units, transaction,
                                                 owner=owner, mounts=mounts_provider())
@@ -1460,10 +1732,19 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                             raise RuntimeError('external storage requires review; no package was removed')
                         if account_lookup is not None:
                             accounts = account_lookup()
-                            validate_account(record or {}, accounts['accounts'], accounts['groups'], accounts['process_uids'])
+                            if legacy or initial:
+                                validate_legacy_account(accounts['accounts'], accounts['groups'], accounts['process_uids'])
+                            else:
+                                validate_account(record or {}, accounts['accounts'], accounts['groups'], accounts['process_uids'])
                         mounts = mounts_provider()
                         for path in paths:
                             remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, expected=record['directories'][path], generation_matches=generation_matches)
+                        try:
+                            clean_package_caches(root, owner=owner)
+                        except (OSError, ValueError, RuntimeError) as error:
+                            # Bytecode is optional and unknown files are never
+                            # a reason to remove an unrecognised directory.
+                            print('Package caches preserved for review: ' + str(error))
                         transaction.begin_purge()
                         purge_packages(runner, frontend_locked=True)
                         if not packages_absent(runner):
@@ -1471,7 +1752,7 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                         journal.state['phase'] = 'packages_absent'
                         journal.save()
                         try:
-                            if account_lookup is not None and record is not None:
+                            if account_lookup is not None and record is not None and not (legacy or initial):
                                 journal.state['steps']['account'] = 'intent'
                                 journal.save()
                                 remove_account(record, runner, account_lookup)
@@ -1494,7 +1775,8 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                                     journal.save()
                             journal.state['steps']['apt'] = 'intent'
                             journal.save()
-                            source_removed, key_removed = remove_apt_config(root, mounts=mounts_provider(), owner=owner)
+                            source_removed, key_removed = ((False, False) if legacy else
+                                                           remove_apt_config(root, mounts=mounts_provider(), owner=owner))
                             journal.state['steps']['apt'] = 'done'
                             journal.save()
                             plan.update(source_removed=source_removed, key_removed=key_removed)
@@ -1523,7 +1805,7 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                                 raise RuntimeError('Package purge succeeded, but nginx provenance is preserved: ' + str(error)) from error
                         if record is not None:
                             try:
-                                if ownership._read(ownership_fd) != record:
+                                if ownership._read(ownership_fd) != original_record:
                                     raise ValueError('ownership journal changed')
                                 journal.state['metadata']['ownership']['intent'] = True
                                 journal.save()
@@ -1866,17 +2148,27 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
             with ExitStack() as stack:
                 if state['record'] is not None:
                     ownership_fd = stack.enter_context(ownership._locked(create=False))
-                    if ownership._read(ownership_fd) != state['record']:
+                    legacy = state['record'].get('format') == 3
+                    expected_record = {'format': 2, 'directories': {}} if legacy else original_ownership_record(state['record'])
+                    if ownership._read(ownership_fd) != expected_record:
                         raise ValueError('ownership journal changed before retry')
+                    if legacy:
+                        import hashlib
+                        item = state['metadata']['ownership']
+                        if (_journal_identities(ownership_fd, owner) != {k: tuple(v) for k, v in item['identities'].items()}
+                                or hashlib.sha256(_journal_bytes(ownership_fd)).hexdigest() != item['sha256']):
+                            raise ValueError('legacy ownership journal changed before retry')
                 else:
+                    legacy = False
                     stack.enter_context(ownership.hold_lock())
                     directory = root / 'var/lib/pxe-tools-ownership'
                     if directory.exists() or directory.is_symlink():
                         raise ValueError('ownership journal appeared before retry')
-                matches = generation_matches or ownership.generation.matches
+                matches = generation_matches or (legacy_identity_matches if legacy else ownership.generation.matches)
                 proven_tree_paths(root, owner=owner, record=state['record'], generation_matches=matches)
+                excluded = set(state['record']['preserved']) if legacy else {'/var/log/pxe-tools'}
                 if any(((root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink())
-                       for path in TREES if path not in state['paths']):
+                       for path in TREES if path not in state['paths'] and path not in excluded):
                     raise ValueError('unproven instance paths appeared before retry')
                 stack.enter_context(installer_lock(lifecycle.home / 'lock', owner=owner))
                 required = (state['worker'] is not None or bool(state['masks'])) and state['restore'] != 'done'
@@ -1902,7 +2194,7 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
                     journal.save()
                 remove_legacy()
                 journal.finish(aborted=True)
-            return 'retry'
+            return 'retry-legacy' if legacy or original_ownership_record(state['record']) != state['record'] else 'retry'
         if not packages_absent(runner):
             recovery_masks(root, runner, journal, units, owner=owner, mounts=mounts_provider(), dry_run=True)
             for unit in units:
@@ -1913,8 +2205,8 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
             raise RuntimeError('Package purge is incomplete. Inspect sudo dpkg --audit; after resolving errors, '
                                'run sudo dpkg --purge pxe-tools-ansible pxe-tools, then retry --resume. '
                                'Keep the PXE Tools services masked until recovery finishes.')
-        generation_matches = generation_matches or recorded_generation_matches
         record = state['record']
+        generation_matches = generation_matches or (legacy_identity_matches if record is not None and record.get('format') == 3 else recorded_generation_matches)
         paths = state['paths']
         with ExitStack() as stack:
             for key in ('ownership', 'nginx'):
@@ -1984,7 +2276,8 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
                 state['steps'][path] = 'done'; journal.save()
             if state['steps']['apt'] != 'done':
                 state['steps']['apt'] = 'intent'; journal.save()
-                remove_apt_config(root, mounts=mounts_provider(), owner=owner)
+                if record is None or record.get('format') != 3:
+                    remove_apt_config(root, mounts=mounts_provider(), owner=owner)
                 state['steps']['apt'] = 'done'; journal.save()
             for key, item in state['metadata'].items():
                 item['intent'] = True; journal.save()
@@ -1997,6 +2290,7 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
 
 def parse_arguments(argv):
     import argparse
+    import re
     parser = argparse.ArgumentParser(description=(
         'Remove the native APT packages and recognised PXE Tools instance data. '
         'Data, database, local secrets, TLS/MOK files and local upgrade snapshots '
@@ -2006,7 +2300,23 @@ def parse_arguments(argv):
     choice.add_argument('--dry-run', action='store_true', help='inspect the proposed removal (default)')
     choice.add_argument('--yes', action='store_true', help='explicitly authorise destructive removal')
     choice.add_argument('--resume', action='store_true', help='resume an interrupted, authorised removal')
-    return parser.parse_args(argv)
+    parser.add_argument('--allow-legacy', action='store_true',
+                        help='include legacy paths explicitly reviewed by the operator')
+    parser.add_argument('--legacy-plan-sha256', help='SHA-256 printed by the legacy preview')
+    parser.add_argument('--purge-residuals', action='store_true', help='review eligible legacy logs and APT files')
+    parser.add_argument('--residual-plan-sha256', help='SHA-256 printed by the residual preview')
+    result = parser.parse_args(argv)
+    if result.resume and result.allow_legacy:
+        parser.error('--resume uses the existing receipt and cannot accept --allow-legacy')
+    if result.resume and (result.purge_residuals or result.residual_plan_sha256):
+        parser.error('--resume uses the existing residual receipt')
+    if result.residual_plan_sha256 and (not result.yes or not result.purge_residuals or
+                                       not re.fullmatch(r'[0-9a-f]{64}', result.residual_plan_sha256)):
+        parser.error('--residual-plan-sha256 requires --yes, --purge-residuals and a full SHA-256')
+    if result.legacy_plan_sha256 and (not result.yes or not result.allow_legacy or
+                                     not re.fullmatch(r'[0-9a-f]{64}', result.legacy_plan_sha256)):
+        parser.error('--legacy-plan-sha256 requires --yes, --allow-legacy and a full SHA-256')
+    return result
 
 
 def read_package_helper(root, filename, *, owner=0):
@@ -2630,10 +2940,13 @@ def validate_account(record, accounts, groups, process_uids):
         if matches or named_groups:
             raise ValueError('pre-existing Ansible account or group has no creation proof')
         return None
-    if (not isinstance(proof, dict) or set(proof) != {'name', 'uid', 'gid', 'gecos', 'home', 'shell'} or
+    explicit = isinstance(proof, dict) and proof.get('source') == 'explicit-legacy-consent'
+    fields = {'name', 'uid', 'gid', 'gecos', 'home', 'shell'} | ({'source'} if explicit else set())
+    if (not isinstance(proof, dict) or set(proof) != fields or
             proof['name'] != name or proof['home'] != '/var/lib/pxe-tools-ansible/home' or
             proof['shell'] != '/usr/sbin/nologin' or not isinstance(proof['gecos'], str) or
-            not re.fullmatch(r'pxe-tools-[0-9a-f]{32}', proof['gecos']) or
+            (not explicit and not re.fullmatch(r'pxe-tools-[0-9a-f]{32}', proof['gecos'])) or
+            (explicit and (len(proof['gecos']) > 255 or any(ord(c) < 32 or c in ':\n' for c in proof['gecos']))) or
             any(type(proof[key]) is not int or proof[key] <= 0 for key in ('uid', 'gid'))):
         raise ValueError('invalid Ansible account creation proof')
     uid, gid = proof['uid'], proof['gid']
@@ -2654,6 +2967,32 @@ def validate_account(record, accounts, groups, process_uids):
             uid, gid, proof['gecos'], proof['home'], proof['shell']):
         raise ValueError('Ansible account identity changed')
     return proof
+
+
+def validate_legacy_account(accounts, groups, process_uids):
+    """Preserve the legacy account, refusing a shared or in-use workspace."""
+    name = 'pxe-tools-ansible'
+    if not isinstance(accounts, list) or not isinstance(groups, list):
+        raise ValueError('incomplete legacy account inventory')
+    matches = [entry for entry in accounts if entry.pw_name == name]
+    named_groups = [group for group in groups if group.gr_name == name]
+    if len(matches) > 1 or len(named_groups) > 1:
+        raise ValueError('duplicate legacy account or group')
+    if not matches:
+        if named_groups and (named_groups[0].gr_mem or
+                             any(entry.pw_gid == named_groups[0].gr_gid for entry in accounts)):
+            raise ValueError('legacy group is shared')
+        return
+    account = matches[0]
+    if (account.pw_uid <= 0 or account.pw_gid <= 0 or account.pw_uid in process_uids or
+            account.pw_dir != '/var/lib/pxe-tools-ansible/home' or account.pw_shell != '/usr/sbin/nologin'
+            or len(named_groups) != 1 or named_groups[0].gr_gid != account.pw_gid
+            or set(named_groups[0].gr_mem) - {name}
+            or any(other.pw_name != name and (other.pw_uid == account.pw_uid or other.pw_gid == account.pw_gid)
+                   for other in accounts)
+            or any(group.gr_name != name and (group.gr_gid == account.pw_gid or name in group.gr_mem)
+                   for group in groups)):
+        raise ValueError('legacy Ansible account or workspace is shared, changed or in use')
 
 
 def _validate_userdel_configuration(snapshot):
@@ -2895,6 +3234,387 @@ def external_paths(lifecycle, recognised):
     return tuple(sorted(result))
 
 
+def remaining_apt_resources(root, *, source_removed=False, key_removed=False):
+    """Report existing PXE-specific APT files that are not approved for removal."""
+    root = Path(root)
+    candidates = []
+    if not source_removed:
+        candidates.append('/etc/apt/sources.list.d/pxe-tools.sources')
+    candidates.append('/etc/apt/sources.list.d/pxe-tools.list')
+    if not key_removed:
+        candidates.append('/etc/apt/keyrings/pxe-tools-archive-keyring.gpg')
+    return tuple(path for path in candidates
+                 if (root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink())
+
+
+def remaining_package_paths(root):
+    """Detect payload directories dpkg could not remove because files remain."""
+    root = Path(root)
+    return tuple(path for path in ('/opt/pxe-tools', '/usr/lib/pxe-tools')
+                 if (root / path.lstrip('/')).exists() or (root / path.lstrip('/')).is_symlink())
+
+
+RESIDUAL_SOURCE = '/etc/apt/sources.list.d/pxe-tools.sources'
+RESIDUAL_KEY = '/etc/apt/keyrings/pxe-tools-archive-keyring.gpg'
+RESIDUAL_LOG = '/var/log/pxe-tools'
+RESIDUAL_JOURNAL = 'pxe-tools-residual-purge'
+
+
+def _residual_directory(root, parts, *, owner=0, writable_log_parent=False, opener=None):
+    """Pin trusted ancestors; only /var/log may have a writable group."""
+    import sys
+    if opener is None:
+        if sys.platform == 'linux':
+            opener = _openat2_no_mount
+        elif Path(root) != Path('/') and owner != 0:
+            opener = lambda fd, part: os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        else:
+            raise RuntimeError('Linux openat2 is required for residual cleanup')
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for index in range(len(parts) + 1):
+            info = os.fstat(fd)
+            allow_group = writable_log_parent and tuple(parts[:index]) == ('var', 'log')
+            if owner is not None and (info.st_uid != owner or info.st_mode & (0o002 if allow_group else 0o022)):
+                raise ValueError('untrusted residual cleanup ancestor')
+            if index < len(parts):
+                child = opener(fd, parts[index])
+                os.close(fd)
+                fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _residual_file_snapshot(root, path, *, owner=0, opener=None):
+    import hashlib
+    parts = Path(path).parts[1:]
+    parent = _residual_directory(root, parts[:-1], owner=owner, opener=opener)
+    fd = None
+    try:
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1048576 or
+                (owner is not None and (info.st_uid != owner or info.st_mode & 0o022))):
+            raise ValueError('untrusted residual APT file')
+        with os.fdopen(os.dup(fd), 'rb') as stream:
+            data = stream.read(1048577)
+        if len(data) > 1048576:
+            raise ValueError('residual APT file too large')
+        current = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        if (current.st_dev, current.st_ino, current.st_nlink) != (info.st_dev, info.st_ino, 1):
+            raise ValueError('residual APT file changed')
+        return {'dev': info.st_dev, 'ino': info.st_ino, 'sha256': hashlib.sha256(data).hexdigest()}
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent)
+
+
+def residual_plan(root, preview, mounts, *, owner=0, apt_config=None, opener=None, identity=None):
+    """Inspect three bounded legacy resources; never claim creation provenance."""
+    root = Path(root)
+    identity = identity or legacy_birth_identity
+    plan = {'format': 1, 'source': None, 'key': None, 'log': None}
+    if (root / 'var/lib' / RESIDUAL_JOURNAL).exists() or (root / 'var/lib' / RESIDUAL_JOURNAL).is_symlink():
+        raise RuntimeError('An interrupted residual purge requires --resume')
+    source_ok, key_ok = apt_cleanup_plan(root, owner=owner, apt_config=apt_config, allow_reviewed=True)
+    for field, path, eligible in (('source', RESIDUAL_SOURCE, source_ok and not preview['source']),
+                                  ('key', RESIDUAL_KEY, key_ok and not preview['key'])):
+        target = root / path.lstrip('/')
+        anchors = ('.pxe-tools-sources.*.created' if field == 'source'
+                   else '.pxe-tools-archive-keyring.*.created')
+        if target.parent.exists() and list(target.parent.glob(anchors)):
+            continue
+        if eligible and (target.exists() or target.is_symlink()):
+            if any(m != '/' and (path == m or path.startswith(m + '/')) for m in mounts):
+                continue
+            plan[field] = _residual_file_snapshot(root, path, owner=owner, opener=opener)
+    if RESIDUAL_LOG in preview['preserved']:
+        if not any(m == RESIDUAL_LOG or m.startswith(RESIDUAL_LOG + '/') for m in mounts):
+            parent = _residual_directory(root, ('var', 'log'), owner=owner,
+                                         writable_log_parent=True, opener=opener)
+            fd = None
+            try:
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                if opener is not None:
+                    open_child = opener
+                elif root != Path('/') and owner != 0 and __import__('sys').platform != 'linux':
+                    open_child = lambda parent_fd, name: os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                else:
+                    open_child = _openat2_no_mount
+                fd = open_child(parent, 'pxe-tools')
+                info = os.fstat(fd)
+                if (owner is not None and (info.st_uid != owner or info.st_mode & 0o022)):
+                    raise ValueError('untrusted legacy log directory')
+                plan['log'] = identity(fd)
+            finally:
+                if fd is not None:
+                    os.close(fd)
+                os.close(parent)
+    return plan
+
+
+def residual_plan_hash(plan):
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+class ResidualJournal:
+    """Durable, private authorisation for the three reviewed legacy resources."""
+    def __init__(self, root, *, owner=0, opener=None):
+        self.root, self.owner, self.opener = Path(root), owner, opener
+        self.state = None
+
+    def base(self):
+        return _residual_directory(self.root, ('var', 'lib'), owner=self.owner, opener=self.opener)
+
+    def directory(self):
+        base = self.base()
+        try:
+            fd = os.open(RESIDUAL_JOURNAL, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=base)
+            info = os.fstat(fd)
+            if stat.S_IMODE(info.st_mode) != 0o700 or (self.owner is not None and info.st_uid != self.owner):
+                os.close(fd)
+                raise ValueError('untrusted residual purge receipt')
+            return fd
+        finally:
+            os.close(base)
+
+
+    @staticmethod
+    def validate(value):
+        import re
+        if (not isinstance(value, dict) or set(value) != {'format', 'plan', 'steps'} or value['format'] != 1 or
+                not isinstance(value['plan'], dict) or set(value['plan']) != {'format', 'source', 'key', 'log'} or
+                value['plan']['format'] != 1 or not isinstance(value['steps'], dict) or
+                set(value['steps']) != {'source', 'key', 'log'} or
+                any(step not in ('pending', 'intent', 'moved', 'done') for step in value['steps'].values())):
+            raise ValueError('invalid residual purge receipt')
+        for name in ('source', 'key'):
+            item = value['plan'][name]
+            if item is not None and (not isinstance(item, dict) or set(item) != {'dev', 'ino', 'sha256'} or
+                    any(type(item[k]) is not int or item[k] < 0 for k in ('dev', 'ino')) or
+                    item['ino'] == 0 or not isinstance(item['sha256'], str) or
+                    not re.fullmatch(r'[0-9a-f]{64}', item['sha256'])):
+                raise ValueError('invalid residual file identity')
+        item = value['plan']['log']
+        if item is not None and (not isinstance(item, dict) or set(item) != {'dev', 'ino', 'btime_sec', 'btime_nsec'} or
+                any(type(item[k]) is not int or item[k] < 0 for k in item) or item['ino'] == 0 or
+                item['btime_nsec'] >= 1000000000):
+            raise ValueError('invalid residual log identity')
+        for name, step in value['steps'].items():
+            if (name != 'log' and step == 'moved') or (value['plan'][name] is None and step != 'done'):
+                raise ValueError('invalid residual purge step')
+        return value
+
+    def save(self):
+        import json
+        import secrets
+        data = (json.dumps(self.validate(self.state), sort_keys=True, separators=(',', ':')) + '\n').encode()
+        directory = self.directory()
+        try:
+            name = '.state-' + secrets.token_hex(16)
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+            try:
+                with os.fdopen(fd, 'wb', closefd=False) as stream:
+                    stream.write(data)
+                    stream.flush()
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(name, 'state.json', src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def create(self, plan):
+        self.state = self.validate({'format': 1, 'plan': plan,
+                                    'steps': {name: 'pending' if plan[name] is not None else 'done'
+                                              for name in ('source', 'key', 'log')}})
+        base = self.base()
+        try:
+            os.mkdir(RESIDUAL_JOURNAL, 0o700, dir_fd=base)
+            os.fsync(base)
+        finally:
+            os.close(base)
+        self.save()
+
+    def read(self):
+        import json
+        directory = self.directory()
+        try:
+            names = os.listdir(directory)
+            if any(name not in ('state.json', 'logs') and not name.startswith('.state-') for name in names):
+                raise ValueError('unexpected file in residual purge receipt')
+            fd = os.open('state.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 100000 or
+                        stat.S_IMODE(info.st_mode) != 0o600 or (self.owner is not None and info.st_uid != self.owner)):
+                    raise ValueError('untrusted residual purge state')
+                with os.fdopen(os.dup(fd), 'rb') as stream:
+                    data = stream.read(100001)
+            finally:
+                os.close(fd)
+            def unique(pairs):
+                result = {}
+                for key, item in pairs:
+                    if key in result:
+                        raise ValueError('duplicate residual purge state')
+                    result[key] = item
+                return result
+            self.state = self.validate(json.loads(data, object_pairs_hook=unique))
+            return self.state
+        finally:
+            os.close(directory)
+
+    def finish(self):
+        directory = self.directory()
+        try:
+            for name in os.listdir(directory):
+                if name == 'logs' or (name != 'state.json' and not name.startswith('.state-')):
+                    raise ValueError('residual purge receipt is not empty')
+                info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                        (self.owner is not None and info.st_uid != self.owner)):
+                    raise ValueError('untrusted residual purge receipt entry')
+                os.unlink(name, dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        base = self.base()
+        try:
+            os.rmdir(RESIDUAL_JOURNAL, dir_fd=base)
+            os.fsync(base)
+        finally:
+            os.close(base)
+
+def _residual_unlink(root, path, expected, *, owner=0, opener=None):
+    """Unlink only the exact reviewed regular file in a trusted directory."""
+    if _residual_file_snapshot(root, path, owner=owner, opener=opener) != expected:
+        raise ValueError('reviewed APT file changed; preserved: ' + path)
+    parts = Path(path).parts[1:]
+    parent = _residual_directory(root, parts[:-1], owner=owner, opener=opener)
+    try:
+        current = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or
+                (current.st_dev, current.st_ino) != (expected['dev'], expected['ino'])):
+            raise ValueError('reviewed APT file was replaced; preserved: ' + path)
+        os.unlink(parts[-1], dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+def _clear_residual_directory(fd, opener):
+    """Clear an already quarantined directory without following mounts or symlinks."""
+    for name in os.listdir(fd):
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISDIR(info.st_mode):
+            child = opener(fd, name)
+            try:
+                opened = os.fstat(child)
+                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    raise ValueError('legacy log directory changed during removal')
+                _clear_residual_directory(child, opener)
+            finally:
+                os.close(child)
+            os.rmdir(name, dir_fd=fd)
+        else:
+            os.unlink(name, dir_fd=fd)
+    os.fsync(fd)
+
+
+def complete_residual_purge(journal, mounts, *, apt_config=None, opener=None, identity_matches=None):
+    """Resume a confirmed plan; a shared or changed resource is never deleted."""
+    import sys
+    root, owner = journal.root, journal.owner
+    state = journal.state or journal.read()
+    if opener is None:
+        if sys.platform == 'linux':
+            opener = _openat2_no_mount
+        elif root != Path('/') and owner != 0:
+            opener = lambda fd, part: os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        else:
+            raise RuntimeError('Linux openat2 is required for residual cleanup')
+    identity_matches = identity_matches or legacy_identity_matches
+    for name, path in (('source', RESIDUAL_SOURCE), ('key', RESIDUAL_KEY)):
+        expected = state['plan'][name]
+        if expected is None or state['steps'][name] == 'done':
+            continue
+        target = root / path.lstrip('/')
+        if not target.exists() and not target.is_symlink():
+            if state['steps'][name] != 'intent':
+                raise ValueError('reviewed APT file disappeared before removal: ' + path)
+            state['steps'][name] = 'done'; journal.save()
+            continue
+        if any(m != '/' and (path == m or path.startswith(m + '/')) for m in mounts):
+            raise ValueError('reviewed APT file crosses a mount: ' + path)
+        source_ok, key_ok = apt_cleanup_plan(root, owner=owner, apt_config=apt_config, allow_reviewed=True)
+        if not (source_ok if name == 'source' else key_ok):
+            raise ValueError('APT file is changed or shared; preserved: ' + path)
+        state['steps'][name] = 'intent'; journal.save()
+        _residual_unlink(root, path, expected, owner=owner, opener=opener)
+        state['steps'][name] = 'done'; journal.save()
+
+    proof = state['plan']['log']
+    if proof is not None and state['steps']['log'] != 'done':
+        staged_path = '/var/lib/' + RESIDUAL_JOURNAL + '/logs'
+        if any(m == RESIDUAL_LOG or m.startswith(RESIDUAL_LOG + '/') or
+               m == staged_path or m.startswith(staged_path + '/') for m in mounts):
+            raise ValueError('mount within legacy logs; preserved')
+        directory = journal.directory()
+        parent = _residual_directory(root, ('var', 'log'), owner=owner,
+                                     writable_log_parent=True, opener=opener)
+        try:
+            try:
+                staged = os.stat('logs', dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                staged = None
+            if staged is None and state['steps']['log'] in ('pending', 'intent'):
+                source_fd = opener(parent, 'pxe-tools')
+                try:
+                    info = os.fstat(source_fd)
+                    if ((owner is not None and (info.st_uid != owner or info.st_mode & 0o022)) or
+                            not identity_matches(source_fd, proof)):
+                        raise ValueError('legacy log identity changed; preserved')
+                    if os.fstat(directory).st_dev != info.st_dev:
+                        raise ValueError('legacy logs cannot be quarantined across filesystems')
+                    state['steps']['log'] = 'intent'; journal.save()
+                    os.rename('pxe-tools', 'logs', src_dir_fd=parent, dst_dir_fd=directory)
+                    os.fsync(parent); os.fsync(directory)
+                    moved = os.stat('logs', dir_fd=directory, follow_symlinks=False)
+                    if (moved.st_dev, moved.st_ino) != (info.st_dev, info.st_ino):
+                        try:
+                            os.stat('pxe-tools', dir_fd=parent, follow_symlinks=False)
+                        except FileNotFoundError:
+                            os.rename('logs', 'pxe-tools', src_dir_fd=directory, dst_dir_fd=parent)
+                            os.fsync(parent); os.fsync(directory)
+                        raise ValueError('legacy logs were replaced during quarantine; preserved')
+                finally:
+                    os.close(source_fd)
+                staged = os.stat('logs', dir_fd=directory, follow_symlinks=False)
+            if staged is not None:
+                log_fd = opener(directory, 'logs')
+                try:
+                    if not identity_matches(log_fd, proof):
+                        raise ValueError('quarantined log identity changed; preserved')
+                    state['steps']['log'] = 'moved'; journal.save()
+                    _clear_residual_directory(log_fd, opener)
+                finally:
+                    os.close(log_fd)
+                os.rmdir('logs', dir_fd=directory)
+                os.fsync(directory)
+            state['steps']['log'] = 'done'; journal.save()
+        finally:
+            os.close(parent)
+            os.close(directory)
+    journal.finish()
+
+
 UNITS = ('pxe-tools.target', 'pxe-tools-admin.target', 'pxe-tools-worker.service',
          'pxe-tools-dnsmasq-tail.service', 'pxe-tools-nginx.service',
          'pxe-tools-pxe-http.service', 'pxe-tools-php.service',
@@ -3032,7 +3752,23 @@ def main(argv):
     if args.resume:
         with installer_lock(Path('/run/lock/pxe-tools-apt-install.lock')):
             account_lookup = lambda: account_snapshot(Path('/'), list(pwd.getpwall()), list(grp.getgrall()))
-            result = resume_uninstall(Path('/'), subprocess.run, UNITS, mounts, account_lookup=account_lookup)
+            residual = ResidualJournal(Path('/'))
+            receipt = Path('/var/lib') / RESIDUAL_JOURNAL
+            has_residual = receipt.exists() or receipt.is_symlink()
+            core_receipts = [Path('/var/lib') / name for name in
+                             ('pxe-tools-uninstall', 'pxe-tools-uninstall-complete', 'pxe-tools-uninstall-aborted')]
+            if has_residual:
+                residual.read()
+            if has_residual and packages_intact(subprocess.run) and not any(p.exists() or p.is_symlink() for p in core_receipts):
+                if any(step not in ('pending', 'done') for step in residual.state['steps'].values()):
+                    raise RuntimeError('Packages are installed but residual cleanup has started; inspect the receipt')
+                residual.finish()
+                print('Removal had not begun; run a new preview and confirmation.')
+                return 0
+            if has_residual and packages_absent(subprocess.run) and not any(p.exists() or p.is_symlink() for p in core_receipts):
+                result = None
+            else:
+                result = resume_uninstall(Path('/'), subprocess.run, UNITS, mounts, account_lookup=account_lookup)
             if result == 'retry':
                 lifecycle = load_lifecycle(Path('/'))
                 ownership = load_ownership(Path('/'))
@@ -3044,6 +3780,17 @@ def main(argv):
                 run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=True,
                               record=record, ownership=ownership, reconciler=reconciler,
                               account_lookup=account_lookup)
+            if result == 'retry-legacy':
+                if has_residual:
+                    if any(step not in ('pending', 'done') for step in residual.state['steps'].values()):
+                        raise RuntimeError('Residual cleanup already began; inspect its receipt')
+                    residual.finish()
+                print('Legacy interruption safely reverted; run a new preview and confirmation.')
+                return 0
+            if has_residual:
+                if not packages_absent(subprocess.run):
+                    raise RuntimeError('Packages are still installed; residual cleanup was not run')
+                complete_residual_purge(residual, mounts())
         print('No interrupted removal was found.' if result == 'nothing' else 'Interrupted removal resumed.')
         return 0
     lifecycle = load_lifecycle(Path('/'))
@@ -3053,18 +3800,43 @@ def main(argv):
         record = ownership.read() if ownership is not None else None
     except FileNotFoundError:
         record = None
-    preview = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=False, record=record, ownership=ownership, reconciler=reconciler)
+    account_lookup = lambda: account_snapshot(Path('/'), list(pwd.getpwall()), list(grp.getgrall()))
+    preview = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=False, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy)
+    residual = residual_plan(Path('/'), preview, mounts()) if args.purge_residuals else None
     outside = external_paths(lifecycle, preview['trees']) if lifecycle is not None else ()
     outside = tuple(path for path in outside if Path(path).exists() or Path(path).is_symlink())
     print('WARNING: removal destroys the PXE Tools database, configuration, local keys, certificates,')
     print('boot files and local upgrade snapshots in recognised paths. Keep a verified external backup.')
     print('Package removal: pxe-tools-ansible and pxe-tools; dependencies are retained.')
+    if preview['legacy']:
+        print('LEGACY INSTALLATION: listed paths have no creation proof; explicit operator approval is required.')
+        print('The existing Ansible account and group will be preserved.')
+    elif preview['initial_incomplete']:
+        print('INCOMPLETE INITIAL INSTALLATION: only creation-witnessed paths will be removed.')
+        print('Any existing Ansible account and group will be preserved.')
+    if preview['approved_account'] is not None:
+        print('Pre-existing Ansible account and group will be removed if confirmed:',
+              preview['approved_account']['name'], 'UID', preview['approved_account']['uid'],
+              'GID', preview['approved_account']['gid'])
+        print('The account has no creation proof; the confirmed plan is bound to its identity.')
+    if preview['legacy_plan_sha256'] is not None:
+        print('Legacy plan SHA256:', preview['legacy_plan_sha256'])
     for path in preview['trees']:
         print('Candidate data path, if present:', path)
-    for path in sorted(set(preview['preserved']) | set(outside)):
+    apt_preserved = remaining_apt_resources(Path('/'), source_removed=preview['source'], key_removed=preview['key'])
+    residual_paths = {path for name, path in (('source', RESIDUAL_SOURCE), ('key', RESIDUAL_KEY), ('log', RESIDUAL_LOG))
+                      if residual is not None and residual[name] is not None}
+    for path in sorted(residual_paths):
+        print('Candidate legacy residual, if confirmed:', path)
+    if residual is not None:
+        print('Residual plan SHA256:', residual_plan_hash(residual))
+    for path in sorted((set(preview['preserved']) | set(outside) | set(apt_preserved)) - residual_paths):
         print('Preserved for manual review:', path)
-    print('APT source recognised:', 'yes' if preview['source'] else 'no; absent or preserved')
-    print('APT key unshared:', 'yes' if preview['key'] else 'no; absent or preserved')
+    if preview['legacy']:
+        print('Legacy APT files not listed as candidates are preserved.')
+    else:
+        print('APT source recognised:', 'yes' if preview['source'] or RESIDUAL_SOURCE in residual_paths else 'no; absent or preserved')
+        print('APT key unshared:', 'yes' if preview['key'] or RESIDUAL_KEY in residual_paths else 'no; absent or preserved')
     print('Externally enrolled firmware keys and external backups are not modified.')
     if not args.yes:
         print('Preview only. Service state and active tasks will be checked during removal.')
@@ -3074,13 +3846,29 @@ def main(argv):
     if outside:
         raise RuntimeError('Configured paths outside recognised roots require review; no package was removed')
     with installer_lock(Path('/run/lock/pxe-tools-apt-install.lock')):
-        account_lookup = lambda: account_snapshot(Path('/'), list(pwd.getpwall()), list(grp.getgrall()))
-        result = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=True, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup)
+        receipt = None
+        if residual is not None and args.residual_plan_sha256 != residual_plan_hash(residual):
+            raise ValueError('residual resources changed or were not approved; inspect a fresh preview')
+        if residual_paths:
+            receipt = ResidualJournal(Path('/'))
+            receipt.create(residual)
+        try:
+            result = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=True, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy, legacy_expected=args.legacy_plan_sha256)
+        except BaseException:
+            if receipt is not None and packages_intact(subprocess.run) and not (Path('/var/lib/pxe-tools-uninstall').exists()):
+                receipt.finish()
+            raise
+        if receipt is not None:
+            complete_residual_purge(receipt, mounts())
     print('Requested package purge completed; recognised data paths were removed where present.')
     print('APT source removed:', 'yes' if result['source_removed'] else 'no')
     print('APT key removed:', 'yes' if result['key_removed'] else 'no')
-    remaining_source = Path('/etc/apt/sources.list.d/pxe-tools.sources')
-    if result['preserved'] or outside or remaining_source.exists() or remaining_source.is_symlink():
+    remaining_apt = remaining_apt_resources(Path('/'))
+    remaining_package = remaining_package_paths(Path('/'))
+    remaining_preserved = [p for p in result['preserved'] if Path(p).exists() or Path(p).is_symlink()]
+    if remaining_preserved or outside or remaining_apt or remaining_package:
+        for path in remaining_apt + remaining_package:
+            print('Preserved for manual review:', path)
         print('Some resources were preserved or their provenance could not be established; inspect them manually.')
         return 1
     return 0

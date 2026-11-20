@@ -19,8 +19,9 @@ if [ -e /var/lib/pxe-tools/tls ] || [ -L /var/lib/pxe-tools/tls ]; then
     fi
 fi
 python3 /opt/pxe-tools/scripts/validate-native-runtime.py tls "$TLS_DIR"
+python3 /opt/pxe-tools/scripts/validate-native-runtime.py http-tree /var/lib/pxe-tools-native log
 # Create only absent directories; never replace existing user data or links.
-for directory in /var/lib/pxe-tools "$HTTP_ROOT" "$TFTP_ROOT" /var/log/pxe-tools; do
+for directory in /var/lib/pxe-tools "$HTTP_ROOT" "$TFTP_ROOT"; do
     if [ -L "$directory" ] || { [ -e "$directory" ] && [ ! -d "$directory" ]; }; then
         echo "Répertoire requis invalide : $directory" >&2; exit 1
     fi

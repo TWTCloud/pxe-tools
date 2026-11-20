@@ -1,3 +1,4 @@
+<?php use Admin\Ui\DeviceTerminology as Term; ?>
 <?php
 use Admin\View;
 /** @var array<int, array<string,mixed>> $images */
@@ -30,7 +31,7 @@ use Admin\View;
         <strong>Actualisation automatique</strong>
       </label>
       <p class="muted text-sm" style="margin:0.35rem 0 0;">
-        Vérifie les images quand aucune machine n’est en cours d’installation, de wipe ou de test.
+        <?= View::e(Term::format('Vérifie les images quand {aucun} n’est en cours d’installation, de wipe ou de test.')) ?>
         <?php if ($auto_refresh['last_at'] > 0): ?>Dernier contrôle : <?= View::e(date('d/m/Y H:i', $auto_refresh['last_at'])) ?>.<?php endif; ?>
         <?php if ($auto_refresh['enabled'] && $auto_refresh['next_at'] > 0): ?>Prochain : <?= View::e(date('d/m/Y H:i', $auto_refresh['next_at'])) ?>.<?php endif; ?>
         <?php if ($auto_refresh['enabled'] && $auto_refresh['next_at'] === 0): ?>Premier contrôle au prochain passage du worker.<?php endif; ?>

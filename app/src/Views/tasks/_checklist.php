@@ -1,5 +1,5 @@
 <?php
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 use Admin\Models\Action;
 use Admin\Models\ActionCheckpoints;
 use Admin\Support\Format;
@@ -38,7 +38,7 @@ $labelRunning = static function (string $code, string $defaultLabel): string {
         'wipe_script_started'   => 'Effacement des disques en cours',
         'partitioning_started'  => 'Installation du système en cours',
         'late_command_started'  => 'Finalisation de l\'installation en cours',
-        'ansible_started'       => 'Configuration de la machine en cours',
+        'ansible_started'       => Term::format('Configuration {du} en cours'),
         'disktest_started'      => 'Tests des disques en cours',
         // Codes kind='done' : affichés en "en cours" uniquement quand ils sont
         // le prochain attendu (pas encore reçu).
@@ -510,7 +510,7 @@ if (isset($pollInterval) && $pollInterval !== null) {
                 $label = match ($code) {
                     'wipe_disks_done'  => 'Effacement des disques en échec',
                     'disktest_finished' => 'Tests des disques en échec',
-                    'ansible_finished' => 'Configuration de la machine en échec',
+                    'ansible_finished' => Term::format('Configuration {du} en échec'),
                     default            => $label,
                 };
                 $stateClass   = 'checkpoint--error';
@@ -625,12 +625,12 @@ if (isset($pollInterval) && $pollInterval !== null) {
   <?php if ($actionStatus === 'running' || $actionStatus === 'pending'): ?>
     <div class="checklist-force-complete">
       <small class="muted" style="font-size:0.78rem;line-height:1.5;flex:1;min-width:14rem;">
-        À utiliser uniquement si l'opération est physiquement terminée côté machine
-        mais qu'un checkpoint manqué bloque la fiche en « En cours ». L’action passera en « Clôturée manuellement ». Aucun processus distant ne sera arrêté. Si nécessaire, corrigez ensuite l’état de la machine dans les paramètres Expert.
+        <?= View::e(Term::format('À utiliser uniquement si l’opération est physiquement terminée côté {one}')) ?>
+        mais qu'un checkpoint manqué bloque la fiche en « En cours ». L’action passera en « Clôturée manuellement ». Aucun processus distant ne sera arrêté. Si nécessaire, <?= View::e(Term::format('corrigez ensuite l’état {du} dans les paramètres Expert.')) ?>
       </small>
       <form method="post"
             action="/actions/<?= $actionId ?>/force-complete"
-            onsubmit="return confirm('Clôturer administrativement ce suivi ?\n\nAucun processus distant ne sera arrêté. Vérifiez l’état physique de la machine avant de préparer une nouvelle opération.');"
+            onsubmit="return confirm(<?= View::e(json_encode(Term::format('Clôturer administrativement ce suivi ? Aucun processus distant ne sera arrêté. Vérifiez l’état physique {du} avant de préparer une nouvelle opération.'))) ?>);"
             style="margin:0;flex-shrink:0;">
         <button type="submit" class="btn btn-secondary" style="margin:0;font-size:0.85rem;">
           <?= View::icon('check') ?> Clôturer le suivi

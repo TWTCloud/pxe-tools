@@ -9,7 +9,8 @@ final class Navigation
     public static function sections(): array
     {
         return [
-            'machines' => ['label' => 'Machines', 'icon' => 'hard-drive', 'href' => '/machines', 'children' => []],
+            'overview' => ['label' => 'Vue d’ensemble', 'icon' => 'home', 'href' => '/', 'children' => []],
+            'machines' => ['label' => DeviceTerminology::format('{Many}'), 'icon' => 'hard-drive', 'href' => '/machines', 'children' => []],
             'presets' => ['label' => 'Modèles', 'icon' => 'package', 'href' => '/presets', 'children' => []],
             'activity' => ['label' => 'Activité', 'icon' => 'zap', 'href' => '/activity', 'children' => [
                 ['/activity', 'Toute l’activité'], ['/installations', 'Installations'],
@@ -24,6 +25,7 @@ final class Navigation
 
     public static function section(string $path): string
     {
+        if ($path === '/') return 'overview';
         if (preg_match('~^/(?:activity|installations|tasks|jobs|wipes|disktests|init)(?:/|$)~', $path)) return 'activity';
         if (preg_match('~^/settings(?:/|$)~', $path)) return 'settings';
         if (preg_match('~^/presets(?:/|$)~', $path)) return 'presets';
@@ -32,7 +34,8 @@ final class Navigation
 
     public static function current(string $path, string $href): bool
     {
-        if ($href === '/machines') return $path === '/' || $path === $href;
+        if ($href === '/') return $path === '/';
+        if ($href === '/machines') return $path === $href;
         if (in_array($href, ['/settings', '/activity'], true)) return $path === $href;
         return $path === $href || str_starts_with($path, $href . '/');
     }
@@ -46,14 +49,14 @@ final class Navigation
 
         if (preg_match('~^/machines/(\d+)(/install)?$~', $path, $matches)) {
             $machine = $data['machine'] ?? [];
-            $label = trim((string)($machine['hostname'] ?? '')) ?: (string)($machine['mac'] ?? 'Machine #' . $matches[1]);
+            $label = trim((string)($machine['hostname'] ?? '')) ?: (string)($machine['mac'] ?? DeviceTerminology::format('{One}') . ' #' . $matches[1]);
             $crumbs[] = ['label' => $label, 'href' => '/machines/' . $matches[1]];
             if (isset($matches[2])) $crumbs[] = ['label' => 'Préparer l’installation', 'href' => $path];
         } elseif (preg_match('~^/presets/(\d+)$~', $path)) {
             $crumbs[] = ['label' => (string)($data['preset']['name'] ?? 'Éditer le modèle'), 'href' => $path];
         } else {
             $labels = [
-                '/machines/new' => 'Ajouter une machine', '/presets/new' => 'Nouveau modèle',
+                '/machines/new' => DeviceTerminology::format('Ajouter {un}'), '/presets/new' => 'Nouveau modèle',
                 '/presets/import' => 'Importer', '/presets/duplicate' => 'Dupliquer',
                 '/installations' => 'Installations', '/settings/images' => 'Images système',
                 '/settings/images/add' => 'Ajouter une image', '/settings/ansible' => 'Ansible',

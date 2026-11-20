@@ -1,5 +1,5 @@
 <?php
-use Admin\View;
+use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 
 $step      = $step ?? 4;
 $stepLabel = 'Systèmes';
@@ -19,7 +19,7 @@ $contentRender = function () use ($step, $stepLabel, $distros, $grouped, $counts
   <p class="muted">
     Choisissez les versions à préparer. <strong>Debian (version actuelle)</strong> est
     toujours installée en base — elle sert au mode découverte et au dépannage de vos
-    machines, quel que soit votre choix ci-dessous. Les téléchargements démarrent en
+    <?= View::e(Term::format('{many}, quel que soit votre choix ci-dessous.')) ?> Les téléchargements démarrent en
     tâche de fond ; l'outil reste utilisable pendant ce temps. Vous pourrez affiner ou
     compléter cette sélection plus tard dans <strong>Paramètres › Systèmes</strong>.
   </p>

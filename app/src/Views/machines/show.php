@@ -18,6 +18,7 @@
  */
 use Admin\View;
 use Admin\Models\Machine;
+use Admin\Ui\DeviceTerminology as Term;
 use Admin\Models\DiskTest;
 use Admin\Models\TaskPhase;
 use Admin\Util\MachineOperation;
@@ -29,6 +30,7 @@ $operationSummary = \Admin\Util\MachineOperationSummary::forMachine($machine);
 $operationRule = $operationSummary['state']['rules']['operation'];
 $powerRule = $operationSummary['state']['rules']['power'];
 $ansibleRule = ['ok'=>$operationSummary['state']['rules']['ansible']['allowed'],'message'=>$operationSummary['state']['rules']['ansible']['reason']];
+if ($ansibleRule['message'] === 'Aucun rôle Ansible configuré pour cette machine.') $ansibleRule['message'] = Term::format('Aucun rôle Ansible configuré pour {ce}.');
 $headerState = View::stateLabel($machine);
 $isBusy = !$operationRule['allowed'];
 $deleteConfirmation = 'Supprimer la fiche de ' . Machine::displayLabel($machine) . ' (' . $machine['mac'] . ') ? Statut actuel : ' . $machine['status'] . '. Les inventaires, configurations enregistrées et historiques liés seront supprimés. Cette suppression n’efface pas les disques et ne garantit pas l’arrêt des processus distants.';
@@ -96,7 +98,7 @@ $tabHidden = static fn(string $t): string => $t === $defaultTab ? '' : ' hidden'
 
 ?>
 
-<nav class="tabs" aria-label="Sections de la machine">
+<nav class="tabs" aria-label="<?= View::e(Term::format('Sections {du}')) ?>">
   <a href="#overview" class="tab<?= $tabActive('overview') ?>" data-tab="overview">Aperçu</a>
   <a href="#storage"  class="tab<?= $tabActive('storage') ?>" data-tab="storage">Stockage</a>
   <a href="#install"  class="tab<?= $tabActive('install') ?>" data-tab="install"><?= $installVerb ?></a>
@@ -241,7 +243,7 @@ if (!empty($hwInfo['boot_mode'])) {
 
 <section class="card mb-4" aria-label="Observation et configuration">
   <div class="grid">
-    <div><strong>Dernière observation</strong><p><?= View::e($machine['last_seen_at'] ?? 'Aucune observation') ?><?= !empty($machine['last_seen_at']) ? ' UTC' : '' ?></p><small>Adresse observée : <?= View::e($inventory['discovery_ip'] ?? 'non remontée') ?>. L’état de suivi ne prouve pas que la machine est joignable.</small></div>
+    <div><strong>Dernière observation</strong><p><?= View::e($machine['last_seen_at'] ?? 'Aucune observation') ?><?= !empty($machine['last_seen_at']) ? ' UTC' : '' ?></p><small>Adresse observée : <?= View::e($inventory['discovery_ip'] ?? 'non remontée') ?>. <?= View::e(Term::format('L’état de suivi ne prouve pas que {le} est joignable.')) ?></small></div>
     <div><strong>Système observé</strong><p>Non remonté par l’inventaire PXE</p><small>La configuration prévue et les indices de démarrage ne constituent pas une détection de l’OS.</small></div>
     <div><strong>Dernière installation</strong><p><?php if ($latestInstall): ?><a href="/installations/<?= (int)$latestInstall['id'] ?>"><?= View::e(View::statusLabel($latestInstall['install_status'])) ?></a> · <?= View::e($latestInstall['ended_at'] ?? $latestInstall['started_at'] ?? '') ?><?php else: ?>Aucune installation enregistrée<?php endif; ?></p></div>
   </div>
@@ -296,7 +298,7 @@ if (!empty($hwInfo['boot_mode'])) {
 
 <!-- Informations de la machine : 2 colonnes (Identifiants à gauche · Notes à droite) -->
 <article class="panel">
-  <header><h3>Informations de la machine</h3></header>
+  <header><h3><?= View::e(Term::format('Informations {du}')) ?></h3></header>
   <div class="machine-info-grid">
 
     <!-- Colonne gauche : identifiants de connexion (lecture seule) -->
@@ -325,7 +327,7 @@ if (!empty($hwInfo['boot_mode'])) {
     <!-- Colonne droite : Notes (textarea éditable, dédiée — POST partial sur /machines/{id}) -->
     <section>
       <h4 style="margin:0 0 .35rem 0; font-size:.95rem; font-weight:600;">Notes</h4>
-      <p class="muted" style="margin-top:0;">Annotations libres sur cette machine (localisation, propriétaire, contexte…). Modifications sauvegardées indépendamment des autres attributs.</p>
+      <p class="muted" style="margin-top:0;"><?= View::e(Term::format('Annotations libres sur {ce} (localisation, propriétaire, contexte…).')) ?> Modifications sauvegardées indépendamment des autres attributs.</p>
       <?php $notesValue = (string)($machine['notes'] ?? ''); ?>
       <form method="post" action="/machines/<?= (int)$machine['id'] ?>" style="margin:0;">
         <input type="hidden" name="_method" value="PUT">
@@ -418,7 +420,7 @@ if (!empty($hwInfo['boot_mode'])) {
 </div>
 <?php else: ?>
 <article>
-  <p class="muted">Aucun inventaire matériel disponible pour le moment. Démarrez la machine en PXE pour qu'elle effectue sa phase d'inventaire automatique.</p>
+  <p class="muted"><?= View::e(Term::format('Aucun inventaire matériel disponible pour le moment. Démarrez {le} en PXE pour lancer l’inventaire automatique.')) ?></p>
 </article>
 <?php endif; ?>
 
@@ -581,7 +583,7 @@ $usbList = $usbCollected ? ($inventory['usb_devices'] ?? []) : [];
   <details<?= !empty($usbList) && count($usbList) <= 4 ? ' open' : '' ?>>
     <summary><strong>Périphériques USB</strong> <span class="muted text-small">· <?= $usbCollected ? count($usbList) : 'non collecté' ?></span></summary>
     <?php if (!$usbCollected): ?>
-      <p class="muted">L'inventaire de cette machine date d'avant la collecte USB. Cliquez sur <strong>Re-collecter l'inventaire</strong> dans l'onglet Aperçu pour rafraîchir.</p>
+      <p class="muted"><?= View::e(Term::format('L’inventaire {du} date d’avant la collecte USB.')) ?> Cliquez sur <strong>Re-collecter l'inventaire</strong> dans l'onglet Aperçu pour rafraîchir.</p>
     <?php elseif (empty($usbList)): ?>
       <p class="muted">Aucun périphérique USB détecté lors du dernier discovery (hors hubs root).</p>
     <?php else: ?>
@@ -848,8 +850,7 @@ $renderDiskTestBadge = static function (?array $r) {
       </div>
     </div>
     <small class="form-hint" style="display:block; margin-top:0.5rem;">
-      Sélectionnez au moins un disque, puis choisissez le mode d'effacement. La machine sera
-      redémarrera ou sera réveillée, puis démarrera en PXE pour exécuter l'opération.
+      <?= View::e(Term::format('Sélectionnez au moins un disque, puis choisissez le mode d’effacement. {One} : redémarrage ou réveil, puis démarrage PXE pour exécuter l’opération.')) ?>
     </small>
   </form>
   <script>
@@ -888,7 +889,7 @@ $renderDiskTestBadge = static function (?array $r) {
       && in_array((string)($latestTest['job_status'] ?? ''), ['pending', 'running'], true); ?>
   <?php if ($dtActive): ?>
   <p class="muted text-small" style="margin:0 0 1rem 0;">
-    Un test est en cours sur cette machine — suivi en direct ci-dessous
+    <?= View::e(Term::format('Un test est en cours sur {ce} — suivi en direct ci-dessous')) ?>
     (<a href="<?= !empty($latestTest['action_id']) ? '/tasks/' . (int)$latestTest['action_id'] : '/disktests/' . (int)$latestTest['id'] ?>">page détaillée avec journal et contrôles</a>).
   </p>
   <div hx-get="/disktests/<?= (int)$latestTest['id'] ?>/progress"
@@ -973,7 +974,7 @@ $renderDiskTestBadge = static function (?array $r) {
           <div style="display:flex; flex-direction:column; gap:.4rem;">
             <label class="flex items-center gap-2 cursor-pointer">
               <input type="radio" name="post_action" value="" checked style="margin:0;">
-              <span>Auto <span class="muted text-small">(machine en attente : retour à l'écran d'attente · sinon redémarrer si OS installé, ou éteindre)</span></span>
+              <span>Auto <span class="muted text-small"><?= View::e(Term::format('({one} en attente : retour à l’écran d’attente · sinon redémarrer si OS installé, ou éteindre)')) ?></span></span>
             </label>
             <label class="flex items-center gap-2 cursor-pointer">
               <input type="radio" name="post_action" value="reboot" style="margin:0;">
@@ -1056,7 +1057,7 @@ $renderDiskTestBadge = static function (?array $r) {
 
 <?php else: ?>
 <article>
-  <p class="muted">Aucun inventaire disque disponible. Démarrez d'abord la machine en PXE pour effectuer la phase d'inventaire.</p>
+  <p class="muted"><?= View::e(Term::format('Aucun inventaire disque disponible. Démarrez d’abord {le} en PXE pour effectuer l’inventaire.')) ?></p>
 </article>
 <?php endif; ?>
 
@@ -1220,7 +1221,7 @@ $tasks = \Admin\Models\MachineTask::recentByMachine((int)$machine['id'], 30);
 <!-- ============================================================ -->
 <div id="settings" tabindex="-1" data-tab-content="settings"<?= $tabHidden('settings') ?>>
 <div class="card mb-6">
-  <h3 style="margin:0 0 1rem 0;">Démarrage de la machine</h3>
+  <h3 style="margin:0 0 1rem 0;"><?= View::e(Term::format('Démarrage {du}')) ?></h3>
   <form id="machine-attrs-form" method="post" action="/machines/<?= (int)$machine['id'] ?>">
     <input type="hidden" name="_method" value="PUT">
   </form>
@@ -1295,7 +1296,7 @@ $_redeployDisabled = !$ansibleRule['ok'];
     </form>
   </div>
 
-  <p class="text-sm">Rôle : <code><?= View::e($_ansibleRole ?: 'aucun') ?></code> · cible : <?= View::e(Machine::displayLabel($machine)) ?>. Actualiser le dépôt concerne toutes les machines ; appliquer concerne uniquement cette cible.</p>
+  <p class="text-sm">Rôle : <code><?= View::e($_ansibleRole ?: 'aucun') ?></code> · cible : <?= View::e(Machine::displayLabel($machine)) ?>. <?= View::e(Term::format('Actualiser le dépôt concerne l’ensemble des {many} ; appliquer concerne uniquement cette cible.')) ?></p>
   <form method="post" action="/machines/<?= (int)$machine['id'] ?>/auto-deploy" style="margin:0;">
     <label class="toggle-switch">
       <input type="checkbox" name="auto_deploy" value="1"
@@ -1308,7 +1309,7 @@ $_redeployDisabled = !$ansibleRule['ok'];
 
   <small class="form-hint" style="display:block; margin-top:.5rem;">
     Lorsque vous activez cette option, chaque push sur le dépôt Ansible qui modifie
-    un fichier concernant cette machine déclenche un redéploiement automatique
+    <?= View::e(Term::format('un fichier concernant {ce} déclenche un redéploiement automatique')) ?>
     (<code>git pull</code> + <code>ansible-playbook</code>). Nécessite que le
     webhook GitHub soit configuré et activé dans
     <a href="/settings/ansible">Paramètres → Ansible</a>.
@@ -1316,9 +1317,9 @@ $_redeployDisabled = !$ansibleRule['ok'];
 
   <div class="ansible-actions" style="margin-top:1rem; display:flex; justify-content:flex-end;">
     <form method="post" action="/machines/<?= (int)$machine['id'] ?>/ansible/redeploy" data-operation-kind="ansible" style="margin:0;"
-          onsubmit="return confirm('Lancer un redéploiement Ansible sur cette machine maintenant ?');">
+          onsubmit="return confirm(<?= View::e(json_encode(Term::format('Lancer un redéploiement Ansible sur {ce} maintenant ?'))) ?>);">
       <button type="submit" class="btn btn-primary" <?= $_redeployDisabled ? 'disabled data-operation-locked="1"' : '' ?> title="<?= View::e($ansibleRule['message']) ?>">
-        Appliquer à cette machine
+        <?= View::e(Term::format('Appliquer à {ce}')) ?>
       </button>
     </form>
   </div>
@@ -1339,7 +1340,7 @@ $_redeployDisabled = !$ansibleRule['ok'];
       <small class="form-hint">Le prochain démarrage PXE proposera le menu normal.</small>
     <?php else: ?>
       <form method="post" action="/machines/<?= (int)$machine['id'] ?>/rescue" data-operation-kind="operation" class="mt-3"
-            onsubmit="return confirm('Démarrer la machine en mode rescue (Debian d-i en récupération) ?');">
+            onsubmit="return confirm(<?= View::e(json_encode(Term::format('Démarrer {le} en mode rescue (Debian d-i en récupération) ?'))) ?>);">
         <button type="submit" class="btn btn-primary" <?= $operationRule['allowed'] ? '' : 'disabled data-operation-locked="1"' ?> title="<?= View::e($operationRule['reason']) ?>">Démarrer en mode récupération</button>
       </form>
     <?php endif; ?>
@@ -1352,11 +1353,11 @@ $_redeployDisabled = !$ansibleRule['ok'];
   ?>
   <article class="panel">
     <header><h3>Inventaire matériel</h3></header>
-    <p class="muted">Re-collecte l'inventaire (disques + SMART, NICs, périphériques USB). La machine reboote en mode discovery puis revient à l'état précédent.</p>
+    <p class="muted"><?= View::e(Term::format('Re-collecte l’inventaire (disques + SMART, NICs, périphériques USB). {One} : redémarrage en mode discovery, puis retour à l’état précédent.')) ?></p>
     <div class="machine-section-action">
       <small class="form-hint" data-operation-reason="operation" <?= $rediscoverDisabled ? '' : 'hidden' ?>><?= View::e($operationRule['reason']) ?></small>
       <form method="post" action="/machines/<?= (int)$machine['id'] ?>/rediscover" data-operation-kind="operation"
-            onsubmit="return confirm('Relancer la collecte d\'inventaire ? La machine va rebooter en mode discovery.');">
+            onsubmit="return confirm(<?= View::e(json_encode(Term::format('Relancer la collecte d’inventaire ? {One} : redémarrage en mode discovery.'))) ?>);">
         <button type="submit" class="btn btn-primary"<?= $rediscoverDisabled ? ' disabled data-operation-locked="1"' : '' ?>>Re-collecter l'inventaire</button>
       </form>
     </div>
@@ -1367,7 +1368,7 @@ $_redeployDisabled = !$ansibleRule['ok'];
 </details>
 <details class="card mb-6" id="machine-expert">
   <summary>Expert — corriger le suivi et supprimer la fiche</summary>
-  <p>Ces actions modifient le suivi de l’appliance. Elles ne garantissent pas l’arrêt d’une installation, d’un effacement ou d’un processus distant. Vérifiez l’état physique de la machine avant de relancer une opération.</p>
+  <p>Ces actions modifient le suivi de l’appliance. Elles ne garantissent pas l’arrêt d’une installation, d’un effacement ou d’un processus distant. <?= View::e(Term::format('Vérifiez l’état physique {du} avant de relancer une opération.')) ?></p>
   <form method="post" action="/machines/<?= (int)$machine['id'] ?>/status" onsubmit="return confirm('Corriger le suivi et clôturer ses actions et sous-jobs actifs ? Aucun arrêt physique n’est garanti.');">
     <label for="machine-status">Corriger l’état de suivi</label>
     <select id="machine-status" name="status" class="select">

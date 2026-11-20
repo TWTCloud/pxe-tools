@@ -1,3 +1,4 @@
+<?php use Admin\Ui\DeviceTerminology as Term; ?>
 <?php
 /**
  * Suivi temps réel des tests de disque : une carte par (disque, mode) planifié,
@@ -76,7 +77,7 @@ $ageSeconds = static function (?string $iso): ?int {
           temps restant (phase en cours) : <?= View::e($fmtEta($r['eta_s'])) ?>
         <?php endif; ?>
         <?php if ($stale): ?>
-          <strong style="color: var(--color-danger);">· la machine ne répond plus depuis <?= (int)$age ?> s — vérifiez son écran</strong>
+          <strong style="color: var(--color-danger);"><?= View::e(Term::format('· {le} ne répond plus depuis')) ?> <?= (int)$age ?> s — vérifiez son écran</strong>
         <?php elseif ($r['state'] === 'running' && $age !== null): ?>
           · mis à jour il y a <?= (int)$age ?> s
         <?php endif; ?>

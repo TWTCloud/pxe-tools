@@ -15,4 +15,14 @@ fi
 tag="apt-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 config=packaging/cloudflare/wrangler.jsonc
 "$wrangler" versions upload --config "$config" --assets "$assets" --tag "$tag"
-"$wrangler" versions deploy --config "$config" --version-tag "$tag@100%" --yes
+# A version uploaded a moment ago can be briefly unknown to the deploy API
+# (code 100146). Retry only that error, never any other failure.
+for attempt in 1 2 3 4 5; do
+    if output=$("$wrangler" versions deploy --config "$config" --version-tag "$tag@100%" --yes 2>&1); then
+        printf '%s\n' "$output"
+        exit 0
+    fi
+    printf '%s\n' "$output" >&2
+    [[ "$output" == *"100146"* && "$attempt" -lt 5 ]] || exit 1
+    sleep $((attempt * ${DEPLOY_RETRY_SECONDS:-5}))
+done

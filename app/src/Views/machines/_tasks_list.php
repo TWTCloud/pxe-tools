@@ -1,3 +1,4 @@
+<?php use Admin\Ui\DeviceTerminology as Term; ?>
 <?php
 use Admin\View;
 use Admin\Support\Format;
@@ -54,7 +55,7 @@ $relativeTime = function (?string $iso): string {
 ?>
 
 <?php if (empty($tasks)): ?>
-  <p class="muted">Aucune tâche enregistrée pour cette machine.</p>
+  <p class="muted"><?= View::e(Term::format('Aucune tâche enregistrée pour {ce}.')) ?></p>
 <?php else: ?>
   <table>
     <thead>
@@ -104,7 +105,7 @@ $relativeTime = function (?string $iso): string {
                     onsubmit="return confirm('Clôturer le suivi de cette action et de ses sous-jobs actifs ? Cette correction administrative ne garantit pas l’arrêt des processus distants.');"
                     style="margin:0;display:inline-block;">
                 <button type="submit" class="btn btn-secondary" style="font-size:0.72rem;padding:0.25rem 0.5rem;margin:0;"
-                        title="À utiliser si l'opération est physiquement terminée côté machine mais qu'un checkpoint manqué bloque la fiche.">
+                        title="<?= View::e(Term::format('À utiliser si l’opération est physiquement terminée côté {one} mais qu’un checkpoint manqué bloque la fiche.')) ?>">
                   Clôturer le suivi
                 </button>
               </form>

@@ -2,9 +2,9 @@
   'use strict';
   const root = document.documentElement;
   const system = matchMedia('(prefers-color-scheme: dark)');
-  let mode = ['light', 'dark', 'system'].includes(root.dataset.themeMode) ? root.dataset.themeMode : 'system';
+  let mode = ['light', 'dark', 'system'].includes(root.dataset.themeMode) ? root.dataset.themeMode : 'light';
   function apply(next, persist = true) {
-    mode = ['light', 'dark', 'system'].includes(next) ? next : 'system';
+    mode = ['light', 'dark', 'system'].includes(next) ? next : 'light';
     root.dataset.themeMode = mode;
     root.dataset.theme = mode === 'system' ? (system.matches ? 'dark' : 'light') : mode;
     document.querySelectorAll('[data-theme-preference]').forEach(select => { select.value = mode; });

@@ -15,13 +15,13 @@ $navigation = Navigation::sections();
 $pageContext = Navigation::context($path, $title ?? 'PXE Tools', $data ?? []);
 $activeSection = $pageContext['section'];
 ?><!doctype html>
-<html lang="fr">
+<html lang="fr" data-device-one="<?= View::e(\Admin\Ui\DeviceTerminology::format('{one}')) ?>" data-device-many="<?= View::e(\Admin\Ui\DeviceTerminology::format('{many}')) ?>" data-device-du="<?= View::e(\Admin\Ui\DeviceTerminology::format('{du}')) ?>" data-device-ce="<?= View::e(\Admin\Ui\DeviceTerminology::format('{ce}')) ?>" data-device-one-title="<?= View::e(\Admin\Ui\DeviceTerminology::format('{One}')) ?>" data-device-installed-one="<?= View::e(\Admin\Ui\DeviceTerminology::format('{installe}')) ?>" data-device-installed-many="<?= View::e(\Admin\Ui\DeviceTerminology::format('{installees}')) ?>">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title><?= View::e($title ?? 'PXE Tools') ?></title>
-<!-- Anti-FOUC : pose data-theme AVANT le CSS (choix stocké, sinon préférence système). -->
-<script>(function(){var r=document.documentElement,t='system';try{t=localStorage.getItem('theme')||'system';}catch(e){}if(t!=='light'&&t!=='dark')t='system';r.dataset.themeMode=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'):t;try{r.dataset.sidebarCollapsed=localStorage.getItem('pxe.sidebar.collapsed')==='true'?'true':'false';}catch(e){}})();</script>
+<!-- Applique le choix d'apparence avant la feuille de style. -->
+<script src="/theme-init.js?v=<?= @filemtime(__DIR__ . '/../../public/theme-init.js') ?: time() ?>"></script>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -61,7 +61,7 @@ $flashesHtml = static function() use ($flashes) {
   <div class="app-shell" id="app-shell" data-sidebar-collapsed="false" data-sidebar-hover="false">
   <aside class="app-sidebar" id="app-sidebar" aria-label="Menu principal">
     <div class="sidebar-header">
-      <a href="/machines" class="sidebar-brand" aria-label="PXE Tools · Machines"><svg class="sidebar-logo" viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="22" height="6" rx="2"/><rect x="3" y="11" width="22" height="6" rx="2"/><rect x="3" y="19" width="22" height="6" rx="2"/></svg><span class="sidebar-label sidebar-brand-full">PXE Tools <?= View::appVersionBadge() ?></span></a>
+      <a href="/" class="sidebar-brand" aria-label="PXE Tools · Vue d’ensemble"><svg class="sidebar-logo" viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="22" height="6" rx="2"/><rect x="3" y="11" width="22" height="6" rx="2"/><rect x="3" y="19" width="22" height="6" rx="2"/></svg><span class="sidebar-label sidebar-brand-full">PXE Tools <?= View::appVersionBadge() ?></span></a>
       <button class="sidebar-close btn btn-ghost" type="button" data-sidebar-close aria-label="Fermer le menu"><?= View::icon('x') ?></button>
     </div>
     <button type="button" class="sidebar-search sidebar-item" data-search-open aria-label="Recherche rapide"><?= View::icon('search') ?><span class="sidebar-label">Recherche rapide</span><kbd class="sidebar-label">Ctrl K</kbd></button>
