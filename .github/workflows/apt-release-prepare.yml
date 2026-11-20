@@ -21,7 +21,7 @@ concurrency:
 jobs:
   prepare:
     if: github.ref == 'refs/heads/main' && github.ref_protected
-    environment: production
+    environment: prod
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
@@ -177,7 +177,7 @@ jobs:
       actions: read
     needs: prepare
     if: needs.prepare.outputs.ready == 'true'
-    environment: production
+    environment: prod
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:

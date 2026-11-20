@@ -44,7 +44,7 @@ jobs:
   verify-production-signature:
     needs: verify
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected
-    environment: production
+    environment: prod
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

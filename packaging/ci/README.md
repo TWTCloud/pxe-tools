@@ -43,7 +43,7 @@ empreintes avant publication. Les deux grosses archives dépassent la limite de
 Worker. Les notices applicatives pointent directement vers cette release.
 
 Avant la première publication, créer une release GitHub publique persistante
-`apt-snapshots` et configurer dans l'environnement GitHub `production` les
+`apt-snapshots` et configurer dans l'environnement GitHub `prod` les
 secrets `APT_SIGNING_KEY`, `APT_SIGNING_PASSPHRASE`, `PACKAGES_PXETOOLS_COM` et
 la variable `CLOUDFLARE_ACCOUNT_ID`. Le jeton Cloudflare doit être limité au
 Worker de distribution ; l'association du domaine est gérée séparément. La première exécution manuelle
