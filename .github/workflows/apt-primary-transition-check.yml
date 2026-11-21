@@ -5,6 +5,10 @@ on: workflow_dispatch
 permissions:
   contents: read
 
+concurrency:
+  group: pxe-apt-publication
+  cancel-in-progress: false
+
 jobs:
   verify-transition:
     if: github.ref == 'refs/heads/main' && github.ref_protected
@@ -91,3 +95,10 @@ jobs:
           (cd "$client/download" && apt-get "${apt_options[@]}" download 'pxe-tools=0.0.1~primary-fixture1')
           cmp "$RUNNER_TEMP/transition-fixture.deb" "$client/download/pxe-tools_0.0.1~primary-fixture1_amd64.deb"
           echo 'The new key verified the index and the same synthetic package was downloaded.'
+      - name: Verify the dedicated prod Worker token without deployment
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.PACKAGES_PXETOOLS_COM }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          python3 packaging/ci/cloudflare-permissions-check.py
+          python3 packaging/ci/cloudflare-upload-preflight.py
