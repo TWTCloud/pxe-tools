@@ -117,4 +117,20 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           python3 packaging/ci/cloudflare-permissions-check.py
+          python3 - <<'PYTHON'
+          import importlib.util
+          import os
+
+          spec = importlib.util.spec_from_file_location(
+              "worker_preflight", "packaging/ci/cloudflare-upload-preflight.py")
+          preflight = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(preflight)
+          account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
+          token = os.environ["CLOUDFLARE_API_TOKEN"]
+          preflight.call(account, token, f"services/{preflight.WORKER}")
+          print("Wrangler Worker service lookup confirmed.")
+          deployed = preflight.observe(account, token)["deployment"]
+          for version in deployed["versions"]:
+              print(f"Active Worker version: {version['version_id']} ({version['percentage']}%)")
+          PYTHON
           python3 packaging/ci/cloudflare-upload-preflight.py
