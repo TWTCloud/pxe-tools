@@ -94,6 +94,32 @@ python3 "$helper" "$fixture/package-next.deb" "$fixture/next" \
 cmp "$old_index" "$fixture/next/dists/stable/main/binary-amd64/by-hash/SHA256/$old_hash"
 test "$(find "$fixture/next/pool" -name '*.deb' | wc -l | tr -d ' ')" = 2
 gpg --homedir "$gnupg" --batch --export "$primary" > "$fixture/public.gpg"
+# A new CI secret can authenticate and retain an old snapshot with the
+# separately pinned public keyring, without importing the old signing secret.
+gpg --homedir "$gnupg" --batch --pinentry-mode loopback --passphrase-file "$fixture/passphrase" \
+    --quick-generate-key 'Next CI Fixture <next-fixture@example.invalid>' ed25519 cert 1d >/dev/null 2>&1
+next_primary=$(gpg --homedir "$gnupg" --batch --with-colons --list-keys next-fixture@example.invalid | awk -F: '$1=="fpr" && !found {print $10;found=1}')
+gpg --homedir "$gnupg" --batch --pinentry-mode loopback --passphrase-file "$fixture/passphrase" \
+    --quick-add-key "$next_primary" ed25519 sign 1d >/dev/null 2>&1
+next_sub=$(gpg --homedir "$gnupg" --batch --with-colons --list-keys "$next_primary" | awk -F: '$1=="sub" {subkey=1;next} subkey && $1=="fpr" {print $10}')
+gpg --homedir "$gnupg" --batch --armor --pinentry-mode loopback --passphrase-file "$fixture/passphrase" \
+    --export-secret-subkeys "$next_sub!" > "$fixture/transition-sub.asc"
+transition=(--primary-fingerprint "$next_primary" --signing-fingerprint "$next_sub"
+    --previous "$fixture/good" --previous-keyring "$fixture/public.gpg"
+    --previous-primary-fingerprint "$primary" --previous-signing-fingerprint "$sub" --valid-days 1)
+APT_SIGNING_KEY="$(cat "$fixture/transition-sub.asc")" python3 "$helper" \
+    "$fixture/package-next.deb" "$fixture/transition" "${transition[@]}" --public-key-output "$fixture/transition-public.gpg"
+cmp "$old_index" "$fixture/transition/dists/stable/main/binary-amd64/by-hash/SHA256/$old_hash"
+test "$(find "$fixture/transition/pool" -name '*.deb' | wc -l | tr -d ' ')" = 2
+gpgv --keyring "$fixture/transition-public.gpg" "$fixture/transition/dists/stable/InRelease"
+for option in --previous-primary-fingerprint --previous-signing-fingerprint; do
+    if APT_SIGNING_KEY="$(cat "$fixture/transition-sub.asc")" python3 "$helper" \
+        "$fixture/package-next.deb" "$fixture/invalid-transition" "${transition[@]}" "$option" "$next_primary" \
+        > "$fixture/invalid-transition.log" 2>&1; then
+        echo "Unexpected acceptance with incorrect $option" >&2; exit 1
+    fi
+    test ! -e "$fixture/invalid-transition"
+done
 python3 "$root/tests/unit/test_openpgp_fixture_comparison.py"
 if ! python3 "$root/tests/support/compare_openpgp_fixture.py" "$fixture/public.gpg" "$fixture/exported-public.gpg"; then
     # Both files contain public fixture material only. Capture packet

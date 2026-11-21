@@ -1,0 +1,93 @@
+name: Check APT primary transition without publishing
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  verify-transition:
+    if: github.ref == 'refs/heads/main' && github.ref_protected
+    environment: prod
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install verification tools
+        run: sudo apt-get update && sudo apt-get install -y apt-utils dpkg-dev gnupg gpgv python3
+      - name: Recover and verify the current snapshot with the old public key
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 packaging/ci/worker-snapshot.py "$RUNNER_TEMP/apt-previous"
+      - name: Build a synthetic package
+        run: |
+          mkdir -p "$RUNNER_TEMP/transition-fixture/DEBIAN"
+          printf '%s\n' \
+            'Package: pxe-tools' \
+            'Version: 0.0.1~primary-fixture1' \
+            'Architecture: amd64' \
+            'Maintainer: Fixture <fixture@example.invalid>' \
+            'Description: Synthetic package for isolated APT primary transition verification' \
+            > "$RUNNER_TEMP/transition-fixture/DEBIAN/control"
+          dpkg-deb --build --root-owner-group "$RUNNER_TEMP/transition-fixture" "$RUNNER_TEMP/transition-fixture.deb"
+      - name: Sign a temporary index with the new CI subkey
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+          APT_SIGNING_PASSPHRASE: ${{ secrets.APT_SIGNING_PASSPHRASE }}
+        run: |
+          python3 packaging/native/ci-sign-apt-candidate.py \
+            "$RUNNER_TEMP/transition-fixture.deb" "$RUNNER_TEMP/apt-transition" \
+            --valid-days 1 \
+            --previous "$RUNNER_TEMP/apt-previous/snapshot" \
+            --previous-keyring "$PWD/packaging/ci/pxe-tools-public.gpg" \
+            --previous-primary-fingerprint CD8B4493876B4FBD1009FE2DB195E5DE026807EC \
+            --previous-signing-fingerprint 76CA2883C9DACEB52D9E806A1F2D96C9062271AB \
+            --primary-fingerprint 17410C3B457E574257281551CFC35C536A61C3CF \
+            --signing-fingerprint A807812C7D83085301C630CD1DC963B9AF9C6908
+      - name: Verify the new signature and retained files
+        run: |
+          printf '%s\n' '66b4cdc3939f3489217920b78455754727a51c7b7ff5e80d2a8c52e6d5a50ffa  packaging/ci/pxe-tools-next-public.gpg' | sha256sum --check
+          python3 packaging/native/prepare-static-apt.py \
+            "$RUNNER_TEMP/apt-transition" "$RUNNER_TEMP/apt-transition-static" \
+            --keyring "$PWD/packaging/ci/pxe-tools-next-public.gpg" \
+            --primary-fingerprint 17410C3B457E574257281551CFC35C536A61C3CF \
+            --signing-fingerprint A807812C7D83085301C630CD1DC963B9AF9C6908
+          python3 - "$RUNNER_TEMP/apt-previous/snapshot" "$RUNNER_TEMP/apt-transition" <<'PY'
+          from filecmp import cmp
+          from pathlib import Path
+          import sys
+
+          previous, candidate = map(Path, sys.argv[1:])
+          for directory in ('pool', 'dists/stable/main/binary-amd64/by-hash'):
+              files = sorted(path for path in (previous / directory).rglob('*') if path.is_file())
+              if not files:
+                  raise SystemExit(f'No files to retain in {directory}')
+              for path in files:
+                  if not cmp(path, candidate / path.relative_to(previous), shallow=False):
+                      raise SystemExit(f'Retained file differs: {path.relative_to(previous)}')
+              print(f'Verified {len(files)} retained files in {directory}')
+          PY
+      - name: Verify the temporary index with an isolated APT client
+        run: |
+          client="$RUNNER_TEMP/transition-client"
+          mkdir -p "$client/lists/partial" "$client/sources" "$client/download"
+          touch "$client/status"
+          apt_options=(-o "APT::Sandbox::User=$(id -un)" -o "Dir::Etc::sourcelist=$client/source.list"
+                       -o "Dir::Etc::sourceparts=$client/sources" -o "Dir::State::lists=$client/lists"
+                       -o "Dir::State::status=$client/status" -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache=
+                       -o APT::Update::Error-Mode=any -o Acquire::Languages=none)
+          printf 'deb [signed-by=%s] file:%s stable main\n' "$PWD/packaging/ci/pxe-tools-public.gpg" \
+            "$RUNNER_TEMP/apt-transition" > "$client/source.list"
+          if apt-get "${apt_options[@]}" update > "$client/old.log" 2>&1; then
+            echo 'The old key unexpectedly accepted the new index' >&2
+            exit 1
+          fi
+          grep -Ei 'NO_PUBKEY|Missing key' "$client/old.log"
+          printf 'deb [signed-by=%s] file:%s stable main\n' "$PWD/packaging/ci/pxe-tools-next-public.gpg" \
+            "$RUNNER_TEMP/apt-transition" > "$client/source.list"
+          apt-get "${apt_options[@]}" update
+          (cd "$client/download" && apt-get "${apt_options[@]}" download 'pxe-tools=0.0.1~primary-fixture1')
+          cmp "$RUNNER_TEMP/transition-fixture.deb" "$client/download/pxe-tools_0.0.1~primary-fixture1_amd64.deb"
+          echo 'The new key verified the index and the same synthetic package was downloaded.'
