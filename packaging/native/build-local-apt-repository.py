@@ -73,7 +73,10 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
             raise ValueError('transition requires a previous snapshot, public keyring and full signer fingerprints')
     if not 1 <= valid_days <= 31:
         raise ValueError('validity must be between 1 and 31 days')
-    for binary in ('apt-ftparchive', 'dpkg-deb', 'dpkg', 'gpg'):
+    required_tools = ['apt-ftparchive', 'dpkg-deb', 'dpkg', 'gpg']
+    if previous_keyring is not None:
+        required_tools.append('gpgv')
+    for binary in required_tools:
         if not shutil.which(binary):
             raise RuntimeError(f'{binary} is required')
 
