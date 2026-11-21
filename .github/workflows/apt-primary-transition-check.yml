@@ -1,6 +1,12 @@
 name: Check APT primary transition without publishing
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      worker_token_only:
+        description: Check the prod Worker token without recovering or signing an APT snapshot
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -11,7 +17,7 @@ concurrency:
 
 jobs:
   verify-transition:
-    if: github.ref == 'refs/heads/main' && github.ref_protected
+    if: github.ref == 'refs/heads/main' && github.ref_protected && inputs.worker_token_only != true
     environment: prod
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -95,6 +101,16 @@ jobs:
           (cd "$client/download" && apt-get "${apt_options[@]}" download 'pxe-tools=0.0.1~primary-fixture1')
           cmp "$RUNNER_TEMP/transition-fixture.deb" "$client/download/pxe-tools_0.0.1~primary-fixture1_amd64.deb"
           echo 'The new key verified the index and the same synthetic package was downloaded.'
+
+  verify-worker-token:
+    if: github.ref == 'refs/heads/main' && github.ref_protected
+    environment: prod
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - name: Verify the dedicated prod Worker token without deployment
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.PACKAGES_PXETOOLS_COM }}
