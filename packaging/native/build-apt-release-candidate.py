@@ -21,8 +21,9 @@ def main() -> None:
     parser.add_argument('--fingerprint', required=True, help='full fingerprint of the chosen signing key')
     parser.add_argument('--passphrase-file', type=Path, help='private file containing the signing passphrase')
     parser.add_argument('--previous', type=Path, help='previous signed snapshot whose immutable objects must be retained')
-    parser.add_argument('--previous-signing-fingerprint', help='explicit previous signing subkey for an isolated transition')
-    parser.add_argument('--previous-primary-fingerprint', help='pinned primary required for both transition signers')
+    parser.add_argument('--previous-keyring', type=Path, help='public keyring for the previous snapshot')
+    parser.add_argument('--previous-primary-fingerprint', help='pinned primary for the previous snapshot')
+    parser.add_argument('--previous-signing-fingerprint', help='pinned signer for the previous snapshot')
     parser.add_argument('--valid-days', type=int, default=7, help='snapshot validity, 1 to 31 days')
     parser.add_argument('--source-commit')
     parser.add_argument('--build-run-id')
@@ -41,8 +42,9 @@ def main() -> None:
                   source_commit=args.source_commit, build_run_id=args.build_run_id,
                   approved_package_sha256=args.approved_package_sha256,
                   approved_ansible_sha256=args.approved_ansible_sha256,
-                  previous_signing_fingerprint=args.previous_signing_fingerprint,
-                  previous_primary_fingerprint=args.previous_primary_fingerprint)
+                  previous_keyring=args.previous_keyring,
+                  previous_primary_fingerprint=args.previous_primary_fingerprint,
+                  previous_signing_fingerprint=args.previous_signing_fingerprint)
     print('Built locally signed APT release candidate:', args.destination)
 
 

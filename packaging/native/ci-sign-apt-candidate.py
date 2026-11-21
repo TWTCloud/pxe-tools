@@ -34,6 +34,9 @@ def main() -> None:
     parser.add_argument('--previous', type=Path, help='previous signed snapshot to retain')
     parser.add_argument('--transition-previous-signing-fingerprint', help='previous signing subkey for an explicit transition')
     parser.add_argument('--transition-previous-public-key', type=Path, help='public-only previous certificate for the pinned primary')
+    parser.add_argument('--previous-keyring', type=Path, help='public keyring for the previous snapshot')
+    parser.add_argument('--previous-primary-fingerprint', help='pinned primary for the previous snapshot')
+    parser.add_argument('--previous-signing-fingerprint', help='pinned signer for the previous snapshot')
     parser.add_argument('--public-key-output', type=Path, help='new path for the exported public key only')
     parser.add_argument('--source-commit')
     parser.add_argument('--build-run-id')
@@ -50,6 +53,9 @@ def main() -> None:
     old_signing = args.transition_previous_signing_fingerprint
     old_key = args.transition_previous_public_key
     if old_signing is not None or old_key is not None:
+        if any(value is not None for value in (args.previous_keyring, args.previous_primary_fingerprint,
+                                                args.previous_signing_fingerprint)):
+            raise ValueError('the same-primary and external-keyring transition inputs are mutually exclusive')
         if (old_signing is None or old_key is None or args.previous is None
                 or not re.fullmatch(r'(?:[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})', old_signing)
                 or old_signing.upper() in (primary, signing)
@@ -148,6 +154,13 @@ def main() -> None:
             if old_signing is not None:
                 build_args += ['--previous-signing-fingerprint', old_signing,
                                '--previous-primary-fingerprint', primary]
+            else:
+                for option, value in (
+                        ('--previous-keyring', args.previous_keyring),
+                        ('--previous-primary-fingerprint', args.previous_primary_fingerprint),
+                        ('--previous-signing-fingerprint', args.previous_signing_fingerprint)):
+                    if value is not None:
+                        build_args += [option, str(value)]
             if (args.ansible_package is None) != (args.approved_ansible_sha256 is None):
                 raise ValueError('the module and its approved SHA256 must be supplied together')
             if args.ansible_package is not None:

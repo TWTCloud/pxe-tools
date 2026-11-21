@@ -31,9 +31,9 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
           release_candidate: bool = False, passphrase_file: Path | None = None,
           previous: Path | None = None, source_commit: str | None = None,
           build_run_id: str | None = None, approved_package_sha256: str | None = None,
-          approved_ansible_sha256: str | None = None,
-          previous_signing_fingerprint: str | None = None,
-          previous_primary_fingerprint: str | None = None) -> None:
+          approved_ansible_sha256: str | None = None, previous_keyring: Path | None = None,
+          previous_primary_fingerprint: str | None = None,
+          previous_signing_fingerprint: str | None = None) -> None:
     if release_candidate and ((ansible_package is None) != (approved_ansible_sha256 is None)):
         raise ValueError('the production module and its approved SHA256 must be supplied together')
     if approved_ansible_sha256 is not None and (not release_candidate or not re.fullmatch(r'[a-f0-9]{64}', approved_ansible_sha256)):
@@ -63,17 +63,21 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
         raise ValueError('passphrase file must be an absolute regular file')
     if previous is not None and (not previous.is_absolute() or previous.is_symlink() or not previous.is_dir()):
         raise ValueError('previous repository must be an absolute directory')
-    # An explicit transition must authenticate both old and new signers under
-    # the same pinned primary. Ordinary renewals retain the exact-signer rule.
-    transition = (previous_signing_fingerprint, previous_primary_fingerprint)
-    if any(value is not None for value in transition):
-        if (not release_candidate or previous is None or not all(transition)
+    previous_identity = (previous_primary_fingerprint, previous_signing_fingerprint)
+    if previous_keyring is not None or any(value is not None for value in previous_identity):
+        if (not release_candidate or previous is None
                 or not all(re.fullmatch(r'(?:[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})', value or '')
-                           for value in transition)):
-            raise ValueError('transition requires the previous snapshot, old signer and primary fingerprints')
+                           for value in previous_identity)):
+            raise ValueError('transition requires a previous snapshot and full signer fingerprints')
+    if previous_keyring is not None and (not previous_keyring.is_absolute()
+                                         or previous_keyring.is_symlink() or not previous_keyring.is_file()):
+        raise ValueError('previous public keyring must be an absolute regular file')
     if not 1 <= valid_days <= 31:
         raise ValueError('validity must be between 1 and 31 days')
-    for binary in ('apt-ftparchive', 'dpkg-deb', 'dpkg', 'gpg'):
+    required_tools = ['apt-ftparchive', 'dpkg-deb', 'dpkg', 'gpg']
+    if previous_keyring is not None:
+        required_tools.append('gpgv')
+    for binary in required_tools:
         if not shutil.which(binary):
             raise RuntimeError(f'{binary} is required')
 
@@ -207,16 +211,26 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
             old_release = previous_path('dists/stable/InRelease')
             if old_release.is_symlink() or not old_release.is_file():
                 raise ValueError('previous signed release is missing')
-            status = command('gpg', '--homedir', str(gnupg_home), '--batch', '--status-fd', '1',
-                             '--verify', str(old_release)).decode('utf-8')
-            signatures = [line.split() for line in status.splitlines() if line.startswith('[GNUPG:] VALIDSIG ')]
-            expected_previous = (previous_signing_fingerprint or fingerprint).upper()
-            if (len(signatures) != 1 or signatures[0][2].upper() != expected_previous
-                    or (previous_primary_fingerprint is not None
-                        and signatures[0][-1].upper() != previous_primary_fingerprint.upper())):
-                raise ValueError('previous snapshot was not signed by the expected key')
-            cleartext = command('gpg', '--homedir', str(gnupg_home), '--batch', '--decrypt',
-                                str(old_release)).decode('utf-8')
+            if previous_keyring is not None:
+                verified = Path(temporary) / 'previous-release'
+                status = command('gpgv', '--homedir', temporary, '--keyring', str(previous_keyring),
+                                 '--status-fd', '1', '--output', str(verified), str(old_release)).decode()
+                signatures = [line.split() for line in status.splitlines() if line.startswith('[GNUPG:] VALIDSIG ')]
+                if (len(signatures) != 1 or signatures[0][2].upper() != previous_signing_fingerprint.upper()
+                        or signatures[0][-1].upper() != previous_primary_fingerprint.upper()):
+                    raise ValueError('previous snapshot was not signed by the pinned transition key')
+                cleartext = verified.read_text(encoding='utf-8')
+            else:
+                status = command('gpg', '--homedir', str(gnupg_home), '--batch', '--status-fd', '1',
+                                 '--verify', str(old_release)).decode('utf-8')
+                signatures = [line.split() for line in status.splitlines() if line.startswith('[GNUPG:] VALIDSIG ')]
+                expected_previous = (previous_signing_fingerprint or fingerprint).upper()
+                if (len(signatures) != 1 or signatures[0][2].upper() != expected_previous
+                        or (previous_primary_fingerprint is not None
+                            and signatures[0][-1].upper() != previous_primary_fingerprint.upper())):
+                    raise ValueError('previous snapshot was not signed by the expected key')
+                cleartext = command('gpg', '--homedir', str(gnupg_home), '--batch', '--decrypt',
+                                    str(old_release)).decode('utf-8')
             if '\nAcquire-By-Hash: yes\n' not in '\n' + cleartext:
                 raise ValueError('previous release does not support by-hash')
             sha_section = re.search(r'(?ms)^SHA256:\s*\n((?: [^\n]+\n)+)', cleartext)
@@ -307,7 +321,7 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
              str(release_dir / 'Release'))
         status = command('gpg', '--homedir', str(gnupg_home), '--batch', '--status-fd', '1',
                          '--verify', str(release_dir / 'InRelease')).decode('utf-8')
-        if previous_primary_fingerprint is not None:
+        if previous_primary_fingerprint is not None and previous_keyring is None:
             signatures = [line.split() for line in status.splitlines() if line.startswith('[GNUPG:] VALIDSIG ')]
             if (len(signatures) != 1 or signatures[0][2].upper() != fingerprint.upper()
                     or signatures[0][-1].upper() != previous_primary_fingerprint.upper()):
