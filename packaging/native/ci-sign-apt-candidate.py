@@ -31,6 +31,9 @@ def main() -> None:
     parser.add_argument('--signing-fingerprint', required=True)
     parser.add_argument('--valid-days', type=int, default=7)
     parser.add_argument('--previous', type=Path, help='previous signed snapshot to retain')
+    parser.add_argument('--previous-keyring', type=Path, help='public keyring for the previous snapshot')
+    parser.add_argument('--previous-primary-fingerprint', help='pinned primary for the previous snapshot')
+    parser.add_argument('--previous-signing-fingerprint', help='pinned signer for the previous snapshot')
     parser.add_argument('--public-key-output', type=Path, help='new path for the exported public key only')
     parser.add_argument('--source-commit')
     parser.add_argument('--build-run-id')
@@ -90,6 +93,12 @@ def main() -> None:
                           '--valid-days', str(args.valid_days), '--passphrase-file', str(password_file)]
             if args.previous is not None:
                 build_args += ['--previous', str(args.previous)]
+            for option, value in (
+                    ('--previous-keyring', args.previous_keyring),
+                    ('--previous-primary-fingerprint', args.previous_primary_fingerprint),
+                    ('--previous-signing-fingerprint', args.previous_signing_fingerprint)):
+                if value is not None:
+                    build_args += [option, str(value)]
             if (args.ansible_package is None) != (args.approved_ansible_sha256 is None):
                 raise ValueError('the module and its approved SHA256 must be supplied together')
             if args.ansible_package is not None:
