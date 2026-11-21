@@ -261,7 +261,7 @@ apt_check old "$fixture/client/old.list"
 if apt_check stale "$fixture/client/stale.list"; then
   echo 'Old client unexpectedly accepted the new signing subkey' >&2; exit 1
 fi
-grep -q 'NO_PUBKEY' "$fixture/client/stale.log"
+grep -Eq 'NO_PUBKEY|Missing key' "$fixture/client/stale.log" || { cat "$fixture/client/stale.log" >&2; exit 1; }
 apt_check updated "$fixture/client/new.list"
 
 # Rehearse replacing a single client keyring path, not just switching between
