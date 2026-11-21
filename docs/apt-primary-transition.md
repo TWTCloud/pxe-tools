@@ -47,13 +47,10 @@ client. Utiliser un chemin absolu pour `gpgv --keyring`.
    un trousseau déjà présent s’il diffère du fichier attendu. Pendant la
    transition, utiliser APT sur les clients migrés et valider séparément le
    parcours de la nouvelle installation.
-4. En cas d’échec avant la bascule, restaurer les anciens octets sous verrou et
-   contrôler de nouveau l’index. Si un témoin pointe vers l’inode d’origine,
-   documenter ce que la restauration remet en place. Après la bascule, garder
-   le trousseau de transition pendant le délai de retour arrière, puis passer
-   à la seule nouvelle clé après validation. Un client qui a manqué la
-   préparation aura besoin du trousseau par un canal authentifié avant que
-   `apt update` fonctionne à nouveau.
+4. En cas d’échec avant la bascule, suivre le retour arrière ci-dessous. Après
+   la bascule, garder le trousseau de transition pendant le délai de retour
+   arrière. Un client qui a manqué la préparation aura besoin du trousseau par
+   un canal authentifié avant que `apt update` fonctionne à nouveau.
 
 ## Installation atomique sur le pilote
 
@@ -89,6 +86,52 @@ install -m 0644 -o root -g root -- "$1" "$staged"
 printf '%s  %s\n' "$expected" "$staged" | sha256sum -c
 cmp -s -- "$target" "$backup/original.gpg"
 mv -T -- "$staged" "$target"
+BASH
+
+sudo apt-get -o 'Dir::Etc::sourcelist=/etc/apt/sources.list.d/pxe-tools.sources' \
+  -o 'Dir::Etc::sourceparts=-' -o 'APT::Get::List-Cleanup=0' \
+  -o 'APT::Update::Error-Mode=any' update
+```
+
+## Retour arrière sur le pilote
+
+Suspendre à nouveau les opérations APT. Utiliser le chemin exact de la
+sauvegarde root affiché lors de la migration. La restauration exige que
+l’ancienne clé vérifie encore l’index public. Si le témoin de création existe
+et correspond à la sauvegarde, la restauration réutilise son inode. Sur une
+installation sans témoin, elle restaure le fichier et ses attributs.
+
+```bash
+backup=/var/backups/pxe-tools-keyring.REMPLACER
+sudo flock -n /run/lock/pxe-tools-apt-install.lock bash -s -- "$backup" <<'BASH'
+set -euo pipefail
+backup=$1
+target=/etc/apt/keyrings/pxe-tools-archive-keyring.gpg
+expected=33eb2c01abd4ab5b9db21117f774dabafbb61103801529d7b9d00b80bfd97efb
+[[ "$backup" =~ ^/var/backups/pxe-tools-keyring\.[[:alnum:]]+$ ]]
+[[ -d "$backup" && ! -L "$backup" && $(stat -c '%u:%a' -- "$backup") == 0:700 ]]
+for path in "$target" "$backup/original.gpg"; do
+    [[ -f "$path" && ! -L "$path" && $(stat -c '%u' -- "$path") == 0 ]]
+done
+[[ ! -L /etc/apt/keyrings && $(stat -c '%u' -- /etc/apt/keyrings) == 0 ]]
+! mountpoint -q -- "$target"
+printf '%s  %s\n' "$expected" "$target" | sha256sum -c
+work=$(mktemp -d /etc/apt/keyrings/.pxe-tools-rollback.XXXXXXXX)
+trap 'if [[ -e "$work/key.gpg" ]]; then unlink "$work/key.gpg"; fi; if [[ -e "$work/InRelease" ]]; then unlink "$work/InRelease"; fi; rmdir "$work"' EXIT
+curl --proto '=https' --fail --silent --show-error --max-time 30 \
+  https://packages.pxetools.com/apt/dists/stable/InRelease -o "$work/InRelease"
+gpgv --keyring "$backup/original.gpg" "$work/InRelease"
+old_sha=$(sha256sum "$backup/original.gpg" | cut -d' ' -f1)
+anchor="/etc/apt/keyrings/.pxe-tools-archive-keyring.${old_sha}.created"
+if [[ -e "$anchor" || -L "$anchor" ]]; then
+    [[ -f "$anchor" && ! -L "$anchor" && $(stat -c '%u' -- "$anchor") == 0 ]]
+    ! mountpoint -q -- "$anchor"
+    cmp -- "$backup/original.gpg" "$anchor"
+    ln -- "$anchor" "$work/key.gpg"
+else
+    cp -p -- "$backup/original.gpg" "$work/key.gpg"
+fi
+mv -T -- "$work/key.gpg" "$target"
 BASH
 
 sudo apt-get -o 'Dir::Etc::sourcelist=/etc/apt/sources.list.d/pxe-tools.sources' \
