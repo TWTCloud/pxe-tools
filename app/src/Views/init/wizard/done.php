@@ -2,16 +2,14 @@
 use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 use Admin\Models\Setting;
 $step = $step ?? 5;
-$stepLabel = 'Validation';
 $title = 'Validation';
-$contentRender = function () use ($step, $stepLabel) {
-    include __DIR__ . '/_progress.php';
+$contentRender = function () {
     $enabled = Setting::get(Setting::KEY_PXE_ENABLED, 'on') === 'on';
     $proxy = Setting::get(Setting::KEY_DHCP_PROXY_ENABLED, 'off') === 'on';
 ?>
 <h2>Confirmer la configuration</h2>
 <p><?= $enabled ? 'La console est configurée. En terminant, vous demandez le démarrage des services PXE sur le réseau ci-dessous.' : 'La console est configurée. En terminant, vous gardez les services de démarrage PXE arrêtés.' ?></p>
-<dl>
+<dl class="wizard-summary">
   <dt>Interface réseau</dt><dd><code><?= View::e(Setting::get(Setting::KEY_PXE_INTERFACE, '') ?: 'À configurer avant l’activation PXE') ?></code></dd>
   <dt>Adresse du serveur</dt><dd><code><?= View::e(Setting::get(Setting::KEY_PXE_IP, '') ?: 'À configurer') ?></code></dd>
   <dt>Réseau autorisé</dt><dd><code><?= View::e(Setting::get(Setting::KEY_PXE_SUBNET, '') ?: 'À configurer') ?></code></dd>
@@ -21,7 +19,7 @@ $contentRender = function () use ($step, $stepLabel) {
 <p class="muted"><?= $enabled ? Term::format('Le résultat des traitements confirmera l’application de la configuration. Il faudra ensuite vérifier une image disponible et le démarrage {du} sur ce réseau ; la fin de l’assistant ne prouve pas à elle seule que PXE fonctionne.') : 'Vous pourrez activer PXE dans Paramètres › Réseau PXE, puis appliquer la configuration. Les systèmes peuvent être téléchargés pendant que vous préparez le réseau.' ?></p>
 <form method="post" action="/init/complete">
   <div class="wizard-actions">
-    <a href="/init/images" class="btn btn-secondary">Retour</a>
+    <a href="/init/images" class="btn btn-secondary"><span class="btn-arrow">←</span> Retour</a>
     <button type="submit" class="btn btn-primary"><?= $enabled ? 'Terminer et activer les services PXE' : 'Terminer avec la console uniquement' ?></button>
   </div>
 </form>

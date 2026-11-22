@@ -2,7 +2,6 @@
 use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 use Admin\Util\NetworkDetector;
 $step = $step ?? 3;
-$stepLabel = 'Réseau';
 $interfaces = $interfaces ?? [];
 $current = $current ?? [];
 $settingsFlow = $settingsFlow ?? false;
@@ -23,8 +22,7 @@ $errorMsg = match ($error ?? null) {
     default => 'Choisissez un mode de configuration et une utilisation du démarrage réseau valides.',
 };
 $title = 'Réseau';
-$contentRender = function () use ($interfaces, $current, $errorMsg, $step, $stepLabel, $settingsFlow) {
-    if (!$settingsFlow) include __DIR__ . '/_progress.php';
+$contentRender = function () use ($interfaces, $current, $errorMsg, $settingsFlow) {
     $choices = NetworkDetector::addressChoices($interfaces);
     $selected = null;
     foreach ($choices as $choice) if ($choice['value'] === ($current['network_address'] ?? '')) $selected = $choice;
@@ -92,8 +90,8 @@ $contentRender = function () use ($interfaces, $current, $errorMsg, $step, $step
     </fieldset>
   </details>
   <div class="wizard-actions">
-    <a href="<?= $settingsFlow ? '/settings' : '/init/admin' ?>" class="btn btn-secondary"><?= $settingsFlow ? 'Retour aux paramètres' : 'Retour' ?></a>
-    <button type="submit" class="btn btn-primary"><?= $settingsFlow ? 'Enregistrer' : 'Continuer' ?></button>
+    <a href="<?= $settingsFlow ? '/settings' : '/init/admin' ?>" class="btn btn-secondary"><?= $settingsFlow ? 'Retour aux paramètres' : '<span class="btn-arrow">←</span> Retour' ?></a>
+    <button type="submit" class="btn btn-primary"><?= $settingsFlow ? 'Enregistrer' : 'Continuer <span class="btn-arrow">→</span>' ?></button>
   </div>
 </form>
 <script>

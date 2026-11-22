@@ -1,6 +1,10 @@
 /* PXE Tools — shared UI components, 11 octobre 2026. Source: 61b602b.
    Imported once in the canonical CSS; tokens, base and shell are separate. */
 
+/* Typées pour que le fondu du bandeau défilant s'anime au lieu de sauter. */
+@property --scroll-strip-fade-start { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --scroll-strip-fade-end { syntax: "<length>"; inherits: false; initial-value: 0px; }
+
 @layer components {
   .btn {
     display: inline-flex;
@@ -275,6 +279,113 @@
     height: 2px;
     background-color: var(--color-apple-blue);
     border-radius: 1px 1px 0 0;
+  }
+
+  /* Bandeau d'onglets défilant (scroll-strip.js) : du côté où des éléments
+     restent cachés, ils se floutent et s'effacent sous une flèche, comme s'ils
+     s'enroulaient hors du cadre. */
+  .scroll-strip {
+    --scroll-strip-zone: 3.5rem;
+    --scroll-strip-shade: rgba(12, 26, 46, 0.06);
+    position: relative;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--color-divider);
+  }
+
+  [data-theme="dark"] .scroll-strip {
+    --scroll-strip-shade: rgba(0, 0, 0, 0.28);
+  }
+
+  .scroll-strip > .scroll-strip__track {
+    margin: 0 0 -1px;
+    padding-bottom: 1px;
+    border-bottom: 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    scroll-padding-inline: var(--scroll-strip-zone);
+    mask-image: linear-gradient(to right,
+      transparent,
+      #000 var(--scroll-strip-fade-start),
+      #000 calc(100% - var(--scroll-strip-fade-end)),
+      transparent);
+    transition: --scroll-strip-fade-start 200ms ease-out, --scroll-strip-fade-end 200ms ease-out;
+  }
+
+  .scroll-strip > .scroll-strip__track::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Anneau intérieur : le débordement du bandeau couperait un anneau extérieur. */
+  .scroll-strip__track > :focus-visible {
+    outline-offset: -2px;
+    border-radius: var(--radius-button);
+  }
+
+  .scroll-strip[data-overflow-start] > .scroll-strip__track {
+    --scroll-strip-fade-start: var(--scroll-strip-zone);
+  }
+
+  .scroll-strip[data-overflow-end] > .scroll-strip__track {
+    --scroll-strip-fade-end: var(--scroll-strip-zone);
+  }
+
+  .scroll-strip__nav {
+    position: absolute;
+    top: 0;
+    bottom: 1px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    width: var(--scroll-strip-zone);
+    padding: 0 0.3rem;
+    border: 0;
+    border-radius: 0;
+    color: var(--color-text-secondary);
+    backdrop-filter: blur(3px);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 200ms ease-out, visibility 0s linear 200ms, color 150ms ease;
+  }
+
+  .scroll-strip__nav--prev {
+    left: 0;
+    justify-content: flex-start;
+    background: radial-gradient(farthest-side at 0 50%, var(--scroll-strip-shade), transparent);
+    mask-image: linear-gradient(to right, #000 35%, transparent);
+  }
+
+  .scroll-strip__nav--next {
+    right: 0;
+    justify-content: flex-end;
+    background: radial-gradient(farthest-side at 100% 50%, var(--scroll-strip-shade), transparent);
+    mask-image: linear-gradient(to left, #000 35%, transparent);
+  }
+
+  .scroll-strip[data-overflow-start] > .scroll-strip__nav--prev,
+  .scroll-strip[data-overflow-end] > .scroll-strip__nav--next {
+    opacity: 1;
+    visibility: visible;
+    transition-delay: 0s;
+  }
+
+  .scroll-strip__nav svg {
+    width: 1.2rem;
+    height: 1.2rem;
+    stroke-width: 2.25;
+    transition: transform 150ms ease-out;
+  }
+
+  .scroll-strip__nav:hover {
+    color: var(--color-text-primary);
+  }
+
+  .scroll-strip__nav--prev:hover svg {
+    transform: translateX(-2px);
+  }
+
+  .scroll-strip__nav--next:hover svg {
+    transform: translateX(2px);
   }
 
   .card {
@@ -846,5 +957,147 @@
 
   ol.wizard-stepper .done .dot {
     background: var(--color-success-bg); border-color: var(--color-success); color: var(--color-success);
+  }
+
+  /* Trait entre deux pastilles : de la pastille précédente à la courante,
+     en vert une fois l'étape précédente franchie. */
+  ol.wizard-stepper .wizard-step {
+    position: relative;
+  }
+
+  ol.wizard-stepper .wizard-step + .wizard-step::before {
+    content: '';
+    position: absolute;
+    top: calc(0.875rem - 1px);
+    left: calc(-50% + 0.75rem);
+    right: calc(50% + 1.25rem);
+    height: 2px;
+    border-radius: 1px;
+    background: var(--color-divider-strong);
+  }
+
+  ol.wizard-stepper .wizard-step.done + .wizard-step::before {
+    background: var(--color-success);
+  }
+
+  @media (max-width: 520px) {
+    ol.wizard-stepper .wizard-step:not(.active) .label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  }
+
+  .status-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin: 0 0 1.25rem;
+    padding: 0.6rem 0.8rem;
+    border-radius: var(--radius-input);
+    background: var(--color-surface-2);
+    color: var(--color-text-secondary);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+  }
+
+  .status-note svg {
+    flex: none;
+    width: 1rem;
+    height: 1rem;
+    margin-top: 0.05rem;
+    color: var(--color-text-tertiary);
+  }
+
+  .wizard-summary {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    margin: 1rem 0 1.25rem;
+    border: 1px solid var(--color-divider);
+    border-radius: var(--radius-card);
+  }
+
+  .wizard-summary dt,
+  .wizard-summary dd {
+    margin: 0;
+    padding: 0.65rem 1rem;
+    border-top: 1px solid var(--color-divider);
+  }
+
+  .wizard-summary dt:first-of-type,
+  .wizard-summary dt:first-of-type + dd {
+    border-top: 0;
+  }
+
+  .wizard-summary dt {
+    padding-right: 1.5rem;
+    color: var(--color-text-secondary);
+    font-size: 0.85rem;
+  }
+
+  .wizard-summary dd {
+    color: var(--color-text-primary);
+    font-size: 0.9rem;
+  }
+
+  .wizard-summary code {
+    padding: 0;
+    background: none;
+    color: inherit;
+    font-size: 0.85rem;
+  }
+
+  @media (max-width: 520px) {
+    .wizard-summary {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .wizard-summary dt {
+      padding-bottom: 0.1rem;
+    }
+
+    .wizard-summary dd {
+      padding-top: 0;
+      border-top: 0;
+    }
+  }
+
+  .wizard-brand {
+    display: block;
+    width: 3.5rem;
+    height: 3.5rem;
+    margin: 0 auto 1rem;
+  }
+
+  .wizard-shell details > summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    list-style: none;
+    font-weight: 500;
+    color: var(--color-text-primary);
+  }
+
+  .wizard-shell details > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .wizard-shell details > summary::before {
+    content: '';
+    flex: none;
+    width: 0.45rem;
+    height: 0.45rem;
+    margin-inline: 0.1rem;
+    border-right: 1.5px solid var(--color-text-secondary);
+    border-bottom: 1.5px solid var(--color-text-secondary);
+    transform: rotate(-45deg);
+    transition: transform 150ms ease-out;
+  }
+
+  .wizard-shell details[open] > summary::before {
+    transform: translateY(-0.15rem) rotate(45deg);
   }
 }

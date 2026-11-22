@@ -2,7 +2,6 @@
 use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 
 $step      = $step ?? 4;
-$stepLabel = 'Systèmes';
 $title     = 'Systèmes d\'exploitation';
 $wide      = true;   // le picker (tableau version × arch) a besoin de plus de place que 640px
 
@@ -11,17 +10,14 @@ $wide      = true;   // le picker (tableau version × arch) a besoin de plus de 
 /** @var array $counts */
 $totalEntries = array_sum($counts);
 
-$contentRender = function () use ($step, $stepLabel, $distros, $grouped, $counts, $totalEntries) {
-    include __DIR__ . '/_progress.php';
+$contentRender = function () use ($distros, $grouped, $counts, $totalEntries) {
 ?>
   <header><h2 style="margin:0;">Systèmes d'exploitation</h2></header>
 
   <p class="muted">
-    Choisissez les versions à préparer. <strong>Debian (version actuelle)</strong> est
-    toujours installée en base — elle sert au mode découverte et au dépannage de vos
-    <?= View::e(Term::format('{many}, quel que soit votre choix ci-dessous.')) ?> Les téléchargements démarrent en
-    tâche de fond ; l'outil reste utilisable pendant ce temps. Vous pourrez affiner ou
-    compléter cette sélection plus tard dans <strong>Paramètres › Systèmes</strong>.
+    Cochez les versions à télécharger ; vous pourrez compléter ce choix dans
+    <strong>Paramètres › Systèmes</strong>. La version actuelle de <strong>Debian</strong>
+    est toujours incluse : <?= View::e(Term::format('elle sert à la découverte et au dépannage des {many}.')) ?>
   </p>
 
   <?php if ($totalEntries === 0): ?>
@@ -39,9 +35,6 @@ $contentRender = function () use ($step, $stepLabel, $distros, $grouped, $counts
       </div>
     </form>
   <?php else: ?>
-    <div class="wizard-actions" style="margin-bottom:1rem;">
-      <a href="/init/network" class="btn btn-secondary"><span class="btn-arrow">←</span> Retour</a>
-    </div>
     <?php View::partial('_partials/os-picker-form', [
         'distros'            => $distros,
         'grouped'            => $grouped,
@@ -50,6 +43,7 @@ $contentRender = function () use ($step, $stepLabel, $distros, $grouped, $counts
         'submit_label'       => 'Continuer <span class="btn-arrow">→</span>',
         'submit_class'       => 'btn btn-primary',
         'require_selection'  => false,
+        'back_href'          => '/init/network',
         'empty_tab_hint'     => 'Le catalogue se met à jour en arrière-plan — vous pourrez ajouter cette version plus tard depuis Paramètres › Systèmes.',
     ]); ?>
   <?php endif; ?>
