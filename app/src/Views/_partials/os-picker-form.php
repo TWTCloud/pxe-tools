@@ -19,46 +19,70 @@ use Admin\Catalog\DistroCatalogInterface;
  *                                 à 0 ligne cochée (skip explicitement permis).
  * @var string $empty_tab_hint     Message affiché dans un onglet dont le
  *                                 catalogue n'a encore aucune entrée.
+ * @var ?string $back_href         Si fourni (wizard), la barre d'actions passe
+ *                                 en pied de formulaire avec un bouton Retour,
+ *                                 comme les autres étapes de l'assistant.
  */
 $submit_label      = $submit_label ?? (View::icon('download') . ' Télécharger sélection');
 $submit_class      = $submit_class ?? 'btn btn-secondary';
 $require_selection = $require_selection ?? true;
 $empty_tab_hint    = $empty_tab_hint ?? null;
+$back_href         = $back_href ?? null;
 
-// Premier onglet = distro qui a le plus d'entrées en cache. Sinon « debian » par défaut.
+// Premier onglet = distro qui a le plus d'entrées en cache, à égalité la première
+// dans l'ordre du catalogue (Debian en tête). Sinon « debian » par défaut.
 $defaultTab = 'debian';
-if (!empty($counts)) {
-    $sorted = $counts;
-    arsort($sorted);
-    $defaultTab = array_key_first($sorted);
+$defaultCount = 0;
+foreach (array_keys($distros) as $code) {
+    if (($counts[$code] ?? 0) > $defaultCount) {
+        $defaultCount = $counts[$code];
+        $defaultTab = $code;
+    }
 }
 $tabActive = static fn(string $code): string => $code === $defaultTab ? ' active' : '';
 $tabHidden = static fn(string $code): string => $code === $defaultTab ? '' : ' hidden';
-?>
-<form method="post" action="<?= View::e($form_action) ?>" id="picker-form" data-require-selection="<?= $require_selection ? '1' : '0' ?>">
-  <div class="picker-action-bar">
+
+$renderActionBar = static function (string $placementClass) use ($back_href, $submit_class, $submit_label, $require_selection): void { ?>
+  <div class="picker-action-bar<?= $placementClass ?>">
     <span class="picker-count-label">
       <span id="picker-count" aria-live="polite">0</span> image(s) sélectionnée(s)
     </span>
-    <button type="submit" id="picker-submit" class="<?= View::e($submit_class) ?>"<?= $require_selection ? ' disabled' : '' ?>>
-      <?= $submit_label ?>
+    <div class="picker-action-buttons">
+      <?php if ($back_href !== null): ?>
+        <a href="<?= View::e($back_href) ?>" class="btn btn-secondary"><span class="btn-arrow">←</span> Retour</a>
+      <?php endif; ?>
+      <button type="submit" id="picker-submit" class="<?= View::e($submit_class) ?>"<?= $require_selection ? ' disabled' : '' ?>>
+        <?= $submit_label ?>
+      </button>
+    </div>
+  </div>
+<?php };
+?>
+<form method="post" action="<?= View::e($form_action) ?>" id="picker-form" data-require-selection="<?= $require_selection ? '1' : '0' ?>">
+  <?php if ($back_href === null) $renderActionBar(''); ?>
+
+  <div class="scroll-strip" data-scroll-strip>
+    <button type="button" class="scroll-strip__nav scroll-strip__nav--prev" data-scroll-strip-nav="prev" tabindex="-1" aria-hidden="true">
+      <span class="scroll-strip__chip"><?= View::icon('chevron-left') ?></span>
+    </button>
+    <nav class="tabs picker-tabs scroll-strip__track" data-scroll-strip-track aria-label="Filtrer le catalogue par distribution">
+      <?php foreach ($distros as $code => $d):
+        $n = $counts[$code] ?? 0;
+      ?>
+        <button type="button" aria-pressed="<?= $code === $defaultTab ? 'true' : 'false' ?>" aria-controls="catalog-<?= View::e($code) ?>"
+           class="tab<?= $tabActive($code) ?>" data-tab="<?= View::e($code) ?>">
+          <?= View::distroLogo($code) ?>
+          <?= View::e($d->label()) ?>
+          <?php if ($n > 0): ?>
+            <span class="picker-tab-count"><?= $n ?></span>
+          <?php endif; ?>
+        </button>
+      <?php endforeach; ?>
+    </nav>
+    <button type="button" class="scroll-strip__nav scroll-strip__nav--next" data-scroll-strip-nav="next" tabindex="-1" aria-hidden="true">
+      <span class="scroll-strip__chip"><?= View::icon('chevron-right') ?></span>
     </button>
   </div>
-
-  <nav class="tabs picker-tabs" aria-label="Filtrer le catalogue par distribution">
-    <?php foreach ($distros as $code => $d):
-      $n = $counts[$code] ?? 0;
-    ?>
-      <button type="button" aria-pressed="<?= $code === $defaultTab ? 'true' : 'false' ?>" aria-controls="catalog-<?= View::e($code) ?>"
-         class="tab<?= $tabActive($code) ?>" data-tab="<?= View::e($code) ?>">
-        <?= View::distroLogo($code) ?>
-        <?= View::e($d->label()) ?>
-        <?php if ($n > 0): ?>
-          <span class="picker-tab-count"><?= $n ?></span>
-        <?php endif; ?>
-      </button>
-    <?php endforeach; ?>
-  </nav>
 
   <?php foreach ($distros as $code => $d): ?>
     <div id="catalog-<?= View::e($code) ?>" data-tab-content="<?= View::e($code) ?>"<?= $tabHidden($code) ?>>
@@ -71,8 +95,11 @@ $tabHidden = static fn(string $code): string => $code === $defaultTab ? '' : ' h
       ]); ?>
     </div>
   <?php endforeach; ?>
+
+  <?php if ($back_href !== null) $renderActionBar(' picker-action-bar--footer'); ?>
 </form>
 
+<script src="/scroll-strip.js?v=<?= @filemtime(__DIR__ . '/../../../public/scroll-strip.js') ?: time() ?>" defer></script>
 <script>
 (() => {
   // ----- Tabs (réutilise le pattern de machines/show.php) -----

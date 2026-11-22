@@ -39,9 +39,6 @@ $contentRender = function () use ($step, $stepLabel, $distros, $grouped, $counts
       </div>
     </form>
   <?php else: ?>
-    <div class="wizard-actions" style="margin-bottom:1rem;">
-      <a href="/init/network" class="btn btn-secondary"><span class="btn-arrow">←</span> Retour</a>
-    </div>
     <?php View::partial('_partials/os-picker-form', [
         'distros'            => $distros,
         'grouped'            => $grouped,
@@ -50,6 +47,7 @@ $contentRender = function () use ($step, $stepLabel, $distros, $grouped, $counts
         'submit_label'       => 'Continuer <span class="btn-arrow">→</span>',
         'submit_class'       => 'btn btn-primary',
         'require_selection'  => false,
+        'back_href'          => '/init/network',
         'empty_tab_hint'     => 'Le catalogue se met à jour en arrière-plan — vous pourrez ajouter cette version plus tard depuis Paramètres › Systèmes.',
     ]); ?>
   <?php endif; ?>

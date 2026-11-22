@@ -1,6 +1,12 @@
 /* PXE Tools — shared UI components, 11 octobre 2026. Source: 61b602b.
    Imported once in the canonical CSS; tokens, base and shell are separate. */
 
+/* Typées pour que le fondu du bandeau défilant s'anime au lieu de sauter. */
+@property --scroll-strip-hide-start { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --scroll-strip-fade-start { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --scroll-strip-hide-end { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --scroll-strip-fade-end { syntax: "<length>"; inherits: false; initial-value: 0px; }
+
 @layer components {
   .btn {
     display: inline-flex;
@@ -275,6 +281,119 @@
     height: 2px;
     background-color: var(--color-apple-blue);
     border-radius: 1px 1px 0 0;
+  }
+
+  /* Bandeau d'onglets défilant (scroll-strip.js) : le contenu se fond sous
+     une flèche ombrée du côté où il reste des éléments cachés. */
+  .scroll-strip {
+    --scroll-strip-shade: rgba(12, 26, 46, 0.09);
+    position: relative;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--color-divider);
+  }
+
+  [data-theme="dark"] .scroll-strip {
+    --scroll-strip-shade: rgba(0, 0, 0, 0.32);
+  }
+
+  .scroll-strip > .scroll-strip__track {
+    margin: 0 0 -1px;
+    padding-bottom: 1px;
+    border-bottom: 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    scroll-padding-inline: 4.5rem;
+    mask-image: linear-gradient(to right,
+      transparent var(--scroll-strip-hide-start),
+      #000 var(--scroll-strip-fade-start),
+      #000 calc(100% - var(--scroll-strip-fade-end)),
+      transparent calc(100% - var(--scroll-strip-hide-end)));
+    transition: --scroll-strip-hide-start 180ms ease-out, --scroll-strip-fade-start 180ms ease-out,
+                --scroll-strip-hide-end 180ms ease-out, --scroll-strip-fade-end 180ms ease-out;
+  }
+
+  .scroll-strip > .scroll-strip__track::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Anneau intérieur : le débordement du bandeau couperait un anneau extérieur. */
+  .scroll-strip__track > :focus-visible {
+    outline-offset: -2px;
+    border-radius: var(--radius-button);
+  }
+
+  .scroll-strip[data-overflow-start] > .scroll-strip__track {
+    --scroll-strip-hide-start: 1.75rem;
+    --scroll-strip-fade-start: 5rem;
+  }
+
+  .scroll-strip[data-overflow-end] > .scroll-strip__track {
+    --scroll-strip-hide-end: 1.75rem;
+    --scroll-strip-fade-end: 5rem;
+  }
+
+  .scroll-strip__nav {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    width: 3rem;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    color: var(--color-text-secondary);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 180ms ease-out, visibility 0s linear 180ms;
+  }
+
+  .scroll-strip__nav--prev {
+    left: 0;
+    justify-content: flex-start;
+    background: radial-gradient(farthest-side at 0 50%, var(--scroll-strip-shade), transparent);
+  }
+
+  .scroll-strip__nav--next {
+    right: 0;
+    justify-content: flex-end;
+    background: radial-gradient(farthest-side at 100% 50%, var(--scroll-strip-shade), transparent);
+  }
+
+  .scroll-strip[data-overflow-start] > .scroll-strip__nav--prev,
+  .scroll-strip[data-overflow-end] > .scroll-strip__nav--next {
+    opacity: 1;
+    visibility: visible;
+    transition-delay: 0s;
+  }
+
+  .scroll-strip__chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border: 1px solid var(--color-divider-strong);
+    border-radius: var(--radius-pill);
+    background: var(--color-surface-1);
+    box-shadow: 0 1px 2px rgba(12, 26, 46, 0.06), 0 4px 10px -4px rgba(12, 26, 46, 0.22);
+    transition: color 150ms ease, border-color 150ms ease, transform 150ms ease-out;
+  }
+
+  .scroll-strip__chip svg {
+    width: 1rem;
+    height: 1rem;
+  }
+
+  .scroll-strip__nav:hover .scroll-strip__chip {
+    color: var(--color-text-primary);
+    border-color: var(--color-border-input);
+  }
+
+  .scroll-strip__nav:active .scroll-strip__chip {
+    transform: scale(0.92);
   }
 
   .card {
