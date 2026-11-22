@@ -21,8 +21,9 @@ use Admin\View;
  *   - worker.py skip les jobs ansible:playbook (passe les machines en
  *     status='installed' direct sans phase de provisioning)
  *   - Les machines fraîchement installées ne reçoivent PAS la pubkey ansible
- *     (preseed.php.j2 génère un /home/ansible/.ssh/authorized_keys vide ou
- *     skippe carrément la création du user ansible)
+ *     (preseed.php.j2 ne crée pas le compte technique — réglage
+ *     ansible_target_user, « ansible » par défaut — ou
+ *     le crée sans clé)
  */
 final class AnsibleController
 {
@@ -96,6 +97,7 @@ final class AnsibleController
             'privkey_db_present'       => $privkeyDb !== '',
             'privkey_fs_path'          => $privkeyFs,
             'playbooks_dir'            => Setting::get(Setting::KEY_ANSIBLE_PLAYBOOKS_DIR, (string)(getenv('ANSIBLE_WORKDIR') ?: '/home/ansible/ansible')) ?? '/home/ansible/ansible',
+            'target_user'              => Setting::get(Setting::KEY_ANSIBLE_TARGET_USER) ?? 'ansible',
             'vault_unlock_pending'     => AnsibleVaultUnlock::isPending(),
             'repo_url'                 => Setting::get(Setting::KEY_ANSIBLE_REPO_URL, '') ?? '',
             'repo_branch'              => Setting::get(Setting::KEY_ANSIBLE_REPO_BRANCH, 'main') ?? 'main',
@@ -108,7 +110,7 @@ final class AnsibleController
             'one_shot_webhook_secret'  => $oneShotWebhookSecret,
         ];
         if ($submitted !== []) {
-            foreach (['ssh_pubkey', 'playbooks_dir', 'repo_url', 'github_push_user'] as $field) {
+            foreach (['ssh_pubkey', 'target_user', 'playbooks_dir', 'repo_url', 'github_push_user'] as $field) {
                 $data[$field] = (string)($submitted[$field] ?? '');
             }
             foreach (['repo_branch', 'repo_profile'] as $field) {

@@ -54,6 +54,8 @@ echo '::endgroup::'
 
 echo '::group::Debian preseed, signed bootloaders and disk guards'
 python3 tests/unit/test_preseed_install_invariants.py
+php tests/unit/test_ansible_target_user.php
+python3 tests/unit/test_ansible_target_user.py
 python3 tests/integration/test_install_callback_authorization.py
 python3 tests/integration/test_install_artifact_phase.py
 python3 tests/integration/test_pxe_agent_callback_authorization.py

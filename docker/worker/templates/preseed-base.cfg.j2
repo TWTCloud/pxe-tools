@@ -54,6 +54,6 @@ d-i mirror/suite string {{ '{{DISTRO_CODENAME}}' }}
 ### --- Fin de l'install ------------------------------------------------
 {{ '{{FINISH_BLOCK}}' }}
 
-### --- late_command : crée user 'ansible' + user admin custom + hardening + ping API
+### --- late_command : crée le compte technique (réglage, « ansible » par défaut) + user admin custom + hardening + ping API
 # Bloc dynamique généré par preseed.php selon le preset
 {{ '{{ADMIN_USER_BLOCK}}' }}

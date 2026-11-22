@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class PreseedInvariants(unittest.TestCase):
     def render(self, config, inventory=None, running_action_token=None, global_root_hash=None, template=None, expected_status=200,
-               module_enabled=None, module_key=None, stale_key=None, machine_status='configured',
+               module_enabled=None, module_key=None, module_user=None, stale_key=None, machine_status='configured',
                installation_status=None, previous_installation=False):
         with tempfile.TemporaryDirectory(prefix='pxe-preseed-review-') as tmp:
             data = Path(tmp)
@@ -24,6 +24,8 @@ class PreseedInvariants(unittest.TestCase):
                 connection.execute("INSERT INTO settings(key,value) VALUES ('ansible_enabled',?)", (module_enabled,))
             if module_key is not None:
                 connection.execute("INSERT INTO settings(key,value) VALUES ('ansible_ssh_pubkey',?)", (module_key,))
+            if module_user is not None:
+                connection.execute("INSERT INTO settings(key,value) VALUES ('ansible_target_user',?)", (module_user,))
             connection.execute("INSERT INTO machines(mac,status,install_config_json,inventory_json) VALUES (?,?,?,?)", ('02:00:00:00:00:01',machine_status,json.dumps(config), None if inventory is None else json.dumps(inventory)))
             if previous_installation:
                 connection.execute("INSERT INTO actions(id,machine_id,type,status,token,created_by) VALUES (6,1,'install_only','success',?,'test')", ('e' * 64,))
@@ -209,6 +211,33 @@ if [ "$n" -le "$FAILURES" ]; then exit "$CODE"; fi
         self.assertNotIn('/home/ansible/.ssh/authorized_keys', missing)
         invalid = self.render(config, template=template, module_enabled='on', module_key='invalid-key', expected_status=422)
         self.assertIn('clé publique du module Ansible invalide', invalid)
+
+    def test_technical_account_name_follows_the_setting(self):
+        template = '{{ACCOUNTS_BLOCK}}\n{{ADMIN_USER_BLOCK}}\n'
+        config = {'distro':'debian', 'admin_user_login':'operator', 'admin_user_pwhash':'fixture-hash'}
+        key = 'ssh-ed25519 AAAA fixture@example.test'
+        custom = self.render(config, template=template, module_enabled='on', module_key=key, module_user='automation')
+        self.assertIn('useradd -m -s /bin/bash -g automation -G sudo automation', custom)
+        self.assertIn('/home/automation/.ssh/authorized_keys', custom)
+        self.assertIn('automation ALL=(ALL) NOPASSWD:ALL', custom)
+        self.assertIn('visudo -cf /etc/sudoers.d/automation', custom)
+        self.assertNotIn('/home/ansible/', custom)
+        self.assertNotIn('ansible ALL=(ALL)', custom)
+        default = self.render(config, template=template, module_enabled='on', module_key=key)
+        self.assertIn('/home/ansible/.ssh/authorized_keys', default)
+        self.assertIn('ansible ALL=(ALL) NOPASSWD:ALL', default)
+        for invalid in ('root', 'Automation', 'a;id', 'a' * 33):
+            with self.subTest(invalid=invalid):
+                refused = self.render(config, template=template, module_enabled='on', module_key=key,
+                                      module_user=invalid, expected_status=422)
+                self.assertIn('nom du compte technique du module Ansible invalide', refused)
+                self.assertNotIn('NOPASSWD', refused)
+        shared = self.render(config, template=template, module_enabled='on', module_key=key,
+                             module_user='operator', expected_status=422)
+        self.assertIn('doit différer du compte administrateur', shared)
+        self.assertNotIn('NOPASSWD', shared)
+        disabled = self.render(config, template=template, module_enabled='off', module_key=key, module_user='root')
+        self.assertNotIn('NOPASSWD', disabled)
 
     def test_root_without_machine_password_is_locked_even_if_enabled_and_global_hash_exists(self):
         config = {'distro':'debian', 'root_login_mode':'enabled', 'admin_user_login':'operator',

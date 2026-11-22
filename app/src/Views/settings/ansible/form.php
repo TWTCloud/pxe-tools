@@ -118,6 +118,24 @@ use Admin\View;
       <?php endif; ?>
     </label>
 
+    <label for="ansible-target-user">
+      Nom du compte technique
+      <input type="text" name="target_user" id="ansible-target-user"
+             maxlength="32" autocomplete="off" spellcheck="false"
+             pattern="[a-z_][a-z0-9_\-]{0,31}"
+             placeholder="ansible" value="<?= View::e($target_user ?? 'ansible') ?>"
+             aria-describedby="ansible-target-user-help">
+      <small class="muted" id="ansible-target-user-help">
+        Compte créé <?= View::e(Term::format('sur chaque {one} {installe}')) ?> avec la clé
+        publique ci-dessus et sudo sans mot de passe. Le worker s'y connecte pour
+        les redémarrages et l'utilise par défaut pour les playbooks ; un
+        <code>ansible_user</code> déclaré dans l'inventaire reste prioritaire.
+        Il doit être différent du compte administrateur des modèles. Le
+        changement vaut pour les prochaines installations : les machines déjà
+        installées gardent leur compte.
+      </small>
+    </label>
+
     <details class="mb-4"><summary>Accès du worker — clé privée et diagnostic</summary>
       <?php if ($privkey_status === 'fs'): ?>
         <p>Clé privée détectée au chemin <code><?= View::e($privkey_fs_path) ?></code> ; cet emplacement doit être préparé par l’administrateur.</p>
