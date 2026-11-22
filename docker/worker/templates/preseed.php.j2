@@ -1185,9 +1185,10 @@ $admin_pubkeys = trim($row['admin_user_pubkeys'] ?? '');
 // Le fichier data.json peut avoir été rendu avant une désactivation ou une
 // rotation. La configuration courante fait foi pour chaque preseed servi.
 $ansible_pubkey = '';
+$ansible_user = 'ansible';
 try {
     $settings = [];
-    $stmt = $pdo->query("SELECT key, value FROM settings WHERE key IN ('ansible_enabled', 'ansible_ssh_pubkey')");
+    $stmt = $pdo->query("SELECT key, value FROM settings WHERE key IN ('ansible_enabled', 'ansible_ssh_pubkey', 'ansible_target_user')");
     foreach ($stmt->fetchAll() as $setting) {
         $settings[(string)$setting['key']] = (string)$setting['value'];
     }
@@ -1196,6 +1197,13 @@ try {
         if ($ansible_pubkey !== '' && !preg_match('/^(ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-[a-z0-9-]+)\s+[A-Za-z0-9+\/]+={0,2}(?:\s+[^\r\n]*)?$/D', $ansible_pubkey)) {
             http_response_code(422);
             echo "# ERREUR : clé publique du module Ansible invalide.\n";
+            exit;
+        }
+        // Même règle que AnsibleConfiguration::TARGET_USER_PATTERN.
+        $ansible_user = trim($settings['ansible_target_user'] ?? '') ?: 'ansible';
+        if (!preg_match('/^[a-z_][a-z0-9_-]{0,31}$/D', $ansible_user) || $ansible_user === 'root') {
+            http_response_code(422);
+            echo "# ERREUR : nom du compte technique du module Ansible invalide.\n";
             exit;
         }
     }
@@ -1394,16 +1402,24 @@ done
 exit 0
 SH;
 
+// Le compte technique reçoit sudo sans mot de passe et voit son authorized_keys
+// remplacé : partagé avec l'administrateur, il donnerait ces droits à un humain.
+if ($ansible_pubkey !== '' && $ansible_user === $admin_login) {
+    http_response_code(422);
+    echo "# ERREUR : le compte technique du module Ansible doit différer du compte administrateur.\n";
+    exit;
+}
 if ($ansible_pubkey !== '') {
-    $late_command .= "in-target /usr/sbin/groupadd -f ansible ; \\\n"
-                  .  "    in-target /usr/bin/id -u ansible >/dev/null 2>&1 || in-target /usr/sbin/useradd -m -s /bin/bash -g ansible -G sudo ansible ; \\\n"
-                  .  "    in-target /bin/bash -c 'install -d -m 0700 -o ansible -g ansible /home/ansible/.ssh' ; \\\n"
-                  .  "    in-target /bin/bash -c 'echo " . base64_encode($ansible_pubkey . "\n") . " | base64 -d > /home/ansible/.ssh/authorized_keys' ; \\\n"
-                  .  "    in-target /bin/chown ansible:ansible /home/ansible/.ssh/authorized_keys ; \\\n"
-                  .  "    in-target /bin/chmod 0600 /home/ansible/.ssh/authorized_keys ; \\\n"
-                  .  "    in-target /bin/bash -c 'echo \"ansible ALL=(ALL) NOPASSWD:ALL\" > /etc/sudoers.d/ansible' ; \\\n"
-                  .  "    in-target /bin/chmod 0440 /etc/sudoers.d/ansible ; \\\n"
-                  .  "    in-target /usr/sbin/visudo -cf /etc/sudoers.d/ansible ; \\\n";
+    $u = $ansible_user;
+    $late_command .= "in-target /usr/sbin/groupadd -f $u ; \\\n"
+                  .  "    in-target /usr/bin/id -u $u >/dev/null 2>&1 || in-target /usr/sbin/useradd -m -s /bin/bash -g $u -G sudo $u ; \\\n"
+                  .  "    in-target /bin/bash -c 'install -d -m 0700 -o $u -g $u /home/$u/.ssh' ; \\\n"
+                  .  "    in-target /bin/bash -c 'echo " . base64_encode($ansible_pubkey . "\n") . " | base64 -d > /home/$u/.ssh/authorized_keys' ; \\\n"
+                  .  "    in-target /bin/chown $u:$u /home/$u/.ssh/authorized_keys ; \\\n"
+                  .  "    in-target /bin/chmod 0600 /home/$u/.ssh/authorized_keys ; \\\n"
+                  .  "    in-target /bin/bash -c 'echo \"$u ALL=(ALL) NOPASSWD:ALL\" > /etc/sudoers.d/$u' ; \\\n"
+                  .  "    in-target /bin/chmod 0440 /etc/sudoers.d/$u ; \\\n"
+                  .  "    in-target /usr/sbin/visudo -cf /etc/sudoers.d/$u ; \\\n";
 }
 
 // Bug 2 fix : on ne crée le user admin QUE s'il a au moins un moyen d'accès

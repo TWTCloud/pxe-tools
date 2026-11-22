@@ -7,6 +7,19 @@ use InvalidArgumentException;
 
 final class AnsibleConfiguration
 {
+    public const DEFAULT_TARGET_USER = 'ansible';
+    // Le preseed et le worker appliquent la même règle : la garder identique.
+    public const TARGET_USER_PATTERN = '/^[a-z_][a-z0-9_-]{0,31}$/D';
+
+    public static function validateTargetUser(string $user): string
+    {
+        $user = trim($user);
+        if (!preg_match(self::TARGET_USER_PATTERN, $user) || $user === 'root') {
+            throw new InvalidArgumentException('Nom du compte technique invalide : minuscules, chiffres, _ ou -, 32 caractères au plus, ni root.');
+        }
+        return $user;
+    }
+
     /** Validate and encrypt everything before any SQL or filesystem mutation. */
     public static function save(array $post): array
     {
@@ -55,6 +68,9 @@ final class AnsibleConfiguration
             if ($pubkey !== '' && !preg_match('/^(ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-[a-z0-9-]+)\s+[A-Za-z0-9+\/]+={0,2}(?:\s+[^\r\n]*)?$/D', $pubkey)) {
                 throw new InvalidArgumentException('Clé publique SSH invalide. Copiez une clé publique SSH complète sur une seule ligne.');
             }
+            $targetUser = self::validateTargetUser((string)($post['target_user']
+                ?? Setting::get(Setting::KEY_ANSIBLE_TARGET_USER, self::DEFAULT_TARGET_USER)));
+            $values[Setting::KEY_ANSIBLE_TARGET_USER] = $targetUser;
             $directory = trim((string)($post['playbooks_dir'] ?? '')) ?: '/home/ansible/ansible';
             if (!str_starts_with($directory, '/') || preg_match('/[\x00-\x1f]/', $directory)) {
                 throw new InvalidArgumentException('Le répertoire des playbooks doit être un chemin absolu.');

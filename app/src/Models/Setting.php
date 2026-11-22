@@ -42,6 +42,7 @@ final class Setting
     public const KEY_ANSIBLE_ENABLED       = 'ansible_enabled';        // on / off
     public const KEY_ANSIBLE_SSH_PRIVKEY   = 'ansible_ssh_privkey';    // ancienne valeur en clair, non utilisée par le worker
     public const KEY_ANSIBLE_PLAYBOOKS_DIR = 'ansible_playbooks_dir';  // chemin local container
+    public const KEY_ANSIBLE_TARGET_USER   = 'ansible_target_user';    // compte technique créé sur les machines installées
     public const KEY_ANSIBLE_REPO_URL       = 'ansible_repo_url';       // URL Git du dépôt Ansible
     public const KEY_ANSIBLE_REPO_BRANCH    = 'ansible_repo_branch';    // branche suivie ; défaut main
     public const KEY_ANSIBLE_REPO_PROFILE   = 'ansible_repo_profile';   // manifeste JSON relatif ; vide = dépôt historique complet
@@ -91,6 +92,7 @@ final class Setting
     private const DEFAULTS = [
         self::KEY_ANSIBLE_REPO_BRANCH => 'main',
         self::KEY_ANSIBLE_REPO_PROFILE => '',
+        self::KEY_ANSIBLE_TARGET_USER => 'ansible',
     ];
 
     /**

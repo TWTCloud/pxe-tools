@@ -1688,7 +1688,13 @@ def run_ansible_redeploy_job(job: dict) -> None:
                         log="".join(log_buffer), ended_at=now(), updated_at=now())
         return
 
-    cmd = [ansible_executable, playbook_relpath, "--limit", hostname]
+    target_user = ansible_target_user()
+    if target_user is None:
+        update_init_job(job_id, status="failed", message="Nom du compte technique invalide dans les paramètres Ansible.",
+                        log="".join(log_buffer), ended_at=now(), updated_at=now())
+        return
+    # -u ne sert que de défaut : un ansible_user de l'inventaire reste prioritaire.
+    cmd = [ansible_executable, playbook_relpath, "--limit", hostname, "-u", target_user]
     ansible_key = os.path.join(ansible_home(), ".ssh", "ansible_automation")
     if os.path.exists(ansible_key):
         cmd += ["--private-key", ansible_key]
@@ -2319,7 +2325,16 @@ def run_render_postboot_job(job: dict) -> None:
 # process root/ansible. Cf. compose/.env.example § WORKER_SSH_DIR.
 
 _ANSIBLE_SSH_KEY = os.path.join(ansible_home(), ".ssh", "ansible_automation")
-_SSH_USER = "ansible"
+# Même règle que AnsibleConfiguration::TARGET_USER_PATTERN côté PHP.
+_TARGET_USER_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
+
+
+def ansible_target_user() -> str | None:
+    """Compte technique créé par le preseed ; None si le réglage est invalide."""
+    user = (db_setting("ansible_target_user", "ansible") or "ansible").strip()
+    return user if _TARGET_USER_RE.fullmatch(user) and user != "root" else None
+
+
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 _MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 _DHCP_IP_RE = re.compile(r'"dhcp_ip"\s*:\s*"([0-9.]+)"')
@@ -2414,6 +2429,9 @@ def _ssh_reboot(ip: str) -> tuple[bool, str | None]:
     """
     if not _IPV4_RE.match(ip):
         return False, f"ip invalide: {ip}"
+    user = ansible_target_user()
+    if user is None:
+        return False, "nom du compte technique invalide"
     cmd = [
         "ssh",
         "-i", _ANSIBLE_SSH_KEY,
@@ -2421,7 +2439,7 @@ def _ssh_reboot(ip: str) -> tuple[bool, str | None]:
         "-o", "ConnectTimeout=3",
         "-o", "BatchMode=yes",
         "-o", "LogLevel=ERROR",
-        f"{_SSH_USER}@{ip}",
+        f"{user}@{ip}",
         "sudo systemctl reboot",
     ]
     try:
@@ -2594,6 +2612,9 @@ def _ssh_systemctl(ip: str, verb: str) -> tuple[bool, str | None]:
     """
     if not _IPV4_RE.match(ip):
         return False, f"ip invalide: {ip}"
+    user = ansible_target_user()
+    if user is None:
+        return False, "nom du compte technique invalide"
     cmd = [
         "ssh",
         "-i", _ANSIBLE_SSH_KEY,
@@ -2601,7 +2622,7 @@ def _ssh_systemctl(ip: str, verb: str) -> tuple[bool, str | None]:
         "-o", "ConnectTimeout=3",
         "-o", "BatchMode=yes",
         "-o", "LogLevel=ERROR",
-        f"{_SSH_USER}@{ip}",
+        f"{user}@{ip}",
         f"sudo systemctl {verb}",
     ]
     try:
@@ -2973,7 +2994,14 @@ def run_playbook(job: dict) -> None:
             "[worker] Skip attente checkpoints post-install (action legacy sans token) — ansible direct.\n",
         )
 
-    cmd = [ansible_executable, playbook, "--limit", hostname]
+    target_user = ansible_target_user()
+    if target_user is None:
+        append_install_log(install_id, "[worker] Nom du compte technique invalide dans les paramètres Ansible.\n")
+        update_install(install_id, ansible_status="failed")
+        update_machine_status(job["machine_id"], "failed")
+        return
+    # -u ne sert que de défaut : un ansible_user de l'inventaire reste prioritaire.
+    cmd = [ansible_executable, playbook, "--limit", hostname, "-u", target_user]
 
     # --private-key : surcharge ansible_ssh_private_key_file (~/.ssh/ansible_automation
     # qui s'expanse en /root/.ssh/... car le worker tourne en root, alors que la clé
