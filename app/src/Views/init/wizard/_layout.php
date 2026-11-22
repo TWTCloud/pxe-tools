@@ -10,9 +10,9 @@
  *
  * Le stepper (wizard/_progress.php) est rendu ici pour les étapes numérotées
  * ($step défini, hors parcours Paramètres), puis une éventuelle alerte de
- * conflit sur le HTTP de démarrage : l'orientation d'abord, le diagnostic ensuite. Le titre "PXE Tools" et le
- * bandeau d'étape global ont été retirés pour éviter le double titre avec le
- * <h2> de chaque page.
+ * conflit sur le HTTP de démarrage : l'orientation d'abord, le diagnostic
+ * ensuite. Le titre "PXE Tools" et le bandeau d'étape global ont été retirés
+ * pour éviter le double titre avec le <h2> de chaque page.
  */
 use Admin\View;
 $centerOnPage = $centerOnPage ?? false;
@@ -36,7 +36,7 @@ $showStepper = isset($step) && !($settingsFlow ?? false);
        donne de l'air sous la barre Retour/Suivant, jugée trop collée au bord. -->
   <article style="padding-bottom: 2rem;">
     <?php if ($showStepper) include __DIR__ . '/_progress.php'; ?>
-    <?php if (!($suppressPxeHttpWarning ?? false)) View::partial('_partials/pxe-http-warning', ['conflictOnly' => !($settingsFlow ?? false)]); ?>
+    <?php if (!($suppressPxeHttpWarning ?? false)) View::partial('_partials/pxe-http-warning'); ?>
     <?php $contentRender(); ?>
   </article>
 </main>
