@@ -63,7 +63,7 @@ $renderActionBar = static function (string $placementClass) use ($back_href, $su
 
   <div class="scroll-strip" data-scroll-strip>
     <button type="button" class="scroll-strip__nav scroll-strip__nav--prev" data-scroll-strip-nav="prev" tabindex="-1" aria-hidden="true">
-      <span class="scroll-strip__chip"><?= View::icon('chevron-left') ?></span>
+      <?= View::icon('chevron-left') ?>
     </button>
     <nav class="tabs picker-tabs scroll-strip__track" data-scroll-strip-track aria-label="Filtrer le catalogue par distribution">
       <?php foreach ($distros as $code => $d):
@@ -80,7 +80,7 @@ $renderActionBar = static function (string $placementClass) use ($back_href, $su
       <?php endforeach; ?>
     </nav>
     <button type="button" class="scroll-strip__nav scroll-strip__nav--next" data-scroll-strip-nav="next" tabindex="-1" aria-hidden="true">
-      <span class="scroll-strip__chip"><?= View::icon('chevron-right') ?></span>
+      <?= View::icon('chevron-right') ?>
     </button>
   </div>
 

@@ -2,9 +2,7 @@
    Imported once in the canonical CSS; tokens, base and shell are separate. */
 
 /* Typées pour que le fondu du bandeau défilant s'anime au lieu de sauter. */
-@property --scroll-strip-hide-start { syntax: "<length>"; inherits: false; initial-value: 0px; }
 @property --scroll-strip-fade-start { syntax: "<length>"; inherits: false; initial-value: 0px; }
-@property --scroll-strip-hide-end { syntax: "<length>"; inherits: false; initial-value: 0px; }
 @property --scroll-strip-fade-end { syntax: "<length>"; inherits: false; initial-value: 0px; }
 
 @layer components {
@@ -283,17 +281,19 @@
     border-radius: 1px 1px 0 0;
   }
 
-  /* Bandeau d'onglets défilant (scroll-strip.js) : le contenu se fond sous
-     une flèche ombrée du côté où il reste des éléments cachés. */
+  /* Bandeau d'onglets défilant (scroll-strip.js) : du côté où des éléments
+     restent cachés, ils se floutent et s'effacent sous une flèche, comme s'ils
+     s'enroulaient hors du cadre. */
   .scroll-strip {
-    --scroll-strip-shade: rgba(12, 26, 46, 0.09);
+    --scroll-strip-zone: 3.5rem;
+    --scroll-strip-shade: rgba(12, 26, 46, 0.06);
     position: relative;
     margin-bottom: 1rem;
     border-bottom: 1px solid var(--color-divider);
   }
 
   [data-theme="dark"] .scroll-strip {
-    --scroll-strip-shade: rgba(0, 0, 0, 0.32);
+    --scroll-strip-shade: rgba(0, 0, 0, 0.28);
   }
 
   .scroll-strip > .scroll-strip__track {
@@ -303,14 +303,13 @@
     overflow-x: auto;
     overscroll-behavior-x: contain;
     scrollbar-width: none;
-    scroll-padding-inline: 4.5rem;
+    scroll-padding-inline: var(--scroll-strip-zone);
     mask-image: linear-gradient(to right,
-      transparent var(--scroll-strip-hide-start),
+      transparent,
       #000 var(--scroll-strip-fade-start),
       #000 calc(100% - var(--scroll-strip-fade-end)),
-      transparent calc(100% - var(--scroll-strip-hide-end)));
-    transition: --scroll-strip-hide-start 180ms ease-out, --scroll-strip-fade-start 180ms ease-out,
-                --scroll-strip-hide-end 180ms ease-out, --scroll-strip-fade-end 180ms ease-out;
+      transparent);
+    transition: --scroll-strip-fade-start 200ms ease-out, --scroll-strip-fade-end 200ms ease-out;
   }
 
   .scroll-strip > .scroll-strip__track::-webkit-scrollbar {
@@ -324,42 +323,43 @@
   }
 
   .scroll-strip[data-overflow-start] > .scroll-strip__track {
-    --scroll-strip-hide-start: 1.75rem;
-    --scroll-strip-fade-start: 5rem;
+    --scroll-strip-fade-start: var(--scroll-strip-zone);
   }
 
   .scroll-strip[data-overflow-end] > .scroll-strip__track {
-    --scroll-strip-hide-end: 1.75rem;
-    --scroll-strip-fade-end: 5rem;
+    --scroll-strip-fade-end: var(--scroll-strip-zone);
   }
 
   .scroll-strip__nav {
     position: absolute;
     top: 0;
-    bottom: 0;
+    bottom: 1px;
     z-index: 2;
     display: flex;
     align-items: center;
-    width: 3rem;
-    padding: 0;
+    width: var(--scroll-strip-zone);
+    padding: 0 0.3rem;
     border: 0;
     border-radius: 0;
     color: var(--color-text-secondary);
+    backdrop-filter: blur(3px);
     opacity: 0;
     visibility: hidden;
-    transition: opacity 180ms ease-out, visibility 0s linear 180ms;
+    transition: opacity 200ms ease-out, visibility 0s linear 200ms, color 150ms ease;
   }
 
   .scroll-strip__nav--prev {
     left: 0;
     justify-content: flex-start;
     background: radial-gradient(farthest-side at 0 50%, var(--scroll-strip-shade), transparent);
+    mask-image: linear-gradient(to right, #000 35%, transparent);
   }
 
   .scroll-strip__nav--next {
     right: 0;
     justify-content: flex-end;
     background: radial-gradient(farthest-side at 100% 50%, var(--scroll-strip-shade), transparent);
+    mask-image: linear-gradient(to left, #000 35%, transparent);
   }
 
   .scroll-strip[data-overflow-start] > .scroll-strip__nav--prev,
@@ -369,31 +369,23 @@
     transition-delay: 0s;
   }
 
-  .scroll-strip__chip {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 1.75rem;
-    height: 1.75rem;
-    border: 1px solid var(--color-divider-strong);
-    border-radius: var(--radius-pill);
-    background: var(--color-surface-1);
-    box-shadow: 0 1px 2px rgba(12, 26, 46, 0.06), 0 4px 10px -4px rgba(12, 26, 46, 0.22);
-    transition: color 150ms ease, border-color 150ms ease, transform 150ms ease-out;
+  .scroll-strip__nav svg {
+    width: 1.2rem;
+    height: 1.2rem;
+    stroke-width: 2.25;
+    transition: transform 150ms ease-out;
   }
 
-  .scroll-strip__chip svg {
-    width: 1rem;
-    height: 1rem;
-  }
-
-  .scroll-strip__nav:hover .scroll-strip__chip {
+  .scroll-strip__nav:hover {
     color: var(--color-text-primary);
-    border-color: var(--color-border-input);
   }
 
-  .scroll-strip__nav:active .scroll-strip__chip {
-    transform: scale(0.92);
+  .scroll-strip__nav--prev:hover svg {
+    transform: translateX(-2px);
+  }
+
+  .scroll-strip__nav--next:hover svg {
+    transform: translateX(2px);
   }
 
   .card {

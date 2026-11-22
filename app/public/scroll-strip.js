@@ -26,6 +26,12 @@
       if (delta !== 0) track.scrollBy({ left: delta, behavior });
     };
 
+    // Les flèches sont masquées aux technologies d'assistance (le clavier passe
+    // par les onglets) : elles ne doivent donc jamais prendre le focus au clic.
+    strip.addEventListener('mousedown', (event) => {
+      if (event.target.closest('[data-scroll-strip-nav]')) event.preventDefault();
+    });
+
     strip.addEventListener('click', (event) => {
       const arrow = event.target.closest('[data-scroll-strip-nav]');
       if (arrow) {
