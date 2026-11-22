@@ -23,8 +23,7 @@ $title = 'Base de données';
 $configured = $configured ?? false;
 $selectedDriver = $current['driver'] ?? 'sqlite';
 
-$contentRender = function () use ($current, $errorMsg, $step, $selectedDriver, $configured) {
-    include __DIR__ . '/_progress.php';
+$contentRender = function () use ($current, $errorMsg, $selectedDriver, $configured) {
 ?>
   <header><h2 style="margin:0;">Choix de la base de données</h2></header>
 
@@ -46,7 +45,7 @@ $contentRender = function () use ($current, $errorMsg, $step, $selectedDriver, $
     reste nécessaire. Aucun changement de stockage n’est effectué ici.
   </article>
   <?php if (!$configured): ?>
-  <div class="wizard-actions"><a href="/init/welcome" class="btn btn-secondary">Retour</a></div>
+  <div class="wizard-actions"><a href="/init/welcome" class="btn btn-secondary"><span class="btn-arrow">←</span> Retour</a></div>
   <?php return; endif; endif; ?>
 
   <?php if ($configured): ?>
@@ -54,7 +53,7 @@ $contentRender = function () use ($current, $errorMsg, $step, $selectedDriver, $
     <strong>Base de données configurée.</strong> Stockage : <?= View::e($selectedDriver) ?>.
     Cette étape est terminée. Un changement du stockage d’une appliance existante demande une migration des données.
   </article>
-  <div class="wizard-actions"><a href="/init/welcome" class="btn btn-secondary">Retour</a><a href="/init/admin" class="btn btn-primary">Continuer vers le compte administrateur</a></div>
+  <div class="wizard-actions"><a href="/init/welcome" class="btn btn-secondary"><span class="btn-arrow">←</span> Retour</a><a href="/init/admin" class="btn btn-primary">Continuer <span class="btn-arrow">→</span></a></div>
   <?php return; endif; ?>
   <form method="post" action="/init/db" id="db-form">
     <fieldset>

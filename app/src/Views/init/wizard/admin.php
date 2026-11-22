@@ -1,7 +1,6 @@
 <?php
 use Admin\View;
 $step      = $step ?? 2;
-$stepLabel = 'Compte admin';
 $error = $error ?? null;
 $existingAdmin = $existingAdmin ?? null;
 $errorMsg = match ($error) {
@@ -13,8 +12,7 @@ $errorMsg = match ($error) {
     default           => 'Erreur de validation.',
 };
 $title = 'Compte admin';
-$contentRender = function () use ($errorMsg, $existingAdmin, $step, $stepLabel) {
-    include __DIR__ . '/_progress.php';
+$contentRender = function () use ($errorMsg, $existingAdmin) {
 ?>
   <header><h2 style="margin:0;">Création du compte administrateur</h2></header>
 

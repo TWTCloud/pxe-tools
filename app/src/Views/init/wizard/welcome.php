@@ -3,6 +3,7 @@ use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 $title = 'Bienvenue';
 $centerOnPage = true;
 $contentRender = function () { ?>
+  <img class="wizard-brand" src="/favicon.svg" alt="" width="56" height="56">
   <h2 style="margin-top:0;text-align:center;">Bienvenue sur PXE Tools</h2>
 
   <p style="text-align:center;">

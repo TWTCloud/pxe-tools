@@ -966,4 +966,150 @@
   ol.wizard-stepper .done .dot {
     background: var(--color-success-bg); border-color: var(--color-success); color: var(--color-success);
   }
+
+  /* Trait entre deux pastilles : de la pastille précédente à la courante,
+     en vert une fois l'étape précédente franchie. */
+  ol.wizard-stepper .wizard-step {
+    position: relative;
+  }
+
+  ol.wizard-stepper .wizard-step + .wizard-step::before {
+    content: '';
+    position: absolute;
+    top: calc(0.875rem - 1px);
+    left: calc(-50% + 0.75rem);
+    right: calc(50% + 1.25rem);
+    height: 2px;
+    border-radius: 1px;
+    background: var(--color-divider-strong);
+  }
+
+  ol.wizard-stepper .wizard-step.done + .wizard-step::before {
+    background: var(--color-success);
+  }
+
+  @media (max-width: 520px) {
+    ol.wizard-stepper .wizard-step:not(.active) .label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  }
+
+  .status-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin: 0 0 1.25rem;
+    padding: 0.6rem 0.8rem;
+    border-radius: var(--radius-input);
+    background: var(--color-surface-2);
+    color: var(--color-text-secondary);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+  }
+
+  .wizard-actions + .status-note {
+    margin: 1.75rem 0 0;
+  }
+
+  .status-note svg {
+    flex: none;
+    width: 1rem;
+    height: 1rem;
+    margin-top: 0.05rem;
+    color: var(--color-text-tertiary);
+  }
+
+  .wizard-summary {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    margin: 1rem 0 1.25rem;
+    border: 1px solid var(--color-divider);
+    border-radius: var(--radius-card);
+  }
+
+  .wizard-summary dt,
+  .wizard-summary dd {
+    margin: 0;
+    padding: 0.65rem 1rem;
+    border-top: 1px solid var(--color-divider);
+  }
+
+  .wizard-summary dt:first-of-type,
+  .wizard-summary dt:first-of-type + dd {
+    border-top: 0;
+  }
+
+  .wizard-summary dt {
+    padding-right: 1.5rem;
+    color: var(--color-text-secondary);
+    font-size: 0.85rem;
+  }
+
+  .wizard-summary dd {
+    color: var(--color-text-primary);
+    font-size: 0.9rem;
+  }
+
+  .wizard-summary code {
+    padding: 0;
+    background: none;
+    color: inherit;
+    font-size: 0.85rem;
+  }
+
+  @media (max-width: 520px) {
+    .wizard-summary {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .wizard-summary dt {
+      padding-bottom: 0.1rem;
+    }
+
+    .wizard-summary dd {
+      padding-top: 0;
+      border-top: 0;
+    }
+  }
+
+  .wizard-brand {
+    display: block;
+    width: 3.5rem;
+    height: 3.5rem;
+    margin: 0 auto 1rem;
+  }
+
+  .wizard-shell details > summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    list-style: none;
+    font-weight: 500;
+    color: var(--color-text-primary);
+  }
+
+  .wizard-shell details > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .wizard-shell details > summary::before {
+    content: '';
+    flex: none;
+    width: 0.45rem;
+    height: 0.45rem;
+    margin-inline: 0.1rem;
+    border-right: 1.5px solid var(--color-text-secondary);
+    border-bottom: 1.5px solid var(--color-text-secondary);
+    transform: rotate(-45deg);
+    transition: transform 150ms ease-out;
+  }
+
+  .wizard-shell details[open] > summary::before {
+    transform: translateY(-0.15rem) rotate(45deg);
+  }
 }

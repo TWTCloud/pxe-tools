@@ -1,11 +1,9 @@
 <?php
 /**
- * Stepper de progression intégré dans l'<article> de chaque étape numérotée
- * du wizard d'init (étapes 1..5 — la welcome est hors compteur).
+ * Stepper de progression, rendu par wizard/_layout.php en tête de l'<article>
+ * de chaque étape numérotée (étapes 1..5 — la welcome est hors compteur).
  *
- * @var int    $step       Numéro 1..5 (étape courante)
- * @var string $stepLabel  Nom court (utilisé seulement pour cohérence ; le
- *                         libellé visible vient de $allSteps ci-dessous)
+ * @var int $step  Numéro 1..5 (étape courante)
  */
 use Admin\View;
 

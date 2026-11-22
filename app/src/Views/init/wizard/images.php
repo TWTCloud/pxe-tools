@@ -2,7 +2,6 @@
 use Admin\View; use Admin\Ui\DeviceTerminology as Term;
 
 $step      = $step ?? 4;
-$stepLabel = 'Systèmes';
 $title     = 'Systèmes d\'exploitation';
 $wide      = true;   // le picker (tableau version × arch) a besoin de plus de place que 640px
 
@@ -11,8 +10,7 @@ $wide      = true;   // le picker (tableau version × arch) a besoin de plus de 
 /** @var array $counts */
 $totalEntries = array_sum($counts);
 
-$contentRender = function () use ($step, $stepLabel, $distros, $grouped, $counts, $totalEntries) {
-    include __DIR__ . '/_progress.php';
+$contentRender = function () use ($distros, $grouped, $counts, $totalEntries) {
 ?>
   <header><h2 style="margin:0;">Systèmes d'exploitation</h2></header>
 

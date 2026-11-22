@@ -8,14 +8,19 @@
  *                              utilisé par l'étape images dont le picker riche
  *                              (tableau version × arch) a besoin de plus de place.
  *
- * Le label d'étape + barre de progression sont rendus DANS l'<article>
- * via le partial wizard/_progress.php (étapes 1..4 uniquement, pas la welcome).
- * Le titre "PXE Tools" et le bandeau d'étape global ont été retirés pour
- * éviter le double titre avec le <h2> de chaque page.
+ * Le stepper (wizard/_progress.php) est rendu ici pour les étapes numérotées
+ * ($step défini, hors parcours Paramètres), puis l'état du HTTP de démarrage :
+ * l'orientation d'abord, le diagnostic ensuite. Le titre "PXE Tools" et le
+ * bandeau d'étape global ont été retirés pour éviter le double titre avec le
+ * <h2> de chaque page.
  */
 use Admin\View;
 $centerOnPage = $centerOnPage ?? false;
 $wide = $wide ?? false;
+$showStepper = isset($step) && !($settingsFlow ?? false);
+$showPxeHttpWarning = !($suppressPxeHttpWarning ?? false);
+// Sans stepper (page d'accueil), la marque ouvre la carte : l'état HTTP passe dessous.
+$pxeHttpWarningAfterContent = !isset($step);
 ?><!doctype html>
 <html lang="fr">
 <head>
@@ -29,12 +34,14 @@ $wide = $wide ?? false;
 <link rel="stylesheet" href="/style.tailwind.css?v=<?= @filemtime(__DIR__ . '/../../../../public/style.tailwind.css') ?: time() ?>">
 </head>
 <body<?= $centerOnPage ? ' class="wizard-centered"' : '' ?>>
-<main class="container" style="max-width: <?= $wide ? '880px' : '640px' ?>;<?= $centerOnPage ? '' : ' margin-top: 4vh;' ?>">
+<main class="container wizard-shell" style="max-width: <?= $wide ? '880px' : '640px' ?>;<?= $centerOnPage ? '' : ' margin-top: 4vh;' ?>">
   <!-- padding-bottom élargi (inline → bat le shorthand padding de tailwind) :
        donne de l'air sous la barre Retour/Suivant, jugée trop collée au bord. -->
   <article style="padding-bottom: 2rem;">
-    <?php if (!($suppressPxeHttpWarning ?? false)) View::partial('_partials/pxe-http-warning'); ?>
+    <?php if ($showStepper) include __DIR__ . '/_progress.php'; ?>
+    <?php if ($showPxeHttpWarning && !$pxeHttpWarningAfterContent) View::partial('_partials/pxe-http-warning'); ?>
     <?php $contentRender(); ?>
+    <?php if ($showPxeHttpWarning && $pxeHttpWarningAfterContent) View::partial('_partials/pxe-http-warning'); ?>
   </article>
 </main>
 </body>

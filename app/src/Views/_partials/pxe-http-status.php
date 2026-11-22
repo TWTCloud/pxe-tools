@@ -10,4 +10,8 @@ $message = match ($state) {
     default => 'L’état du port HTTP de démarrage est indéterminé. Les informations accessibles ne permettent pas de confirmer son fonctionnement ou un conflit.',
 };
 ?>
-<p class="<?= $state === 'conflict' ? 'flash flash-warning' : 'muted' ?>" <?= $state === 'conflict' ? 'role="status"' : '' ?>><?= View::e($message) ?></p>
+<?php if ($state === 'conflict'): ?>
+<p class="flash flash-warning" role="status"><?= View::e($message) ?></p>
+<?php else: ?>
+<p class="status-note"><?= View::icon('info') ?><span><?= View::e($message) ?></span></p>
+<?php endif; ?>
