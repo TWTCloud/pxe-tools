@@ -1004,10 +1004,6 @@
     line-height: 1.45;
   }
 
-  .wizard-actions + .status-note {
-    margin: 1.75rem 0 0;
-  }
-
   .status-note svg {
     flex: none;
     width: 1rem;

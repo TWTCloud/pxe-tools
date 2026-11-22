@@ -9,8 +9,8 @@
  *                              (tableau version × arch) a besoin de plus de place.
  *
  * Le stepper (wizard/_progress.php) est rendu ici pour les étapes numérotées
- * ($step défini, hors parcours Paramètres), puis l'état du HTTP de démarrage :
- * l'orientation d'abord, le diagnostic ensuite. Le titre "PXE Tools" et le
+ * ($step défini, hors parcours Paramètres), puis une éventuelle alerte de
+ * conflit sur le HTTP de démarrage : l'orientation d'abord, le diagnostic ensuite. Le titre "PXE Tools" et le
  * bandeau d'étape global ont été retirés pour éviter le double titre avec le
  * <h2> de chaque page.
  */
@@ -18,9 +18,6 @@ use Admin\View;
 $centerOnPage = $centerOnPage ?? false;
 $wide = $wide ?? false;
 $showStepper = isset($step) && !($settingsFlow ?? false);
-$showPxeHttpWarning = !($suppressPxeHttpWarning ?? false);
-// Sans stepper (page d'accueil), la marque ouvre la carte : l'état HTTP passe dessous.
-$pxeHttpWarningAfterContent = !isset($step);
 ?><!doctype html>
 <html lang="fr">
 <head>
@@ -39,9 +36,8 @@ $pxeHttpWarningAfterContent = !isset($step);
        donne de l'air sous la barre Retour/Suivant, jugée trop collée au bord. -->
   <article style="padding-bottom: 2rem;">
     <?php if ($showStepper) include __DIR__ . '/_progress.php'; ?>
-    <?php if ($showPxeHttpWarning && !$pxeHttpWarningAfterContent) View::partial('_partials/pxe-http-warning'); ?>
+    <?php if (!($suppressPxeHttpWarning ?? false)) View::partial('_partials/pxe-http-warning', ['conflictOnly' => !($settingsFlow ?? false)]); ?>
     <?php $contentRender(); ?>
-    <?php if ($showPxeHttpWarning && $pxeHttpWarningAfterContent) View::partial('_partials/pxe-http-warning'); ?>
   </article>
 </main>
 </body>

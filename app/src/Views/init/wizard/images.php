@@ -15,11 +15,9 @@ $contentRender = function () use ($distros, $grouped, $counts, $totalEntries) {
   <header><h2 style="margin:0;">Systèmes d'exploitation</h2></header>
 
   <p class="muted">
-    Choisissez les versions à préparer. <strong>Debian (version actuelle)</strong> est
-    toujours installée en base — elle sert au mode découverte et au dépannage de vos
-    <?= View::e(Term::format('{many}, quel que soit votre choix ci-dessous.')) ?> Les téléchargements démarrent en
-    tâche de fond ; l'outil reste utilisable pendant ce temps. Vous pourrez affiner ou
-    compléter cette sélection plus tard dans <strong>Paramètres › Systèmes</strong>.
+    Cochez les versions à télécharger ; vous pourrez compléter ce choix dans
+    <strong>Paramètres › Systèmes</strong>. La version actuelle de <strong>Debian</strong>
+    est toujours incluse : <?= View::e(Term::format('elle sert à la découverte et au dépannage des {many}.')) ?>
   </p>
 
   <?php if ($totalEntries === 0): ?>
