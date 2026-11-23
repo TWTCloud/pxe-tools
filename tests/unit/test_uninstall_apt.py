@@ -1213,6 +1213,29 @@ class AptSourceTests(unittest.TestCase):
         self.assertFalse(self.key.exists())
         self.assertFalse(self.anchor.exists())
 
+    def test_proven_key_with_root_group_writable_zorin_source(self):
+        from types import SimpleNamespace
+
+        self.prove_created_key()
+        self.source.unlink()
+        self.source_anchor.unlink()
+        reference = self.root / 'etc/apt/sources.list'
+        reference.write_text('# Zorin manages its repositories in sources.list.d.\n')
+        reference.chmod(0o664)
+        stat_path = os.stat
+
+        def root_owned_stat(path, *args, **kwargs):
+            info = list(stat_path(path, *args, **kwargs))
+            info[4] = info[5] = 0
+            return os.stat_result(info)
+
+        with patch.object(os, 'stat', side_effect=root_owned_stat), \
+                patch('grp.getgrgid', return_value=SimpleNamespace(gr_name='root', gr_mem=[])), \
+                patch('pwd.getpwall', return_value=[SimpleNamespace(pw_uid=0, pw_gid=0)]) as accounts:
+            self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=0, apt_config=self.standard), (False, True))
+            accounts.return_value.append(SimpleNamespace(pw_uid=1000, pw_gid=0))
+            self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=0, apt_config=self.standard), (False, False))
+
     def test_in_place_changed_proven_key_is_preserved(self):
         self.prove_created_key()
         self.key.write_bytes(b'administrator changed it')

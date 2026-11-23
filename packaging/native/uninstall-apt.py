@@ -247,7 +247,9 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None, allow_reviewed=False):
     def safe_reference(path):
         if safe_file(path):
             return True
-        if not allow_reviewed or path.is_symlink() or not path.is_file():
+        # Zorin ships sources.list as root:root 0664. Inspect it if group
+        # write access is limited to root, regardless of the key's provenance.
+        if path.is_symlink() or not path.is_file():
             return False
         info = path.stat()
         if (owner != 0 or info.st_uid != 0 or info.st_gid != 0 or info.st_nlink != 1 or
