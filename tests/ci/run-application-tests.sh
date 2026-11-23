@@ -62,6 +62,7 @@ python3 tests/integration/test_pxe_agent_callback_authorization.py
 python3 tests/integration/test_discovery_identity_conflict.py
 python3 tests/unit/test_grub_sbat_distribution.py
 python3 tests/unit/test_debian_shim_acquisition.py
+python3 tests/unit/test_windows_pxe_evidence.py
 echo '::endgroup::'
 
 echo '::group::Signed Debian netboot freshness and integrity'
