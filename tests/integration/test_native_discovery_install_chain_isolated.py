@@ -243,6 +243,7 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         mounts.extend(('--mount',f'type=bind,src={source},dst={target}'))
 
     if native:
+        env.append('PXE_TOOLS_DATA_DIR=/var/lib/pxe-tools-native/rendered')
         runtime=root/'runtime.env'
         runtime.write_text('\n'.join(item if ' ' not in item else
                                       f'{item.split("=",1)[0]}="{item.split("=",1)[1]}"' for item in env) + '\n')
@@ -255,6 +256,7 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         package=docker('exec',app,'dpkg-query','-W','-f=${Status}|${Version}','pxe-tools-local-test').stdout
         if package.strip()!='install ok installed|0.1.0~guided1':
             raise RuntimeError('Expected the packaged Rust APT candidate')
+        docker('exec',app,'install','-d','-m','0755','/var/lib/pxe-tools-native/rendered')
         docker('exec',app,'systemctl','mask','--now','php8.4-fpm.service','pxe-tools-php.service','nginx.service')
     else:
         docker('run','-d','--name',lan,'--network','none','--entrypoint','sleep',image,'5400')

@@ -27,8 +27,9 @@ if (file_exists(Db::CONFIG_PATH) || is_link(Db::CONFIG_PATH)
     exit('Base de fixture requise.');
 }
 
-if (parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH) === '/preseed.php') {
-    $renderer = dirname($fixture) . '/preseed.php';
+$route = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+if (in_array($route, ['/preseed.php', '/grub.php'], true)) {
+    $renderer = dirname($fixture) . $route;
     if (is_file($renderer)) {
         require $renderer;
         exit;

@@ -22,4 +22,21 @@ fn main() {
             .expect("find end of installer script");
         fs::write(output.join(file), script).expect("write shared installer script");
     }
+    let path = "../docker/worker/templates/grub.php.j2";
+    println!("cargo:rerun-if-changed={path}");
+    let source = fs::read_to_string(path).expect("read the PHP GRUB template");
+    for menu in ["discovery", "install", "local", "rescue"] {
+        let (_, function) = source
+            .split_once(&format!("function menuentry_{menu}("))
+            .expect("find shared GRUB menu");
+        let (_, body) = function
+            .split_once("return <<<")
+            .expect("find GRUB menu heredoc");
+        let (delimiter, text) = body.split_once('\n').expect("read GRUB delimiter");
+        let (menuentry, _) = text
+            .split_once(&format!("\n{delimiter};"))
+            .expect("read GRUB menu");
+        fs::write(output.join(format!("grub-{menu}.cfg")), menuentry)
+            .expect("write shared GRUB menu");
+    }
 }

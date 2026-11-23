@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::net::Ipv4Addr;
 
-fn menu_label(menu: &str) -> Option<&'static str> {
+pub fn menu_label(menu: &str) -> Option<&'static str> {
     match menu {
         "discovery" => Some("Discovery"),
         "wipe" => Some("Effacement des disques"),

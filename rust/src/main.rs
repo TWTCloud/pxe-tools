@@ -2,6 +2,7 @@
 
 mod discovery;
 mod disk_identity;
+mod grub;
 mod install;
 mod monitoring;
 mod preseed;
@@ -386,6 +387,11 @@ fn handle(
                 _ => None,
             };
             preseed::serve(&mut db, source, param(&args, "mac"))
+        }
+        (Method::Get, "/grub.php") => {
+            let args = parse_query(query.as_bytes());
+            let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            grub::serve(&mut db, ip, param(&args, "mac"), param(&args, "arch"))
         }
         (Method::Get, path) if path.starts_with("/pxe/postboot/") => {
             let db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;

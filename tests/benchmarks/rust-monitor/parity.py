@@ -30,8 +30,9 @@ CHECKPOINT = "/api/internal/checkpoint"
 LOG = "/api/internal/install-log"
 PHASE = "/api/task-phase"
 PRESEED = "/preseed.php"
+GRUB = "/grub.php"
 ARTIFACT = "/pxe/postboot/162/postboot.sh"
-ROUTES = (ROUTE, BOOT, DISCOVERY, POLL, START, END, READY, CHECKPOINT, LOG, PHASE, PRESEED, ARTIFACT)
+ROUTES = (ROUTE, BOOT, DISCOVERY, POLL, START, END, READY, CHECKPOINT, LOG, PHASE, PRESEED, GRUB, ARTIFACT)
 LAN = "192.0.2.24"
 
 
@@ -126,7 +127,41 @@ def php_preseed(root, port):
     template = (templates / "preseed-base.cfg.j2").read_text()
     template = re.sub(r"\{\{ '(\{\{[A-Z_]+\}\})' \}\}", r"\1", template)
     (root / "preseed-base.cfg").write_text(template)
-    (root / "data.json").write_text(json.dumps({"pxe_ip": "192.0.2.1"}))
+    grub = (templates / "grub.php.j2").read_text().replace("{{ pxe_data_dir }}", str(root))
+    (root / "grub.php").write_text(grub)
+    (root / "data.json").write_text(json.dumps({
+        "pxe_ip": "192.0.2.1", "default_distro": "trixie",
+        "default_arch": "amd64", "kernel_opts": "ipv6.disable=1",
+    }))
+
+
+def compare_grub(ports, paths):
+    mac = "02:00:00:00:04:00"
+    route = GRUB + "?" + urlencode({"mac": mac, "arch": "aarch64"})
+    for port, database in zip(ports, paths):
+        assert response(port, route, peer="outside", spoof=True)[0] == 403
+        status, _, _, menu = response(port, route, peer="lan")
+        assert status == 200 and b"/netboot/trixie/arm64/linux" in menu
+        assert b"/discovery-preseed.cfg" in menu and b"${net_default_mac}" in menu
+        boot, token = re.search(rb"boot_id=(\d+)&token=([a-f0-9]{32})&menu=discovery", menu).groups()
+        assert response(port, BOOT + f"?boot_id={boot.decode()}&token={token.decode()}&menu=discovery",
+                        peer="lan")[0] == 200
+        with closing(sqlite3.connect(database)) as db, db:
+            machine = db.execute("SELECT id,status,boot_arch FROM machines WHERE mac=?", (mac,)).fetchone()
+            assert machine[1:] == ("inventorying", "arm64")
+            assert db.execute("SELECT selected_menu,client_ip FROM boot_sessions WHERE id=?", (int(boot),)).fetchone() == (
+                "discovery", LAN,
+            )
+            db.execute("UPDATE machines SET status='configured',hostname='PXE-UEFI',install_config_json=? WHERE mac=?",
+                       (json.dumps({"codename": "bookworm"}), mac))
+            action = db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES(?,'install_only','pending',?)",
+                                (machine[0], "grub-fixture")).lastrowid
+        status, _, _, menu = response(port, route, peer="lan")
+        assert status == 200 and b"/netboot/bookworm/arm64/linux" in menu
+        assert b"/preseed.php?mac=" + mac.encode() in menu
+        with closing(sqlite3.connect(database)) as db:
+            assert db.execute("SELECT checkpoint FROM machine_events WHERE action_id=? AND checkpoint IS NOT NULL",
+                              (action,)).fetchall() == [("grub_config_served_install",)]
 
 
 def compare_inventory(ports, paths):
@@ -324,7 +359,7 @@ def main():
             _, upstream, handler = stack.enter_context(
                 backend(variant, root, args, {**environment, "PXE_DB_PATH": str(db),
                         "PXE_APP_DIR": str(SOURCE / "app"), "POSTBOOT_OUTPUT_DIR": str(root / "postboot"),
-                        "PXE_SESSION_DIR": str(root / "sessions")})
+                        "PXE_SESSION_DIR": str(root / "sessions"), "KERNEL_OPTS": "ipv6.disable=1"})
             )
             config, port = write_nginx(root, variant, upstream, handler, routes=ROUTES)
             if variant.startswith("php"):
@@ -423,7 +458,8 @@ def main():
             assert db.execute("SELECT selected_menu, selected_at FROM boot_sessions WHERE id=4").fetchone() == (None, None)
             db.execute("DROP TRIGGER fail_event")
         assert response(ports[1], retry, peer="lan")[0] == 200
-    print("Parity OK: 69 summaries, GRUB selection, discovery inventory, preseed and installation callbacks")
+        compare_grub(ports, paths)
+    print("Parity OK: 69 summaries, GRUB menus and selection, discovery inventory, preseed and installation callbacks")
 
 
 if __name__ == "__main__":
