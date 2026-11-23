@@ -227,6 +227,41 @@ def verify_tls_import(client, original, imported, persistent, authorization):
     return updated
 
 
+def verify_image_console(client, database, authorization):
+    endpoint = '/settings/images'
+
+    def submit(form, **kwargs):
+        return client.request(endpoint, form=form, authorization=authorization, **kwargs)
+
+    with closing(sqlite3.connect(database)) as db, db:
+        db.executemany("""INSERT INTO catalog_entries(id,distro,version_full,arch,extract_method)
+                          VALUES(?,?,?,?,?)""", [(9001,'debian','13.0-console','arm64','direct'),
+                                                 (9002,'other','1.0-console','amd64','direct')])
+        db.execute("INSERT INTO os_images(distro,version,arch,status) VALUES('legacy','<trixie>','amd64','downloaded')")
+        db.execute("INSERT INTO init_jobs(job_type,status) VALUES('bootstrap:refresh_catalog','running')")
+    assert client.request(endpoint)[0] == 401
+    assert client.request(endpoint, secure=False)[0] == 404
+    assert submit({'action':'refresh'}, origin='https://other.example')[0] == 403
+    assert submit({'action':'refresh'})[:2] == (303, endpoint)
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT COUNT(*) FROM init_jobs WHERE status IN ('running','pending')").fetchone() == (1,)
+        db.execute("UPDATE init_jobs SET status='success' WHERE job_type='bootstrap:refresh_catalog'")
+    assert submit({'image':'9002'})[0] == 422
+    assert submit({'image':'9001'})[:2] == (303, endpoint)
+    for _ in range(2):
+        assert submit({'action':'refresh', 'image':'9001'})[:2] == (303, endpoint)
+    with closing(sqlite3.connect(database)) as db, db:
+        job, = db.execute("SELECT id FROM init_jobs WHERE job_type='bootstrap:refresh_catalog_v2'").fetchall()
+        assert json.loads(db.execute("SELECT value FROM settings WHERE key='catalog_job_ids'").fetchone()[0]) == list(job)
+        db.execute("UPDATE os_images SET status='downloading', progress_percent=61 WHERE version_full='13.0-console'")
+    assert submit({'image':'9001'})[:2] == (303, endpoint)
+    status, _, page = client.request(endpoint, authorization=authorization)
+    assert status == 200 and b'Debian 13.0-console' in page
+    assert b'&lt;trixie&gt;' in page and b'1.0-console' not in page
+    assert b'<td>downloading</td><td>61 %</td>' in page
+    print('Rust image console displays legacy and live state and queues guided downloads and refreshes once', flush=True)
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -273,6 +308,7 @@ def local(binary):
         updated.ready(replacement)
         assert b'Certificat externe' in updated.request('/admin/certificates', authorization=authorization)[2]
         print('The imported TLS pair survived a restart', flush=True)
+        verify_image_console(updated, database, authorization)
 
 
 def main():

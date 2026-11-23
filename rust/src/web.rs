@@ -3,6 +3,7 @@
 mod admin;
 mod assets;
 mod certificates;
+mod images;
 mod onboarding;
 mod setup;
 
@@ -387,7 +388,7 @@ async fn dispatch(
             )
             .await;
     }
-    if path == certificates::ROUTE {
+    if matches!(path, certificates::ROUTE | images::ROUTE) {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
@@ -395,7 +396,12 @@ async fn dispatch(
             if !admin_origin(&parts.headers, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
-            match read_form(&parts.headers, body, certificates::MAX_FORM).await {
+            let limit = if path == certificates::ROUTE {
+                certificates::MAX_FORM
+            } else {
+                256
+            };
+            match read_form(&parts.headers, body, limit).await {
                 Ok(form) => Some(form),
                 Err(reply) => return reply,
             }
@@ -404,7 +410,11 @@ async fn dispatch(
         } else {
             return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
         };
-        let action = admin::Action::Certificates(site.tls.clone(), form);
+        let action = if path == certificates::ROUTE {
+            admin::Action::Certificates(site.tls.clone(), form)
+        } else {
+            admin::Action::Images(form)
+        };
         return site.admin.serve(&parts, peer, &site.database, action).await;
     }
     if path == admin::DEVICE_SETTINGS && parts.method == Method::POST && secure {

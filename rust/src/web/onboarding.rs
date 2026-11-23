@@ -2,7 +2,7 @@
 
 use super::{
     admin::escape,
-    plain,
+    images, plain,
     setup::{page, redirect},
     ErrorBox, Reply,
 };
@@ -182,11 +182,7 @@ fn change(
     };
     if endpoint == "/init/images" && plan.role != Role::Console {
         if field(fields, "action") == "refresh" {
-            enqueue(
-                &tx,
-                "bootstrap:refresh_catalog_v2",
-                "Actualisation du catalogue",
-            )?;
+            images::refresh_catalog(&tx)?;
             tx.commit()?;
             return Ok(redirect(StatusCode::SEE_OTHER, "/init/images"));
         }
@@ -197,7 +193,7 @@ fn change(
         else {
             return Ok(invalid("Choisissez une image Debian.\n"));
         };
-        let Some(id) = queue_image(&tx, entry)? else {
+        let Some(id) = images::queue_image(&tx, entry, true)? else {
             return Ok(invalid("Cette image Debian est indisponible.\n"));
         };
         store(&tx, IMAGE_DRAFT, &id.to_string())?;
@@ -302,34 +298,6 @@ fn enqueue(db: &Connection, kind: &str, message: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn queue_image(db: &Connection, id: i64) -> rusqlite::Result<Option<i64>> {
-    db.execute(
-        "INSERT INTO os_images(distro,version,version_full,arch,codename,major,channel,
-                    kernel_url,initrd_url,iso_url,extract_method,enabled,status)
-                SELECT distro,version_full,version_full,arch,codename,major,channel,
-                    kernel_url,initrd_url,iso_url,extract_method,1,'pending'
-                FROM catalog_entries WHERE id=?1 AND distro='debian'
-                    AND extract_method='direct' AND arch IN ('amd64','arm64')
-                ON CONFLICT(distro,version_full,arch) WHERE version_full IS NOT NULL
-                DO UPDATE SET enabled=1,
-                    status=CASE WHEN os_images.status IN ('downloaded','downloading')
-                                THEN os_images.status ELSE 'pending' END,
-                    error_msg=CASE WHEN os_images.status IN ('downloaded','downloading')
-                                   THEN os_images.error_msg ELSE NULL END
-                WHERE os_images.extract_method='direct'",
-        [id],
-    )?;
-    db.query_row(
-        "SELECT i.id FROM os_images i JOIN catalog_entries c
-                     ON i.distro=c.distro AND i.version_full=c.version_full AND i.arch=c.arch
-                  WHERE c.id=?1 AND c.distro='debian' AND c.extract_method='direct'
-                    AND c.arch IN ('amd64','arm64') AND i.extract_method='direct'",
-        [id],
-        |row| row.get(0),
-    )
-    .optional()
-}
-
 fn selected_image(db: &Connection) -> rusqlite::Result<Option<(i64, String, String)>> {
     let id = setting(db, IMAGE_DRAFT)?.parse::<i64>().unwrap_or_default();
     db.query_row(
@@ -391,34 +359,10 @@ fn network_page(plan: Option<&Network>) -> Reply {
 }
 
 fn images_page(db: &Connection) -> Result<Reply, ErrorBox> {
-    let mut html = String::from(
-        r#"<form method="post" action="/init/images">
-<label>Image Debian <select name="image">"#,
-    );
-    let mut query = db.prepare(
-        "SELECT id,version_full,arch FROM catalog_entries
-        WHERE distro='debian' AND extract_method='direct' AND arch IN ('amd64','arm64')
-        ORDER BY major DESC,version_full DESC,arch,id LIMIT 50",
-    )?;
-    let mut rows = query.query([])?;
-    let mut count = 0;
-    while let Some(row) = rows.next()? {
-        count += 1;
-        let id: i64 = row.get(0)?;
-        html.push_str(&format!(r#"<option value="{id}">Debian "#));
-        escape(&mut html, &row.get::<_, String>(1)?);
-        html.push_str(" · ");
-        escape(&mut html, &row.get::<_, String>(2)?);
-        html.push_str("</option>");
-    }
-    html.push_str("</select></label>");
-    if count != 0 {
-        html.push_str("<button>Télécharger cette image</button>");
-    }
-    html.push_str(
-        r#"<button name="action" value="refresh">Actualiser le catalogue</button></form>"#,
-    );
-    Ok(page("Image de démarrage", &html))
+    Ok(page(
+        "Image de démarrage",
+        &images::catalog_form(db, "/init/images")?,
+    ))
 }
 
 fn done_page(db: &Connection, plan: &Network) -> Result<Reply, ErrorBox> {

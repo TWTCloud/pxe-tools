@@ -126,6 +126,10 @@ importé et le service le recharge au redémarrage.
 `/var/lib/pxe-tools/tls-import/external.json` contient la clé privée et doit
 être conservé avec les données sensibles de l’instance, avec les permissions
 du service. L’émission et le renouvellement ACME restent à porter.
+La page `/settings/images` affiche l’état du catalogue et la progression des
+images enregistrées. Elle permet de demander une actualisation du catalogue
+et d’ajouter une image Debian amd64 ou arm64. Le téléchargement reste assuré
+par le worker.
 
 Les deux variantes fonctionnent sans installer Nginx ni PHP-FPM.
 Dans la variante guidée, Rust réserve la suppression d’une image en
