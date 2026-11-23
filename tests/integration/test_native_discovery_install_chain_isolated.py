@@ -164,9 +164,11 @@ done
                    '--entrypoint','/lib/systemd/systemd',*mounts,image,'--unit=basic.target')
             wait_for(lambda:docker('exec',app,'systemctl','list-units','--no-legend',check=False).returncode==0,
                      60,'native systemd')
-            package=docker('exec',app,'dpkg-query','-W','-f=${Status}|${Version}','pxe-tools-local-test').stdout
-            if package.strip()!='install ok installed|0.0.1~local1':
-                raise RuntimeError('Expected locally installed native test package')
+            package_name=os.environ.get('PXE_NATIVE_PXE_PACKAGE', 'pxe-tools-local-test')
+            package_version=os.environ.get('PXE_NATIVE_PXE_VERSION', '0.0.1~local1')
+            package=docker('exec',app,'dpkg-query','-W','-f=${Status}|${Version}',package_name).stdout
+            if package.strip()!=f'install ok installed|{package_version}':
+                raise RuntimeError('Expected native test package version was not installed')
             architecture=docker('exec',app,'dpkg','--print-architecture').stdout.strip()
             if architecture != os.environ.get('PXE_NATIVE_PXE_ARCH', 'amd64'):
                 raise RuntimeError('Unexpected PXE Tools server architecture')
@@ -321,11 +323,19 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                    '-serial','stdio','-monitor','none','-no-reboot','-boot','n',
                    '-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
                    '-device','e1000,netdev=lan,mac=02:00:00:00:00:01')
-            print('Discovery rebooted and the real installer started',flush=True)
+            print('Discovery rebooted; watching the installer and authenticated checkpoints',flush=True)
             seen=False; deadline=time.monotonic()+3000
+            previous=None
             while time.monotonic()<deadline:
                 output=docker('logs',client,check=False).stdout
                 if 'PXE_FULL_LATE_DONE' in output: seen=True
+                with sqlite3.connect(data/'chosen.sqlite') as db:
+                    progress=db.execute('SELECT install_status FROM installations ORDER BY id DESC LIMIT 1').fetchone()
+                if progress and progress!=previous:
+                    print('Installer receipt:', progress[0], flush=True)
+                    previous=progress
+                if progress==('failed',):
+                    raise RuntimeError('application recorded a failed installation')
                 state=inspect(client)['State']
                 if not state['Running']:
                     if not seen or state['ExitCode']!=0: raise RuntimeError('installer exited before successful late command')
