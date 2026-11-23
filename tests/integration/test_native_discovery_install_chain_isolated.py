@@ -538,6 +538,15 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s}' "$IP" "$(
                       'initrd --name BCD','initrd --name boot.sdi','initrd --name boot.wim'):
             if entry not in boot:
                 raise RuntimeError('Incomplete WinPE iPXE script')
+        menu=request(pxe_url+'/boot.ipxe')
+        if not menu.startswith('HTTP/1.1 200 ') or f'chain {windows}boot.ipxe' not in menu:
+            raise RuntimeError('The reserved client did not receive the WinPE chain from the iPXE entry')
+        fallback=request(pxe_url+'/boot.ipxe?menu=debian')
+        if not fallback.startswith('HTTP/1.1 200 ') or 'item debian-' not in fallback or '/pxe/windows/' in fallback:
+            raise RuntimeError('The Debian iPXE menu was unavailable to the reserved client')
+        normal=docker('exec',app,'curl','-fsS','--max-time','5','http://127.0.0.1/boot.ipxe').stdout
+        if 'item debian-' not in normal or '/pxe/windows/' in normal:
+            raise RuntimeError('The WinPE menu was exposed to an unreserved client')
         wim=request(windows+'boot.wim','--range','8-11')
         if not wim.startswith('HTTP/1.1 206 ') or not wim.endswith('boot'):
             raise RuntimeError('WinPE did not serve the requested WIM bytes')
@@ -546,7 +555,7 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s}' "$IP" "$(
                           '--header','X-Pxe-Client-Ip: 192.0.2.2','http://127.0.0.1'+path).stdout
             if not denied.startswith('HTTP/1.1 404 '):
                 raise RuntimeError('WinPE is visible to an unreserved client')
-        print('Synthetic WinPE script and HTTP range verified for the reserved client only',flush=True)
+        print('Synthetic WinPE chain and HTTP range verified for the reserved client only',flush=True)
 
     kernel_url='/netboot/debian/13.0/amd64/linux'
     kernel = request(pxe_url+kernel_url,'--output','/dev/null')

@@ -375,7 +375,10 @@ empreintes SHA-256 approuvées. [Prérequis Windows 11](https://learn.microsoft.
   banc. Le client part sans média de démarrage local.
 - Démarrer un iPXE signé sur le réseau isolé et le chaîner vers
   `http://<serveur-pxe>/pxe/windows/boot.ipxe`. Cette route Rust est activée
-  pour une adresse réservée avec `PXE_WINPE_CLIENT_IP`. Elle sert le script
+  pour une adresse réservée avec `PXE_WINPE_CLIENT_IP`. Le client réservé
+  qui atteint l’entrée iPXE habituelle `/boot.ipxe` est dirigé vers WinPE
+  s’il est en UEFI amd64. Le menu Debian reste disponible via
+  `/boot.ipxe?menu=debian`. La route WinPE sert le script
   UEFI x86-64 et les quatre fichiers préparés dans `winpe/amd64` sous la
   racine HTTP de l’instance, `wimboot`, `BCD`, `boot.sdi` et `boot.wim`.
   Utiliser un `wimboot` signé et un WinPE personnalisé pour Windows 11.

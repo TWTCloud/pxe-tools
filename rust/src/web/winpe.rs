@@ -30,13 +30,22 @@ pub(super) fn allowed(client: Option<Ipv4Addr>, peer: IpAddr) -> bool {
     matches!(peer, IpAddr::V4(peer) if client == Some(peer))
 }
 
+pub(super) fn menu(server: Ipv4Addr, port: u16) -> Reply {
+    let origin = origin(server, port);
+    response(format!(
+        r#"#!ipxe
+iseq ${{platform}} efi || goto debian
+iseq ${{buildarch}} x86_64 || goto debian
+chain {origin}{BOOT} || goto debian
+:debian
+chain {origin}/boot.ipxe?menu=debian || exit
+"#
+    ))
+}
+
 pub(super) fn script(server: Ipv4Addr, port: u16) -> Reply {
-    let origin = if port == 80 {
-        format!("http://{server}")
-    } else {
-        format!("http://{server}:{port}")
-    };
-    let body = format!(
+    let origin = origin(server, port);
+    response(format!(
         r#"#!ipxe
 iseq ${{platform}} efi || goto refused
 iseq ${{buildarch}} x86_64 || goto refused
@@ -50,7 +59,18 @@ boot || goto refused
 echo WinPE requiert un amorcage UEFI x86-64 et les fichiers du banc.
 exit
 "#
-    );
+    ))
+}
+
+fn origin(server: Ipv4Addr, port: u16) -> String {
+    if port == 80 {
+        format!("http://{server}")
+    } else {
+        format!("http://{server}:{port}")
+    }
+}
+
+fn response(body: String) -> Reply {
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "text/plain; charset=utf-8")

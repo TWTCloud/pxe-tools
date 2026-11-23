@@ -487,8 +487,13 @@ async fn dispatch(
         return plain(StatusCode::NOT_FOUND, "Not found\n");
     };
     let winpe = winpe::allowed(site.winpe_client, peer);
-    if path == winpe::BOOT && winpe && readable {
-        return winpe::script(server, site.http_port);
+    if winpe && readable {
+        if path == winpe::BOOT {
+            return winpe::script(server, site.http_port);
+        }
+        if path == "/boot.ipxe" && parts.uri.query() != Some("menu=debian") {
+            return winpe::menu(server, site.http_port);
+        }
     }
     if readable {
         if let Some(reply) = site
