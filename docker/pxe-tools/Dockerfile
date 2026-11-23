@@ -295,7 +295,9 @@ RUN printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rust-monitor/type \
     && touch /etc/s6-overlay/s6-rc.d/user/contents.d/rust-monitor
 
 FROM appliance AS rust-guided
-ENV PXE_RUST_GUIDED=1 PXE_RUST_DIRECT_HTTP=1
+ENV PXE_RUST_GUIDED=1 PXE_RUST_DIRECT_HTTP=1 TLS_DIR=/var/lib/pxe-tools-tls
+RUN install -d -o root -g root -m 0700 /var/lib/pxe-tools-tls
+VOLUME ["/var/lib/pxe-tools-tls"]
 COPY --from=rust-build /source/rust/target/release/pxe-tools-rust /usr/lib/pxe-tools/pxe-tools-rust
 COPY --chmod=0755 rust/packaging/s6-guided-run /etc/s6-overlay/s6-rc.d/rust-guided/run
 RUN rm /etc/s6-overlay/s6-rc.d/user/contents.d/php-fpm \

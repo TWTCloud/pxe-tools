@@ -97,12 +97,17 @@ La racine HTTP redirige vers `/admin/` en HTTPS. Le preseed, les ressources
 de démarrage et les retours d’installation restent disponibles en HTTP.
 Rust sert aussi ces ressources sur HTTPS. Le certificat auto-signé est
 créé au premier démarrage et conservé dans le répertoire TLS de l’instance.
+Pour Docker, réutiliser un volume nommé monté sur `/var/lib/pxe-tools-tls`
+pour garder le certificat en recréant le conteneur. Pour reprendre une
+paire existante, placer `cert.pem` et `key.pem` dans ce volume avant le
+démarrage, avec le répertoire et la clé privés et propriété de root.
 
 La vue HTTPS `/admin/devices` permet de consulter la liste avec le compte
-local SQLite existant. Elle lit le réglage `ui_device_term` pour afficher
-le libellé choisi. Cette vue est en lecture seule. Le parcours de
-configuration initiale, la gestion des certificats et les autres écrans
-d’administration restent à porter.
+local SQLite existant. Le formulaire d’appellation enregistre le réglage
+`ui_device_term` dans la même base et revient à `/admin/devices`. Pour un
+accès par nom DNS, définir `PXE_PUBLIC_HOST` avec ce nom pour la redirection
+et la validation du formulaire. Le parcours de configuration initiale, la
+gestion des certificats et les autres écrans restent à porter.
 
 Les deux variantes fonctionnent sans installer Nginx ni PHP-FPM.
 L’initialisation SQLite et certaines opérations du worker utilisent PHP

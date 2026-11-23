@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{bytes, plain, single, Reply};
-use crate::configured_database;
+use crate::{configured_database, connect};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hyper::{
     header::{AUTHORIZATION, LOCATION, WWW_AUTHENTICATE},
     http::request::Parts,
     Response, StatusCode,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -18,7 +18,21 @@ use std::{
 };
 use tokio::{sync::Semaphore, task};
 
+pub(super) const DEVICE_SETTINGS: &str = "/admin/settings/device-terminology";
 const PAGE_SIZE: usize = 100;
+const DEVICE_TERMS: [(&str, &str, &str); 4] = [
+    ("machine", "Machine", "Machines"),
+    ("client", "Client PXE", "Clients PXE"),
+    ("ordinateur", "Ordinateur", "Ordinateurs"),
+    ("serveur", "Serveur", "Serveurs"),
+];
+
+pub(super) fn device_term(term: &str) -> Option<&'static str> {
+    DEVICE_TERMS
+        .iter()
+        .find(|(key, _, _)| *key == term)
+        .map(|(key, _, _)| *key)
+}
 
 pub(super) struct Console {
     attempts: Mutex<HashMap<IpAddr, (Instant, u8)>>,
@@ -33,7 +47,13 @@ impl Console {
         }
     }
 
-    pub(super) async fn serve(&self, request: &Parts, peer: IpAddr, config: &Path) -> Reply {
+    pub(super) async fn serve(
+        &self,
+        request: &Parts,
+        peer: IpAddr,
+        config: &Path,
+        device_label: Option<&'static str>,
+    ) -> Reply {
         if request.uri.path() == "/admin/" {
             return Response::builder()
                 .status(StatusCode::FOUND)
@@ -78,7 +98,7 @@ impl Console {
         let config = config.to_owned();
         let reply = task::spawn_blocking(move || {
             let db_path = configured_database(&config)?;
-            let db = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+            let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
             let hash: Option<String> = db
                 .query_row(
                     "SELECT password_hash FROM users WHERE username = ?",
@@ -93,6 +113,23 @@ impl Console {
             if !authenticated {
                 return Some(unauthorized());
             }
+            if let Some(label) = device_label {
+                let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
+                db.execute(
+                    "INSERT INTO settings(key, value) VALUES(?, ?)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params!["ui_device_term", label],
+                )
+                .ok()?;
+                return Some(
+                    Response::builder()
+                        .status(StatusCode::SEE_OTHER)
+                        .header(LOCATION, "/admin/devices")
+                        .header("Cache-Control", "no-store")
+                        .body(bytes(""))
+                        .expect("valid settings redirect"),
+                );
+            }
             let output = render_devices(&db, page).ok()?;
             Some(
                 Response::builder()
@@ -102,7 +139,7 @@ impl Console {
                     .header("X-Content-Type-Options", "nosniff")
                     .header(
                         "Content-Security-Policy",
-                        "default-src 'none'; frame-ancestors 'none'; form-action 'none'",
+                        "default-src 'none'; frame-ancestors 'none'; form-action 'self'",
                     )
                     .body(bytes(output))
                     .expect("valid console response"),
@@ -159,12 +196,10 @@ fn unauthorized() -> Reply {
 
 fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
     let term = crate::setting(db, "ui_device_term")?;
-    let label = match term.as_str() {
-        "client" => "Clients PXE",
-        "ordinateur" => "Ordinateurs",
-        "serveur" => "Serveurs",
-        _ => "Machines",
-    };
+    let (term, _, label) = DEVICE_TERMS
+        .iter()
+        .find(|(key, _, _)| *key == term)
+        .unwrap_or(&DEVICE_TERMS[0]);
     let mut rows = db.prepare(
         "SELECT COALESCE(hostname,''), mac, status FROM machines ORDER BY id LIMIT ? OFFSET ?",
     )?;
@@ -172,8 +207,19 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
     let mut html = format!(
         r#"<!doctype html><html lang="fr"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>{label} · PXE Tools</title>
-<main><h1>{label}</h1><table><thead><tr><th>Nom d’hôte</th><th>Adresse MAC</th><th>État</th></tr></thead><tbody>"#
+<main><h1>{label}</h1>
+<form method="post" action="{DEVICE_SETTINGS}">
+<label for="ui-device-term">Appellation dans la console</label>
+<select name="ui_device_term" id="ui-device-term">"#
     );
+    for (key, option, _) in DEVICE_TERMS {
+        let selected = if key == *term { " selected" } else { "" };
+        html.push_str(&format!(
+            r#"<option value="{key}"{selected}>{option}</option>"#
+        ));
+    }
+    html.push_str("</select><button>Enregistrer</button></form>");
+    html.push_str("<table><thead><tr><th>Nom d’hôte</th><th>Adresse MAC</th><th>État</th></tr></thead><tbody>");
     let mut count = 0;
     let mut has_next = false;
     while let Some(row) = rows.next()? {

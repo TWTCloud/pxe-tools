@@ -8,7 +8,7 @@ use http::uri::Authority;
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, Limited};
 use hyper::{
     body::{Bytes, Incoming},
-    header::{HeaderMap, HeaderName, HOST, LOCATION},
+    header::{HeaderMap, HeaderName, CONTENT_TYPE, HOST, LOCATION, ORIGIN},
     server::conn::http1,
     service::service_fn,
     Method, Request, Response, StatusCode,
@@ -104,7 +104,7 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         requests: Semaphore::new(8),
         admin: admin::Console::new(),
     });
-    let tls = tls_config()?;
+    let tls = tls_config().map_err(|error| format!("TLS configuration: {error}"))?;
     let mut listeners = Vec::new();
     // Keep the loopback API used by the worker while exposing PXE only on its configured address.
     for address in [ip, Ipv4Addr::LOCALHOST]
@@ -122,7 +122,7 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
     for (listener, tls) in listeners {
         servers.spawn(accept(listener, tls, site.clone(), connections.clone()));
     }
-    notify_ready()?;
+    notify_ready().map_err(|error| format!("Systemd readiness notification: {error}"))?;
     println!("PXE Tools Rust HTTP/HTTPS ready on {ip}:{http_port} and {ip}:{https_port}");
     tokio::select! {
         result = servers.join_next() => result.ok_or("HTTP listeners unavailable")??,
@@ -145,9 +145,10 @@ fn validate_interface(ip: Ipv4Addr, interface: &str) -> Result<(), ErrorBox> {
     {
         return Err("Invalid PXE interface or address".into());
     }
-    let output = Command::new("/usr/sbin/ip")
+    let output = Command::new("/usr/bin/ip")
         .args(["-j", "-4", "addr", "show", "dev", interface])
-        .output()?;
+        .output()
+        .map_err(|error| format!("PXE interface inspection: {error}"))?;
     if output.status.success() {
         let links: Vec<Value> = serde_json::from_slice(&output.stdout)?;
         let address = ip.to_string();
@@ -179,11 +180,15 @@ fn tls_config() -> Result<TlsAcceptor, ErrorBox> {
         .or_else(|| env::var_os("TLS_DIR"))
         .map(PathBuf::from)
         .ok_or("TLS_DIR is required")?;
-    let certs = rustls_pemfile::certs(&mut BufReader::new(File::open(directory.join("cert.pem"))?))
-        .collect::<Result<Vec<_>, _>>()?;
+    let open = |name| {
+        let path = directory.join(name);
+        File::open(&path)
+            .map(BufReader::new)
+            .map_err(|error| format!("cannot open {}: {error}", path.display()))
+    };
+    let certs = rustls_pemfile::certs(&mut open("cert.pem")?).collect::<Result<Vec<_>, _>>()?;
     let private_key =
-        rustls_pemfile::private_key(&mut BufReader::new(File::open(directory.join("key.pem"))?))?
-            .ok_or("TLS private key missing")?;
+        rustls_pemfile::private_key(&mut open("key.pem")?)?.ok_or("TLS private key missing")?;
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, private_key)?;
@@ -300,7 +305,42 @@ async fn dispatch(
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
-        return site.admin.serve(&parts, peer, &site.database).await;
+        return site.admin.serve(&parts, peer, &site.database, None).await;
+    }
+    if path == admin::DEVICE_SETTINGS && parts.method == Method::POST && secure {
+        if !admin_origin(&parts.headers, site) {
+            return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+        }
+        let form = single(&parts.headers, CONTENT_TYPE.as_str())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| {
+                value
+                    .trim()
+                    .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+            });
+        if !form {
+            return plain(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Expected an HTML form\n",
+            );
+        }
+        let Ok(Ok(data)) = timeout(Duration::from_secs(5), Limited::new(body, 256).collect()).await
+        else {
+            return plain(StatusCode::BAD_REQUEST, "Invalid device label\n");
+        };
+        let data = data.to_bytes();
+        let mut fields = form_urlencoded::parse(&data);
+        let update = match (fields.next(), fields.next()) {
+            (Some((key, value)), None) if key == "ui_device_term" => admin::device_term(&value),
+            _ => None,
+        };
+        let Some(update) = update else {
+            return plain(StatusCode::BAD_REQUEST, "Invalid device label\n");
+        };
+        return site
+            .admin
+            .serve(&parts, peer, &site.database, Some(update))
+            .await;
     }
 
     if readable {
@@ -404,6 +444,31 @@ async fn dispatch(
         );
     }
     reply.body(bytes(body)).expect("valid application response")
+}
+
+fn admin_origin(headers: &HeaderMap, site: &Site) -> bool {
+    let Some(host) = single(headers, HOST.as_str()).and_then(|raw| raw.parse::<Authority>().ok())
+    else {
+        return false;
+    };
+    let name = host.host();
+    if host.port_u16().unwrap_or(443) != site.https_port
+        || !(name == site.ip.to_string()
+            || name.eq_ignore_ascii_case("localhost")
+            || name == "127.0.0.1"
+            || site
+                .public_host
+                .as_ref()
+                .is_some_and(|v| v.eq_ignore_ascii_case(name)))
+    {
+        return false;
+    }
+    let expected = if site.https_port == 443 {
+        format!("https://{name}")
+    } else {
+        format!("https://{host}")
+    };
+    single(headers, ORIGIN.as_str()).is_some_and(|origin| origin.eq_ignore_ascii_case(&expected))
 }
 
 fn single<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

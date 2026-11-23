@@ -319,7 +319,7 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         if state.strip()=='install ok installed':
             raise RuntimeError(f'Unexpected package in the guided appliance: {package_name}')
 
-    tls_dir='/var/lib/pxe-tools-native/tls' if native else '/var/lib/pxe-tools/tls'
+    tls_dir='/var/lib/pxe-tools-native/tls' if native else '/var/lib/pxe-tools-tls'
     docker('cp',f'{app}:{tls_dir}/cert.pem',str(fixture/'rust-cert.pem'))
     cert='/fixture-data/rust-cert.pem'
     tls_url='https://192.0.2.1'
@@ -342,8 +342,15 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     devices=request(tls_url+'/admin/devices',*login)
     if not devices.startswith('HTTP/1.1 200 ') or '<h1>Ordinateurs</h1>' not in devices:
         raise RuntimeError('The Rust console did not apply the existing device label')
-    docker('exec',app,'sqlite3','/var/lib/pxe-tools/chosen.sqlite',
-           "UPDATE settings SET value='serveur' WHERE key='ui_device_term'")
+    settings_url=tls_url+'/admin/settings/device-terminology'
+    change=(*login,'--data','ui_device_term=serveur')
+    # Basic credentials are attached automatically by browsers. Require a
+    # same-origin HTTPS form before authorizing a write.
+    if not request(settings_url,*change,'--header','Origin: https://external.example').startswith('HTTP/1.1 403 '):
+        raise RuntimeError('A cross-origin request changed the device label')
+    saved=request(settings_url,*change,'--header','Origin: '+tls_url)
+    if not saved.startswith('HTTP/1.1 303 ') or 'location: /admin/devices' not in saved.lower():
+        raise RuntimeError('Expected the label form to redirect to the canonical devices list')
     if '<h1>Serveurs</h1>' not in request(tls_url+'/admin/devices',*login):
         raise RuntimeError('The device label change did not preserve the canonical URL')
     kernel_url='/netboot/debian/13.0/amd64/linux'

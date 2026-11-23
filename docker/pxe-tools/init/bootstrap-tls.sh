@@ -13,7 +13,11 @@ KEY="$TLS_DIR/key.pem"
 CN="${TLS_CN:-pxe-tools.local}"
 DAYS="${TLS_DAYS:-3650}"
 
-mkdir -p "$TLS_DIR"
+if [ "${PXE_RUST_DIRECT_HTTP:-}" = 1 ]; then
+    python3 /opt/pxe-tools/scripts/validate-native-runtime.py tls "$TLS_DIR"
+else
+    mkdir -p "$TLS_DIR"
+fi
 
 # Never replace existing certificate material automatically. An expired or
 # unreadable certificate can be diagnosed and replaced explicitly by its owner.
@@ -64,6 +68,13 @@ PYTHON
 )
     SAN="$SAN$ADDITIONAL_SAN"
 fi
+if [ "${PXE_RUST_DIRECT_HTTP:-}" = 1 ]; then
+    umask 077
+    ISSUE_DIR=$(mktemp -d "$TLS_DIR/.issue.XXXXXX")
+    trap 'rm -rf -- "$ISSUE_DIR"' EXIT
+    CERT="$ISSUE_DIR/cert.pem"
+    KEY="$ISSUE_DIR/key.pem"
+fi
 openssl req -x509 -nodes \
     -newkey rsa:2048 \
     -keyout "$KEY" \
@@ -74,5 +85,10 @@ openssl req -x509 -nodes \
 
 chmod 0600 "$KEY"
 chmod 0644 "$CERT"
+if [ "${PXE_RUST_DIRECT_HTTP:-}" = 1 ]; then
+    mv -- "$KEY" "$TLS_DIR/key.pem"
+    mv -- "$CERT" "$TLS_DIR/cert.pem"
+    python3 /opt/pxe-tools/scripts/validate-native-runtime.py tls "$TLS_DIR"
+fi
 
 echo "[bootstrap-tls] cert généré dans $TLS_DIR"
