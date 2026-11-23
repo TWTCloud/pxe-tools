@@ -1,5 +1,14 @@
 # Désinstallation APT d'une installation ancienne
 
+Le lanceur public peut aussi purger les dossiers laissés par l’ancienne
+installation Compose dans `/etc/pxe-tools`, `/var/lib/pxe-tools` et
+`/opt/pxe-tools`. Il exige un manifeste historique reconnaissable, l’absence
+des paquets et de l’état natif APT ainsi que l’arrêt des moteurs de conteneurs
+et des processus qui utilisent ces chemins. L’aperçu liste les dossiers
+concernés, y compris ceux contenant des sauvegardes locales. La purge requiert
+une confirmation liée à l’identité des dossiers. Elle refuse les montages dans
+ces répertoires et peut reprendre avec `--resume` après interruption.
+
 Une instance créée avant l'enregistrement de provenance peut posséder un
 journal Ansible vide (`format: 2`, `directories: {}`, sans `base_phase`). Ce
 journal ne prouve pas la création des répertoires existants. Le désinstallateur
