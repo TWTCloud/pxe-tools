@@ -3463,7 +3463,6 @@ def residual_plan(root, preview, mounts, *, owner=0, apt_config=None, opener=Non
                                          writable_log_parent=True, opener=opener, cross_system_mounts=True)
             fd = None
             try:
-                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
                 if opener is not None:
                     open_child = opener
                 elif root != Path('/') and owner != 0 and __import__('sys').platform != 'linux':

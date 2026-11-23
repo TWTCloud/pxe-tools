@@ -205,6 +205,13 @@ class ResidualPurge(unittest.TestCase):
         self.docker_state = 'active'
         with self.assertRaisesRegex(RuntimeError, 'docker.service'):
             self.orphan_preview()
+        self.docker_state = 'inactive'
+        process = self.root / 'proc/123'
+        (process / 'fd').mkdir(parents=True)
+        (process / 'comm').write_text('unrelated\n')
+        (process / 'fd/4').symlink_to('/var/lib/pxe-tools/data.sqlite')
+        with self.assertRaisesRegex(RuntimeError, 'PID 123'):
+            self.orphan_preview()
 
     def test_orphan_preserves_nested_mount_and_replaced_directory(self):
         self.old_instance()
