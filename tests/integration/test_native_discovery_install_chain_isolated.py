@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -71,6 +72,23 @@ def wait_for(predicate,timeout,description):
         if predicate():return
         time.sleep(1)
     raise RuntimeError('timed out: '+description)
+
+
+def diagnostic_screen(root):
+    proof = root/'pxe-vga.ppm'
+    proof.unlink(missing_ok=True)
+    try:
+        with socket.socket(socket.AF_UNIX) as monitor:
+            monitor.settimeout(4)
+            monitor.connect(str(root/'qemu-monitor.sock'))
+            monitor.sendall(b'screendump /fixture-data/pxe-vga.ppm\n')
+            wait_for(lambda: proof.is_file() and proof.stat().st_size > 0, 4, 'fixture screen')
+        screen = subprocess.run(['tesseract', str(proof), 'stdout', '--psm', '6'],
+                                text=True, capture_output=True, timeout=15, check=False)
+        if screen.stdout.strip():
+            print('Isolated client screen:\n'+screen.stdout.strip()[-1500:], flush=True)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        pass
 
 
 def main():
@@ -187,7 +205,7 @@ done
                    "printf '%s\\n' TFTP_ROOT=/var/lib/pxe-tools-tftp HTTP_ROOT=/var/lib/pxe-tools-http "
                    "PXE_TOOLS_DATA_DIR=/var/lib/pxe-tools-native/rendered MOK_DIR=/var/lib/pxe-tools-native/mok "
                    "PXE_DB_PATH=/var/lib/pxe-tools/stale.sqlite WORKER_POLL_S=1 "
-                   "'KERNEL_OPTS=\"language=fr country=FR locale=fr_FR.UTF-8 keymap=fr ipv6.disable=1 net.ifnames=0 console=ttyS0,115200n8\"' "
+                   "'KERNEL_OPTS=\"language=fr country=FR locale=fr_FR.UTF-8 keymap=fr ipv6.disable=1 net.ifnames=0\"' "
                    "> /var/lib/pxe-tools-native/runtime.env")
             docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
                    '--entrypoint','/bin/sh',image,'-c','exec sleep 4200')
@@ -244,7 +262,7 @@ done
                    '-machine','pc,accel=tcg','-smp','1','-m','1024','-display','none',
                    '-drive','file=/fixture-data/fixture.qcow2,if=none,id=disk,format=qcow2',
                    '-device','virtio-blk-pci,drive=disk,serial=PXE-TEST-ONE',
-                   '-serial','stdio','-monitor','none','-no-reboot','-boot','n',
+                   '-serial','stdio','-monitor','unix:/fixture-data/qemu-monitor.sock,server=on,wait=off','-no-reboot','-boot','n',
                    '-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
                    '-device','e1000,netdev=lan,mac=02:00:00:00:00:01')
             print('Unknown BIOS client booted into Discovery on isolated virtual hardware',flush=True)
@@ -315,12 +333,13 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                 return True
             wait_for(discovery_rebooted,180,'Discovery reboot requested by the interface')
             docker('rm','-f',client)
+            (root/'qemu-monitor.sock').unlink(missing_ok=True)
             docker('run','-d','--name',client,'--network','container:'+app,'--cap-add','NET_ADMIN',
                    '--device','/dev/net/tun','--mount',f'type=bind,src={root},dst=/fixture-data','--entrypoint','qemu-system-x86_64',image,
                    '-machine','pc,accel=tcg','-smp','1','-m','1024','-display','none',
                    '-drive','file=/fixture-data/fixture.qcow2,if=none,id=disk,format=qcow2',
                    '-device','virtio-blk-pci,drive=disk,serial=PXE-TEST-ONE',
-                   '-serial','stdio','-monitor','none','-no-reboot','-boot','n',
+                   '-serial','stdio','-monitor','unix:/fixture-data/qemu-monitor.sock,server=on,wait=off','-no-reboot','-boot','n',
                    '-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
                    '-device','e1000,netdev=lan,mac=02:00:00:00:00:01')
             print('Discovery rebooted; watching the installer and authenticated checkpoints',flush=True)
@@ -328,6 +347,7 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
             seen=False; deadline=began+3000
             previous=None
             http_reported=set()
+            screen_at=began+45
             while time.monotonic()<deadline:
                 output=docker('logs',client,check=False).stdout
                 if 'PXE_FULL_LATE_DONE' in output: seen=True
@@ -348,6 +368,9 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                             http_reported.add(receipt)
                 if progress is None and time.monotonic()-began>600:
                     raise RuntimeError('no authenticated installer start on the isolated network')
+                if progress is None and time.monotonic()>=screen_at:
+                    diagnostic_screen(root)
+                    screen_at=time.monotonic()+120
                 state=inspect(client)['State']
                 if not state['Running']:
                     if not seen or state['ExitCode']!=0: raise RuntimeError('installer exited before successful late command')
@@ -389,6 +412,7 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
             print('OK Discovery, authenticated scheduling, PXE install callback and Debian first boot',flush=True)
             print('Only the disposable qcow2 disk and isolated bridge were used.',flush=True)
         except Exception:
+            diagnostic_screen(root)
             for name, args in ((app, ('exec',app,'journalctl','--no-pager','-n','45','-u','pxe-tools-init','-u','pxe-tools-dnsmasq','-u','pxe-tools-pxe-http','-u','pxe-tools-worker')),
                                (dhcp, ('exec',dhcp,'cat','/tmp/fixture-dhcp.log')),
                                (client, ('logs','--tail','20',client)),
