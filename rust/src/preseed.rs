@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod network;
+
 use crate::disk_identity::{serial, valid_wwid};
 use crate::install::{self, Machine};
 use crate::pxe::{array_values, is_php_array, log_event, normalize_mac, parse_subnet};
@@ -138,7 +140,7 @@ struct Profile {
     hostname: String,
     domain: String,
     distro: String,
-    network: String,
+    network: network::Network,
     disk: String,
     guard_identity: String,
     bootdev: String,
@@ -177,7 +179,7 @@ impl Profile {
                 "le partitionnement personnalisé nécessite le renderer PHP.",
             ));
         }
-        let net = network(config)
+        let net = network::Network::new(config)
             .ok_or_else(|| invalid("plan réseau non pris en charge par le preseed Rust."))?;
         let disk = config["system_disk_path"]
             .as_str()
@@ -406,6 +408,10 @@ impl Profile {
                  && {ordering} && in-target /bin/systemctl enable pxe-postboot.service || exit 1"
             ));
         }
+        if !self.network.secondary.is_empty() {
+            late.push("in-target /bin/mkdir -p /etc/network/interfaces.d".into());
+            late.extend(self.network.secondary.iter().cloned());
+        }
         late.push(phase("late-command", "success"));
         late.push(phase("finished", "success"));
         if let Some((_, token)) = action {
@@ -425,7 +431,7 @@ impl Profile {
         let blocks = [
             ("EARLY_COMMAND_BLOCK", early),
             ("HOSTNAME_BLOCK", self.hostname_block()),
-            ("NETWORK_BLOCK", self.network.clone()),
+            ("NETWORK_BLOCK", self.network.installer.clone()),
             ("DISTRO_CODENAME", self.distro.clone()),
             ("MIRROR_BLOCK", self.mirror_block()),
             ("LOCALIZATION_BLOCK", self.localization_block()),
@@ -611,8 +617,11 @@ impl Profile {
                 "curl",
             ],
         );
+        include.extend(self.network.packages.iter().copied().map(String::from));
         if install_postboot {
             include.extend(["curl", "iproute2"].map(String::from));
+        } else if !self.network.secondary.is_empty() {
+            include.push("iproute2".into());
         }
         if self.ansible.is_some() {
             include.extend(["sudo", "openssh-server", "python3"].map(String::from));
@@ -684,88 +693,6 @@ impl Profile {
         }
         block
     }
-}
-
-fn network(config: &Value) -> Option<String> {
-    let interfaces: Vec<_> = array_values(&config["network"]["interfaces"]).collect();
-    let (selector, primary, ipv4, cidr, gateway, nameservers) = match interfaces.as_slice() {
-        [] => {
-            let mode = config["network_mode"].as_str().unwrap_or("dhcp");
-            let static_mode = mode == "static" && php_truthy(&config["static_ip"]);
-            (
-                "auto".into(),
-                static_mode,
-                &config["static_ip"],
-                &config["static_cidr"],
-                &config["static_gateway"],
-                &config["static_dns"],
-            )
-        }
-        [iface] if !php_truthy(&iface["bond"]) && !php_truthy(&iface["vlan"]) => {
-            if !matches!(iface["mode"].as_str(), None | Some("dhcp" | "static")) {
-                return None;
-            }
-            let selector = if iface["match_by"] == "mac" {
-                let addr = iface["match"]["mac"].as_str().unwrap_or_default();
-                if addr.is_empty() {
-                    "auto".into()
-                } else {
-                    normalize_mac(addr)?
-                }
-            } else {
-                "auto".into()
-            };
-            let cfg = &iface["static"];
-            (
-                selector,
-                iface["mode"] == "static",
-                &cfg["ip"],
-                &cfg["cidr"],
-                &cfg["gateway"],
-                &cfg["dns"],
-            )
-        }
-        _ => return None,
-    };
-    let mut block = format!("d-i netcfg/choose_interface select {selector}");
-    if !primary {
-        block.push_str(if interfaces.is_empty() {
-            "\n# Réseau : DHCP (default)"
-        } else {
-            "\n# Interface primaire : DHCP"
-        });
-        return Some(block);
-    }
-    let ipv4: Ipv4Addr = ipv4.as_str()?.parse().ok()?;
-    let cidr = crate::decimal(&php_string(cidr));
-    let cidr = if cidr == 0 {
-        24
-    } else {
-        cidr.clamp(1, 32) as u32
-    };
-    let netmask = Ipv4Addr::from(u32::MAX << (32 - cidr));
-    let gateway = fallback(gateway, "");
-    if !gateway.is_empty() && gateway.parse::<Ipv4Addr>().is_err() {
-        return None;
-    }
-    let dns = if is_php_array(nameservers) {
-        list(nameservers, &[])
-    } else {
-        let raw = php_string(nameservers);
-        if let Some(value) = serde_json::from_str::<Value>(&raw)
-            .ok()
-            .filter(is_php_array)
-        {
-            list(&value, &[])
-        } else {
-            raw.split(|c: char| c == ',' || c.is_ascii_whitespace())
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect()
-        }
-    };
-    block.push_str(&format!("\nd-i netcfg/disable_autoconfig boolean true\nd-i netcfg/get_ipaddress string {ipv4}\nd-i netcfg/get_netmask string {netmask}\nd-i netcfg/get_gateway string {gateway}\nd-i netcfg/get_nameservers string {}\nd-i netcfg/confirm_static boolean true", dns.join(" ")));
-    Some(block)
 }
 
 fn distro_codename(config: &Value) -> String {

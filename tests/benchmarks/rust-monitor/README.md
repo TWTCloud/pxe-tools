@@ -111,8 +111,11 @@ gestion des certificats et les autres écrans restent à porter.
 
 Les deux variantes fonctionnent sans installer Nginx ni PHP-FPM.
 L’initialisation SQLite et certaines opérations du worker utilisent PHP
-CLI. Les plans de partition personnalisés, le wipe, les tests de disques
-et les configurations réseau multi-interface restent hors de ce parcours.
+CLI. Les plans de partition personnalisés, le wipe et les tests de
+disques restent à porter. Le renderer prend en charge les interfaces
+secondaires DHCP ou statiques, les VLAN secondaires et les bonds. Ces
+profils réseau sont vérifiés par comparaison de leur preseed et de leurs
+scripts générés. Le parcours de bout en bout utilise une seule interface.
 
 Les essais GitHub construisent les deux livrables sur les runners amd64
 et arm64. Ils vérifient HTTP et HTTPS, puis démarrent un client Debian
@@ -220,12 +223,12 @@ réutilise les fichiers déjà authentifiés d'un précédent essai.
 
 ## Périmètre du renderer et étapes restantes
 
-- Le renderer Rust lit les snapshots SQLite du mode Debian guidé avec une
-  seule interface DHCP ou statique. Il réutilise la base preseed du dépôt
-  et les scripts d'identité disque, de journal et de nom d'hôte du renderer
-  PHP. Les plans de partition personnalisés, les réseaux multi-interface,
-  VLAN et bonds ainsi que les templates personnalisés restent à porter.
-  Le renderer expérimental refuse les plans qu'il ne sait pas interpréter.
+- Le renderer Rust lit les snapshots SQLite du mode Debian guidé et
+  leurs configurations réseau. Il réutilise la base preseed du dépôt et
+  les scripts d’identité disque, de journal, de nom d’hôte et de bond du
+  renderer PHP. Les plans de partition et les templates personnalisés
+  restent à porter. Le renderer refuse les plans qu’il ne sait pas
+  interpréter.
 - Le binaire de banc reçoit le chemin SQLite explicitement. Il lit les
   empreintes stockées pour préparer Debian. Le banc natif passe le chemin
   choisi par le sélecteur de base existant et vérifie la conservation

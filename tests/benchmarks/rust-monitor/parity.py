@@ -275,6 +275,61 @@ def compare_install(ports, paths):
         assert "Bearer " + token in seed and "$6$hidden" not in seed
         assert "services-select multiselect" in seed
         assert "/dev/vda:" + base64.b64encode(b"PXE-TEST-ONE").decode() in seed
+    def set_config(snapshot):
+        for database in paths:
+            with closing(sqlite3.connect(database)) as db, db:
+                db.execute("UPDATE machines SET install_config_json=? WHERE id=81", (json.dumps(snapshot),))
+
+    vlan = {"mode": "static", "match_by": "mac", "match": {"mac": "02:00:00:00:51:02"},
+            "vlan": {"id": 77}, "static": {"ip": "198.51.100.4", "cidr": 24,
+                                           "gateway": "198.51.100.1", "dns": ["198.51.100.53"]}}
+    primary = {"mode": "dhcp", "match_by": "mac", "match": {"mac": mac}}
+    secondary = {"mode": "dhcp", "match_by": "mac", "match": {"mac": "02:00:00:00:51:03"}}
+    disabled = {"mode": "disabled", "match_by": "index"}
+    multi = {**config, "network": {"interfaces": [vlan, primary, secondary, disabled], "primary": 1}}
+    set_config(multi)
+    seeds = [response(port, PRESEED + query, peer="lan") for port in ports]
+    assert [item[0] for item in seeds] == [200, 200]
+    decoded = [item[3].decode() for item in seeds]
+    assert directives(decoded[0]) == directives(decoded[1]), (directives(decoded[0]), directives(decoded[1]))
+    for seed in decoded:
+        assert f"d-i netcfg/choose_interface select {mac}" in seed
+        assert "d-i pkgsel/include string openssh-server vlan curl iproute2" in seed
+        assert "/etc/network/interfaces.d/pxe-nic-03" not in seed
+    stanza = r"echo ([A-Za-z0-9+/=]+) \| base64 -d \| sed .*?/etc/network/interfaces.d/pxe-nic-(\d{2})"
+    generated = [{index: base64.b64decode(data).decode() for data, index in re.findall(stanza, seed)} for seed in decoded]
+    assert generated[0] == generated[1]
+    assert "iface __IFNAME__.77 inet static" in generated[1]["00"]
+    assert "vlan-raw-device __IFNAME__" in generated[1]["00"]
+    assert "iface __IFNAME__ inet dhcp" in generated[1]["02"]
+    master_mac = "02:00:00:00:51:04"
+    master = {**vlan, "match": {"mac": master_mac}, "vlan": None,
+              "bond": {"name": "bond0", "role": "master", "mode": "active-backup"}}
+    member = {**primary, "bond": {"name": "bond0", "role": "slave"}}
+    bonded = {**multi, "network": {"interfaces": [master, member, secondary], "primary": 1}}
+    set_config(bonded)
+    seeds = [response(port, PRESEED + query, peer="lan") for port in ports]
+    assert [item[0] for item in seeds] == [200, 200]
+    decoded = [item[3].decode() for item in seeds]
+    assert directives(decoded[0]) == directives(decoded[1]), (directives(decoded[0]), directives(decoded[1]))
+    for seed in decoded:
+        assert f"d-i netcfg/choose_interface select {mac}" in seed
+        assert "d-i netcfg/get_ipaddress string 198.51.100.4" in seed
+        assert "d-i pkgsel/include string openssh-server ifenslave curl iproute2" in seed
+    shell = [base64.b64decode(re.search(pattern, seed).group(1)) for pattern, seed in zip((
+        r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /tmp/pxe-bond.sh",
+        r"echo ([A-Za-z0-9+/=]+) \| base64 -d \| /bin/bash'",
+    ), decoded, strict=True)]
+    assert shell[0] == shell[1]
+    assert f"for mac in {mac} {master_mac}; do".encode() in shell[1]
+    assert b"bond-primary-reselect always" in shell[1]
+    subprocess.run(["bash", "-n"], input=shell[1], check=True)
+    set_config({**bonded, "network": {"interfaces": [master], "primary": 0}})
+    assert response(ports[1], PRESEED + query, peer="lan")[0] == 422
+    invalid_vlan = {**multi, "network": {"interfaces": [vlan, primary], "primary": 0}}
+    set_config(invalid_vlan)
+    assert response(ports[1], PRESEED + query, peer="lan")[0] == 422
+    set_config(config)
     assert compare(ports, START + query, 200)["installation_id"] == 1
     assert compare(ports, ARTIFACT, 200, peer="lan") == b"#!/bin/sh\ntrue\n"
     compare(ports, ARTIFACT, 404, peer="outside", spoof=True)
@@ -459,7 +514,7 @@ def main():
             db.execute("DROP TRIGGER fail_event")
         assert response(ports[1], retry, peer="lan")[0] == 200
         compare_grub(ports, paths)
-    print("Parity OK: 69 summaries, GRUB menus and selection, discovery inventory, preseed and installation callbacks")
+    print("Parity OK: 69 summaries, GRUB menus and selection, discovery inventory, multi-interface preseed and installation callbacks")
 
 
 if __name__ == "__main__":

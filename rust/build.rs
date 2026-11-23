@@ -12,6 +12,7 @@ fn main() {
         ("disk_guard_tpl", "disk-guard.sh"),
         ("dilog_tpl", "install-log.sh"),
         ("host_script", "target-hostname.sh"),
+        ("bond_script_tpl", "target-bond.sh"),
     ] {
         let marker = format!("${name} = <<<'SH'\n");
         let (_, rest) = source

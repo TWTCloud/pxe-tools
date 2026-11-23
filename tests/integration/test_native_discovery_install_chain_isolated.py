@@ -401,6 +401,12 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         if marker not in logs.splitlines():
             raise RuntimeError(f'Missing evidence in the Rust server log: {marker}')
     print('Direct Rust access records and first-boot acknowledgement verified',flush=True)
+    pair=('sha256sum',tls_dir+'/cert.pem',tls_dir+'/key.pem')
+    before=docker('exec',app,*pair).stdout
+    docker('exec',app,'bash','-ec',check_env+'exec /bin/sh /opt/pxe-tools/init/bootstrap-tls.sh')
+    if docker('exec',app,*pair).stdout!=before:
+        raise RuntimeError('TLS bootstrap changed the existing instance certificate or key')
+    print('TLS bootstrap preserved the generated certificate and key',flush=True)
 
 
 def main():
