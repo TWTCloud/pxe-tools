@@ -3395,7 +3395,6 @@ def orphan_plan(root, runner, mounts, *, owner=0, opener=_openat2_no_mount, iden
                 b'/etc/pxe-tools:/etc/pxe-tools' in data,
         )):
             return {}
-        require_idle_orphan(root, runner)
         proofs = {}
         for path in ORPHAN_TREES:
             target = root / path.lstrip('/')
@@ -3408,7 +3407,8 @@ def orphan_plan(root, runner, mounts, *, owner=0, opener=_openat2_no_mount, iden
             if path == '/opt/pxe-tools' and not os.path.samestat(os.fstat(tree), os.fstat(payload)):
                 raise ValueError('old Compose directory changed during inspection')
             proofs[path] = identity(tree)
-        return proofs
+    require_idle_orphan(root, runner)
+    return proofs
 
 
 def _residual_file_snapshot(root, path, *, owner=0, opener=None):
