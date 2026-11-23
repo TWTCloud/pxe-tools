@@ -119,8 +119,13 @@ La vue HTTPS `/admin/devices` permet de consulter la liste avec le compte
 local SQLite existant. Le formulaire d’appellation enregistre le réglage
 `ui_device_term` dans la même base et revient à `/admin/devices`. Pour un
 accès par nom DNS, définir `PXE_PUBLIC_HOST` avec ce nom pour la redirection
-et la validation du formulaire. La gestion des certificats et les autres
-écrans d'administration restent à porter.
+et la validation du formulaire. La page HTTPS `/admin/certificates` permet
+d’importer une chaîne de certificats et sa clé privée au format PEM. Après
+vérification de la paire, les nouvelles connexions utilisent le certificat
+importé et le service le recharge au redémarrage.
+`/var/lib/pxe-tools/tls-import/external.json` contient la clé privée et doit
+être conservé avec les données sensibles de l’instance, avec les permissions
+du service. L’émission et le renouvellement ACME restent à porter.
 
 Les deux variantes fonctionnent sans installer Nginx ni PHP-FPM.
 Dans la variante guidée, Rust réserve la suppression d’une image en

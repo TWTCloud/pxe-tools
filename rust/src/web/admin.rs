@@ -14,7 +14,7 @@ use std::{
     collections::HashMap,
     net::IpAddr,
     path::Path,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::{sync::Semaphore, task};
@@ -39,6 +39,7 @@ pub(super) enum Action {
     Devices,
     Terminology(&'static str),
     Setup(String, Option<Bytes>),
+    Certificates(Arc<super::certificates::Certificates>, Option<Bytes>),
 }
 
 pub(super) struct Console {
@@ -127,6 +128,12 @@ impl Console {
                     endpoint,
                     form.as_deref(),
                 ));
+            }
+            if let Action::Certificates(tls, form) = &action {
+                return Some(match form {
+                    Some(data) => tls.import(data),
+                    None => tls.page(),
+                });
             }
             if let Action::Terminology(label) = action {
                 let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
@@ -234,6 +241,7 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
         ));
     }
     html.push_str("</select><button>Enregistrer</button></form>");
+    html.push_str(r#"<p><a href="/admin/certificates">Certificats TLS</a></p>"#);
     if crate::setting(db, "wizard_completed")? != "1" {
         html.push_str(r#"<p><a href="/init/network">Poursuivre la configuration initiale</a></p>"#);
     }

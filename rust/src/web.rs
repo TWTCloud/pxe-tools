@@ -2,6 +2,7 @@
 
 mod admin;
 mod assets;
+mod certificates;
 mod onboarding;
 mod setup;
 
@@ -52,6 +53,7 @@ struct Site {
     requests: Semaphore,
     admin: admin::Console,
     setup: setup::Wizard,
+    tls: Arc<certificates::Certificates>,
 }
 
 pub fn serve(config: &Path) -> Result<(), ErrorBox> {
@@ -78,6 +80,8 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         .transpose()?;
     let http_port = port("PXE_HTTP_PORT", 80)?;
     let https_port = port("PXE_HTTPS_PORT", 443)?;
+    let default_tls = tls_config().map_err(|error| format!("TLS configuration: {error}"))?;
+    let tls = Arc::new(certificates::Certificates::new(default_tls)?);
     let site = Arc::new(Site {
         database: config.to_owned(),
         assets: assets::Assets::new(
@@ -92,17 +96,14 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         requests: Semaphore::new(8),
         admin: admin::Console::new(),
         setup: setup::Wizard::new(),
+        tls,
     });
-    let tls = tls_config().map_err(|error| format!("TLS configuration: {error}"))?;
     let mut listeners = Vec::new();
     // Keep the loopback API used by the worker while exposing PXE only on its configured address.
     for address in std::iter::once(Ipv4Addr::LOCALHOST).chain(pxe_ip.filter(|ip| !ip.is_loopback()))
     {
-        listeners.push((TcpListener::bind((address, http_port)).await?, None));
-        listeners.push((
-            TcpListener::bind((address, https_port)).await?,
-            Some(tls.clone()),
-        ));
+        listeners.push((TcpListener::bind((address, http_port)).await?, false));
+        listeners.push((TcpListener::bind((address, https_port)).await?, true));
     }
     let connections = Arc::new(Semaphore::new(64));
     let mut servers = task::JoinSet::new();
@@ -242,7 +243,7 @@ fn notify_ready() -> io::Result<()> {
 
 async fn accept(
     listener: TcpListener,
-    tls: Option<TlsAcceptor>,
+    tls: bool,
     site: Arc<Site>,
     connections: Arc<Semaphore>,
 ) -> Result<(), ErrorBox> {
@@ -251,10 +252,11 @@ async fn accept(
         let Ok(permit) = connections.clone().try_acquire_owned() else {
             continue;
         };
-        let (tls, site) = (tls.clone(), site.clone());
+        let site = site.clone();
         task::spawn(async move {
             let _permit = permit;
-            if let Some(tls) = tls {
+            if tls {
+                let tls = site.tls.acceptor();
                 if let Ok(Ok(stream)) = timeout(Duration::from_secs(10), tls.accept(stream)).await {
                     connection(stream, peer, true, site).await;
                 }
@@ -384,6 +386,26 @@ async fn dispatch(
                 admin::Action::Setup(endpoint, form),
             )
             .await;
+    }
+    if path == certificates::ROUTE {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        let form = if parts.method == Method::POST {
+            if !admin_origin(&parts.headers, site) {
+                return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+            }
+            match read_form(&parts.headers, body, certificates::MAX_FORM).await {
+                Ok(form) => Some(form),
+                Err(reply) => return reply,
+            }
+        } else if readable {
+            None
+        } else {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        };
+        let action = admin::Action::Certificates(site.tls.clone(), form);
+        return site.admin.serve(&parts, peer, &site.database, action).await;
     }
     if path == admin::DEVICE_SETTINGS && parts.method == Method::POST && secure {
         if !admin_origin(&parts.headers, site) {

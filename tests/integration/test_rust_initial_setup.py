@@ -194,6 +194,39 @@ def verify_worker_image_delete(database, http_root):
     raise RuntimeError('The packaged worker did not finish the image deletion job')
 
 
+def generate_tls_pair(directory, common_name):
+    subprocess.run(['openssl', 'req', '-x509', '-nodes', '-newkey', 'rsa:2048', '-days', '1',
+                    '-subj', f'/CN={common_name}', '-addext', 'subjectAltName=IP:127.0.0.1',
+                    '-keyout', str(directory/'key.pem'), '-out', str(directory/'cert.pem')],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def verify_tls_import(client, original, imported, persistent, authorization):
+    generate_tls_pair(imported, 'fixture-import')
+    endpoint = '/admin/certificates'
+    valid = {'certificate': (imported/'cert.pem').read_text(),
+             'private_key': (imported/'key.pem').read_text()}
+    invalid = {**valid, 'private_key': (original/'key.pem').read_text()}
+    assert client.request(endpoint)[0] == 401
+    assert client.request(endpoint, form=valid, authorization=authorization,
+                          origin='https://other.example')[0] == 403
+    assert client.request(endpoint, form=invalid, authorization=authorization)[0] == 422
+    assert client.request('/healthz')[0] == 200
+    assert not persistent.exists()
+    assert client.request(endpoint, form=valid, authorization=authorization)[:2] == (303, endpoint)
+
+    updated = Client(imported, client.http_port, client.https_port)
+    assert b'Certificat externe' in updated.request(endpoint, authorization=authorization)[2]
+    assert updated.request(endpoint, form=invalid, authorization=authorization)[0] == 422
+    assert updated.request('/healthz')[0] == 200
+    bundle = persistent/'external.json'
+    assert stat.S_IMODE(persistent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(bundle.stat().st_mode) == 0o600
+    assert json.loads(bundle.read_text()) == valid
+    print('Rust imported a matching TLS pair without restart and refused the mismatched key', flush=True)
+    return updated
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -202,10 +235,7 @@ def local(binary):
             path.mkdir()
         (conf/'master.key').write_bytes(secrets.token_bytes(32))
         (credentials/'setup-code').write_text(secrets.token_hex(24)+'\n')
-        subprocess.run(['openssl','req','-x509','-nodes','-newkey','rsa:2048','-days','1',
-                        '-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1',
-                        '-keyout',str(credentials/'key.pem'),'-out',str(credentials/'cert.pem')],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        generate_tls_pair(credentials, 'localhost')
         with ExitStack() as reservations:
             ports = []
             for _ in range(2):
@@ -218,7 +248,8 @@ def local(binary):
         env = {**os.environ, 'AUTH_MODE':'local', 'CREDENTIALS_DIRECTORY':str(credentials),
                'HTTP_ROOT':str(public), 'PXE_DB_DRIVER':'sqlite', 'PXE_DB_PATH':str(database),
                'PXE_SETUP_DATA_ROOT':str(data), 'PXE_HTTP_PORT':str(ports[0]),
-               'PXE_HTTPS_PORT':str(ports[1]), 'PXE_PUBLIC_HOST':'pxe.example.test'}
+               'PXE_HTTPS_PORT':str(ports[1]), 'PXE_PUBLIC_HOST':'pxe.example.test',
+               'PXE_TLS_IMPORT_DIR':str(root/'tls-import')}
         with closing(sqlite3.connect(database)) as db, db:
             db.execute('CREATE TABLE existing(data TEXT)')
             db.execute("INSERT INTO existing VALUES ('preserve')")
@@ -232,6 +263,16 @@ def local(binary):
         database.unlink()
         authorization = setup(client, credentials, config, database)
         verify_configuration(client, database, authorization, packaged=False)
+        imported = root/'imported'
+        imported.mkdir()
+        updated = verify_tls_import(client, credentials, imported, root/'tls-import', authorization)
+        server.terminate()
+        server.wait(timeout=5)
+        replacement = stack.enter_context(subprocess.Popen([str(binary), '--serve-guided', str(config)], env=env))
+        stack.callback(replacement.terminate)
+        updated.ready(replacement)
+        assert b'Certificat externe' in updated.request('/admin/certificates', authorization=authorization)[2]
+        print('The imported TLS pair survived a restart', flush=True)
 
 
 def main():
@@ -257,6 +298,9 @@ def main():
         if args.http_root:
             verify_worker_image_delete(database, args.http_root)
         verify_configuration(client, database, authorization, packaged=True)
+        with tempfile.TemporaryDirectory(prefix='pxe-tls-test-') as temporary:
+            verify_tls_import(client, credentials, Path(temporary),
+                              database.parent/'tls-import', authorization)
     else:
         binary = args.binary or Path(__file__).resolve().parents[2]/'rust/target/release/pxe-tools-rust'
         local(binary.resolve())
