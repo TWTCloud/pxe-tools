@@ -233,10 +233,11 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         'TFTP_ROOT='+tftp_root, 'HTTP_ROOT='+http_root,
         'PXE_DB_PATH=/var/lib/pxe-tools/stale.sqlite', 'WORKER_POLL_S=1', 'KERNEL_OPTS='+kernel,
     ]
+    http_mount=(root/'http',http_root) if native else (root/'http/netboot',http_root+'/netboot')
     mounts=[]
     for source,target in (
         (root/'data','/var/lib/pxe-tools'), (root/'conf','/etc/pxe-tools'),
-        (root/'http',http_root), (root/'tftp',tftp_root), (fixture,'/fixture-data'),
+        http_mount, (root/'tftp',tftp_root), (fixture,'/fixture-data'),
         (discovery_template,'/opt/pxe-tools/templates/discovery-preseed.cfg.j2'),
         (ROOT/'tests/support/native-rust-pxe/server.py','/fixture-data/rust-server.py'),
     ):
@@ -297,8 +298,11 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         raise RuntimeError('Unexpected Rust appliance architecture')
     print(f'Packaged Rust appliance {backend} on Debian 13 {pg}',flush=True)
     pxe_url='http://192.0.2.1'
-    wait_for(lambda:docker('exec',dhcp,'curl','-fsS','--max-time','2',pxe_url+'/healthz',check=False).returncode==0,
-             90,'packaged PXE listener')
+    def http_ready():
+        if not inspect(app)['State']['Running']:
+            raise RuntimeError('The packaged appliance stopped during startup')
+        return docker('exec',dhcp,'curl','-fsS','--max-time','2',pxe_url+'/healthz',check=False).returncode==0
+    wait_for(http_ready,90,'packaged PXE listener')
     nginx_config=docker('exec',app,*nginx_command).stdout
     if re.search(r'(?m)^\s*(?:fastcgi_pass|error_page)\s',nginx_config) or 'pxe-tools-rust-guided/http.sock' not in nginx_config:
         raise RuntimeError('PXE listener has a PHP or fallback route, or Rust is missing')
@@ -652,8 +656,8 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
         except Exception:
             diagnostic_screen(root)
             if backend=='rust-docker':
-                output=docker('logs','--tail','45',app,check=False).stdout
-                print(output[-3000:],flush=True)
+                output=docker('logs','--tail','45',app,check=False)
+                print((output.stdout+'\n'+output.stderr)[-4500:],flush=True)
             if rust_lab:
                 status_log=fixture/'native-status.log'
                 if status_log.is_file():
