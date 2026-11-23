@@ -21,6 +21,26 @@ import subprocess
 import tempfile
 
 
+CHANGELOG_URI = 'https://packages.pxetools.com/apt/changelogs/@CHANGEPATH@_changelog'
+CHANGELOG_SOURCE = Path(__file__).resolve().parents[1] / 'changelogs'
+
+
+def stage_changelogs(stage: Path) -> None:
+    # Include the tracked history so clients with cached indexes can still
+    # look up versions after the next snapshot replaces Packages.
+    for source in sorted(CHANGELOG_SOURCE.glob('*_changelog')):
+        match = re.fullmatch(r'(pxe-tools(?:-ansible)?)_([0-9][A-Za-z0-9.+~\-]{0,100})_changelog', source.name)
+        if match is None or source.is_symlink() or not source.is_file():
+            raise ValueError(f'invalid APT changelog file: {source.name}')
+        name, version = match.groups()
+        data = source.read_text(encoding='utf-8')
+        if not data.startswith(f'{name} ({version}) '):
+            raise ValueError(f'APT changelog header does not match {source.name}')
+        target = stage / 'changelogs/main/p' / name / source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(data, encoding='utf-8')
+
+
 def command(*args: str, cwd: Path | None = None, pass_fds: tuple[int, ...] = ()) -> bytes:
     return subprocess.run(args, cwd=cwd, check=True, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, pass_fds=pass_fds).stdout
@@ -200,6 +220,9 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
         release = command('apt-ftparchive', *options, 'release', str(release_dir), cwd=stage)
         if b'\nValid-Until:' in b'\n' + release or b'\nSHA256:' not in b'\n' + release:
             raise RuntimeError('unexpected APT Release metadata')
+        if release_candidate:
+            stage_changelogs(stage)
+            release = f'Changelogs: {CHANGELOG_URI}\n'.encode('ascii') + release
         # apt-ftparchive does not emit Valid-Until from its Release options.
         expires = format_datetime(now + timedelta(days=valid_days), usegmt=True)
         provenance_fields = ''
@@ -349,7 +372,7 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
         # is embedded in signed Release and calculated from canonical paths.
         if release_candidate:
             rows = []
-            for path in sorted(stage.rglob('*')):
+            for path in sorted(stage.rglob('*'), key=Path.as_posix):
                 if path.is_file() and path.parent != release_dir:
                     with path.open('rb') as stream:
                         checksum = hashlib.file_digest(stream, 'sha256').hexdigest()

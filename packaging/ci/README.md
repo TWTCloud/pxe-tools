@@ -1,5 +1,11 @@
 # Publication APT par Worker
 
+Pour chaque version APT, ajouter les notes du socle et du module Ansible
+dans `packaging/changelogs/`, au format Debian et sous le nom
+`PAQUET_VERSION_changelog`. Le premier en-tête donne le nom et la version
+exacts. L’index signé annonce leur URL et le dépôt conserve les fichiers
+des versions précédentes.
+
 Pour les limites actuelles de rotation de clé, la reprise des instantanés et la portée des essais APT, voir [état de la rotation et reprise](../../docs/apt-trust-and-recovery.md).
 
 Pour le changement de primaire et la préparation des clients existants, suivre la [procédure de transition](../../docs/apt-primary-transition.md).
