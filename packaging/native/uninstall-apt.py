@@ -223,6 +223,7 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None, allow_reviewed=False):
     APT invocations with a later, explicitly supplied alternative configuration
     are outside this inspection. The CLI never exposes the fixture override.
     """
+    import errno
     import hashlib
     import re
     import subprocess
@@ -247,7 +248,9 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None, allow_reviewed=False):
     def safe_reference(path):
         if safe_file(path):
             return True
-        if not allow_reviewed or path.is_symlink() or not path.is_file():
+        # Zorin may have a root:root 0664 sources.list. Inspect it if group
+        # write access is limited to root.
+        if path.is_symlink() or not path.is_file():
             return False
         info = path.stat()
         if (owner != 0 or info.st_uid != 0 or info.st_gid != 0 or info.st_nlink != 1 or
@@ -257,10 +260,19 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None, allow_reviewed=False):
         import pwd
         try:
             group = grp.getgrgid(0)
-            return (group.gr_name == 'root' and not group.gr_mem and
-                    all(entry.pw_uid == 0 for entry in pwd.getpwall() if entry.pw_gid == 0))
+            if (group.gr_name != 'root' or group.gr_mem or
+                    any(entry.pw_uid != 0 and entry.pw_gid == 0 for entry in pwd.getpwall())):
+                return False
         except (KeyError, OSError):
             return False
+        # An extended ACL can grant write access outside the owning group.
+        try:
+            os.getxattr(path, 'system.posix_acl_access', follow_symlinks=False)
+        except OSError as error:
+            return error.errno == errno.ENODATA
+        except AttributeError:
+            return False
+        return False
 
     try:
         if not all(safe_dir(path) for path in (root, root / 'etc', root / 'etc/apt', source.parent)):
