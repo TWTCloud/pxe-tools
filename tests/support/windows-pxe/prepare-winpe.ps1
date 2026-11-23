@@ -10,6 +10,7 @@ param(
     [Parameter(Mandatory)][guid]$GuestId,
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]{1,20}$')][string]$DiskSerial,
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{1,40}$')][string]$Edition,
+    [ValidateRange(0, 128)][int]$InstallImageIndex = 0,
     [string]$AdkDirectory = "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit"
 )
 
@@ -97,11 +98,18 @@ try {
     }
     $system = Join-Path $mount 'Windows\System32'
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'collect.ps1') -Destination (Join-Path $system 'pxe-collect.ps1')
+    $script = "pxe-collect.ps1"
+    $parameters = "-GuestId $GuestId -DiskSerial $DiskSerial"
+    if ($InstallImageIndex -gt 0) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-fixture.ps1') -Destination $system
+        $script = "install-fixture.ps1"
+        $parameters += " -ImageIndex $InstallImageIndex"
+    }
     @"
 @echo off
 wpeinit
 if errorlevel 1 exit /b 1
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SystemRoot%\System32\pxe-collect.ps1" -GuestId $GuestId -DiskSerial $DiskSerial
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "%SystemRoot%\System32\$script" $parameters
 exit /b %errorlevel%
 "@ | Set-Content -LiteralPath (Join-Path $system 'startnet.cmd') -Encoding Ascii
     Invoke-Checked -Program $dism -Arguments @('/Unmount-Image',"/MountDir:$mount",'/Commit')

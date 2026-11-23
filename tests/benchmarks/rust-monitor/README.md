@@ -412,6 +412,15 @@ temporaires. [Personnalisation WinPE](https://learn.microsoft.com/windows-hardwa
   -GuestId $guestId -DiskSerial $diskSerial -Edition $edition
 ```
 
+Pour l’installation automatisée, fournir en plus `-InstallImageIndex`
+avec l’index de l’édition approuvée. La VM démarre WinPE par le réseau et
+accède à l’ISO Windows sur un lecteur optique en lecture seule, sans le
+sélectionner comme périphérique d’amorçage. WinPE exige Secure Boot, un
+TPM 2.0, l’UUID du banc et un seul disque modifiable, vierge et identifié
+par son numéro de série. DISM applique l’image sur ce disque. La sonde
+s’exécute de nouveau pendant le premier démarrage, dans la phase
+`specialize`. Tester ce chemin sur un banc muni des médias approuvés.
+
 Le manifeste du cas contient `guest_id` (UUID), `disk_serial`,
 `edition` (par exemple `Professional`), `iso_sha256` et
 `winpe_sha256`. La preuve réseau produite côté serveur contient
