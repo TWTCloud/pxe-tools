@@ -65,19 +65,21 @@ DOCKERFILE
         if docker exec "$name" systemctl list-units --no-legend >/dev/null 2>&1; then break; fi
         sleep 1
     done
-    docker exec "$name" bash -euc '
-        export DEBIAN_FRONTEND=noninteractive
-        printf "%s\n" "deb [signed-by=/usr/share/keyrings/pxe-lab.gpg] file:/mnt/pxe-apt stable main" \
-            > /etc/apt/sources.list.d/pxe-lab.list
-        apt-get update
-        apt-get install -y --no-install-recommends pxe-tools-local-test
-        test "$(dpkg-query -W -f="${Architecture}" pxe-tools-local-test)" = "$1"
-        test -z "$(dpkg --print-foreign-architectures)"
-        systemctl is-active --quiet pxe-tools-admin.target
-        systemctl is-active --quiet pxe-tools-worker.service
-        ! systemctl is-active --quiet pxe-tools-dnsmasq.service
-        ! command -v ansible
-    ' fixture "$architecture"
+    docker exec -i "$name" bash -eus -- "$architecture" <<'APT_GUEST'
+export DEBIAN_FRONTEND=noninteractive
+printf '%s\n' 'deb [signed-by=/usr/share/keyrings/pxe-lab.gpg] file:/mnt/pxe-apt stable main' \
+    > /etc/apt/sources.list.d/pxe-lab.list
+apt-get update
+apt-get install -y --no-install-recommends pxe-tools-local-test
+test "$(dpkg-query -W -f='${Architecture}' pxe-tools-local-test)" = "$1"
+test -z "$(dpkg --print-foreign-architectures)"
+systemctl is-active --quiet pxe-tools-admin.target
+systemctl is-active --quiet pxe-tools-worker.service
+if systemctl is-active --quiet pxe-tools-dnsmasq.service || command -v ansible; then
+    echo 'The fresh core started DHCP or included Ansible.' >&2
+    exit 1
+fi
+APT_GUEST
 else
     docker build --platform "linux/$architecture" -f docker/pxe-tools/Dockerfile -t "$name" .
     docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes' "$name"
