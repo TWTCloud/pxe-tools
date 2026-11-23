@@ -38,6 +38,8 @@ def main() -> None:
     parser.add_argument('--source-commit')
     parser.add_argument('--build-run-id')
     parser.add_argument('--approved-package-sha256')
+    parser.add_argument('--arm64-package', type=Path)
+    parser.add_argument('--approved-arm64-sha256')
     parser.add_argument('--ansible-package', type=Path)
     parser.add_argument('--approved-ansible-sha256')
     args = parser.parse_args()
@@ -104,6 +106,11 @@ def main() -> None:
             if args.ansible_package is not None:
                 build_args += ['--ansible-package', str(args.ansible_package),
                                '--approved-ansible-sha256', args.approved_ansible_sha256]
+            if (args.arm64_package is None) != (args.approved_arm64_sha256 is None):
+                raise ValueError('the arm64 package and its approved SHA256 must be supplied together')
+            if args.arm64_package is not None:
+                build_args += ['--arm64-package', str(args.arm64_package),
+                               '--approved-arm64-sha256', args.approved_arm64_sha256]
             provenance = (args.source_commit, args.build_run_id, args.approved_package_sha256)
             if any(value is not None for value in provenance):
                 if not all(value is not None for value in provenance):

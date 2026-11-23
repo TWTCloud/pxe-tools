@@ -1,10 +1,41 @@
 # Installation native et exploitation
 
-Le paquet natif vise actuellement Debian 13 amd64 avec systemd. Il installe
-l'application et ses dépendances sans Docker ni Ansible. L'installation APT,
-l'assistant, une installation Debian PXE et Secure Boot ont été vérifiés sur
-un banc Hyper-V isolé ; le matériel physique et les autres distributions ne
-sont pas encore validés.
+Le paquet natif prend en charge Debian 13 amd64 et arm64 avec systemd. Il
+installe l'application et ses dépendances sans Docker ni Ansible. Les essais
+APT couvrent les deux architectures. Un banc ARM64 isolé a installé Debian 13
+jusqu'à la première invite de connexion d'un client BIOS amd64. Secure Boot x86 a
+également été testé sur un banc Hyper-V isolé.
+
+### Construire le candidat ARM64 pour Debian 13
+
+Le paquet natif peut être construit avec `--architecture arm64` depuis les
+mêmes sources. Sur une machine de construction Debian, préparez le paquet
+expérimental avec la commande suivante.
+
+```sh
+python3 packaging/native/build-local-package.py "$PWD/pxe-tools-arm64.deb" --architecture arm64
+```
+
+Le script `packaging/native/build-local-apt-repository.py` peut indexer ce
+paquet ARM64 seul, ou avec le paquet AMD64 de même version (en passant le paquet
+ARM64 via `--arm64-package`). Le module Ansible facultatif conserve
+`Architecture: all` et figure dans les deux index lorsqu'il est fourni.
+Utilisez une clé de test dédiée pour signer le dépôt expérimental.
+
+Pour Docker, le même Dockerfile construit une image native à partir de
+Debian 13. Sur un hôte Linux ARM64, lancez la construction depuis la racine du
+dépôt.
+
+```sh
+docker build --platform linux/arm64 -f docker/pxe-tools/Dockerfile -t pxe-tools:arm64 .
+```
+
+Sur un serveur ARM64, la préparation de GRUB télécharge les modules x86, shim
+et MokManager depuis l'archive Debian authentifiée. Elle construit le chargeur
+x86 signé par le MOK de l'instance à l'aide de `grub-mkimage` natif. Le
+chargeur UEFI ARM64 fourni par le serveur exige Secure Boot désactivé côté
+client. Les outils statiques de découverte et de diagnostic restent prévus
+pour les clients x86-64.
 
 ## Premier démarrage et réseau
 

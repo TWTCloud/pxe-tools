@@ -121,11 +121,18 @@ jobs:
             gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$module_asset" --dir "$RUNNER_TEMP/package"
             module_args+=(--ansible-package "$RUNNER_TEMP/package/$module_asset")
           fi
+          arm_args=()
+          if jq -e 'has("arm64_package_asset") or has("arm64_package_sha256")' "$manifest" >/dev/null; then
+            arm_asset=$(jq -er '.arm64_package_asset | select(type == "string")' "$manifest")
+            [[ "$arm_asset" =~ ^pxe-tools_[A-Za-z0-9._-]+_arm64\.deb$ ]]
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$arm_asset" --dir "$RUNNER_TEMP/package"
+            arm_args+=(--arm64-package "$RUNNER_TEMP/package/$arm_asset")
+          fi
           python3 packaging/ci/verify-approved-release.py --manifest "$manifest" \
             --release-json "$RUNNER_TEMP/release.json" --build-json "$RUNNER_TEMP/build-run.json" \
             --build-jobs-json "$RUNNER_TEMP/build-jobs.json" \
             --package "$RUNNER_TEMP/package/$asset" --version-file "$RUNNER_TEMP/approved-version.txt" \
-            --tag-commit "$tag_commit" "${module_args[@]}"
+            --tag-commit "$tag_commit" "${module_args[@]}" "${arm_args[@]}"
           # First publication must compare exact bytes to the CI build. Once
           # GitHub's temporary artifact expires, renew only if the existing
           # public InRelease cryptographically proves this same build/package.
@@ -134,6 +141,10 @@ jobs:
             test "$(cat "$RUNNER_TEMP/build-artifact/source-commit.txt")" = "$source"
             cmp "$RUNNER_TEMP/package/$asset" "$RUNNER_TEMP/build-artifact/$asset"
             test "$(cat "$RUNNER_TEMP/build-artifact/package.sha256")" = "$(jq -er '.package_sha256' "$manifest")"
+            if [[ -n "${arm_asset:-}" ]]; then
+              cmp "$RUNNER_TEMP/package/$arm_asset" "$RUNNER_TEMP/build-artifact/$arm_asset"
+              test "$(cat "$RUNNER_TEMP/build-artifact/arm64-package.sha256")" = "$(jq -er '.arm64_package_sha256' "$manifest")"
+            fi
             if [[ ${#module_args[@]} -gt 0 ]]; then
               cmp "$RUNNER_TEMP/package/$module_asset" "$RUNNER_TEMP/build-artifact/$module_asset"
               test "$(cat "$RUNNER_TEMP/build-artifact/ansible-package.sha256")" = "$(jq -er '.ansible_package_sha256' "$manifest")"
@@ -148,10 +159,14 @@ jobs:
               primary=CD8B4493876B4FBD1009FE2DB195E5DE026807EC
               signing=76CA2883C9DACEB52D9E806A1F2D96C9062271AB
             fi
+            prior_arm_args=()
+            if [[ ${#arm_args[@]} -gt 0 ]]; then
+              prior_arm_args+=(--arm64-packages "$prior/main/binary-arm64/Packages")
+            fi
             python3 packaging/ci/verify-published-provenance.py \
               --inrelease "$prior/InRelease" --packages "$prior/main/binary-amd64/Packages" \
               --keyring "$keyring" --manifest "$manifest" \
-              --primary-fingerprint "$primary" --signing-fingerprint "$signing"
+              --primary-fingerprint "$primary" --signing-fingerprint "$signing" "${prior_arm_args[@]}"
           fi
           printf '%s\n' "$asset" > "$RUNNER_TEMP/package-asset.txt"
       - name: Sign and verify the approved package
@@ -174,6 +189,13 @@ jobs:
             [[ "$module_asset" =~ ^pxe-tools-ansible_[A-Za-z0-9._-]+_all\.deb$ && "$module_sha" =~ ^[0-9a-f]{64}$ ]]
             module_args+=(--ansible-package "$RUNNER_TEMP/package/$module_asset" --approved-ansible-sha256 "$module_sha")
           fi
+          arm_args=()
+          if jq -e 'has("arm64_package_asset") or has("arm64_package_sha256")' packaging/ci/release-manifest.json >/dev/null; then
+            arm_asset=$(jq -er '.arm64_package_asset' packaging/ci/release-manifest.json)
+            arm_sha=$(jq -er '.arm64_package_sha256' packaging/ci/release-manifest.json)
+            [[ "$arm_asset" =~ ^pxe-tools_[A-Za-z0-9._-]+_arm64\.deb$ && "$arm_sha" =~ ^[0-9a-f]{64}$ ]]
+            arm_args+=(--arm64-package "$RUNNER_TEMP/package/$arm_asset" --approved-arm64-sha256 "$arm_sha")
+          fi
           previous=()
           if [[ -d "$RUNNER_TEMP/previous/snapshot" ]]; then previous+=(--previous "$RUNNER_TEMP/previous/snapshot"); fi
           if [[ "$PRIMARY_TRANSITION" == true ]]; then
@@ -186,7 +208,7 @@ jobs:
             --primary-fingerprint 17410C3B457E574257281551CFC35C536A61C3CF \
             --signing-fingerprint A807812C7D83085301C630CD1DC963B9AF9C6908 \
             --source-commit "$source" --build-run-id "$run_id" --approved-package-sha256 "$sha" \
-            "${module_args[@]}"
+            "${module_args[@]}" "${arm_args[@]}"
       - name: Retain signed snapshot for publication
         if: steps.manifest.outputs.ready == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -38,6 +38,13 @@ signature. Le premier passage exige l'artefact de construction, et les
 renouvellements après expiration exigent sa provenance et son empreinte dans
 l'index précédemment signé. Sans ces trois champs, seul le socle est publié.
 
+Une livraison du socle sur les deux architectures approuve aussi
+`arm64_package_asset` et `arm64_package_sha256`. Les deux paquets proviennent
+du même commit et du même run que le paquet amd64. Les index signés
+`binary-amd64` et `binary-arm64` contiennent chacun leur socle et le
+module facultatif commun, s'il fait partie de la livraison. Un renouvellement
+conserve les objets immuables des deux index et vérifie les deux empreintes.
+
 L'offre des sources des utilitaires doit rester accessible sous les cinq assets
 de la release publique `sources-2026-11-12` ; la CI télécharge et vérifie leurs
 empreintes avant publication. Les deux grosses archives dépassent la limite de
@@ -96,3 +103,19 @@ pas `wrangler triggers deploy` et ne gère pas les routes ou domaines. Vérifier
 la liaison du domaine séparément. Un échec après déploiement peut laisser une
 version effective malgré un run rouge : inspecter la version active et le
 snapshot public avant toute nouvelle publication.
+
+## Publication Docker
+
+Le workflow manuel `docker-release.yml` construit les images amd64 et arm64
+sur des runners natifs à partir du tag approuvé. Il vérifie le démarrage et la
+génération des chargeurs PXE, puis rapproche les versions installées des
+index de sources Debian authentifiés. Les offres de sources correspondant
+aux empreintes des images testées sont attachées à la release GitHub avant
+l'envoi au registre. Les archives de sources et de reliage des outils
+statiques font l'objet du même contrôle que pour APT.
+
+Le registre prévu pour la version publique est
+`ghcr.io/williamboglietti/pxe-tools-appliance`. Une publication crée un index
+pour les deux plateformes sous le tag de la release. Vérifier le
+téléchargement anonyme des deux images après le réglage de visibilité du
+nouveau paquet.

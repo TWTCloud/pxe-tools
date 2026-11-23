@@ -26,11 +26,26 @@ def command(*args: str, cwd: Path | None = None, pass_fds: tuple[int, ...] = ())
                           stderr=subprocess.PIPE, pass_fds=pass_fds).stdout
 
 
+def write_index(index: Path, packages: bytes) -> None:
+    index.mkdir(parents=True)
+    files = {'Packages': packages, 'Packages.gz': gzip.compress(packages, mtime=0)}
+    for name, data in files.items():
+        (index / name).write_bytes(data)
+    # APT chooses the strongest advertised digest (typically SHA512).
+    for algorithm in ('sha256', 'sha512'):
+        by_hash = index / 'by-hash' / algorithm.upper()
+        by_hash.mkdir(parents=True)
+        for data in files.values():
+            (by_hash / hashlib.new(algorithm, data).hexdigest()).write_bytes(data)
+
+
 def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
           valid_days: int = 7, ansible_package: Path | None = None, *,
+          arm64_package: Path | None = None,
           release_candidate: bool = False, passphrase_file: Path | None = None,
           previous: Path | None = None, source_commit: str | None = None,
           build_run_id: str | None = None, approved_package_sha256: str | None = None,
+          approved_arm64_sha256: str | None = None,
           approved_ansible_sha256: str | None = None, previous_keyring: Path | None = None,
           previous_primary_fingerprint: str | None = None,
           previous_signing_fingerprint: str | None = None) -> None:
@@ -39,6 +54,11 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
     if approved_ansible_sha256 is not None and (not release_candidate or not re.fullmatch(r'[a-f0-9]{64}', approved_ansible_sha256)):
         raise ValueError('invalid approved module SHA256')
     provenance = (source_commit, build_run_id, approved_package_sha256)
+    if release_candidate and (arm64_package is None) != (approved_arm64_sha256 is None):
+        raise ValueError('the arm64 package and its approved SHA256 must be supplied together')
+    if approved_arm64_sha256 is not None and (not release_candidate or not all(provenance)
+                                             or not re.fullmatch(r'[a-f0-9]{64}', approved_arm64_sha256)):
+        raise ValueError('the arm64 package requires complete approved build provenance')
     if release_candidate and ansible_package is not None and not all(provenance):
         raise ValueError('the production module requires complete build provenance')
     if any(value is not None for value in provenance):
@@ -47,7 +67,9 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
                 or not re.fullmatch(r'[1-9][0-9]{0,19}', build_run_id or '')
                 or not re.fullmatch(r'[a-f0-9]{64}', approved_package_sha256 or '')):
             raise ValueError('complete approved build provenance is required')
-    for candidate in (package, ansible_package):
+    if arm64_package is not None and previous is not None and not release_candidate:
+        raise ValueError('the additional arm64 test package requires a new local repository')
+    for candidate in (package, ansible_package, arm64_package):
         if candidate is not None and (not candidate.is_absolute() or candidate.is_symlink() or not candidate.is_file()):
             raise ValueError('each package must be an absolute regular file')
     if not destination.is_absolute() or not destination.parent.is_dir() or destination.parent.is_symlink():
@@ -83,14 +105,19 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
     with tempfile.TemporaryDirectory(prefix='.pxe-apt-', dir=destination.parent) as temporary:
         stage = Path(temporary) / 'repository'
         pool = stage / 'pool/main/p/pxe-tools'
-        index = stage / 'dists/stable/main/binary-amd64'
         pool.mkdir(parents=True)
-        index.mkdir(parents=True)
         # A content-addressed filename keeps old package URLs immutable when
         # a later repository revision contains a different package.
         versions = {}
+        current_digests = {}
+        base_name = 'pxe-tools' if release_candidate else 'pxe-tools-local-test'
+        base_architectures = ('all', 'amd64') if release_candidate or previous is not None else ('all', 'amd64', 'arm64')
+        if arm64_package is not None:
+            base_architectures = ('amd64',)
+        index_architectures = set()
         for candidate, expected, architectures in (
-                (package, 'pxe-tools' if release_candidate else 'pxe-tools-local-test', ('all', 'amd64')),
+                (package, base_name, base_architectures),
+                (arm64_package, base_name, ('arm64',)),
                 (ansible_package, 'pxe-tools-ansible' if release_candidate else 'pxe-tools-ansible-local-test', ('all',))):
             if candidate is None:
                 continue
@@ -104,10 +131,6 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
                     digest.update(block)
                     target.write(block)
             copied = pool / f'pxe-tools-{digest.hexdigest()}.deb'
-            if expected == 'pxe-tools' and approved_package_sha256 is not None and digest.hexdigest() != approved_package_sha256:
-                raise ValueError('package differs from approved build provenance')
-            if expected == 'pxe-tools-ansible' and digest.hexdigest() != approved_ansible_sha256:
-                raise ValueError('module differs from approved build provenance')
             if copied.exists():
                 raise ValueError('the same package was supplied twice')
             os.rename(partial, copied)
@@ -116,12 +139,23 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
             def field(name: str) -> str:
                 return command('dpkg-deb', '--field', str(copied), name).decode('utf-8').strip()
 
-            if field('Package') != expected or field('Architecture') not in architectures:
+            architecture = field('Architecture')
+            if field('Package') != expected or architecture not in architectures:
                 raise ValueError(f'expected {expected} for {" or ".join(architectures)}')
+            if release_candidate:
+                approved_digest = (approved_ansible_sha256 if expected == 'pxe-tools-ansible'
+                                   else approved_arm64_sha256 if architecture == 'arm64' else approved_package_sha256)
+                if approved_digest is not None and digest.hexdigest() != approved_digest:
+                    raise ValueError('package differs from approved build provenance')
+                current_digests[expected, architecture] = digest.hexdigest()
             version = field('Version')
             if not re.fullmatch(r'[0-9][A-Za-z0-9.+:~\-]{0,100}', version):
                 raise ValueError('unsupported package version')
             subprocess.run(['dpkg', '--validate-version', version], check=True, capture_output=True)
+            if expected == base_name:
+                if expected in versions and versions[expected] != version:
+                    raise ValueError('both architectures must use the same base version')
+                index_architectures.add('amd64' if architecture == 'all' else architecture)
             versions[expected] = version
             if expected == 'pxe-tools-ansible-local-test':
                 depends = [item.strip() for item in field('Depends').split(',')]
@@ -141,23 +175,21 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
         packages = command('apt-ftparchive', 'packages', 'pool', cwd=stage)
         if not packages:
             raise RuntimeError('APT package index is empty')
-        (index / 'Packages').write_bytes(packages)
-        (index / 'Packages.gz').write_bytes(gzip.compress(packages, mtime=0))
-        # APT chooses the strongest advertised digest (typically SHA512).
-        # Serving only SHA256 silently falls back to the mutable path.
-        for algorithm in ('sha256', 'sha512'):
-            by_hash = index / 'by-hash' / algorithm.upper()
-            by_hash.mkdir(parents=True)
-            for name in ('Packages', 'Packages.gz'):
-                data = (index / name).read_bytes()
-                (by_hash / hashlib.new(algorithm, data).hexdigest()).write_bytes(data)
+        for architecture in sorted(index_architectures):
+            selected = packages
+            if arm64_package is not None:
+                architecture_fields = {b'Architecture: all', b'Architecture: ' + architecture.encode('ascii')}
+                stanzas = packages.rstrip(b'\n').split(b'\n\n')
+                selected = b'\n\n'.join(stanza for stanza in stanzas
+                                         if architecture_fields.intersection(stanza.splitlines())) + b'\n\n'
+            write_index(stage / 'dists/stable/main' / f'binary-{architecture}', selected)
         now = datetime.now(timezone.utc)
         settings = {
             'Origin': 'PXE Tools' if release_candidate else 'PXE Tools local test',
             'Label': 'PXE Tools' if release_candidate else 'PXE Tools local test',
             'Suite': 'stable',
             'Codename': 'stable',
-            'Architectures': 'amd64',
+            'Architectures': ' '.join(sorted(index_architectures)),
             'Components': 'main',
             'Acquire-By-Hash': 'yes',
             'Description': 'PXE Tools release candidate repository' if release_candidate else 'PXE Tools experimental local test repository',
@@ -176,6 +208,8 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
                                  f'X-PXE-Build-Run: {build_run_id}\n'
                                  f'X-PXE-Package-SHA256: {approved_package_sha256}\n'
                                  f'X-PXE-Package-Version: {versions["pxe-tools"]}\n')
+            if arm64_package is not None:
+                provenance_fields += f'X-PXE-Arm64-SHA256: {approved_arm64_sha256}\n'
             if ansible_package is not None:
                 provenance_fields += (f'X-PXE-Ansible-SHA256: {approved_ansible_sha256}\n'
                                       f'X-PXE-Ansible-Version: {versions["pxe-tools-ansible"]}\n')
@@ -236,39 +270,50 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
             for line in sha_section.group(1).splitlines():
                 digest, size, name = line.split()
                 checksums[name] = (digest, int(size))
-            old_index_dir = 'dists/stable/main/binary-amd64'
-            for name in ('Packages', 'Packages.gz'):
-                rel = f'main/binary-amd64/{name}'
-                if rel not in checksums:
-                    raise ValueError('previous release does not describe its package indexes')
-                digest, size = checksums[rel]
-                if not re.fullmatch(r'[0-9a-f]{64}', digest):
-                    raise ValueError('invalid previous index checksum')
-                canonical = previous_path(f'{old_index_dir}/{name}')
-                immutable = previous_path(f'{old_index_dir}/by-hash/SHA256/{digest}')
-                if not canonical.is_file() or not immutable.is_file():
-                    raise ValueError('previous signed index or its immutable copy is missing')
-                data = canonical.read_bytes()
-                if len(data) != size or hashlib.sha256(data).hexdigest() != digest or immutable.read_bytes() != data:
-                    raise ValueError('previous signed index is inconsistent')
-            old_packages = previous_path(f'{old_index_dir}/Packages').read_text(encoding='utf-8')
-            for paragraph in old_packages.strip().split('\n\n'):
-                fields = dict(line.split(': ', 1) for line in paragraph.splitlines() if ': ' in line)
-                filename, digest = fields.get('Filename', ''), fields.get('SHA256', '')
-                if not re.fullmatch(r'pool/main/p/pxe-tools/pxe-tools-[0-9a-f]{64}\.deb', filename):
-                    raise ValueError('previous index refers to an unexpected package path')
-                old_package = previous_path(filename)
-                if not old_package.is_file() or not re.fullmatch(r'[0-9a-f]{64}', digest):
-                    raise ValueError('previous package is missing or has no checksum')
-                with old_package.open('rb') as old:
-                    if hashlib.file_digest(old, 'sha256').hexdigest() != digest:
-                        raise ValueError('previous package does not match its signed index')
+            previous_architectures = re.findall(r'(?m)^Architectures: (.+)$', cleartext)
+            if previous_architectures not in (['amd64'], ['amd64 arm64']):
+                raise ValueError('unsupported previous release architectures')
+            old_architectures = previous_architectures[0].split()
+            if not set(old_architectures).issubset(index_architectures):
+                raise ValueError('cannot remove an architecture from the published repository')
+            for architecture in old_architectures:
+                old_index_dir = f'dists/stable/main/binary-{architecture}'
+                for name in ('Packages', 'Packages.gz'):
+                    rel = f'main/binary-{architecture}/{name}'
+                    if rel not in checksums:
+                        raise ValueError('previous release does not describe its package indexes')
+                    digest, size = checksums[rel]
+                    if not re.fullmatch(r'[0-9a-f]{64}', digest):
+                        raise ValueError('invalid previous index checksum')
+                    canonical = previous_path(f'{old_index_dir}/{name}')
+                    immutable = previous_path(f'{old_index_dir}/by-hash/SHA256/{digest}')
+                    if not canonical.is_file() or not immutable.is_file():
+                        raise ValueError('previous signed index or its immutable copy is missing')
+                    data = canonical.read_bytes()
+                    if len(data) != size or hashlib.sha256(data).hexdigest() != digest or immutable.read_bytes() != data:
+                        raise ValueError('previous signed index is inconsistent')
+                old_packages = previous_path(f'{old_index_dir}/Packages').read_text(encoding='utf-8')
+                for paragraph in old_packages.strip().split('\n\n'):
+                    fields = dict(line.split(': ', 1) for line in paragraph.splitlines() if ': ' in line)
+                    filename, digest = fields.get('Filename', ''), fields.get('SHA256', '')
+                    if not re.fullmatch(r'pool/main/p/pxe-tools/pxe-tools-[0-9a-f]{64}\.deb', filename):
+                        raise ValueError('previous index refers to an unexpected package path')
+                    old_package = previous_path(filename)
+                    if not old_package.is_file() or not re.fullmatch(r'[0-9a-f]{64}', digest):
+                        raise ValueError('previous package is missing or has no checksum')
+                    with old_package.open('rb') as old:
+                        if hashlib.file_digest(old, 'sha256').hexdigest() != digest:
+                            raise ValueError('previous package does not match its signed index')
             # Only immutable, content-addressed objects are carried forward. Old
             # mutable Release and Packages paths must never overwrite the new ones.
-            for relative, pattern, algorithm, optional in (
-                    ('pool/main/p/pxe-tools', r'pxe-tools-([0-9a-f]{64})\.deb', 'sha256', False),
-                    ('dists/stable/main/binary-amd64/by-hash/SHA256', r'([0-9a-f]{64})', 'sha256', False),
-                    ('dists/stable/main/binary-amd64/by-hash/SHA512', r'([0-9a-f]{128})', 'sha512', True)):
+            immutable_roots = [('pool/main/p/pxe-tools', r'pxe-tools-([0-9a-f]{64})\.deb', 'sha256', False)]
+            for architecture in old_architectures:
+                prefix = f'dists/stable/main/binary-{architecture}/by-hash'
+                immutable_roots += [
+                    (f'{prefix}/SHA256', r'([0-9a-f]{64})', 'sha256', False),
+                    (f'{prefix}/SHA512', r'([0-9a-f]{128})', 'sha512', True),
+                ]
+            for relative, pattern, algorithm, optional in immutable_roots:
                 source = previous_path(relative)
                 # Older approved snapshots contain SHA256 only.
                 if optional and not source.exists() and not source.is_symlink():
@@ -290,9 +335,9 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
                         old_version = command('dpkg-deb', '--field', str(item), 'Version').decode().strip()
                         if old_name not in ('pxe-tools', 'pxe-tools-ansible'):
                             raise ValueError('unexpected package in previous release pool')
-                        current = package if old_name == 'pxe-tools' else ansible_package
-                        if (current is not None and old_version == versions[old_name]
-                                and digest != hashlib.sha256(current.read_bytes()).hexdigest()):
+                        old_arch = command('dpkg-deb', '--field', str(item), 'Architecture').decode().strip()
+                        current = current_digests.get((old_name, old_arch))
+                        if current is not None and old_version == versions[old_name] and digest != current:
                             raise ValueError('Debian version already has different package bytes')
                     dest = target / item.name
                     if dest.exists():
@@ -337,10 +382,11 @@ def main() -> None:
     parser.add_argument('--fingerprint', required=True, help='full fingerprint of the selected signing key')
     parser.add_argument('--passphrase-file', type=Path, help='private file containing the signing passphrase')
     parser.add_argument('--ansible-package', type=Path, help='optional absolute path to the native Ansible test package')
+    parser.add_argument('--arm64-package', type=Path, help='additional arm64 test package when the primary package is amd64')
     parser.add_argument('--valid-days', type=int, default=7, help='release validity in days (1–31; default 7)')
     args = parser.parse_args()
     build(args.package, args.destination, args.gnupg_home, args.fingerprint, args.valid_days, args.ansible_package,
-          passphrase_file=args.passphrase_file)
+          passphrase_file=args.passphrase_file, arm64_package=args.arm64_package)
     print('Built local signed repository:', args.destination)
 
 

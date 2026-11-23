@@ -3,6 +3,7 @@
 """Extract distribution SBAT matching the installed GRUB modules."""
 from __future__ import annotations
 
+import argparse
 import csv
 from pathlib import Path
 import platform
@@ -29,8 +30,8 @@ def matching_sbat(rows, distro, module_version):
         len(row) >= 5 and row[0] == vendor and row[4] == module_version for row in rows)
 
 
-def main() -> None:
-    data = SIGNED_GRUB.read_bytes()
+def main(signed_efi: Path | None = None, module_version: str | None = None) -> None:
+    data = (signed_efi if signed_efi is not None else SIGNED_GRUB).read_bytes()
     if len(data) > 16 * 1024 * 1024 or data[:2] != b'MZ':
         raise ValueError('invalid signed GRUB image')
     pe = struct.unpack_from('<I', data, 0x3c)[0]
@@ -52,16 +53,26 @@ def main() -> None:
     if len(matches) != 1:
         raise ValueError('signed GRUB must contain one SBAT section')
     rows = list(csv.reader(matches[0].splitlines()))
-    version = subprocess.check_output(
-        ['dpkg-query', '-W', '-f=${Version}', 'grub-efi-amd64-bin'], text=True).strip()
-    distro = grub_distribution(platform.freedesktop_os_release())
-    if not matching_sbat(rows, distro, version):
-        raise ValueError('signed GRUB SBAT does not match the installed GRUB modules')
+    if signed_efi is None:
+        module_version = subprocess.check_output(
+            ['dpkg-query', '-W', '-f=${Version}', 'grub-efi-amd64-bin'], text=True).strip()
+        distro = grub_distribution(platform.freedesktop_os_release())
+    else:
+        # Staged x86 modules and EFI image come from the Debian archive.
+        distro = 'debian'
+    if not matching_sbat(rows, distro, module_version):
+        raise ValueError('signed GRUB SBAT does not match the GRUB modules')
     sys.stdout.write(matches[0].rstrip('\n') + '\n')
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--signed-efi', type=Path)
+    parser.add_argument('--module-version')
+    args = parser.parse_args()
+    if (args.signed_efi is None) != (args.module_version is None):
+        parser.error('--signed-efi and --module-version must be supplied together')
     try:
-        main()
+        main(args.signed_efi, args.module_version)
     except (OSError, ValueError, UnicodeError, struct.error, subprocess.CalledProcessError) as exc:
         raise SystemExit(f'Cannot obtain matching distribution GRUB SBAT metadata: {exc}')

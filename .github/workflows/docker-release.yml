@@ -1,0 +1,154 @@
+name: Publish reviewed multiarchitecture Docker image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Reviewed release tag on protected main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pxe-docker-publication
+  cancel-in-progress: false
+
+env:
+  REGISTRY_IMAGE: ghcr.io/williamboglietti/pxe-tools-appliance
+
+jobs:
+  plan:
+    if: github.repository == 'williamboglietti/pxe-tools' && github.ref == 'refs/heads/main' && github.ref_protected
+    runs-on: ubuntu-24.04
+    outputs:
+      source: ${{ steps.release.outputs.source }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the tag to the reviewed source
+        id: release
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$ ]]
+          source=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          git merge-base --is-ancestor "$source" "$GITHUB_SHA"
+          version=$(git show "$source:packaging/ci/release-version.txt")
+          asset_version=${version//\~/-}
+          test "$TAG" = "v$asset_version"
+          printf 'source=%s\nversion=%s\n' "$source" "$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      TAG: ${{ inputs.tag }}
+      ARCH: ${{ matrix.architecture }}
+      SOURCE: ${{ needs.plan.outputs.source }}
+      PXE_TEST_APT_VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          persist-credentials: false
+      - name: Build and exercise the image and record its corresponding sources
+        run: |
+          set -euo pipefail
+          bash packaging/ci/verify-clean-checkout.sh "$SOURCE"
+          out="$RUNNER_TEMP/docker-candidate"
+          mkdir -p "$out"
+          export PXE_DOCKER_TEST_IMAGE="$REGISTRY_IMAGE:$TAG-$ARCH"
+          export PXE_DOCKER_SOURCE_OFFER="$out/docker-sources-$ARCH.json"
+          export PXE_DOCKER_DOCUMENTATION="https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          bash tests/integration/test_server_architecture.sh docker "$ARCH"
+          test "$(jq -r .architecture "$PXE_DOCKER_SOURCE_OFFER")" = "$ARCH"
+          test "$(jq -r .pxe_tools_source "$PXE_DOCKER_SOURCE_OFFER")" = "$SOURCE"
+          docker image save "$PXE_DOCKER_TEST_IMAGE" | gzip -3 > "$out/image-$ARCH.tar.gz"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: docker-candidate-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/docker-candidate/
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: [plan, build]
+    environment: prod
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: write
+    env:
+      TAG: ${{ inputs.tag }}
+      SOURCE: ${{ needs.plan.outputs.source }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: docker-candidate-*
+          path: ${{ runner.temp }}/docker-candidates
+      - name: Verify the corresponding-source offer for the static helpers
+        run: |
+          set -euo pipefail
+          offer="$RUNNER_TEMP/static-helper-sources"
+          mkdir -p "$offer"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/sources-2026-11-12" > "$RUNNER_TEMP/source-release.json"
+          for file in README.md relink-helpers.sh pxe-tools-static-helper-sources.tar pxe-tools-static-helper-relink-materials.tar.gz SHA256SUMS; do
+            gh release download sources-2026-11-12 --repo "$GITHUB_REPOSITORY" --pattern "$file" --dir "$offer"
+          done
+          python3 packaging/ci/verify-source-offer.py "$offer" "$RUNNER_TEMP/source-release.json"
+      - name: Attach source offers and publish the verified image index
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName | grep -Fx "$TAG"
+          base="$RUNNER_TEMP/docker-candidates"
+          offers=()
+          images=()
+          for arch in amd64 arm64; do
+            dir="$base/docker-candidate-$arch"
+            image="$REGISTRY_IMAGE:$TAG-$arch"
+            offer="$dir/docker-sources-$arch.json"
+            docker image load --input "$dir/image-$arch.tar.gz"
+            test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "linux/$arch"
+            test "$(docker image inspect --format '{{.Id}}' "$image")" = "$(jq -er .image_id "$offer")"
+            test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = "$SOURCE"
+            test "$(jq -er .pxe_tools_source "$offer")" = "$SOURCE"
+            offers+=("$offer")
+            images+=("$image")
+          done
+          mkdir -p "$RUNNER_TEMP/previous-offers"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/asset-names"
+          for offer in "${offers[@]}"; do
+            asset=$(basename "$offer")
+            if grep -Fxq "$asset" "$RUNNER_TEMP/asset-names"; then
+              gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$RUNNER_TEMP/previous-offers"
+              cmp "$offer" "$RUNNER_TEMP/previous-offers/$asset"
+            else
+              gh release upload "$TAG" "$offer" --repo "$GITHUB_REPOSITORY"
+            fi
+          done
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          for image in "${images[@]}"; do docker image push "$image"; done
+          docker buildx imagetools create --tag "$REGISTRY_IMAGE:$TAG" "${images[@]}"
+          docker buildx imagetools inspect --raw "$REGISTRY_IMAGE:$TAG" |
+            jq -e '[.manifests[].platform | (.os + "/" + .architecture)] | sort == ["linux/amd64", "linux/arm64"]'
