@@ -89,9 +89,8 @@ final class InternalApiController
      *   - Containers Docker (IP ∈ docker_cidr) : si jamais on déporte un job
      *     dans un sidecar futur.
      *
-     * Réponse TOUJOURS 200 vide (spec §Échec silencieux). Tout échec
-     * validation → error_log avec contexte (token redact 8 chars max),
-     * pas de leak via la réponse HTTP.
+     * Réponse 200 vide par défaut. Pour os_first_boot avec ack=1, le client
+     * reçoit un accusé après l'enregistrement du signal, ou l'état de clôture.
      */
     public function checkpoint(array $params): void
     {
@@ -103,6 +102,7 @@ final class InternalApiController
             $token    = $this->readBearerToken();
             $macRaw   = (string)($_GET['mac']  ?? '');
             $code     = (string)($_GET['code'] ?? '');
+            $acknowledge = $code === 'os_first_boot' && ($_GET['ack'] ?? '') === '1';
 
             // Filtre IP : pxe_subnet (machines clientes) OU loopback / docker_cidr
             // (worker.py interne au container). Le token Bearer reste l'autorité
@@ -132,14 +132,6 @@ final class InternalApiController
                 return;
             }
 
-            // Action déjà terminale → reject (un ping retardé ne doit pas
-            // ré-écrire une checklist déjà fermée).
-            if (in_array($action['status'], Action::STATUSES_TERMINAL, true)) {
-                $this->logRejection('checkpoint', 'action_terminal', $remoteIp, $token, $code);
-                $this->respond200();
-                return;
-            }
-
             // MAC : normalisation + match avec action.machine_id.
             $mac = Machine::normalizeMac($macRaw);
             if ($mac === '') {
@@ -158,6 +150,16 @@ final class InternalApiController
             if (!ActionCheckpoints::validCode((string)$action['type'], $code)) {
                 $this->logRejection('checkpoint', 'code_invalid', $remoteIp, $token, $code);
                 $this->respond200();
+                return;
+            }
+
+            $actionId = (int)$action['id'];
+            if ($acknowledge && $this->hasFirstBootReceipt($actionId)) {
+                $this->respond200("accepted\n");
+            }
+            if (in_array($action['status'], Action::STATUSES_TERMINAL, true)) {
+                $this->logRejection('checkpoint', 'action_terminal', $remoteIp, $token, $code);
+                $this->respond200($acknowledge ? "closed\n" : '');
                 return;
             }
 
@@ -189,7 +191,7 @@ final class InternalApiController
                 $level,
                 $message,
                 $code,
-                (int)$action['id']
+                $actionId
             );
 
             // POURQUOI passer en running au 1er checkpoint : la création d'une
@@ -207,15 +209,24 @@ final class InternalApiController
                 "UPDATE actions SET status = ?, ended_at = NULL "
               . "WHERE id = ? AND status = ?"
             );
-            $upd->execute([Action::STATUS_RUNNING, (int)$action['id'], Action::STATUS_PENDING]);
+            $upd->execute([Action::STATUS_RUNNING, $actionId, Action::STATUS_PENDING]);
             // rowCount best-effort : 0 = pas pending (déjà transité ailleurs),
             // 1 = transition appliquée. Pas d'erreur dans les deux cas.
 
-            $this->respond200();
+            $this->respond200($acknowledge && $this->hasFirstBootReceipt($actionId) ? "accepted\n" : '');
         } catch (\Throwable $e) {
             error_log('[internal-api] checkpoint failed: ' . $e->getMessage());
             $this->respond200();
         }
+    }
+
+    private function hasFirstBootReceipt(int $actionId): bool
+    {
+        $statement = Db::get()->prepare(
+            "SELECT 1 FROM machine_events WHERE action_id = ? AND checkpoint = 'os_first_boot' LIMIT 1"
+        );
+        $statement->execute([$actionId]);
+        return (bool)$statement->fetchColumn();
     }
 
     /** Server provenance cannot be supplied or overwritten by the client body. */
@@ -941,17 +952,17 @@ final class InternalApiController
     }
 
     /**
-     * Réponse 200 vide stricte (spec §Échec silencieux).
+     * Réponse 200 vide par défaut (spec §Échec silencieux).
      * SEC-14 : headers Cache-Control + X-Content-Type-Options (défense en profondeur).
      */
-    private function respond200(): void
+    private function respond200(string $body = ''): void
     {
         http_response_code(200);
         header('Content-Type: text/plain; charset=utf-8');
-        header('Content-Length: 0');
+        header('Content-Length: ' . strlen($body));
         header('Cache-Control: no-store');
         header('X-Content-Type-Options: nosniff');
-        // Pas d'echo : body vide.
+        echo $body;
         exit;
     }
 

@@ -209,7 +209,7 @@ fn handle(
             json_response(result)
         }
         (Method::Post, "/api/internal/checkpoint") => {
-            let result = (|| -> rusqlite::Result<()> {
+            let result = (|| -> rusqlite::Result<&'static str> {
                 let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
                 let Some(ip) = ip.filter(|ip| {
                     ip.is_loopback()
@@ -220,11 +220,11 @@ fn handle(
                             &setting(&db, "docker_internal_cidr").unwrap_or_default(),
                         )
                 }) else {
-                    return Ok(());
+                    return Ok("");
                 };
                 let body = match read_body(request, install::CHECKPOINT_BODY_MAX) {
                     Ok(body) => body,
-                    Err(_) => return Ok(()),
+                    Err(_) => return Ok(""),
                 };
                 let args = parse_query(query.as_bytes());
                 let proxy_headers_seen =
@@ -244,16 +244,18 @@ fn handle(
                         mac: param(&args, "mac"),
                         code: param(&args, "code"),
                         level: param(&args, "level"),
+                        acknowledge: param(&args, "ack") == "1",
                         ip,
                         proxy_headers_seen,
                         body: &body,
                     },
                 )
             })();
-            if let Err(error) = result {
+            let receipt = result.unwrap_or_else(|error| {
                 eprintln!("Checkpoint write failed: {error}");
-            }
-            Ok(internal_reply(response(200, TEXT, "")))
+                ""
+            });
+            Ok(internal_reply(response(200, TEXT, receipt)))
         }
         (Method::Post, "/api/internal/install-log") => {
             let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;

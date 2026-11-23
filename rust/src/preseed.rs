@@ -7,7 +7,7 @@ use crate::{header, php_string, php_trim, php_truthy, response, setting, HttpRes
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{Connection, TransactionBehavior};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
 const BASE: &str = include_str!("../../docker/worker/templates/preseed-base.cfg.j2");
@@ -391,18 +391,19 @@ impl Profile {
         late.push("in-target /bin/systemctl enable pxe-machine-ready.service".into());
         if let Some((id, _)) = action {
             let postboot = format!("{base_url}/pxe/postboot/{id}");
-            // The Debian Installer has wget even when the target system is minimal.
+            let download =
+                "in-target /usr/bin/curl -fsS --connect-timeout 5 --max-time 20 --retry 3";
             // network-online.target can be reached before DHCP grants the lease.
             let ordering = write_target(
                 "/etc/systemd/system/pxe-postboot.service.d/ready.conf",
                 "[Unit]\nRequires=pxe-machine-ready.service\nAfter=pxe-machine-ready.service\n",
             );
             late.push(format!(
-                "/usr/bin/wget -q --timeout=10 -O /target/usr/local/bin/postboot.sh '{postboot}/postboot.sh' \
-                 && /bin/chmod 0755 /target/usr/local/bin/postboot.sh \
-                 && /usr/bin/wget -q --timeout=10 -O /target/etc/systemd/system/pxe-postboot.service '{postboot}/pxe-postboot.service' \
+                "{download} '{postboot}/postboot.sh' -o /usr/local/bin/postboot.sh \
+                 && {download} '{postboot}/pxe-postboot.service' -o /etc/systemd/system/pxe-postboot.service \
+                 && in-target /bin/chmod 0700 /usr/local/bin/postboot.sh \
                  && /bin/mkdir -p /target/etc/systemd/system/pxe-postboot.service.d \
-                 && {ordering} && in-target /bin/systemctl enable pxe-postboot.service || true"
+                 && {ordering} && in-target /bin/systemctl enable pxe-postboot.service || exit 1"
             ));
         }
         late.push(phase("late-command", "success"));
@@ -430,7 +431,7 @@ impl Profile {
             ("LOCALIZATION_BLOCK", self.localization_block()),
             ("CLOCK_BLOCK", self.clock_block()),
             ("ACCOUNTS_BLOCK", self.accounts_block()),
-            ("PACKAGES_BLOCK", self.packages_block()),
+            ("PACKAGES_BLOCK", self.packages_block(action.is_some())),
             ("APT_BLOCK", self.apt_block()),
             ("BOOTLOADER_BLOCK", self.bootloader_block()),
             ("PARTITION_BLOCK", ATOMIC.into()),
@@ -586,7 +587,7 @@ impl Profile {
         block.join("\n")
     }
 
-    fn packages_block(&self) -> String {
+    fn packages_block(&self, install_postboot: bool) -> String {
         let pkg = &self.advanced["packages"];
         let mut lines = vec![format!(
             "d-i base-installer/install-recommends boolean {}",
@@ -599,7 +600,7 @@ impl Profile {
                 tasksel.join(", ")
             ));
         }
-        let include = list_field(
+        let mut include = list_field(
             pkg,
             "pkgsel_include",
             &[
@@ -610,6 +611,14 @@ impl Profile {
                 "curl",
             ],
         );
+        if install_postboot {
+            include.extend(["curl", "iproute2"].map(String::from));
+        }
+        if self.ansible.is_some() {
+            include.extend(["sudo", "openssh-server", "python3"].map(String::from));
+        }
+        let mut seen = HashSet::new();
+        include.retain(|package| seen.insert(package.clone()));
         if !include.is_empty() || self.distro == "trixie" {
             lines.push(format!("d-i pkgsel/include string {}", include.join(" ")));
         }

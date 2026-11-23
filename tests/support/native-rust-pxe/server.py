@@ -21,6 +21,7 @@ DATABASE = DATA / "chosen.sqlite"
 STALE = DATA / "stale.sqlite"
 PXE_IP = "192.0.2.1"
 CLIENT = "192.0.2.100"
+NGINX_LOG = Path("/var/lib/pxe-tools-native/log/nginx-access.log")
 MAC = "02:00:00:00:00:01"
 SERIAL = "PXE-TEST-ONE"
 INSTALL_MENU = TFTP / "pxelinux.cfg" / ("01-" + MAC.replace(":", "-"))
@@ -197,6 +198,10 @@ def first_boot(action):
     payload = json.loads(receipt[0].removeprefix("checkpoint:os_first_boot "))
     if payload["ip"] != CLIENT or payload["_observed_remote_ip"] != CLIENT or not payload["kernel"]:
         raise RuntimeError("The first-boot receipt lacks the original native client address or kernel")
+    # The postboot client asked for an acknowledgement. "accepted\n" is nine bytes.
+    if not any(line.startswith(f"{CLIENT} ") and "code=os_first_boot&ack=1" in line and '" 200 9 ' in line
+               for line in NGINX_LOG.read_text().splitlines()):
+        return None
     return payload["kernel"]
 
 
@@ -215,16 +220,16 @@ def follow(_root):
     print("PXE_NATIVE_DISCOVERY_OK", flush=True)
     wait_for(lambda: successful_install(action), 2400, "native install callback")
     print("PXE_NATIVE_INSTALL_OK", flush=True)
-    kernel = wait_for(lambda: first_boot(action), 900, "native first-boot receipt")
+    kernel = wait_for(lambda: first_boot(action), 900, "native first-boot checkpoint and HTTP acknowledgement")
     if digest(STALE) != original_stale or digest(CONF / "master.key") != original_key:
         raise RuntimeError("The stale database or existing fixture master key was modified")
     assert_php_stopped()
-    log = Path("/var/lib/pxe-tools-native/log/nginx-access.log").read_text().splitlines()
+    log = NGINX_LOG.read_text().splitlines()
     for path in ("/api/discovery", "/preseed.php?mac=", "/pxe/postboot/", "/api/install-end?",
                  "/api/machine-ready?", "code=os_first_boot"):
         if not any(line.startswith(f"{CLIENT} ") and path in line and '" 200 ' in line for line in log):
             raise RuntimeError("Missing native HTTP evidence for " + path)
-    print(f"PXE_NATIVE_FIRST_BOOT_OK kernel={kernel} peer={CLIENT} action={action}", flush=True)
+    print(f"PXE_NATIVE_FIRST_BOOT_OK kernel={kernel} peer={CLIENT} action={action} ack=accepted", flush=True)
     while True:
         assert_php_stopped()
         time.sleep(1)

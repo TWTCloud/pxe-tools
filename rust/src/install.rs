@@ -350,6 +350,7 @@ pub struct Checkpoint<'a> {
     pub mac: &'a str,
     pub code: &'a str,
     pub level: &'a str,
+    pub acknowledge: bool,
     pub ip: IpAddr,
     pub proxy_headers_seen: bool,
     pub body: &'a [u8],
@@ -359,10 +360,11 @@ pub fn checkpoint(
     db: &mut Connection,
     catalog: &Catalog,
     input: Checkpoint<'_>,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<&'static str> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let action = authorized_action(&tx, input.token)?.filter(|a| !terminal(&a.status));
-    let Some(action) = action else { return Ok(()) };
+    let Some(action) = authorized_action(&tx, input.token)? else {
+        return Ok("");
+    };
     let mac = normalize_mac(input.mac);
     if !catalog
         .get(&action.kind)
@@ -372,7 +374,20 @@ pub fn checkpoint(
             None => true,
         }
     {
-        return Ok(());
+        return Ok("");
+    }
+    let acknowledge = input.acknowledge && input.code == "os_first_boot";
+    if acknowledge
+        && tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM machine_events WHERE action_id = ? AND checkpoint = 'os_first_boot')",
+            [action.id],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok("accepted\n");
+    }
+    if terminal(&action.status) {
+        return Ok(if acknowledge { "closed\n" } else { "" });
     }
     let mut payload =
         serde_json::from_slice::<Value>(&input.body[..input.body.len().min(CHECKPOINT_BODY_MAX)])
@@ -414,7 +429,8 @@ pub fn checkpoint(
     )?;
     tx.execute("UPDATE actions SET status = 'running', ended_at = NULL WHERE id = ? AND status = 'pending'",
                [action.id])?;
-    tx.commit()
+    tx.commit()?;
+    Ok(if acknowledge { "accepted\n" } else { "" })
 }
 
 pub fn append_log(

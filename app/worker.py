@@ -2084,31 +2084,8 @@ def ansible_needs_vault(job: dict) -> bool:
     )
 
 
-# Pipeline event-driven post-install : 2 checkpoints attendus successivement
-# avant de lancer ansible-playbook.
-#
-# 1. install_reboot_done — émis par le sidecar dnsmasq-tail quand la machine
-#    effectue un DHCP request POST-install (boot PXE suivant le reboot d-i).
-#    Confirme que la machine a physiquement redémarré et contacté le réseau.
-#    Cf. REINSTCKPT01 Fix R (pivot depuis l'ancien signal late_command).
-#
-# 2. os_first_boot — émis par postboot.sh (systemd unit pxe-postboot.service)
-#    qui POST `/api/internal/checkpoint?code=os_first_boot` au premier boot
-#    local. Confirme OS bootée + network up + sshd up (systemd ordonne sshd
-#    avant pxe-postboot.service). Push-based, signal exact = moment idéal
-#    pour lancer ansible. Évite tout poll TCP:22.
-#
-# Fallback : si l'un des signaux n'arrive pas dans le délai imparti, un
-# checkpoint synthétique *_assumed est posé en log (via Bearer ; absent du
-# catalogue PHP donc rejeté silencieusement = trace uniquement dans error_log)
-# et le pipeline continue. Ansible aura son propre verdict de connexion SSH.
-_INSTALL_REBOOT_DONE_CP = "install_reboot_done"
-_INSTALL_REBOOT_ASSUMED_CP = "install_reboot_assumed"
-# Timeouts généreux (10 min) pour couvrir le pire cas hardware : serveurs avec
-# POST + vérif RAID/RAM/disques qui peuvent boot pendant 5-10 minutes avant le
-# 1er DHCP post-install ou avant l'exécution de postboot.sh. Sur hardware
-# rapide (laptops type board), les checkpoints arrivent en <2 min cumulés.
-_INSTALL_REBOOT_TIMEOUT_S = 600
+# Le système installé signale sa disponibilité même si son UEFI démarre
+# directement sur le disque et que le serveur ne voit aucun DHCP PXE.
 _OS_FIRST_BOOT_CP = "os_first_boot"
 _OS_FIRST_BOOT_ASSUMED_CP = "os_first_boot_assumed"
 _OS_FIRST_BOOT_TIMEOUT_S = 600
@@ -2142,21 +2119,6 @@ def _wait_for_checkpoint(
             logging.warning("_wait_for_checkpoint(%s) DB poll failed: %s", checkpoint_code, e)
         time.sleep(interval_s)
     return False
-
-
-def wait_for_install_reboot_done(
-    action_id: int,
-    action_token: str,
-    mac: str,
-    timeout_s: int = _INSTALL_REBOOT_TIMEOUT_S,
-    interval_s: float = 5.0,
-) -> bool:
-    """Cf. _wait_for_checkpoint(install_reboot_done). Signature préserve
-    action_token/mac pour cohérence avec les call sites legacy (provenance
-    HTTP côté machine), même si le poll DB ne les utilise pas directement."""
-    if not action_token or not mac:
-        return False
-    return _wait_for_checkpoint(action_id, _INSTALL_REBOOT_DONE_CP, timeout_s, interval_s)
 
 
 def wait_for_os_first_boot(
@@ -2929,40 +2891,7 @@ def run_playbook(job: dict) -> None:
         update_machine_status(job["machine_id"], "failed")
         return
 
-    # Pipeline event-driven : 2 checkpoints successifs avant ansible-playbook.
-    # 1. install_reboot_done — sidecar dnsmasq-tail détecte le DHCP post-install
-    #    (machine a physiquement redémarré et contacté le réseau).
-    # 2. os_first_boot — postboot.sh confirme OS bootée + network up + sshd up
-    #    (push-based, signal exact = moment idéal pour lancer ansible).
-    # Cf. block « Pipeline event-driven post-install » plus haut.
     if action_id and action_token and mac:
-        append_install_log(
-            install_id,
-            f"[worker] Attente signal DHCP post-install (install_reboot_done) "
-            f"— timeout {_INSTALL_REBOOT_TIMEOUT_S}s...\n",
-        )
-        if wait_for_install_reboot_done(
-            int(action_id), str(action_token), str(mac),
-            timeout_s=_INSTALL_REBOOT_TIMEOUT_S,
-        ):
-            append_install_log(
-                install_id,
-                "[worker] Signal install_reboot_done reçu — machine rebootée en PXE post-install.\n",
-            )
-        else:
-            logging.warning(
-                "[worker] Signal install_reboot_done non reçu après %ds "
-                "(action_id=%s) — fallback install_reboot_assumed.",
-                _INSTALL_REBOOT_TIMEOUT_S, action_id,
-            )
-            append_install_log(
-                install_id,
-                f"[worker] ⚠ Signal DHCP post-install non reçu après {_INSTALL_REBOOT_TIMEOUT_S}s "
-                "(machine en IP statique, PXE désactivé au 2e boot, ou réseau instable). "
-                "Checkpoint synthétique install_reboot_assumed posé — on continue.\n",
-            )
-            send_checkpoint(str(action_token), str(mac), _INSTALL_REBOOT_ASSUMED_CP)
-
         append_install_log(
             install_id,
             f"[worker] Attente signal os_first_boot (postboot.sh) — timeout {_OS_FIRST_BOOT_TIMEOUT_S}s...\n",
@@ -2988,7 +2917,7 @@ def run_playbook(job: dict) -> None:
             )
             send_checkpoint(str(action_token), str(mac), _OS_FIRST_BOOT_ASSUMED_CP)
     else:
-        # Action legacy (sans token) : skip les 2 polls, ansible direct.
+        # Action sans token : Ansible valide la disponibilité via SSH.
         append_install_log(
             install_id,
             "[worker] Skip attente checkpoints post-install (action legacy sans token) — ansible direct.\n",

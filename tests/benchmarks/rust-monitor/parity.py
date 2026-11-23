@@ -205,10 +205,13 @@ def compare_install(ports, paths):
               "admin_user_login": "fixture", "admin_user_pwhash": "$6$fixture$hash",
               "admin_user_pubkeys": "ssh-ed25519 AAAA fixture",
               "network": {"interfaces": [{"mode": "dhcp", "match_by": "primary"}], "primary": 0},
-              "advanced": {"apt": {"services_select": []}, "packages": {"tasksel": ["ssh-server"], "upgrade": "none"}}}
+              "advanced": {"apt": {"services_select": []},
+                           "packages": {"tasksel": ["ssh-server"], "pkgsel_include": ["openssh-server"],
+                                        "upgrade": "none"}}}
     for database in paths:
         with closing(sqlite3.connect(database)) as db, db:
             db.execute("UPDATE actions SET token=?,status='pending' WHERE id=162", (token,))
+            db.execute("DELETE FROM machine_events WHERE action_id=162 AND checkpoint='os_first_boot'")
             db.execute("UPDATE machines SET status='configured', local_boot_source='manual', hostname='Host', domain='example.test',"
                        " install_config_json=? WHERE id=81", (json.dumps(config),))
     query = "?" + urlencode({"mac": mac})
@@ -225,8 +228,10 @@ def compare_install(ports, paths):
     assert directives(decoded[0]) == directives(decoded[1]), (directives(decoded[0]), directives(decoded[1]))
     guard = r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /tmp/pxe-disk-guard.sh"
     assert re.search(guard, decoded[0]).group(1) == re.search(guard, decoded[1]).group(1)
-    assert "/usr/bin/wget -q --timeout=10 -O /target/usr/local/bin/postboot.sh" in decoded[1]
-    assert "/usr/bin/wget -q --timeout=10 -O /target/etc/systemd/system/pxe-postboot.service" in decoded[1]
+    for seed in decoded:
+        assert "d-i pkgsel/include string openssh-server curl iproute2" in seed
+        assert "in-target /usr/bin/curl -fsS --connect-timeout 5 --max-time 20 --retry 3" in seed
+        assert "systemctl enable pxe-postboot.service || exit 1" in seed
     dependency = re.search(r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /etc/systemd/system/pxe-postboot.service.d/ready.conf", decoded[1])
     assert base64.b64decode(dependency.group(1)) == (
         b"[Unit]\nRequires=pxe-machine-ready.service\nAfter=pxe-machine-ready.service\n"
@@ -248,7 +253,8 @@ def compare_install(ports, paths):
     result = compare(ports, LOG + "?install_id=1&seq=42", 200, method="POST", peer="lan",
                      token=token, content_type="text/plain", body=chunk)
     assert result == {"status": "ok", "bytes": len(chunk), "appended": len(chunk), "seq": 42}
-    compare(ports, CHECKPOINT + query + "&code=late_command_started", 200, method="POST", peer="lan", token=token)
+    assert compare(ports, CHECKPOINT + query + "&code=late_command_started&ack=1", 200,
+                   method="POST", peer="lan", token=token) == b""
     assert compare(ports, END, 200, method="POST", peer="lan", token=token,
                    content_type="application/x-www-form-urlencoded", body=urlencode({"mac": mac}))["machine_status"] == "installed"
     compare(ports, END + query, 200, peer="lan", token=token)  # Replay is idempotent.
@@ -256,19 +262,34 @@ def compare_install(ports, paths):
     compare(ports, START + query, 409)
     compare(ports, ARTIFACT, 404, peer="lan")
     compare(ports, READY + query, 200, peer="lan")
-    compare(ports, CHECKPOINT + query + "&code=os_first_boot", 200, method="POST", peer="outside",
-            token=token, spoof=True)
-    compare(ports, CHECKPOINT + query + "&code=os_first_boot", 200, method="POST", peer="lan",
-            token=token, spoof=True, body=b'{"_observed_remote_ip":"fake","kernel":"fixture"}')
+    first_boot = CHECKPOINT + query + "&code=os_first_boot"
+    ack = first_boot + "&ack=1"
+    assert compare(ports, ack, 200, method="POST", peer="outside", token=token, spoof=True) == b""
+    assert compare(ports, ack, 200, method="POST", peer="lan", token="b" * 64) == b""
+    other_mac = urlencode({"mac": "02:00:00:00:01:52"})
+    assert compare(ports, f"{CHECKPOINT}?{other_mac}&code=os_first_boot&ack=1", 200,
+                   method="POST", peer="lan", token=token) == b""
+    assert compare(ports, ack, 200, method="POST", peer="lan", token=token, spoof=True,
+                   body=b'{"_observed_remote_ip":"fake","kernel":"fixture"}') == b"accepted\n"
+    assert compare(ports, ack, 200, method="POST", peer="lan", token=token) == b"accepted\n"
     states = compare_states(paths, [
         "SELECT status,local_boot_source FROM machines WHERE id=81",
         "SELECT action_id,install_status,ansible_status,install_log FROM installations",
         "SELECT status FROM actions WHERE id=162",
     ])
     assert states == [[("installed", "pxe")], [(162, "success", "pending", chunk.decode())], [("running",)]]
+    closed_token = "c" * 64
+    for database in paths:
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("UPDATE actions SET status='success' WHERE id=162")
+            db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES (81,'install_only','success',?)",
+                       (closed_token,))
+    assert compare(ports, ack, 200, method="POST", peer="lan", token=closed_token) == b"closed\n"
+    assert compare(ports, ack, 200, method="POST", peer="lan", token=token) == b"accepted\n"
+    assert compare(ports, first_boot, 200, method="POST", peer="lan", token=token) == b""
     for database in paths:
         with closing(sqlite3.connect(database)) as db:
-            events = db.execute("SELECT message FROM machine_events WHERE action_id=162 AND checkpoint='os_first_boot' AND message LIKE 'checkpoint:os_first_boot %'").fetchall()
+            events = db.execute("SELECT message FROM machine_events WHERE action_id=162 AND checkpoint='os_first_boot'").fetchall()
             assert len(events) == 1
             receipt = json.loads(events[0][0].removeprefix("checkpoint:os_first_boot "))
             assert receipt["_observed_remote_ip"] == LAN and receipt["_proxy_headers_seen"] is True

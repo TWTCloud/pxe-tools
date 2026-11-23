@@ -27,7 +27,7 @@ Rust et un compilateur C pour SQLite. Selon l'installation, passer
 | `GET/POST /api/discovery?phase=…` | Mêmes réponses et niveaux de journal, recherche par MAC primaire ou secondaire, fermeture de la fenêtre d'attente après le signal d'arrêt. |
 | `GET/POST /api/discovery`, inventaire et poll | JSON ou base64, limites de taille, conflits entre fiches, statuts préservés, séries et WWID, métadonnées de stockage et consommation du redémarrage. |
 | `GET /preseed.php` | Comparaison des directives Debian sur un profil guidé, du garde disque embarqué, des refus réseau et de la fermeture après installation. |
-| Retours Debian | Démarrage local et réessais, journal borné, accès aux artefacts postboot, fin d'installation avec jeton lié à l'action, checkpoint du premier démarrage. |
+| Retours Debian | Démarrage local et réessais, journal borné, accès aux artefacts postboot, fin d'installation avec jeton lié à l'action, accusé du premier démarrage et rejouabilité. |
 
 Les requêtes de mutation utilisent deux copies d'une même fixture. Le test
 compare les écritures SQLite et vérifie que le catalogue compilé dans Rust
@@ -113,8 +113,9 @@ la sélection SQLite par `db.conf`, les menus PXELINUX générés et le
 rendu des artefacts postboot par la fonction du worker. Il masque les
 unités PHP-FPM et surveille leur état et les processus pendant tout
 le parcours. Il exige l'invite de connexion Debian, la fin d'installation
-en SQLite et le checkpoint `os_first_boot` associé à l'action. Le vhost
-doit observer l'adresse IPv4 réelle du client, y compris au premier boot.
+en SQLite et l'accusé `accepted` du checkpoint `os_first_boot` associé à
+l'action. Le vhost doit observer l'adresse IPv4 réelle du client,
+y compris au premier boot.
 
 ```sh
 python3 packaging/native/build-local-package.py /tmp/pxe-tools-local.deb --version 0.0.1~local1
