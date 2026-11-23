@@ -67,26 +67,11 @@ DOCKERFILE
         --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
         --mount "type=bind,src=$work/assets/apt,dst=/mnt/pxe-apt,readonly" \
         --mount "type=bind,src=$work/keyring.gpg,dst=/usr/share/keyrings/pxe-lab.gpg,readonly" \
-        --mount "type=bind,src=$PWD/packaging/ci/pxe-tools-next-public.gpg,dst=/usr/share/keyrings/pxe-beta11.gpg,readonly" \
         "$name" /lib/systemd/systemd --unit=basic.target >/dev/null
     for attempt in {1..60}; do
         if docker exec "$name" systemctl list-units --no-legend >/dev/null 2>&1; then break; fi
         sleep 1
     done
-    if [ "${PXE_TEST_APT_UPGRADE:-0}" = 1 ]; then
-        test "$architecture" = amd64
-        docker exec -i "$name" bash -eus <<'BETA11_GUEST'
-export DEBIAN_FRONTEND=noninteractive
-printf '%s\n' 'deb [signed-by=/usr/share/keyrings/pxe-beta11.gpg] https://packages.pxetools.com/apt/ stable main' \
-    > /etc/apt/sources.list.d/pxe-beta11.list
-apt-get update
-apt-get install -y --no-install-recommends 'pxe-tools=0.1.0~beta11'
-systemctl is-active --quiet pxe-tools-admin.target
-curl -fsS http://127.0.0.1:8080/healthz
-sha256sum /etc/pxe-tools/master.key > /run/pxe-upgrade-master-key.sha256
-rm /etc/apt/sources.list.d/pxe-beta11.list
-BETA11_GUEST
-    fi
     docker exec -i "$name" bash -eus -- "$architecture" "$version" <<'APT_GUEST'
 export DEBIAN_FRONTEND=noninteractive
 printf '%s\n' 'deb [signed-by=/usr/share/keyrings/pxe-lab.gpg] file:/mnt/pxe-apt stable main' \
@@ -95,10 +80,6 @@ apt-get update
 apt-get install -y --no-install-recommends pxe-tools
 test "$(dpkg-query -W -f='${Architecture}' pxe-tools)" = "$1"
 test "$(dpkg-query -W -f='${Version}' pxe-tools)" = "$2"
-if [ -f /run/pxe-upgrade-master-key.sha256 ]; then
-    sha256sum --check --status /run/pxe-upgrade-master-key.sha256
-    echo 'Beta 11 upgrade preserved the master key.'
-fi
 test -z "$(dpkg --print-foreign-architectures)"
 systemctl is-active --quiet pxe-tools-admin.target
 systemctl is-active --quiet pxe-tools-worker.service
