@@ -25,17 +25,18 @@ GRUB_DEPENDENCIES = {
     'amd64': 'grub-efi-amd64-bin, grub-efi-amd64-signed',
     'arm64': 'grub-efi-arm64-bin',
 }
+PHP_FPM_DEPENDENCY = 'php-fpm | php8.4-fpm | php8.3-fpm | php8.2-fpm, '
 CONTROL = '''Package: {package_name}
 Version: {version}
 Architecture: {architecture}
 Maintainer: {maintainer}
 Pre-Depends: python3 (>= 3.11)
-Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, dnsmasq-base, gettext-base, git, gpgv, {grub_dependencies}, iproute2, ipxe, mokutil, nginx, openssh-client, openssl, php-cli | php8.4-cli | php8.3-cli | php8.2-cli, php-curl | php8.4-curl | php8.3-curl | php8.2-curl, php-fpm | php8.4-fpm | php8.3-fpm | php8.2-fpm, php-sqlite3 | php8.4-sqlite3 | php8.3-sqlite3 | php8.2-sqlite3, pxelinux, python3-jinja2, python3-nacl, sbsigntool, {shim_dependency}sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
+Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, dnsmasq-base, gettext-base, git, gpgv, {grub_dependencies}, iproute2, ipxe, mokutil, nginx, openssh-client, openssl, php-cli | php8.4-cli | php8.3-cli | php8.2-cli, php-curl | php8.4-curl | php8.3-curl | php8.2-curl, {php_fpm_dependency}php-sqlite3 | php8.4-sqlite3 | php8.3-sqlite3 | php8.2-sqlite3, pxelinux, python3-jinja2, python3-nacl, sbsigntool, {shim_dependency}sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
 Section: admin
 Priority: optional
 Description: {description}
  {details}
- On a fresh system the administration interface starts without enabling PXE.
+ {startup}
 '''
 PREINST = '''#!/bin/sh
 set -eu
@@ -136,17 +137,45 @@ def replace_exact(text: str, old: str, new: str) -> str:
     return text.replace(old, new)
 
 
+def native_php_routes(config: str) -> str:
+    config = replace_exact(config, '/app/public', '/usr/lib/pxe-tools/app/public')
+    config = replace_exact(config, '/run/php/php8.4-fpm.sock', '/run/pxe-tools-php/fpm.sock')
+    return replace_exact(config, 'include fastcgi_params;', 'include /etc/nginx/fastcgi_params;')
+
+
+def configure_guided_units(units: Path) -> None:
+    for name, php, guided in (
+        ('pxe-tools-pxe-http.service', 'pxe-tools-php.service pxe-tools-init.service',
+         'pxe-tools-rust-guided.service pxe-tools-init.service'),
+        ('pxe-tools-worker.service', 'pxe-tools-nginx.service', 'pxe-tools-init.service'),
+        ('pxe-tools.target', 'pxe-tools-php.service pxe-tools-nginx.service ', ''),
+        ('pxe-tools-admin.target', 'pxe-tools-nginx.service pxe-tools-worker.service',
+         'pxe-tools-init.service pxe-tools-worker.service'),
+    ):
+        path = units/name
+        config = replace_exact(path.read_text(), php, guided)
+        if name == 'pxe-tools-pxe-http.service':
+            # The native upgrade replays services with dependencies ignored.
+            # Start the backend explicitly during replay as well.
+            config = replace_exact(config, 'ExecStartPre=/usr/bin/python3',
+                                   'ExecStartPre=/usr/bin/systemctl start pxe-tools-rust-guided.service\n'
+                                   'ExecStartPre=/usr/bin/python3')
+        path.write_text(config)
+
+
 def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-local-test',
           architecture: str = 'amd64',
           maintainer: str = 'PXE Tools local test <maintainers@example.invalid>',
-          rust_binary: Path | None = None) -> None:
+          rust_binary: Path | None = None, rust_guided: bool = False) -> None:
     if package_name not in ('pxe-tools-local-test', 'pxe-tools'):
         raise ValueError('unsupported package name')
     if architecture not in GRUB_DEPENDENCIES:
         raise ValueError('supported package architectures are amd64 and arm64')
+    if rust_guided and rust_binary is None:
+        raise ValueError('The guided variant requires a Rust binary')
     if rust_binary is not None:
         if package_name != 'pxe-tools-local-test':
-            raise ValueError('Rust monitoring is only available in the local test package')
+            raise ValueError('The Rust variants are only available in the local test package')
         if rust_binary.is_symlink() or not rust_binary.is_file():
             raise ValueError('Use a regular file for the Rust binary')
         with rust_binary.open('rb') as binary:
@@ -175,7 +204,10 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         (control/'control').write_text(CONTROL.format(
             version=version, package_name=package_name, architecture=architecture,
             grub_dependencies=GRUB_DEPENDENCIES[architecture],
+            php_fpm_dependency='' if rust_guided else PHP_FPM_DEPENDENCY,
             shim_dependency='shim-signed, ' if architecture == 'amd64' else '',
+            startup=('The Rust variant requires a configured SQLite database and PXE network.'
+                     if rust_guided else 'On a fresh system the administration interface starts without enabling PXE.'),
             maintainer=maintainer, description=description, details=details))
         cleanup = checked(ROOT/'packaging/native/prune-package-cache.py').read_text()
         lifecycle = checked(ROOT/'packaging/native/upgrade-lifecycle.py').read_text()
@@ -206,22 +238,26 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
                      + sorted((ROOT/'packaging/native').glob('pxe-tools-*.target'))):
             shutil.copy2(checked(unit), units/unit.name)
         templates=root/'opt/pxe-tools/nginx'; templates.mkdir(parents=True)
+        rust_assets = ROOT/'rust/packaging'
         if rust_binary is not None:
-            rust_assets = ROOT/'rust/packaging'
-            monitor = root/'usr/lib/pxe-tools/pxe-tools-rust'
-            shutil.copyfile(rust_binary, monitor)
-            monitor.chmod(0o755)
+            binary = root/'usr/lib/pxe-tools/pxe-tools-rust'
+            shutil.copyfile(rust_binary, binary)
+            binary.chmod(0o755)
+        if rust_guided:
+            shutil.copy2(checked(rust_assets/'pxe-tools-rust-guided.service'), units)
+            configure_guided_units(units)
+            shutil.copy2(checked(rust_assets/'guided.conf'), templates/'pxe-routes.conf')
+        else:
+            php_routes = checked(ROOT/'docker/pxe-tools/nginx/pxe-php.conf').read_text()
+            (templates/'pxe-routes.conf').write_text(native_php_routes(php_routes))
+        if rust_binary is not None and not rust_guided:
             shutil.copy2(checked(rust_assets/'pxe-tools-rust-monitor.service'), units)
             drop_in = units/'pxe-tools-pxe-http.service.d'
             drop_in.mkdir()
             shutil.copy2(checked(rust_assets/'rust-monitor.conf'), drop_in/'50-rust-monitor.conf')
             routing = templates/'rust-monitor.d'
             routing.mkdir()
-            data = checked(rust_assets/'monitor.conf').read_text()
-            data = replace_exact(data, '/app/public', '/usr/lib/pxe-tools/app/public')
-            data = replace_exact(data, '/run/php/php8.4-fpm.sock', '/run/pxe-tools-php/fpm.sock')
-            data = replace_exact(data, 'include fastcgi_params;', 'include /etc/nginx/fastcgi_params;')
-            (routing/'monitor.conf').write_text(data)
+            (routing/'monitor.conf').write_text(native_php_routes(checked(rust_assets/'monitor.conf').read_text()))
         for name in ('admin-http-serve.conf.tmpl','admin-http-redirect.conf.tmpl','admin-https.conf.tmpl'):
             data=checked(ROOT/'docker/pxe-tools/nginx'/name).read_text()
             data=data.replace('/app/public','/usr/lib/pxe-tools/app/public')
@@ -234,11 +270,8 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         pxe=checked(ROOT/'docker/pxe-tools/nginx/pxe.conf').read_text()
         pxe=replace_exact(pxe,'listen 80 default_server;', 'listen @@PXE_IPV4@@:80 default_server;\n    listen 127.0.0.1:80;')
         pxe=replace_exact(pxe,'    listen [::]:80 default_server;\n', '')
-        pxe=replace_exact(pxe,'/app/public','/usr/lib/pxe-tools/app/public')
         pxe=replace_exact(pxe,'    root /srv/http;', '    root @@HTTP_ROOT@@;')
-        pxe=replace_exact(pxe,'/run/php/php8.4-fpm.sock','/run/pxe-tools-php/fpm.sock')
         pxe=pxe.replace('/var/log/nginx/','/var/lib/pxe-tools-native/log/')
-        pxe=replace_exact(pxe,'include fastcgi_params;','include /etc/nginx/fastcgi_params;')
         (native/'pxe.conf').write_text(pxe)
         dns=root/'opt/pxe-tools/dnsmasq'; dns.mkdir(parents=True)
         text=checked(ROOT/'docker/dnsmasq/pxe.conf.tmpl').read_text()
@@ -270,7 +303,9 @@ if __name__ == '__main__':
     parser.add_argument('destination',type=Path)
     parser.add_argument('--version',default='0.0.1~local2')
     parser.add_argument('--architecture', choices=GRUB_DEPENDENCIES, default='amd64')
-    parser.add_argument('--rust-binary', type=Path, help='include the local experimental Rust monitor')
+    parser.add_argument('--rust-binary', type=Path, help='include the local experimental Rust backend')
+    parser.add_argument('--rust-guided', action='store_true', help='serve guided PXE using Rust without PHP-FPM')
     args=parser.parse_args()
-    build(args.destination, args.version, architecture=args.architecture, rust_binary=args.rust_binary)
+    build(args.destination, args.version, architecture=args.architecture, rust_binary=args.rust_binary,
+          rust_guided=args.rust_guided)
     print('Experimental local package built:',args.destination)

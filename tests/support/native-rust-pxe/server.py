@@ -13,15 +13,16 @@ import time
 
 DATA = Path("/var/lib/pxe-tools")
 CONF = Path("/etc/pxe-tools")
-APP = Path("/usr/lib/pxe-tools/app")
+APP = Path(os.environ.get("PXE_APP_DIR", "/usr/lib/pxe-tools/app"))
 HTTP = Path("/var/lib/pxe-tools-http")
 TFTP = Path("/var/lib/pxe-tools-tftp")
 UNIT = Path("/etc/systemd/system")
 DATABASE = DATA / "chosen.sqlite"
 STALE = DATA / "stale.sqlite"
 PXE_IP = "192.0.2.1"
+MIRROR_IP = os.environ.get("PXE_FIXTURE_MIRROR_IP", PXE_IP)
 CLIENT = "192.0.2.100"
-NGINX_LOG = Path("/var/lib/pxe-tools-native/log/nginx-access.log")
+NGINX_LOG = Path(os.environ.get("PXE_FIXTURE_NGINX_LOG", "/var/lib/pxe-tools-native/log/nginx-access.log"))
 MAC = "02:00:00:00:00:01"
 SERIAL = "PXE-TEST-ONE"
 INSTALL_MENU = TFTP / "pxelinux.cfg" / ("01-" + MAC.replace(":", "-"))
@@ -117,6 +118,8 @@ def assert_php_stopped():
                 continue
             if name.startswith("php-fpm"):
                 raise RuntimeError("PHP-FPM started in the native PXE fixture")
+    if os.environ.get("PXE_SERVICE_MANAGER") == "s6":
+        return
     for name in ("php8.4-fpm.service", "pxe-tools-php.service"):
         state = subprocess.check_output(
             ["systemctl", "show", "--property=UnitFileState,ActiveState", name], text=True
@@ -160,7 +163,7 @@ def schedule(machine, report):
             "system_disk_path": "/dev/" + target["name"].removeprefix("/dev/"),
             "system_disk_identity": target["identity"],
             "advanced": {"localization": {"locale": "en_US.UTF-8", "keymap": "us"},
-                         "mirror": {"hostname": PXE_IP}, "timezone": {"zone": "UTC", "ntp": False},
+                         "mirror": {"hostname": MIRROR_IP}, "timezone": {"zone": "UTC", "ntp": False},
                          "packages": {"tasksel": ["ssh-server"], "pkgsel_include": ["sudo", "openssh-server", "curl"],
                                       "upgrade": "none"},
                          "apt": {"services_select": [], "contrib": False, "non_free_firmware": False,

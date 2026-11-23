@@ -26,9 +26,13 @@ image=os.environ.get('PXE_NATIVE_PXE_IMAGE','')
 if not re.fullmatch(r'pxe-native-e2e-[a-f0-9]{10}:local',image):
     raise SystemExit('A uniquely named local fixture image is required.')
 backend=os.environ.get('PXE_NATIVE_PXE_BACKEND','php')
-if backend not in ('php', 'rust'):
+if backend not in ('php', 'rust', 'rust-apt', 'rust-docker'):
     raise SystemExit('Unknown fixture backend.')
-rust_lab=backend=='rust'
+rust_lab=backend!='php'
+packaged=backend in ('rust-apt','rust-docker')
+appliance_image=os.environ.get('PXE_RUST_GUIDED_DOCKER_IMAGE','')
+if backend=='rust-docker' and not re.fullmatch(r'pxe-guided-[a-f0-9]{10}:local',appliance_image):
+    raise SystemExit('A uniquely named experimental appliance image is required.')
 
 
 def run(*args, check=True, **kwargs):
@@ -70,6 +74,28 @@ def no_default_route(name,identity):
         raise RuntimeError('fixture namespace unexpectedly has a default route')
 
 
+def connect_fixture_lan(app, dhcp):
+    app_ns=endpoint(app); dhcp_ns=endpoint(dhcp)
+    if app_ns[1]==dhcp_ns[1] or links(app,app_ns)!={'lo'} or links(dhcp,dhcp_ns)!={'lo'}:
+        raise RuntimeError('fixture interfaces are not isolated')
+    no_default_route(app,app_ns);no_default_route(dhcp,dhcp_ns)
+    net(app,app_ns,'link','add','br-pxetest','type','bridge')
+    net(app,app_ns,'addr','add','192.0.2.1/24','dev','br-pxetest')
+    net(app,app_ns,'link','set','br-pxetest','up')
+    net(app,app_ns,'link','add','veth-pxe','type','veth','peer','name','veth-dhcp')
+    net(app,app_ns,'link','set','veth-pxe','master','br-pxetest')
+    net(app,app_ns,'link','set','veth-pxe','up')
+    net(app,app_ns,'link','set','veth-dhcp','netns',str(dhcp_ns[0]))
+    net(dhcp,dhcp_ns,'addr','add','192.0.2.2/24','dev','veth-dhcp')
+    net(dhcp,dhcp_ns,'link','set','veth-dhcp','up')
+    net(app,app_ns,'tuntap','add','dev','tap-pxetest','mode','tap')
+    net(app,app_ns,'link','set','tap-pxetest','master','br-pxetest')
+    net(app,app_ns,'link','set','tap-pxetest','up')
+    if links(app,app_ns)!={'lo','br-pxetest','veth-pxe','tap-pxetest'} or links(dhcp,dhcp_ns)!={'lo','veth-dhcp'}:
+        raise RuntimeError('unexpected interface attached to fixture')
+    no_default_route(app,app_ns);no_default_route(dhcp,dhcp_ns)
+
+
 def wait_for(predicate,timeout,description):
     deadline=time.monotonic()+timeout
     while time.monotonic()<deadline:
@@ -78,7 +104,7 @@ def wait_for(predicate,timeout,description):
     raise RuntimeError('timed out: '+description)
 
 
-def diagnostic_screen(root):
+def capture_screen(root):
     proof = root/'pxe-vga.ppm'
     proof.unlink(missing_ok=True)
     try:
@@ -89,10 +115,15 @@ def diagnostic_screen(root):
             wait_for(lambda: proof.is_file() and proof.stat().st_size > 0, 4, 'fixture screen')
         screen = subprocess.run(['tesseract', str(proof), 'stdout', '--psm', '6'],
                                 text=True, capture_output=True, timeout=15, check=False)
-        if screen.stdout.strip():
-            print('Isolated client screen:\n'+screen.stdout.strip()[-1500:], flush=True)
+        return screen.stdout.strip()
     except (OSError, RuntimeError, subprocess.SubprocessError):
-        pass
+        return ''
+
+
+def diagnostic_screen(root):
+    screen=capture_screen(root)
+    if screen:
+        print('Isolated client screen:\n'+screen[-1500:], flush=True)
 
 
 def wire_rust(app, root):
@@ -127,17 +158,24 @@ def rust_first_boot(app, dhcp, client, root, fixture):
     log=fixture/'native-status.log'
     wait_for(lambda: log.is_file() and 'PXE_NATIVE_READY' in log.read_text(), 30, 'Rust fixture ready')
     print('Native dnsmasq and Rust HTTP are ready. Both PHP-FPM units are masked.', flush=True)
+    run_rust_guests(app,client,root,log)
 
+
+def run_rust_guests(lan,client,root,log, *, screen_login=False):
+    use_kvm=os.uname().machine=='x86_64' and Path('/dev/kvm').is_char_device()
+    accelerator='kvm' if use_kvm else 'tcg'
+    devices=['--device','/dev/kvm'] if use_kvm else []
+    print('QEMU client accelerator:',accelerator,flush=True)
     for name, boot, marker, timeout in (
         ('Discovery','n','PXE_NATIVE_DISCOVERY_OK',1500),
         ('Installer','n','PXE_NATIVE_INSTALL_OK',3000),
         ('First boot','c','PXE_NATIVE_FIRST_BOOT_OK',900),
     ):
         (root/'qemu-monitor.sock').unlink(missing_ok=True)
-        docker('run','-di','--name',client,'--network','container:'+app,'--cap-add','NET_ADMIN',
-               '--device','/dev/net/tun','--mount',f'type=bind,src={root},dst=/fixture-data',
+        docker('run','-di','--name',client,'--network','container:'+lan,'--cap-add','NET_ADMIN',
+               '--device','/dev/net/tun',*devices,'--mount',f'type=bind,src={root},dst=/fixture-data',
                '--entrypoint','qemu-system-x86_64',image,
-               '-machine','pc,accel=tcg','-smp','1','-m','1024','-display','none',
+               '-machine','pc,accel='+accelerator,'-smp','1','-m','1024','-display','none',
                '-drive','file=/fixture-data/fixture.qcow2,if=none,id=disk,format=qcow2',
                '-device','virtio-blk-pci,drive=disk,serial=PXE-TEST-ONE',
                '-serial','stdio','-monitor','unix:/fixture-data/qemu-monitor.sock,server=on,wait=off',
@@ -145,9 +183,10 @@ def rust_first_boot(app, dhcp, client, root, fixture):
                '-device','e1000,netdev=lan,mac=02:00:00:00:00:01')
         print(name+' started on the isolated guest network', flush=True)
         wakeup=False
+        next_screen=0.0
 
         def completed():
-            nonlocal wakeup
+            nonlocal wakeup,next_screen
             state=inspect(client)['State']
             receipt=log.read_text()
             if 'Traceback (most recent call last)' in receipt:
@@ -167,19 +206,127 @@ def rust_first_boot(app, dhcp, client, root, fixture):
                                    timeout=5,check=False)
                 except subprocess.TimeoutExpired:
                     pass
-            return 'pxe-fixture login:' in output and marker in receipt
+            if marker not in receipt:
+                return False
+            if 'pxe-fixture login:' in output:
+                return True
+            if screen_login and time.monotonic() >= next_screen:
+                next_screen=time.monotonic()+5
+                if re.search(r'pxe.fixture\s+login',capture_screen(root),re.I):
+                    return True
+            return False
 
         wait_for(completed,timeout,name+' and '+marker)
         print(next(line for line in log.read_text().splitlines() if line.startswith(marker)), flush=True)
         docker('rm','-f',client)
-    print('Debian GNU/Linux 13 pxe-fixture login: verified with PHP-FPM masked',flush=True)
+    print('Debian GNU/Linux 13 pxe-fixture login: verified with PHP-FPM stopped',flush=True)
+
+
+def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template):
+    native=backend=='rust-apt'
+    http_root='/var/lib/pxe-tools-http' if native else '/srv/http'
+    tftp_root='/var/lib/pxe-tools-tftp' if native else '/srv/tftp'
+    kernel=('language=en country=US locale=en_US.UTF-8 keymap=us '
+            'console=tty0 console=ttyS0,115200n8 net.ifnames=0 ipv6.disable=1 '
+            'netcfg/no_default_route=true netcfg/get_nameservers=192.0.2.2 mirror/udeb/suite=trixie')
+    env=[
+        'TFTP_ROOT='+tftp_root, 'HTTP_ROOT='+http_root,
+        'PXE_DB_PATH=/var/lib/pxe-tools/stale.sqlite', 'WORKER_POLL_S=1', 'KERNEL_OPTS='+kernel,
+    ]
+    mounts=[]
+    for source,target in (
+        (root/'data','/var/lib/pxe-tools'), (root/'conf','/etc/pxe-tools'),
+        (root/'http',http_root), (root/'tftp',tftp_root), (fixture,'/fixture-data'),
+        (discovery_template,'/opt/pxe-tools/templates/discovery-preseed.cfg.j2'),
+        (ROOT/'tests/support/native-rust-pxe/server.py','/fixture-data/rust-server.py'),
+    ):
+        mounts.extend(('--mount',f'type=bind,src={source},dst={target}'))
+
+    if native:
+        runtime=root/'runtime.env'
+        runtime.write_text('\n'.join(item if ' ' not in item else
+                                      f'{item.split("=",1)[0]}="{item.split("=",1)[1]}"' for item in env) + '\n')
+        docker('run','-d','--name',app,'--network','none','--privileged','--cgroupns','private',
+               '--tmpfs','/run','--tmpfs','/run/lock','--tmpfs','/tmp','--entrypoint','/lib/systemd/systemd',
+               '--mount',f'type=bind,src={runtime},dst=/var/lib/pxe-tools-native/runtime.env,readonly',
+               *mounts,image,'--unit=basic.target')
+        wait_for(lambda:docker('exec',app,'systemctl','list-units','--no-legend',check=False).returncode==0,
+                 60,'native systemd')
+        package=docker('exec',app,'dpkg-query','-W','-f=${Status}|${Version}','pxe-tools-local-test').stdout
+        if package.strip()!='install ok installed|0.1.0~guided1':
+            raise RuntimeError('Expected the packaged Rust APT candidate')
+        docker('exec',app,'systemctl','mask','--now','php8.4-fpm.service','pxe-tools-php.service','nginx.service')
+    else:
+        docker('run','-d','--name',lan,'--network','none','--entrypoint','sleep',image,'5400')
+
+    docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
+           '--mount',f'type=bind,src={fixture},dst=/fixture-data,readonly',
+           '--entrypoint','sleep',image,'5400')
+    connect_fixture_lan(lan,dhcp)
+    docker('exec','-d',dhcp,'dnsmasq','-k','--interface=veth-dhcp','--bind-interfaces',
+           '--no-resolv','--no-hosts','--dhcp-authoritative','--dhcp-range=192.0.2.0,static,255.255.255.0,1h',
+           '--dhcp-host=02:00:00:00:00:01,id:*,192.0.2.100','--dhcp-option=3','--dhcp-option-force=6,192.0.2.2',
+           '--log-dhcp','--log-facility=/tmp/fixture-dhcp.log')
+    docker('exec','-d',dhcp,'socat','TCP-LISTEN:80,bind=192.0.2.2,fork,reuseaddr',
+           'UNIX-CONNECT:/fixture-data/mirror.sock')
+    wait_for(lambda:docker('exec',dhcp,'curl','-fsS','--max-time','3',
+                           'http://192.0.2.2/debian/dists/trixie/InRelease',check=False).returncode==0,
+             30,'fixture mirror inside isolated network')
+
+    if native:
+        docker('exec',app,'systemctl','start','pxe-tools.target')
+        for service in ('pxe-tools-rust-guided','pxe-tools-pxe-http','pxe-tools-dnsmasq','pxe-tools-worker'):
+            docker('exec',app,'systemctl','is-active','--quiet',service+'.service')
+        nginx_command=['nginx','-T','-c','/usr/lib/pxe-tools/native/pxe-nginx.conf']
+        dnsmasq_config='/var/lib/pxe-tools-native/rendered/dnsmasq.conf'
+    else:
+        args=[arg for item in env for arg in ('--env',item)]
+        docker('run','-d','--name',app,'--network','container:'+lan,'--cap-add','NET_ADMIN','--cap-add','NET_RAW',
+               *args,*mounts,appliance_image)
+        expected_pid=int(inspect(lan)['State']['Pid'])
+        app_pid=int(inspect(app)['State']['Pid'])
+        if not app_pid or os.stat(f'/proc/{app_pid}/ns/net').st_ino != os.stat(f'/proc/{expected_pid}/ns/net').st_ino:
+            raise RuntimeError('appliance did not join its isolated network')
+        nginx_command=['nginx','-T']
+        dnsmasq_config='/etc/dnsmasq.d/pxe.conf'
+
+    pg=docker('exec',app,'dpkg','--print-architecture').stdout.strip()
+    if pg != os.environ.get('PXE_NATIVE_PXE_ARCH','amd64'):
+        raise RuntimeError('Unexpected Rust appliance architecture')
+    print(f'Packaged Rust appliance {backend} on Debian 13 {pg}',flush=True)
+    pxe_url='http://192.0.2.1'
+    wait_for(lambda:docker('exec',dhcp,'curl','-fsS','--max-time','2',pxe_url+'/healthz',check=False).returncode==0,
+             90,'packaged PXE listener')
+    nginx_config=docker('exec',app,*nginx_command).stdout
+    if re.search(r'(?m)^\s*(?:fastcgi_pass|error_page)\s',nginx_config) or 'pxe-tools-rust-guided/http.sock' not in nginx_config:
+        raise RuntimeError('PXE listener has a PHP or fallback route, or Rust is missing')
+    config=docker('exec',app,'cat',dnsmasq_config).stdout
+    if 'dhcp-range=192.0.2.0,proxy,255.255.255.0' not in config:
+        raise RuntimeError('Packaged dnsmasq proxy configuration is missing')
+    response=docker('exec',dhcp,'curl','-sS','--max-time','5','-D','-',
+                    pxe_url+'/preseed.php?mac=02:00:00:00:00:ff').stdout
+    if not response.startswith('HTTP/1.1 404 ') or 'x-pxe-backend: rust-guided' not in response.lower():
+        raise RuntimeError('Packaged Rust preseed did not reject an unknown machine')
+
+    tftp=root/'tftp'
+    wait_for(lambda:(tftp/'lpxelinux.0').is_file() and (tftp/'pxelinux.cfg/default').is_file(),
+             120,'worker rendering and bootloaders')
+    check_env=('set -a; source /usr/lib/pxe-tools/native/default.env; '
+               'source /var/lib/pxe-tools-native/runtime.env; set +a; ') if native else (
+               'export PXE_APP_DIR=/app PXE_FIXTURE_NGINX_LOG=/var/log/nginx/pxe-access.log; ')
+    docker('exec','-d',app,'bash','-ec',check_env+'export PXE_FIXTURE_MIRROR_IP=192.0.2.2; '
+           'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
+    status=fixture/'native-status.log'
+    wait_for(lambda:status.is_file() and 'PXE_NATIVE_READY' in status.read_text(),30,'packaged Rust fixture ready')
+    run_rust_guests(lan,client,root,status,screen_login=True)
 
 
 def main():
     suffix=secrets.token_hex(5)
     app='pxe-l2-app-'+suffix; dhcp='pxe-l2-dhcp-'+suffix; client='pxe-l2-client-'+suffix
     mirror='pxe-l2-mirror-'+suffix
-    names=[client,dhcp,app,mirror]
+    lan='pxe-l2-lan-'+suffix if backend=='rust-docker' else app
+    names=list(dict.fromkeys([client,app,dhcp,lan,mirror]))
     fixture_parent = os.environ.get('PXE_TEST_FIXTURE_PARENT', '/var/tmp')
     with tempfile.TemporaryDirectory(prefix='pxe-l2-fixture-',dir=fixture_parent) as temporary:
         root=Path(temporary); root.chmod(0o755)
@@ -221,7 +368,8 @@ def main():
         discovery=(ROOT/'docker/worker/templates/discovery-preseed.cfg.j2').read_text()
         discovery_needle='d-i mirror/http/hostname string deb.debian.org'
         if discovery.count(discovery_needle)!=1: raise RuntimeError('unexpected discovery mirror template')
-        discovery=discovery.replace(discovery_needle,'d-i mirror/http/hostname string 192.0.2.1')
+        mirror_ip='192.0.2.2' if packaged else '192.0.2.1'
+        discovery=discovery.replace(discovery_needle,f'd-i mirror/http/hostname string {mirror_ip}')
         discovery=discovery.replace('d-i clock-setup/ntp boolean true','d-i clock-setup/ntp boolean false')
         discovery+='\nd-i mirror/udeb/suite string trixie\n'
         discovery_template=root/'discovery-preseed.cfg.j2';discovery_template.write_text(discovery)
@@ -259,6 +407,9 @@ done
             for item in ('linux','initrd.gz'):
                 import shutil
                 shutil.copyfile(fixture/item,netboot/item)
+            if packaged:
+                run_packaged_rust(app,lan,dhcp,client,root,fixture,discovery_template)
+                return
             mounts += ['--mount',f'type=bind,src={fixture},dst=/fixture-data']
             # The image already contains the locally built .deb installed with
             # dpkg. Only test-specific mirror and console instrumentation are
@@ -303,25 +454,7 @@ done
                 wire_rust(app,root)
             docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
                    '--entrypoint','/bin/sh',image,'-c','exec sleep 4200')
-            app_ns=endpoint(app); dhcp_ns=endpoint(dhcp)
-            if app_ns[1]==dhcp_ns[1] or links(app,app_ns)!={'lo'} or links(dhcp,dhcp_ns)!={'lo'}:
-                raise RuntimeError('fixture interfaces are not isolated')
-            no_default_route(app,app_ns);no_default_route(dhcp,dhcp_ns)
-            net(app,app_ns,'link','add','br-pxetest','type','bridge')
-            net(app,app_ns,'addr','add','192.0.2.1/24','dev','br-pxetest')
-            net(app,app_ns,'link','set','br-pxetest','up')
-            net(app,app_ns,'link','add','veth-pxe','type','veth','peer','name','veth-dhcp')
-            net(app,app_ns,'link','set','veth-pxe','master','br-pxetest')
-            net(app,app_ns,'link','set','veth-pxe','up')
-            net(app,app_ns,'link','set','veth-dhcp','netns',str(dhcp_ns[0]))
-            net(dhcp,dhcp_ns,'addr','add','192.0.2.2/24','dev','veth-dhcp')
-            net(dhcp,dhcp_ns,'link','set','veth-dhcp','up')
-            net(app,app_ns,'tuntap','add','dev','tap-pxetest','mode','tap')
-            net(app,app_ns,'link','set','tap-pxetest','master','br-pxetest')
-            net(app,app_ns,'link','set','tap-pxetest','up')
-            if links(app,app_ns)!={'lo','br-pxetest','veth-pxe','tap-pxetest'} or links(dhcp,dhcp_ns)!={'lo','veth-dhcp'}:
-                raise RuntimeError('unexpected interface attached to fixture')
-            no_default_route(app,app_ns);no_default_route(dhcp,dhcp_ns)
+            connect_fixture_lan(app,dhcp)
             lease_opts=(
                 ('--no-resolv','--no-hosts','--address=/pxe-native-lab.example.test/192.0.2.1',
                  '--dhcp-authoritative','--dhcp-range=192.0.2.0,static,255.255.255.0,1h',
@@ -516,6 +649,9 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
             print('Only the disposable qcow2 disk and isolated bridge were used.',flush=True)
         except Exception:
             diagnostic_screen(root)
+            if backend=='rust-docker':
+                output=docker('logs','--tail','45',app,check=False).stdout
+                print(output[-3000:],flush=True)
             if rust_lab:
                 status_log=fixture/'native-status.log'
                 if status_log.is_file():

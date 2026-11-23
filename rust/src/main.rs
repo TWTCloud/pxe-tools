@@ -31,20 +31,20 @@ type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
 enum Routes<'a> {
     Full(&'a Path),
     Monitor(&'a Path),
+    Guided(&'a Path),
 }
 
 #[derive(Deserialize)]
-struct MonitorDatabase {
+struct DatabaseConfig {
     driver: String,
     path: Option<PathBuf>,
 }
 
-fn monitor_database(config: &Path) -> Option<PathBuf> {
-    let config: MonitorDatabase = serde_json::from_slice(&fs::read(config).ok()?).ok()?;
+fn configured_database(config: &Path) -> Option<PathBuf> {
+    let config: DatabaseConfig = serde_json::from_slice(&fs::read(config).ok()?).ok()?;
     if !config.driver.eq_ignore_ascii_case("sqlite") {
         return None;
     }
-    // Leave implicit paths and unsupported configurations to the PHP application.
     let path = config.path?;
     (path.is_absolute()
         && !path
@@ -65,8 +65,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         [flag, config, socket] if flag == "--monitor-only" && Path::new(config).is_absolute() => {
             (Routes::Monitor(Path::new(config)), socket)
         }
+        [flag, config, socket] if flag == "--guided" && Path::new(config).is_absolute() => {
+            (Routes::Guided(Path::new(config)), socket)
+        }
         _ => return Err(
-            "Usage: pxe-tools-rust [--monitor-only] /absolute/path/to/database-or-config /private/dir/http.sock".into(),
+            "Usage: pxe-tools-rust [--monitor-only|--guided] /absolute/path/to/database-or-config /private/dir/http.sock".into(),
         ),
     };
     let socket = Path::new(socket);
@@ -95,6 +98,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                             json!({"error": "SQLite request failed"}).to_string(),
                         )
                     });
+                    let response = if matches!(routes, Routes::Guided(_)) {
+                        response.with_header(header("X-PXE-Backend", "rust-guided"))
+                    } else {
+                        response
+                    };
                     let _ = request.respond(response);
                 }
             });
@@ -111,24 +119,24 @@ fn handle(
     let uri = request.url().to_owned();
     let (path, query) = uri.split_once('?').unwrap_or((&uri, ""));
     let method = request.method().clone();
-    let monitor_db;
+    if matches!(routes, Routes::Monitor(_)) && (method != Method::Get || path != MONITORING) {
+        return Ok(not_found(&method, path));
+    }
+    let configured_db;
     let path_to_db = match routes {
         Routes::Full(db) => *db,
-        Routes::Monitor(config) => {
-            if method != Method::Get || path != MONITORING {
-                return Ok(not_found(&method, path));
-            }
+        Routes::Monitor(config) | Routes::Guided(config) => {
             // Read each time so an atomic wizard/administrator change takes effect
             // immediately and requests cannot keep going to the previous database.
-            let Some(db) = monitor_database(config) else {
+            let Some(db) = configured_database(config) else {
                 return Ok(response(
                     503,
                     JSON,
                     r#"{"error":"SQLite configuration unavailable"}"#,
                 ));
             };
-            monitor_db = db;
-            &monitor_db
+            configured_db = db;
+            &configured_db
         }
     };
     let peer = request_header(request, CLIENT_IP)
@@ -153,7 +161,7 @@ fn handle(
             };
             let result = result.with_header(header("Cache-Control", "no-store"));
             Ok(match routes {
-                Routes::Full(_) => result,
+                Routes::Full(_) | Routes::Guided(_) => result,
                 Routes::Monitor(_) => result.with_header(header("X-PXE-Monitor-Backend", "rust")),
             })
         }

@@ -1,0 +1,17 @@
+[Unit]
+Description=PXE Tools guided Rust backend
+Requires=pxe-tools-init.service
+After=pxe-tools-init.service
+PartOf=pxe-tools-pxe-http.service
+
+[Service]
+User=www-data
+Group=www-data
+EnvironmentFile=/usr/lib/pxe-tools/native/default.env
+EnvironmentFile=-/var/lib/pxe-tools-native/runtime.env
+RuntimeDirectory=pxe-tools-rust-guided
+RuntimeDirectoryMode=0700
+ExecStart=/usr/lib/pxe-tools/pxe-tools-rust --guided /etc/pxe-tools/db.conf /run/pxe-tools-rust-guided/http.sock
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true

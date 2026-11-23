@@ -190,6 +190,7 @@ EOF
 RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 COPY docker/pxe-tools/nginx/nginx.conf       /etc/nginx/nginx.conf
 COPY docker/pxe-tools/nginx/pxe.conf         /opt/pxe-tools/nginx/pxe.conf.tmpl
+COPY docker/pxe-tools/nginx/pxe-php.conf     /opt/pxe-tools/nginx/pxe-routes.conf
 COPY docker/pxe-tools/nginx/admin-https.conf.tmpl         /opt/pxe-tools/nginx/admin-https.conf.tmpl
 COPY docker/pxe-tools/nginx/admin-http-redirect.conf.tmpl /opt/pxe-tools/nginx/admin-http-redirect.conf.tmpl
 COPY docker/pxe-tools/nginx/admin-http-serve.conf.tmpl    /opt/pxe-tools/nginx/admin-http-serve.conf.tmpl
@@ -297,5 +298,23 @@ COPY rust/packaging/monitor.conf /opt/pxe-tools/nginx/rust-monitor.d/monitor.con
 COPY --chmod=0755 rust/packaging/s6-run /etc/s6-overlay/s6-rc.d/rust-monitor/run
 RUN printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rust-monitor/type \
     && touch /etc/s6-overlay/s6-rc.d/user/contents.d/rust-monitor
+
+FROM appliance AS rust-guided
+COPY --from=rust-build /source/rust/target/release/pxe-tools-rust /usr/lib/pxe-tools/pxe-tools-rust
+COPY rust/packaging/guided.conf /opt/pxe-tools/nginx/pxe-routes.conf
+COPY --chmod=0755 rust/packaging/s6-guided-run /etc/s6-overlay/s6-rc.d/rust-guided/run
+RUN apt-get purge -y php8.4-fpm \
+    && rm /etc/s6-overlay/s6-rc.d/user/contents.d/php-fpm \
+          /etc/s6-overlay/s6-rc.d/nginx/dependencies.d/php-fpm \
+          /etc/s6-overlay/s6-rc.d/worker/dependencies.d/php-fpm \
+    && rm -r /etc/s6-overlay/s6-rc.d/php-fpm \
+    && mkdir /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d \
+    && printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rust-guided/type \
+    && touch /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/php-init \
+             /etc/s6-overlay/s6-rc.d/nginx/dependencies.d/rust-guided \
+             /etc/s6-overlay/s6-rc.d/user/contents.d/rust-guided \
+             /opt/pxe-tools/nginx/rust-guided
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
+    CMD curl -fsS http://127.0.0.1/healthz || exit 1
 
 FROM appliance AS default
