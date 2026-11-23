@@ -27,6 +27,7 @@ MAC = "02:00:00:00:00:01"
 SERIAL = "PXE-TEST-ONE"
 INSTALL_MENU = TFTP / "pxelinux.cfg" / ("01-" + MAC.replace(":", "-"))
 DIRECT_HTTP = os.environ.get("PXE_RUST_DIRECT_HTTP") == "1"
+SECURE_BOOT = os.environ.get("PXE_FIXTURE_SECURE_BOOT") == "1"
 CUSTOM_PARTITIONS = os.environ.get("PXE_FIXTURE_CUSTOM_PARTITIONS") == "1"
 USE_WORKER_QUEUE = os.environ.get("PXE_FIXTURE_USE_WORKER") == "1"
 
@@ -148,7 +149,11 @@ def inventory():
 
 
 def schedule(machine, report):
-    target = next((item for item in json.loads(report)["disks"]
+    observed = json.loads(report)
+    if SECURE_BOOT and (observed["inventory"]["boot_mode"] != "UEFI"
+                        or observed["inventory"]["secure_boot"] is not True):
+        raise RuntimeError("The discovery guest did not report active UEFI Secure Boot")
+    target = next((item for item in observed["disks"]
                    if item["identity"]["value"] == SERIAL and item["identity"]["status"] == "valid"), None)
     if target is None:
         raise RuntimeError("Discovery failed to identify the disposable disk")
@@ -235,6 +240,8 @@ def first_boot(action):
     payload = json.loads(receipt[0].removeprefix("checkpoint:os_first_boot "))
     if payload["ip"] != CLIENT or payload["_observed_remote_ip"] != CLIENT or not payload["kernel"]:
         raise RuntimeError("The first-boot receipt lacks the original native client address or kernel")
+    if SECURE_BOOT and payload.get("fixture_secure_boot") != 1:
+        raise RuntimeError("The installed guest did not boot with Secure Boot enabled")
     if CUSTOM_PARTITIONS and payload.get("fixture_layout") != "gpt-vda3-swap":
         raise RuntimeError("The installed system did not boot from the requested GPT recipe")
     # The postboot client asked for an acknowledgement. "accepted\n" is nine bytes.
@@ -292,6 +299,8 @@ def follow(_root):
                 raise RuntimeError("Missing native HTTP evidence for " + path)
     if CUSTOM_PARTITIONS:
         print("Custom GPT partition recipe verified from the installed guest", flush=True)
+    if SECURE_BOOT:
+        print("UEFI Secure Boot verified in discovery and the installed guest", flush=True)
     print(f"PXE_NATIVE_FIRST_BOOT_OK kernel={kernel} peer={CLIENT} action={action} ack=accepted", flush=True)
     while True:
         assert_php_stopped()
