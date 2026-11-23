@@ -225,6 +225,8 @@ def compare_install(ports, paths):
     assert directives(decoded[0]) == directives(decoded[1]), (directives(decoded[0]), directives(decoded[1]))
     guard = r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /tmp/pxe-disk-guard.sh"
     assert re.search(guard, decoded[0]).group(1) == re.search(guard, decoded[1]).group(1)
+    assert "/usr/bin/wget -q --timeout=10 -O /target/usr/local/bin/postboot.sh" in decoded[1]
+    assert "/usr/bin/wget -q --timeout=10 -O /target/etc/systemd/system/pxe-postboot.service" in decoded[1]
     for seed in decoded:
         assert "Bearer " + token in seed and "$6$hidden" not in seed
         assert "services-select multiselect" in seed

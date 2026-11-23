@@ -391,10 +391,13 @@ impl Profile {
         late.push("in-target /bin/systemctl enable pxe-machine-ready.service".into());
         if let Some((id, _)) = action {
             let postboot = format!("{base_url}/pxe/postboot/{id}");
-            late.push(format!("in-target /usr/bin/wget -q '{postboot}/postboot.sh' -O /usr/local/bin/postboot.sh || true"));
-            late.push("in-target /bin/chmod +x /usr/local/bin/postboot.sh || true".into());
-            late.push(format!("in-target /usr/bin/wget -q '{postboot}/pxe-postboot.service' -O /etc/systemd/system/pxe-postboot.service || true"));
-            late.push("in-target /bin/systemctl enable pxe-postboot.service || true".into());
+            // The Debian Installer has wget even when the target system is minimal.
+            late.push(format!(
+                "/usr/bin/wget -q --timeout=10 -O /target/usr/local/bin/postboot.sh '{postboot}/postboot.sh' \
+                 && /bin/chmod 0755 /target/usr/local/bin/postboot.sh \
+                 && /usr/bin/wget -q --timeout=10 -O /target/etc/systemd/system/pxe-postboot.service '{postboot}/pxe-postboot.service' \
+                 && in-target /bin/systemctl enable pxe-postboot.service || true"
+            ));
         }
         late.push(phase("late-command", "success"));
         late.push(phase("finished", "success"));

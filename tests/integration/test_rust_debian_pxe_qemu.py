@@ -261,6 +261,7 @@ def main():
     parser.add_argument("--rust", type=Path, default=ROOT / "rust/target/release/pxe-tools-rust")
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--keep-fixture", action="store_true")
+    parser.add_argument("--mirror-cache", type=Path, help="copy a mirror cache from a previous fixture")
     args = parser.parse_args()
     if os.geteuid() == 0 or os.environ.get("PXE_RUST_QEMU_TEST") != "1":
         parser.error("Set PXE_RUST_QEMU_TEST=1 and run as an unprivileged user")
@@ -282,7 +283,14 @@ def main():
         else:
             inputs = args.inputs.resolve()
         setup(root, inputs, keyring)
-        (root / "mirror-cache").mkdir()
+        cache = root / "mirror-cache"
+        cache.mkdir()
+        if args.mirror_cache:
+            # The mirror verifies each reused index/package before serving it.
+            for item in args.mirror_cache.iterdir():
+                if len(item.name) == 64 and all(ch in "0123456789abcdef" for ch in item.name):
+                    if item.is_file() and not item.is_symlink():
+                        shutil.copyfile(item, cache / item.name)
         mirror = FullInstallMirror(root / "mirror-cache", inputs / "InRelease", keyring,
                                    b"", inputs / "Packages.xz")
         with ExitStack() as stack:
