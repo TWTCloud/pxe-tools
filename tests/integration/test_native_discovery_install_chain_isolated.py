@@ -207,9 +207,12 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
             network_device='virtio-net-pci,disable-legacy=on,netdev=lan,mac=02:00:00:00:00:01,romfile=,bootindex='+(
                 '2' if boot=='c' else '1')
             firmware=['-machine','q35,smm=on,accel='+accelerator,
+                      '-cpu','host' if use_kvm else 'max',
                       '-global','driver=cfi.pflash01,property=secure,value=on',
-                      '-drive','if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd',
-                      '-drive','if=pflash,format=raw,file=/fixture-data/ovmf-vars.fd']
+                      '-device','virtio-rng-pci',
+                      '-fw_cfg','name=opt/org.tianocore/IPv6Support,string=no',
+                      '-drive','if=pflash,unit=0,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd',
+                      '-drive','if=pflash,unit=1,format=raw,file=/fixture-data/ovmf-vars.fd']
         docker('run','-di','--name',client,'--network','container:'+lan,'--cap-add','NET_ADMIN',
                '--device','/dev/net/tun',*devices,'--mount',f'type=bind,src={root},dst=/fixture-data',
                '--entrypoint','qemu-system-x86_64',uefi_image or image,
@@ -236,6 +239,10 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
                     if (path,code) not in paths_seen:
                         paths_seen.add((path,code))
                         print('PXE HTTP:',path,code,flush=True)
+            if uefi_image:
+                output=docker('logs',client,check=False).stdout
+                if 'No bootable option or device was found' in output:
+                    raise RuntimeError('UEFI firmware found no usable boot option')
             if boot=='n':
                 if state['ExitCode']!=0:
                     raise RuntimeError(name+' QEMU guest failed')
