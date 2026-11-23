@@ -64,10 +64,7 @@ final class BootSession
                 // "local" post-install est un signal fiable (hit HTTP direct de la
                 // machine sur grub.php) que le reboot post-install a eu lieu. On
                 // émet install_reboot_done ici plutôt que de dépendre uniquement du
-                // sidecar dnsmasq-tail (parsing des logs proxy DHCP dont le format
-                // réel ne matche pas toujours le pattern attendu) : sans ce
-                // deuxième chemin, worker.py attendait jusqu'à 10 min avant son
-                // fallback install_reboot_assumed, retardant ansible-playbook d'autant.
+                // sidecar dnsmasq-tail, pour conserver ce jalon dans le suivi.
                 if ($menu === 'local' && $actionId !== null) {
                     $action = Action::findById($actionId);
                     $alreadySeen = Db::get()->prepare("SELECT 1 FROM machine_events WHERE action_id = ? AND checkpoint = 'install_reboot_done' LIMIT 1");

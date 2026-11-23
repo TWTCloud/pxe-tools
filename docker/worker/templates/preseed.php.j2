@@ -1527,23 +1527,15 @@ if (!empty($partitions_for_tune2fs)) {
     }
 }
 
-// Refactor checkpoints 2026-05-16 — installation de postboot.sh + service
-// systemd dans le système cible. Téléchargés depuis /pxe/postboot/{action_id}/
-// (servi par PxeController::serveActionFile avec filtre pxe_subnet). Le
-// service oneshot émet le checkpoint os_first_boot au premier boot OS.
-//
-// On utilise `in-target wget` car wget est dans pkgsel/include (cf. defaults
-// packages.pkgsel_include = sudo openssh-server python3 ca-certificates curl).
-// curl est aussi dispo en fallback si wget pose problème.
-//
-// `|| true` partout — un échec d'install postboot ne doit pas casser l'install
-// Debian (le boot OS aboutira sans ansible auto-trigger, recoverable manuel).
-if ($action_token !== null && $action_id !== null) {
+// Le même client HTTP sert au téléchargement et au premier démarrage.
+$installPostboot = $action_token !== null && $action_id !== null;
+if ($installPostboot) {
     $postbootUrl = "http://" . $pxe_ip_local . "/pxe/postboot/" . $action_id;
-    $late_command .= "    in-target /usr/bin/wget -q '" . $postbootUrl . "/postboot.sh' -O /usr/local/bin/postboot.sh || true ; \\\n";
-    $late_command .= "    in-target /bin/chmod +x /usr/local/bin/postboot.sh || true ; \\\n";
-    $late_command .= "    in-target /usr/bin/wget -q '" . $postbootUrl . "/pxe-postboot.service' -O /etc/systemd/system/pxe-postboot.service || true ; \\\n";
-    $late_command .= "    in-target /bin/systemctl enable pxe-postboot.service || true ; \\\n";
+    $download = 'in-target /usr/bin/curl -fsS --connect-timeout 5 --max-time 20 --retry 3';
+    $late_command .= "    $download '$postbootUrl/postboot.sh' -o /usr/local/bin/postboot.sh && \\\n"
+                  .  "    $download '$postbootUrl/pxe-postboot.service' -o /etc/systemd/system/pxe-postboot.service && \\\n"
+                  .  "    in-target /bin/chmod 0700 /usr/local/bin/postboot.sh && \\\n"
+                  .  "    in-target /bin/systemctl enable pxe-postboot.service || exit 1 ; \\\n";
 }
 
 // Phase 3 chantier preset-hardware-aware — émission des configs ifupdown
@@ -1680,10 +1672,12 @@ if (is_array($pkg['tasksel']) && !empty($pkg['tasksel'])) {
 }
 // Phase 3 chantier preset-hardware-aware : ajoute vlan/ifenslave à pkgsel_include
 // si une NIC secondaire les requiert (cf. construction $network_extra_pkgs).
-$pkg_include_combined = is_array($pkg['pkgsel_include'] ?? null) ? $pkg['pkgsel_include'] : [];
-if (!empty($network_extra_pkgs)) {
-    $pkg_include_combined = array_values(array_unique(array_merge($pkg_include_combined, $network_extra_pkgs)));
-}
+$pkg_include_combined = array_unique(array_merge(
+    is_array($pkg['pkgsel_include'] ?? null) ? $pkg['pkgsel_include'] : [],
+    $network_extra_pkgs,
+    $installPostboot ? ['curl', 'iproute2'] : [],
+    $ansible_pubkey !== '' ? ['sudo', 'openssh-server', 'python3'] : []
+));
 if (!empty($pkg_include_combined)) {
     $inc = array_filter(array_map(fn($x) => safe_preseed_scalar((string)$x), $pkg_include_combined));
     if (!empty($inc)) $pkg_lines[] = "d-i pkgsel/include string " . implode(' ', $inc);

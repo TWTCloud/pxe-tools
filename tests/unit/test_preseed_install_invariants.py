@@ -47,7 +47,8 @@ class PreseedInvariants(unittest.TestCase):
             renderer = renderer.replace('{{ pxe_data_dir }}', tmp).replace('{{ pxe_ip }}', '192.0.2.1')
             (data / 'renderer.php').write_text(renderer)
             (data / 'run.php').write_text("<?php register_shutdown_function(function () { file_put_contents(__DIR__.'/http.status', (string)(http_response_code() ?: 200)); }); $_GET['mac']='02:00:00:00:00:01'; $_SERVER['REMOTE_ADDR']='192.0.2.2'; require __DIR__.'/renderer.php';")
-            env = dict(os.environ, PXE_DB_DRIVER='sqlite', PXE_DB_PATH=str(data / 'pxe-tools.sqlite'))
+            env = dict(os.environ, PXE_APP_DIR=str(ROOT / 'app'), PXE_DB_DRIVER='sqlite',
+                       PXE_DB_PATH=str(data / 'pxe-tools.sqlite'))
             result = subprocess.run([os.environ.get('PHP_BINARY','php'), '-d', 'allow_url_fopen=0', str(data / 'run.php')], env=env, capture_output=True, text=True)
             if result.returncode:
                 self.fail('preseed renderer failed: ' + result.stderr[:500])
@@ -98,6 +99,82 @@ if [ "$n" -le "$FAILURES" ]; then exit "$CODE"; fi
         self.assertIn('/api/install-end?mac=', output)
         without_action = self.render({'distro': 'debian'})
         self.assertNotIn('/api/install-end?mac=', without_action)
+
+    def test_postboot_dependencies_are_added_to_minimal_install(self):
+        config = {'distro': 'debian', 'codename': 'trixie',
+                  'advanced': {'packages': {'pkgsel_include': ['curl']}}}
+        output = self.render(config, running_action_token='a' * 64,
+                             module_enabled='on', module_key='ssh-ed25519 AAAA test')
+        self.assertIn('d-i pkgsel/include string curl iproute2 sudo openssh-server python3\n', output)
+        self.assertIn("'http://192.0.2.1/pxe/postboot/7/postboot.sh'", output)
+        self.assertIn('in-target /usr/bin/curl -fsS', output)
+        self.assertNotIn('in-target /usr/bin/wget', output)
+        self.assertIn('systemctl enable pxe-postboot.service || exit 1', output)
+
+    def test_postboot_marks_completion_only_after_a_receipt(self):
+        templates = ROOT / 'docker/worker/templates'
+        script = (templates / 'postboot.sh.j2').read_text()
+        unit = (templates / 'pxe-postboot.service.j2').read_text()
+        self.assertIn('Restart=on-failure', unit)
+        self.assertIn('StartLimitIntervalSec=0', unit)
+        with tempfile.TemporaryDirectory(prefix='pxe-postboot-') as tmp:
+            root = Path(tmp)
+            marker = root / 'done'
+            ip = root / 'ip'
+            ip.write_text('#!/bin/sh\n[ "$ROUTE_STATUS" = 0 ] || exit "$ROUTE_STATUS"\necho "192.0.2.1 dev eth0 src 192.0.2.2"\n')
+            curl = root / 'curl'
+            curl.write_text('#!/bin/sh\nprintf "%s" "$RECEIPT"\nexit "$CURL_STATUS"\n')
+            for binary in (ip, curl):
+                binary.chmod(0o755)
+            script = (script.replace('{{ pxe_ip }}', '192.0.2.1')
+                      .replace('{{ token }}', 'a' * 64).replace('{{ mac }}', '02:00:00:00:00:01')
+                      .replace('/var/lib/pxe-tools-postboot.done', str(marker)))
+            for route_status, receipt, curl_status, expected in [(2, '', 0, 1), (0, '', 2, 1),
+                                                                 (0, '', 7, 1), (0, '', 0, 1),
+                                                                 (0, 'closed', 0, 2), (0, 'accepted', 0, 0)]:
+                with self.subTest(route_status=route_status, receipt=receipt, curl_status=curl_status):
+                    env = dict(os.environ, PATH=f"{tmp}:{os.environ['PATH']}", RECEIPT=receipt,
+                               CURL_STATUS=str(curl_status), ROUTE_STATUS=str(route_status))
+                    run = subprocess.run(['sh', '-c', script], env=env, capture_output=True)
+                    self.assertEqual(run.returncode, expected)
+                    self.assertEqual(marker.exists(), expected == 0)
+
+    def test_checkpoint_acknowledges_persisted_first_boot_and_closure(self):
+        with tempfile.TemporaryDirectory(prefix='pxe-postboot-receipt-') as tmp:
+            database = Path(tmp) / 'pxe-tools.sqlite'
+            with sqlite3.connect(database) as db:
+                db.executescript((ROOT / 'app/db/schema.sqlite.sql').read_text())
+                db.execute("INSERT INTO settings(key,value) VALUES ('pxe_subnet','192.0.2.0/24')")
+                db.execute("INSERT INTO machines(mac,status) VALUES ('02:00:00:00:00:01','configured')")
+                db.executemany("INSERT INTO actions(machine_id,type,status,token) VALUES (1,'install_only',?,?)",
+                               [('running', 'a' * 64), ('success', 'b' * 64)])
+            script = r'''
+spl_autoload_register(function (string $class): void {
+    $file = getenv('PXE_APP_DIR') . '/src/' . str_replace('\\', '/', substr($class, 6)) . '.php';
+    if (str_starts_with($class, 'Admin\\') && is_file($file)) require_once $file;
+});
+$_SERVER['REMOTE_ADDR'] = '192.0.2.2';
+$_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . $argv[1];
+$_GET = ['mac' => '02:00:00:00:00:01', 'code' => 'os_first_boot', 'ack' => $argv[2]];
+(new Admin\Controllers\InternalApiController())->checkpoint([]);
+'''
+            env = dict(os.environ, PXE_APP_DIR=str(ROOT / 'app'), PXE_DB_DRIVER='sqlite',
+                       PXE_DB_PATH=str(database))
+
+            def invoke(token, ack='1'):
+                return subprocess.run([os.environ.get('PHP_BINARY', 'php'), '-r', script, token, ack],
+                                      env=env, check=True, capture_output=True, text=True).stdout
+
+            self.assertEqual(invoke('c' * 64), '')
+            self.assertEqual(invoke('b' * 64), 'closed\n')
+            self.assertEqual(invoke('a' * 64), 'accepted\n')
+            with sqlite3.connect(database) as db:
+                db.execute("UPDATE actions SET status='success' WHERE token=?", ('a' * 64,))
+            self.assertEqual(invoke('a' * 64), 'accepted\n')
+            self.assertEqual(invoke('a' * 64, '0'), '')
+            with sqlite3.connect(database) as db:
+                self.assertEqual(db.execute("SELECT checkpoint FROM machine_events").fetchall(),
+                                 [('os_first_boot',)])
 
     def test_preseed_closes_after_install_and_reopens_for_new_action(self):
         config = {'distro': 'debian'}
