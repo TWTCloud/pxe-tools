@@ -187,7 +187,7 @@ done
                    "printf '%s\\n' TFTP_ROOT=/var/lib/pxe-tools-tftp HTTP_ROOT=/var/lib/pxe-tools-http "
                    "PXE_TOOLS_DATA_DIR=/var/lib/pxe-tools-native/rendered MOK_DIR=/var/lib/pxe-tools-native/mok "
                    "PXE_DB_PATH=/var/lib/pxe-tools/stale.sqlite WORKER_POLL_S=1 "
-                   "'KERNEL_OPTS=\"language=fr country=FR locale=fr_FR.UTF-8 keymap=fr ipv6.disable=1 net.ifnames=0\"' "
+                   "'KERNEL_OPTS=\"language=fr country=FR locale=fr_FR.UTF-8 keymap=fr ipv6.disable=1 net.ifnames=0 console=ttyS0,115200n8\"' "
                    "> /var/lib/pxe-tools-native/runtime.env")
             docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
                    '--entrypoint','/bin/sh',image,'-c','exec sleep 4200')
@@ -324,8 +324,10 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                    '-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
                    '-device','e1000,netdev=lan,mac=02:00:00:00:00:01')
             print('Discovery rebooted; watching the installer and authenticated checkpoints',flush=True)
-            seen=False; deadline=time.monotonic()+3000
+            began=time.monotonic()
+            seen=False; deadline=began+3000
             previous=None
+            http_reported=set()
             while time.monotonic()<deadline:
                 output=docker('logs',client,check=False).stdout
                 if 'PXE_FULL_LATE_DONE' in output: seen=True
@@ -336,6 +338,16 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                     previous=progress
                 if progress==('failed',):
                     raise RuntimeError('application recorded a failed installation')
+                access=docker('exec',app,'tail','-n','80','/var/lib/pxe-tools-native/log/nginx-access.log',
+                              check=False).stdout
+                for path, status in re.findall(r'"(?:GET|POST|HEAD) (/[^ ?"\\]*)(?:\?[^ "]+)? HTTP/[\d.]+" (\d{3}) ',access):
+                    if path.startswith(('/preseed.php','/netboot/','/debian/dists/','/api/')):
+                        receipt=(path,status)
+                        if receipt not in http_reported:
+                            print('Isolated HTTP:',*receipt,flush=True)
+                            http_reported.add(receipt)
+                if progress is None and time.monotonic()-began>600:
+                    raise RuntimeError('no authenticated installer start on the isolated network')
                 state=inspect(client)['State']
                 if not state['Running']:
                     if not seen or state['ExitCode']!=0: raise RuntimeError('installer exited before successful late command')

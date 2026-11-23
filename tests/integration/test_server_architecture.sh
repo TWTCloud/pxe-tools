@@ -89,13 +89,19 @@ if systemctl is-active --quiet pxe-tools-dnsmasq.service || command -v ansible; 
 fi
 APT_GUEST
 else
+    image="${PXE_DOCKER_TEST_IMAGE:-$name}"
+    labels=(--label "org.opencontainers.image.revision=$(git rev-parse HEAD)"
+            --label 'org.opencontainers.image.source=https://github.com/williamboglietti/pxe-tools')
+    if [ -n "${PXE_DOCKER_DOCUMENTATION:-}" ]; then
+        labels+=(--label "org.opencontainers.image.documentation=$PXE_DOCKER_DOCUMENTATION")
+    fi
     docker build --platform "linux/$architecture" --build-arg "APP_VERSION=${PXE_TEST_APT_VERSION:-0.1.0~lab1}" \
-        -f docker/pxe-tools/Dockerfile -t "$name" .
-    docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes' "$name"
-    docker run -d --name "$name" "$name" >/dev/null
+        "${labels[@]}" -f docker/pxe-tools/Dockerfile -t "$image" .
+    docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes {{.Id}}' "$image"
+    docker run -d --name "$name" "$image" >/dev/null
     docker exec "$name" dpkg-query -W -f='Debian source: ${source:Package} ${source:Version}\n' | sort -u
     if [ -n "${PXE_DOCKER_SOURCE_OFFER:-}" ]; then
-        python3 packaging/ci/docker-source-offer.py "$name" > "$PXE_DOCKER_SOURCE_OFFER"
+        python3 packaging/ci/docker-source-offer.py "$image" > "$PXE_DOCKER_SOURCE_OFFER"
     fi
 fi
 
