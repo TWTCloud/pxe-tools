@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-3.0-only
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+
+MODULE = Path(__file__).resolve().parents[1] / 'integration' / 'verify_windows_pxe_deployment.py'
+spec = importlib.util.spec_from_file_location('windows_pxe_evidence', MODULE)
+evidence = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(evidence)
+
+
+class WindowsEvidenceTest(unittest.TestCase):
+    def test_media_fingerprints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            iso = Path(directory) / 'fixture.iso'
+            winpe = Path(directory) / 'boot.wim'
+            iso.write_bytes(b'iso fixture')
+            winpe.write_bytes(b'winpe fixture')
+            case = {'iso_sha256': hashlib.sha256(iso.read_bytes()).hexdigest(),
+                    'winpe_sha256': hashlib.sha256(winpe.read_bytes()).hexdigest()}
+            evidence.check_media(case, iso, winpe)
+            winpe.write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'fingerprint'):
+                evidence.check_media(case, iso, winpe)
+
+    def test_guest_contract(self):
+        guest = 'b9c4c7c8-c599-446b-b540-69915fbb9a39'
+        disk = 'PXE-WIN-TEST-01'
+        case = {'guest_id': guest, 'disk_serial': disk, 'edition': 'Professional', 'winpe_sha256': 'a'*64}
+        network = {'guest_id': guest, 'architecture': 'uefi-amd64', 'efi_boot_manager_transferred': True,
+                   'winpe_sha256': case['winpe_sha256']}
+        common = {'guest_id': guest, 'disk_serial': disk, 'secure_boot': True, 'tpm_spec': '2.0'}
+        winpe = {**common, 'phase': 'winpe', 'partition_style': 'RAW', 'pe_boot_type': 'Remote'}
+        windows = {**common, 'phase': 'windows', 'partition_style': 'GPT', 'product_type': 1, 'build': 26100,
+                   'system_disk_matches': True, 'edition': 'Professional'}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'serial.log'
+
+            def transcript(*receipts):
+                path.write_text(''.join(evidence.PREFIX + json.dumps(receipt) + '\n' for receipt in receipts))
+
+            transcript(winpe, windows)
+            evidence.verify(case, network, path)
+            with self.assertRaisesRegex(ValueError, 'network evidence'):
+                evidence.verify(case, {**network, 'winpe_sha256': 'b'*64}, path)
+            for change in ({'secure_boot': False}, {'tpm_spec': '1.2'}, {'disk_serial': 'WRONG'},
+                           {'partition_style': 'MBR'}, {'system_disk_matches': False}, {'product_type': 3}):
+                with self.subTest(change=change):
+                    transcript(winpe, {**windows, **change})
+                    with self.assertRaises(ValueError):
+                        evidence.verify(case, network, path)
+            transcript({**winpe, 'pe_boot_type': 'Ramdisk:OpticalDrive'}, windows)
+            with self.assertRaisesRegex(ValueError, 'WinPE'):
+                evidence.verify(case, network, path)
+            transcript(windows, winpe)
+            with self.assertRaisesRegex(ValueError, 'followed'):
+                evidence.verify(case, network, path)
+
+
+if __name__ == '__main__':
+    unittest.main()

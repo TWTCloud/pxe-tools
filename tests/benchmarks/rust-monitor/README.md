@@ -295,7 +295,59 @@ d'accès des artefacts postboot et des payloads netboot.
 | Certificats | Servir une paire importée après validation depuis la console. Tester l’émission et le renouvellement ACME avec une autorité de test. Conserver la paire précédente lorsqu’une opération échoue. |
 | Profils avancés | Porter les recettes de partition personnalisées, les templates et les opérations de diagnostic. Comparer le rendu et les refus à PHP, puis vérifier l’identité de chaque disque et le système installé sur un banc jetable. |
 | Worker et migrations | Porter les migrations SQLite, l’import de modèles et la suppression d’images, puis les familles de tâches en conservant transactions, reprises et compatibilité Ansible. Contrôler le lancement et les tâches sur des livrables sans PHP. |
-| Qualification | Construire les deux formats sur Debian 13 amd64 et arm64, valider la reprise d’une instance et les démarrages BIOS et UEFI, puis mesurer les tailles et la mémoire du livrable. |
+| Qualification | Construire les deux formats sur Debian 13 amd64 et arm64, valider la reprise d’une instance et les démarrages BIOS et UEFI avec Secure Boot, puis mesurer les tailles et la mémoire du livrable. |
+
+### UEFI, Secure Boot et premier déploiement Windows
+
+Le client de test Debian x86-64 utilise OVMF avec Secure Boot actif.
+Le banc prend le shim et le GRUB signés que fournit le serveur, inscrit
+la clé publique MOK de l’instance d’essai dans une copie privée des
+variables du firmware et demande une preuve d’activation dans
+l’inventaire de découverte puis dans le premier démarrage installé.
+L’architecture du serveur et celle du client sont distinctes. Le démarrage
+d’un client ARM64 avec Secure Boot demande sa propre chaîne signée et
+sa propre qualification. [Firmware OVMF de Debian](https://packages.debian.org/trixie/ovmf)
+
+Le futur essai Windows commence par Windows 11 Pro amd64. L’instance de
+test doit disposer d’un firmware UEFI, de Secure Boot actif, d’un TPM
+virtuel 2.0 et d’un disque vierge jetable. Préparer WinPE avec le module
+complémentaire de l’ADK et les composants WMI, PowerShell, StorageWMI,
+SecureStartup et SecureBootCmdlets requis par la sonde. Le média Windows
+et le WIM WinPE sont fournis au banc sous forme de fichiers de test avec
+empreintes SHA-256 approuvées. [Prérequis Windows 11](https://learn.microsoft.com/windows/whats-new/windows-11-requirements) · [Composants optionnels de WinPE](https://learn.microsoft.com/windows-hardware/manufacture/desktop/winpe-add-packages--optional-components-reference)
+
+- Créer une VM isolée avec un UUID SMBIOS et un numéro de série de disque
+  uniques au test. Attacher uniquement le disque vierge et une carte sur
+  le segment privé avec les services DHCP, TFTP et de diffusion WinPE du
+  banc. Le client part sans média de démarrage local.
+- Construire le réseau d’amorçage Windows avec le gestionnaire EFI signé,
+  le BCD et le média WinPE. Préparer la preuve du transfert EFI et du WIM
+  côté serveur. Exécuter la sonde `collect.ps1` dans WinPE, puis déployer
+  l’édition attendue sur le disque jetable. [Démarrer WinPE par PXE](https://learn.microsoft.com/windows/deployment/configure-a-pxe-server-to-load-windows-pe)
+- Pour le premier démarrage installé, démarrer depuis le disque et exécuter
+  à nouveau la sonde. Elle écrit ses mesures sur le port série. Le
+  vérificateur exige les deux phases et contrôle l’identité, le disque
+  initialement vierge, la partition système GPT, Secure Boot et le TPM 2.0.
+- Exécuter le banc sur un runner jetable disposant des médias autorisés.
+  Publier les résultats et journaux de test. Conserver les ISO, WIM et
+  secrets de laboratoire en dehors du dépôt et des artefacts publics.
+
+Le manifeste du cas contient `guest_id` (UUID), `disk_serial`,
+`edition` (par exemple `Professional`), `iso_sha256` et
+`winpe_sha256`. La preuve réseau produite côté serveur contient
+`guest_id`, `architecture` (`uefi-amd64`),
+`efi_boot_manager_transferred` et `winpe_sha256`. Le journal série
+contient les lignes émises par `tests/support/windows-pxe/collect.ps1`.
+
+```bash
+python3 tests/integration/verify_windows_pxe_deployment.py \
+  --case "$case" --iso "$windows_iso" --winpe "$winpe_wim" \
+  --network-proof "$network_proof" --serial "$serial_log"
+```
+
+Le vérificateur et ses cas de refus sont disponibles. Le branchement
+du démarrage WinPE et de l’installation Windows à PXE Tools reste à
+développer et à exécuter avec les médias réels.
 
 ### Contrôles des deux distributions
 
