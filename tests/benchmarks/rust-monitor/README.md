@@ -239,10 +239,31 @@ Les écouteurs conservent les restrictions du réseau PXE et les protections
 de la console et de l'API. Les lectures de fichiers respectent les contrôles
 d'accès des artefacts postboot et des payloads netboot.
 
+### Console, écouteurs et certificats
+
+- La liste des appareils a pour URL canonique `/admin/devices`. Le
+  réglage `ui_device_term` de la bêta 12 change le libellé dans la console.
+  Un changement de libellé conserve la même URL et les liens existants.
+- Sur HTTP 80, la racine `/` redirige directement vers `/admin/` en HTTPS
+  sur le port 443. La règle vise la seule racine. Les images, le preseed et
+  les retours d'installation gardent leurs réponses HTTP directes.
+- La gestion TLS fait partie du produit dans le paquet comme dans l'image.
+  Le premier démarrage génère un certificat auto-signé propre à l'instance
+  et le conserve avec sa clé dans le stockage persistant. La console permet
+  aussi d'importer un certificat externe et de configurer l'émission et le
+  renouvellement automatiques via ACME. Les trois modes de Proxmox VE
+  servent de référence fonctionnelle. Proxmox VE utilise par défaut un
+  certificat signé par la CA du cluster, tandis que PXE Tools génère le
+  certificat d'instance auto-signé demandé. [Gestion des certificats dans Proxmox VE](https://pve.proxmox.com/pve-docs/pve-admin-guide.pdf)
+
+### Contrôles des deux distributions
+
 1. Remplacer les routes nginx et les appels locaux qui en dépendent par
    le serveur HTTP/HTTPS Rust. Qualifier la console, les API, les téléchargements
    et le preseed sur les deux protocoles. Réutiliser les données SQLite, la clé
    maître, les certificats et les réglages existants après mise à niveau.
+   Vérifier l'URL de la liste avant et après un changement de libellé, la
+   redirection directe de la racine et les réponses HTTP des clients PXE.
 2. Porter les parcours d'installation et d'administration encore pris en charge
    par PHP, ainsi que les migrations et les opérations du worker qui en
    dépendent. Préserver les transitions, les refus et les jetons liés à une action.
@@ -255,6 +276,11 @@ d'accès des artefacts postboot et des payloads netboot.
    architecture serveur. Exercer le démarrage BIOS et les chemins UEFI pris en
    charge. Vérifier le chargement des ressources PXE et les refus d'accès
    en HTTP et HTTPS selon le client.
-5. Mesurer les livrables complets et l'appliance en activité. Comparer la taille
+5. Tester les trois modes TLS sur chaque distribution. Vérifier la création
+   initiale et la conservation du certificat auto-signé au redémarrage, le
+   certificat externe réellement servi après import, et l'émission puis le
+   renouvellement ACME sur un serveur de test. La clé privée reste dans le
+   stockage persistant de l'instance.
+6. Mesurer les livrables complets et l'appliance en activité. Comparer la taille
    du `.deb` et de l'image Docker, ainsi que la PSS, la pression mémoire,
    les latences et le débit sous Debian 13 amd64 avec environ 1 Gio de RAM.
