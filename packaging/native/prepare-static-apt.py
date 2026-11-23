@@ -33,11 +33,12 @@ def digest(path: Path, algorithm: str = 'sha256') -> str:
 
 
 def allowed(relative: str) -> bool:
-    fixed = {'dists/stable/InRelease', 'dists/stable/Release', 'dists/stable/Release.gpg',
-             'dists/stable/main/binary-amd64/Packages', 'dists/stable/main/binary-amd64/Packages.gz'}
+    fixed = {'dists/stable/InRelease', 'dists/stable/Release', 'dists/stable/Release.gpg'}
+    index = r'dists/stable/main/binary-(?:amd64|arm64)'
     return (relative in fixed
-            or re.fullmatch(rf'dists/stable/main/binary-amd64/by-hash/SHA256/{HEX}', relative) is not None
-            or re.fullmatch(rf'dists/stable/main/binary-amd64/by-hash/SHA512/{HEX512}', relative) is not None
+            or re.fullmatch(rf'{index}/Packages(?:\.gz)?', relative) is not None
+            or re.fullmatch(rf'{index}/by-hash/SHA256/{HEX}', relative) is not None
+            or re.fullmatch(rf'{index}/by-hash/SHA512/{HEX512}', relative) is not None
             or re.fullmatch(rf'pool/main/p/pxe-tools/pxe-tools-{HEX}\.deb', relative) is not None)
 
 
@@ -83,6 +84,14 @@ def validate(root: Path, keyring: Path, primary: str, signing: str, *, allow_exp
             raise ValueError('InRelease and Release differ')
 
     text = release.read_text(encoding='utf-8')
+    architectures = re.findall(r'(?m)^Architectures: (.+)$', text)
+    if architectures not in (['amd64'], ['amd64 arm64']):
+        raise ValueError('unsupported release architectures')
+    architectures = architectures[0].split()
+    for relative in files:
+        match = re.match(r'dists/stable/main/binary-([^/]+)/', relative)
+        if match and match[1] not in architectures:
+            raise ValueError('snapshot contains an unadvertised architecture')
     for line in ('Suite: stable', 'Codename: stable', 'Acquire-By-Hash: yes'):
         if line not in text.splitlines():
             raise ValueError('release metadata is not suitable for static publication')
@@ -106,15 +115,6 @@ def validate(root: Path, keyring: Path, primary: str, signing: str, *, allow_exp
         if name in entries or not re.fullmatch(HEX, checksum):
             raise ValueError('invalid release checksums')
         entries[name] = checksum, int(size)
-    index_dir = root / 'dists/stable/main/binary-amd64'
-    for name in ('Packages', 'Packages.gz'):
-        index = index_dir / name
-        checksum, size = entries.get(f'main/binary-amd64/{name}', ('', -1))
-        by_hash = index_dir / 'by-hash/SHA256' / checksum
-        if not index.is_file() or not by_hash.is_file() or index.stat().st_size != size:
-            raise ValueError('signed index or by-hash object is missing')
-        if digest(index) != checksum or digest(by_hash) != checksum:
-            raise ValueError('signed index or by-hash object is corrupt')
     sha512_section = re.search(r'(?ms)^SHA512:\s*\n((?: [^\n]+\n)+)', text)
     if not sha512_section:
         raise ValueError('release metadata lacks SHA512 checksums')
@@ -124,27 +124,31 @@ def validate(root: Path, keyring: Path, primary: str, signing: str, *, allow_exp
         if name in sha512_entries or not re.fullmatch(HEX512, checksum):
             raise ValueError('invalid SHA512 release checksums')
         sha512_entries[name] = checksum, int(size)
-    for name in ('Packages', 'Packages.gz'):
-        index = index_dir / name
-        checksum, size = sha512_entries.get(f'main/binary-amd64/{name}', ('', -1))
-        by_hash = index_dir / 'by-hash/SHA512' / checksum
-        if (not index.is_file() or not by_hash.is_file() or index.stat().st_size != size
-                or digest(index, 'sha512') != checksum or digest(by_hash, 'sha512') != checksum):
-            raise ValueError('signed SHA512 index or by-hash object is missing or corrupt')
-    with gzip.open(index_dir / 'Packages.gz', 'rb') as compressed:
-        if compressed.read(LIMIT + 1) != (index_dir / 'Packages').read_bytes():
-            raise ValueError('compressed index differs from its uncompressed form')
-    paragraphs = (index_dir / 'Packages').read_text(encoding='utf-8').strip().split('\n\n')
-    if not paragraphs or not paragraphs[0]:
-        raise ValueError('the signed package index is empty')
-    for paragraph in paragraphs:
-        fields = dict(line.split(': ', 1) for line in paragraph.splitlines() if ': ' in line)
-        name, checksum = fields.get('Filename', ''), fields.get('SHA256', '')
-        if not re.fullmatch(rf'pool/main/p/pxe-tools/pxe-tools-{HEX}\.deb', name) or not re.fullmatch(HEX, checksum):
-            raise ValueError('package index has an unexpected path or checksum')
-        package = root / name
-        if name not in files or digest(package) != checksum or package.stat().st_size != int(fields.get('Size', '-1')):
-            raise ValueError('package is absent or differs from its signed index')
+    for architecture in architectures:
+        index_dir = root / f'dists/stable/main/binary-{architecture}'
+        for name in ('Packages', 'Packages.gz'):
+            index = index_dir / name
+            for algorithm, checksums in (('sha256', entries), ('sha512', sha512_entries)):
+                checksum, size = checksums.get(f'main/binary-{architecture}/{name}', ('', -1))
+                by_hash = index_dir / 'by-hash' / algorithm.upper() / checksum
+                if (not index.is_file() or not by_hash.is_file() or index.stat().st_size != size
+                        or digest(index, algorithm) != checksum or digest(by_hash, algorithm) != checksum):
+                    raise ValueError(f'signed {algorithm} index or by-hash object is missing or corrupt')
+        with gzip.open(index_dir / 'Packages.gz', 'rb') as compressed:
+            if compressed.read(LIMIT + 1) != (index_dir / 'Packages').read_bytes():
+                raise ValueError('compressed index differs from its uncompressed form')
+        paragraphs = (index_dir / 'Packages').read_text(encoding='utf-8').strip().split('\n\n')
+        if not paragraphs or not paragraphs[0]:
+            raise ValueError('the signed package index is empty')
+        for paragraph in paragraphs:
+            fields = dict(line.split(': ', 1) for line in paragraph.splitlines() if ': ' in line)
+            name, checksum = fields.get('Filename', ''), fields.get('SHA256', '')
+            if (not re.fullmatch(rf'pool/main/p/pxe-tools/pxe-tools-{HEX}\.deb', name)
+                    or not re.fullmatch(HEX, checksum) or fields.get('Architecture') not in (architecture, 'all')):
+                raise ValueError('package index has an unexpected path, checksum or architecture')
+            package = root / name
+            if name not in files or digest(package) != checksum or package.stat().st_size != int(fields.get('Size', '-1')):
+                raise ValueError('package is absent or differs from its signed index')
 
 
 def main() -> None:

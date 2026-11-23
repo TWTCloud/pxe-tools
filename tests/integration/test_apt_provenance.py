@@ -18,6 +18,7 @@ def load(name, path):
     return module
 proof = load('proof', ROOT/'packaging/ci/verify-published-provenance.py')
 approved = load('approved', ROOT/'packaging/ci/verify-approved-release.py')
+static = load('static', ROOT/'packaging/native/prepare-static-apt.py')
 class Mod:
     @staticmethod
     def digest(data): return hashlib.sha256(data).hexdigest()
@@ -155,6 +156,59 @@ class SnapshotTest(unittest.TestCase):
                 proof.verify(signed,self.keyring,without_module,self.primary,self.signing,packages)
             failed=subprocess.run(common[:3]+[str(root/'bad')]+common[4:-3]+['b'*64]+common[-2:],capture_output=True)
             self.assertNotEqual(failed.returncode,0)
+
+
+    def test_arm64_promotion_and_renewal_preserve_both_index_namespaces(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            control = root/'tree/DEBIAN'
+            control.mkdir(parents=True)
+            (control/'control').write_text(
+                'Package: pxe-tools\nVersion: 1.0~fixture1\nArchitecture: arm64\n'
+                'Maintainer: Fixture <fixture@example.invalid>\nDescription: fixture only\n')
+            arm = root/'pxe-tools_1.0-fixture1_arm64.deb'
+            run('dpkg-deb','--build','--root-owner-group',str(control.parent),str(arm))
+            arm_sha = mod.digest(arm.read_bytes())
+            amd_sha = mod.digest(self.approved_deb.read_bytes())
+            manifest = {
+                'version':'1.0~fixture1','release_tag':'vfixture','build_run_id':'123','source_commit':'a'*40,
+                'package_asset':self.approved_deb.name,'package_sha256':amd_sha,
+                'arm64_package_asset':arm.name,'arm64_package_sha256':arm_sha,
+            }
+            release = {'tag_name':'vfixture','draft':False,'prerelease':True,'published_at':'fixture',
+                       'assets':[{'name':file.name,'state':'uploaded','size':file.stat().st_size,'digest':'sha256:'+sha}
+                                 for file,sha in ((self.approved_deb,amd_sha),(arm,arm_sha))]}
+            build = {'path':'.github/workflows/apt-package-candidate.yml','id':123,'head_sha':'a'*40,
+                     'head_branch':'main','event':'workflow_dispatch','conclusion':'success'}
+            jobs = {'jobs':[{'name':'package','conclusion':'success'},
+                            {'name':'application-behavior / Application behavior (Debian 13)','conclusion':'success'}]}
+            version = root/'version'
+            version.write_text('1.0~fixture1\n')
+            approved.verify(manifest,release,build,jobs,self.approved_deb,version,'a'*40,arm64_package=arm)
+            with self.assertRaisesRegex(ValueError,'arm64'):
+                approved.verify(manifest,release,build,jobs,self.approved_deb,version,'a'*40,
+                                arm64_package=self.approved_deb)
+
+            def sign(destination, previous):
+                run('python3',str(ROOT/'packaging/native/build-apt-release-candidate.py'),
+                    str(self.approved_deb),str(destination),'--gnupg-home',str(self.home),
+                    '--fingerprint',self.signing,'--source-commit','a'*40,'--build-run-id','123',
+                    '--approved-package-sha256',amd_sha,'--arm64-package',str(arm),
+                    '--approved-arm64-sha256',arm_sha,'--previous',str(previous))
+
+            dual = root/'dual'
+            sign(dual, self.repo)
+            renewed = root/'renewed'
+            sign(renewed, dual)
+            static.validate(renewed, self.keyring, self.primary, self.signing)
+            release_dir = renewed/'dists/stable'
+            amd_index = release_dir/'main/binary-amd64/Packages'
+            arm_index = release_dir/'main/binary-arm64/Packages'
+            proof.verify(release_dir/'InRelease', self.keyring, manifest, self.primary, self.signing,
+                         amd_index, arm_index)
+            with self.assertRaisesRegex(ValueError,'signed hash'):
+                proof.verify(release_dir/'InRelease', self.keyring, manifest, self.primary, self.signing,
+                             amd_index, amd_index)
 
 
 if __name__ == '__main__': unittest.main()

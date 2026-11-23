@@ -38,6 +38,13 @@ signature. Le premier passage exige l'artefact de construction, et les
 renouvellements après expiration exigent sa provenance et son empreinte dans
 l'index précédemment signé. Sans ces trois champs, seul le socle est publié.
 
+Une livraison du socle sur les deux architectures approuve aussi
+`arm64_package_asset` et `arm64_package_sha256`. Les deux paquets proviennent
+du même commit et du même run que le paquet amd64. Les index signés
+`binary-amd64` et `binary-arm64` contiennent chacun leur socle et le
+module facultatif commun, s'il fait partie de la livraison. Un renouvellement
+conserve les objets immuables des deux index et vérifie les deux empreintes.
+
 L'offre des sources des utilitaires doit rester accessible sous les cinq assets
 de la release publique `sources-2026-11-12` ; la CI télécharge et vérifie leurs
 empreintes avant publication. Les deux grosses archives dépassent la limite de

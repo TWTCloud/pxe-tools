@@ -10,14 +10,20 @@ import subprocess
 
 
 def verify(manifest: dict, release: dict, build: dict, jobs: dict, package: Path, version_file: Path,
-           tag_commit: str, ansible_package: Path | None = None) -> None:
+           tag_commit: str, ansible_package: Path | None = None, arm64_package: Path | None = None) -> None:
     required = {'version', 'release_tag', 'source_commit', 'build_run_id', 'package_asset', 'package_sha256'}
     module_fields = {'ansible_version', 'ansible_package_asset', 'ansible_package_sha256'}
-    if not isinstance(manifest, dict) or set(manifest) not in (required, required | module_fields):
+    arm64_fields = {'arm64_package_asset', 'arm64_package_sha256'}
+    if (not isinstance(manifest, dict) or set(manifest) - module_fields - arm64_fields != required
+            or (set(manifest) & arm64_fields not in (set(), arm64_fields))
+            or (set(manifest) & module_fields not in (set(), module_fields))):
         raise ValueError('Release manifest fields are incomplete or unexpected')
     has_module = module_fields <= set(manifest)
+    has_arm64 = arm64_fields <= set(manifest)
     if has_module != (ansible_package is not None):
         raise ValueError('Approved module and its package must be supplied together')
+    if has_arm64 != (arm64_package is not None):
+        raise ValueError('Approved arm64 package and manifest must be supplied together')
     version, tag, source, run_id, asset, checksum = (manifest[k] for k in
         ('version', 'release_tag', 'source_commit', 'build_run_id', 'package_asset', 'package_sha256'))
     if (not isinstance(version, str) or not re.fullmatch(r'[0-9][A-Za-z0-9.+~_-]{0,100}', version)
@@ -65,6 +71,25 @@ def verify(manifest: dict, release: dict, build: dict, jobs: dict, package: Path
         return result.stdout.strip()
     if field('Package') != 'pxe-tools' or field('Version') != version or field('Architecture') != 'amd64':
         raise ValueError('Package metadata differs from the approved release')
+    if has_arm64:
+        arm_asset = manifest['arm64_package_asset']
+        arm_sha = manifest['arm64_package_sha256']
+        if (not isinstance(arm_asset, str) or not re.fullmatch(r'pxe-tools_[A-Za-z0-9._-]+_arm64\.deb', arm_asset)
+                or not isinstance(arm_sha, str) or not re.fullmatch(r'[a-f0-9]{64}', arm_sha) or arm_sha == '0'*64):
+            raise ValueError('Invalid approved arm64 identity')
+        matches = [item for item in release.get('assets', []) if item.get('name') == arm_asset]
+        if (len(matches) != 1 or matches[0].get('state') != 'uploaded'
+                or arm64_package.is_symlink() or not arm64_package.is_file() or arm64_package.name != arm_asset
+                or matches[0].get('size') != arm64_package.stat().st_size
+                or matches[0].get('digest') != 'sha256:'+arm_sha):
+            raise ValueError('Published arm64 package does not match the approved asset')
+        with arm64_package.open('rb') as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() != arm_sha:
+                raise ValueError('Downloaded arm64 package differs from the approved build')
+        for key, value in (('Package', 'pxe-tools'), ('Version', version), ('Architecture', 'arm64')):
+            actual = subprocess.check_output(['dpkg-deb', '--field', str(arm64_package), key], text=True).strip()
+            if actual != value:
+                raise ValueError('Arm64 package metadata differs from the approved release')
     if has_module:
         module_version, module_asset, module_sha = (manifest[k] for k in
             ('ansible_version', 'ansible_package_asset', 'ansible_package_sha256'))
@@ -101,10 +126,11 @@ def main():
     parser.add_argument('--version-file',type=Path,required=True)
     parser.add_argument('--tag-commit',required=True)
     parser.add_argument('--ansible-package',type=Path)
+    parser.add_argument('--arm64-package',type=Path)
     args=parser.parse_args()
     verify(json.loads(args.manifest.read_text()), json.loads(args.release_json.read_text()),
            json.loads(args.build_json.read_text()), json.loads(args.build_jobs_json.read_text()),
-           args.package, args.version_file, args.tag_commit, args.ansible_package)
+           args.package, args.version_file, args.tag_commit, args.ansible_package, args.arm64_package)
     print('Approved product commit, successful build, release tag, package version and SHA-256 verified.')
 
 

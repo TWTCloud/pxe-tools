@@ -28,6 +28,8 @@ def main() -> None:
     parser.add_argument('--source-commit')
     parser.add_argument('--build-run-id')
     parser.add_argument('--approved-package-sha256')
+    parser.add_argument('--arm64-package', type=Path, help='approved arm64 core package')
+    parser.add_argument('--approved-arm64-sha256', help='approved arm64 core SHA256')
     parser.add_argument('--ansible-package', type=Path, help='approved optional Ansible module')
     parser.add_argument('--approved-ansible-sha256', help='approved optional module SHA256')
     args = parser.parse_args()
@@ -41,6 +43,7 @@ def main() -> None:
                   args.valid_days, args.ansible_package, release_candidate=True, passphrase_file=args.passphrase_file, previous=args.previous,
                   source_commit=args.source_commit, build_run_id=args.build_run_id,
                   approved_package_sha256=args.approved_package_sha256,
+                  arm64_package=args.arm64_package, approved_arm64_sha256=args.approved_arm64_sha256,
                   approved_ansible_sha256=args.approved_ansible_sha256,
                   previous_keyring=args.previous_keyring,
                   previous_primary_fingerprint=args.previous_primary_fingerprint,
