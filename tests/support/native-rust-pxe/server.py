@@ -28,6 +28,7 @@ SERIAL = "PXE-TEST-ONE"
 INSTALL_MENU = TFTP / "pxelinux.cfg" / ("01-" + MAC.replace(":", "-"))
 DIRECT_HTTP = os.environ.get("PXE_RUST_DIRECT_HTTP") == "1"
 SECURE_BOOT = os.environ.get("PXE_FIXTURE_SECURE_BOOT") == "1"
+EXPECTED_ARCH = "aarch64" if os.environ.get("PXE_FIXTURE_CLIENT_ARCH") == "arm64" else "x86_64"
 CUSTOM_PARTITIONS = os.environ.get("PXE_FIXTURE_CUSTOM_PARTITIONS") == "1"
 USE_WORKER_QUEUE = os.environ.get("PXE_FIXTURE_USE_WORKER") == "1"
 
@@ -155,6 +156,8 @@ def schedule(machine, report):
         firmware = observed["inventory"]
         raise RuntimeError(f"Expected Secure Boot inventory, got {firmware['boot_mode']} "
                            f"with secure_boot={firmware['secure_boot']!r}")
+    if SECURE_BOOT and observed["inventory"]["cpu_arch"] != EXPECTED_ARCH:
+        raise RuntimeError("Discovery inventory reported an unexpected client architecture")
     target = next((item for item in observed["disks"]
                    if item["identity"]["value"] == SERIAL and item["identity"]["status"] == "valid"), None)
     if target is None:
@@ -256,6 +259,8 @@ def first_boot(action):
         raise RuntimeError("The first-boot receipt lacks the original native client address or kernel")
     if SECURE_BOOT and payload.get("fixture_secure_boot") != 1:
         raise RuntimeError("The installed guest did not boot with Secure Boot enabled")
+    if SECURE_BOOT and payload.get("fixture_arch") != EXPECTED_ARCH:
+        raise RuntimeError("The installed guest reported an unexpected CPU architecture")
     if CUSTOM_PARTITIONS and payload.get("fixture_layout") != "gpt-raid1-two-disks":
         raise RuntimeError("The installed system did not boot from the requested GPT/RAID1 recipe")
     # The postboot client asked for an acknowledgement. "accepted\n" is nine bytes.

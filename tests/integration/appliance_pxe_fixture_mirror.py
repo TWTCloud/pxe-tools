@@ -25,19 +25,22 @@ def main():
     root = Path('/fixture-data')
     keyring = Path('/usr/share/keyrings/debian-archive-keyring.gpg')
     (root/'debs').mkdir()
-    args = SimpleNamespace(keyring=keyring, runtime_manager=False, disk_guard=True,
+    architecture = os.environ.get("PXE_FIXTURE_CLIENT_ARCH", "amd64")
+    args = SimpleNamespace(keyring=keyring, architecture=architecture, runtime_manager=False, disk_guard=True,
                            proxy_boot=True, uefi=False, partman_uefi=False,
                            backup_guest=False, discovery_guest=False, discovery_pxe=False)
     child = multiprocessing.get_context('spawn').Process(target=prepare_inputs, args=(args, root))
     child.start(); child.join()
     if child.exitcode != 0:
         raise RuntimeError('Debian input preparation failed')
-    verify_debian_netboot(root/'linux', root/'initrd.gz', root/'SHA256SUMS', root/'InRelease', keyring)
-    verify_packages((root/'InRelease').read_bytes(), (root/'Packages.xz').read_bytes(), root/'debs')
-    verify_disk_module((root/'InRelease').read_bytes(), (root/'installer-Packages.xz').read_bytes(),
-                       root/'initrd.gz', root/'disk-modules.udeb')
+    verify_debian_netboot(root/'linux', root/'initrd.gz', root/'SHA256SUMS', root/'InRelease', keyring,
+                         architecture=architecture)
+    if architecture == 'amd64':
+        verify_packages((root/'InRelease').read_bytes(), (root/'Packages.xz').read_bytes(), root/'debs')
+        verify_disk_module((root/'InRelease').read_bytes(), (root/'installer-Packages.xz').read_bytes(),
+                           root/'initrd.gz', root/'disk-modules.udeb')
     cache = root/'mirror-cache'; cache.mkdir()
-    mirror = FullInstallMirror(cache, root/'InRelease', keyring, b'', root/'Packages.xz')
+    mirror = FullInstallMirror(cache, root/'InRelease', keyring, b'', root/'Packages.xz', architecture=architecture)
     socket = root/'mirror.sock'
     mirror.start(socket); socket.chmod(0o666)
     (root/'ready').write_text('verified Debian inputs and mirror ready\n')

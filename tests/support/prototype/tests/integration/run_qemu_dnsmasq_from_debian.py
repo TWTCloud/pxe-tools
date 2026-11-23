@@ -38,11 +38,14 @@ def prepare_inputs(args: argparse.Namespace, root: Path) -> None:
     debs = root / "debs"
     opener = build_opener(ProxyHandler({}), NoRedirect())
     base = "https://deb.debian.org/debian/dists/trixie/"
-    installer = base + "main/installer-amd64/current/images/"
+    architecture = getattr(args, "architecture", "amd64")
+    if architecture not in ("amd64", "arm64"):
+        raise ValueError("unsupported fixture architecture")
+    installer = base + f"main/installer-{architecture}/current/images/"
     inputs = {"InRelease": base + "InRelease", "SHA256SUMS": installer + "SHA256SUMS",
-              "Packages.xz": base + "main/binary-amd64/Packages.xz",
-              "linux": installer + "netboot/debian-installer/amd64/linux",
-              "initrd.gz": installer + "netboot/debian-installer/amd64/initrd.gz"}
+              "Packages.xz": base + f"main/binary-{architecture}/Packages.xz",
+              "linux": installer + f"netboot/debian-installer/{architecture}/linux",
+              "initrd.gz": installer + f"netboot/debian-installer/{architecture}/initrd.gz"}
 
     def fetch(item):
         path, url, limit = item
@@ -59,7 +62,11 @@ def prepare_inputs(args: argparse.Namespace, root: Path) -> None:
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(fetch, ((root / name, url, 200 * 1024 * 1024) for name, url in inputs.items())))
     # Authenticate Release and netboot pair before using metadata to fetch packages.
-    verify_debian_netboot(root / "linux", root / "initrd.gz", root / "SHA256SUMS", root / "InRelease", args.keyring)
+    verify_debian_netboot(root / "linux", root / "initrd.gz", root / "SHA256SUMS", root / "InRelease", args.keyring,
+                         architecture=architecture)
+    if architecture == "arm64":
+        # This appliance fixture uses only the signed netboot pair and the mirror.
+        return
     records = package_records((root / "InRelease").read_bytes(), (root / "Packages.xz").read_bytes())
     downloads = []
     for name in PACKAGES:

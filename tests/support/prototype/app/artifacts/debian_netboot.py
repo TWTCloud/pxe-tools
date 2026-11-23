@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-3.0-only
-"""Verify a staged Debian 13 (trixie) amd64 netboot set against a trusted InRelease.
+"""Verify a staged Debian 13 (trixie) netboot set against a trusted InRelease.
 
 This checks local files only. The archive keyring must come from a separately
 trusted source, and the staging directory must not be writable by other actors.
@@ -54,13 +54,15 @@ def _timestamp(value: str) -> datetime:
 
 
 def verify_debian_netboot(kernel: Path, initrd: Path, sums: Path, release: Path, keyring: Path,
-                          *, now: datetime | None = None, max_age: timedelta = timedelta(days=180)) -> None:
-    """Verify the Debian 13 release, its freshness, signed sums and amd64 boot files.
+                          *, architecture: str = "amd64", now: datetime | None = None, max_age: timedelta = timedelta(days=180)) -> None:
+    """Verify the Debian 13 release, its freshness, signed sums and boot files.
 
     Freshness is bounded even when the release lacks Valid-Until. No rollback or
     replay protection beyond the time bound is provided; callers need a trusted
     clock and should retain a previously accepted release version separately.
     """
+    if architecture not in ("amd64", "arm64"):
+        raise VerificationError("unsupported netboot architecture")
     kernel, initrd, sums, release, keyring = map(Path, (kernel, initrd, sums, release, keyring))
     if kernel.name != "linux" or initrd.name != "initrd.gz":
         raise VerificationError("unexpected netboot filenames")
@@ -86,7 +88,7 @@ def verify_debian_netboot(kernel: Path, initrd: Path, sums: Path, release: Path,
         origins = [line[7:].strip() for line in lines if line.startswith("Origin:")]
         codenames = [line[9:].strip() for line in lines if line.startswith("Codename:")]
         architectures = [line[14:].strip().split() for line in lines if line.startswith("Architectures:")]
-        if origins != ["Debian"] or codenames != ["trixie"] or len(architectures) != 1 or "amd64" not in architectures[0]:
+        if origins != ["Debian"] or codenames != ["trixie"] or len(architectures) != 1 or architecture not in architectures[0]:
             raise VerificationError("unexpected Debian release or architecture")
         dates = [line[5:].strip() for line in lines if line.startswith("Date:")]
         expires = [line[12:].strip() for line in lines if line.startswith("Valid-Until:")]
@@ -99,7 +101,7 @@ def verify_debian_netboot(kernel: Path, initrd: Path, sums: Path, release: Path,
             expiry = _timestamp(expires[0])
             if expiry < now or expiry < issued:
                 raise VerificationError("release expired")
-        target = "main/installer-amd64/current/images/SHA256SUMS"
+        target = f"main/installer-{architecture}/current/images/SHA256SUMS"
         entries = []
         in_sha = False
         sections = 0
@@ -116,16 +118,16 @@ def verify_debian_netboot(kernel: Path, initrd: Path, sums: Path, release: Path,
                     entries.append(match.group(1).lower())
         if sections != 1 or len(entries) != 1 or hashlib.sha256(sums_bytes).hexdigest() != entries[0]:
             raise VerificationError("signed installer checksums missing, ambiguous or modified")
-        expected = {"./netboot/debian-installer/amd64/linux": [],
-                    "./netboot/debian-installer/amd64/initrd.gz": []}
+        prefix = f"./netboot/debian-installer/{architecture}/"
+        expected = {prefix + "linux": [], prefix + "initrd.gz": []}
         for line in sums_bytes.decode("utf-8", errors="strict").splitlines():
             match = re.fullmatch(r"([a-fA-F0-9]{64}) [ *](\S+)", line)
             if match and match.group(2) in expected:
                 expected[match.group(2)].append(match.group(1).lower())
         if any(len(items) != 1 for items in expected.values()):
             raise VerificationError("netboot files missing or ambiguous in checksums")
-        _check_file(kernel, expected["./netboot/debian-installer/amd64/linux"][0])
-        _check_file(initrd, expected["./netboot/debian-installer/amd64/initrd.gz"][0])
+        _check_file(kernel, expected[prefix + "linux"][0])
+        _check_file(initrd, expected[prefix + "initrd.gz"][0])
     except VerificationError:
         raise
     except (OSError, UnicodeError, subprocess.SubprocessError) as error:
