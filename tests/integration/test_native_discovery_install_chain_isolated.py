@@ -558,11 +558,13 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s}' "$IP" "$(
         print('Synthetic WinPE chain and HTTP range verified for the reserved client only',flush=True)
 
     kernel_url='/netboot/debian/13.0/amd64/linux'
-    kernel = request(pxe_url+kernel_url,'--output','/dev/null')
+    kernel = request(pxe_url+kernel_url,'--user-agent','GRUB 2.12','--output','/dev/null')
     if not kernel.startswith('HTTP/1.1 200 '):
         raise RuntimeError('The PXE kernel should be available directly on HTTP')
     if not re.search(r'^Content-Length: [1-9][0-9]*\s*$',kernel,re.MULTILINE):
         raise RuntimeError('GRUB requires an exact Content-Length header on the signed kernel')
+    if 'connection: close' not in kernel.lower():
+        raise RuntimeError('Expected the single-file GRUB HTTP connection to close')
     # Drop the binary response body after checking the negotiated HTTPS range.
     partial=request(tls_url+kernel_url,'--range','0-15','--output','/dev/null')
     if not partial.startswith('HTTP/1.1 206 ') or 'content-range: bytes 0-15/' not in partial.lower():
@@ -993,21 +995,21 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                     ):
                         print(f'{label}: {db.execute(query).fetchall()}',flush=True)
             if backend=='rust-docker':
-                output=docker('logs','--tail','45',app,check=False)
-                print((output.stdout+'\n'+output.stderr)[-4500:],flush=True)
+                output=docker('logs','--tail','90',app,check=False)
+                print((output.stdout+'\n'+output.stderr)[-6500:],flush=True)
             if rust_lab:
                 status_log=fixture/'native-status.log'
                 if status_log.is_file():
                     print(status_log.read_text()[-2000:],flush=True)
             for name, args in ((app, ('exec',app,'journalctl','--no-pager','-n','45','-u','pxe-tools-init','-u','pxe-tools-dnsmasq','-u','pxe-tools-pxe-http','-u','pxe-tools-worker')),
                                (dhcp, ('exec',dhcp,'cat','/tmp/fixture-dhcp.log')),
-                               (client, ('logs','--tail','150',client)),
+                               (client, ('logs',client)),
                                (mirror, ('logs','--tail','20',mirror))):
                 result=docker(*args,check=False)
                 diagnostic=result.stdout+'\n'+result.stderr
                 if name==client and packaged:
                     evidence=re.findall(
-                        r'^.*(?:EFI stub|RAMDISK|[Ii]nitrd|[Ii]nitramfs|Kernel panic|partman|mdadm|(?:^|\s)error:).*$',
+                        r'^.*(?:EFI stub|RAMDISK|[Ii]nitrd|[Ii]nitramfs|Kernel command line|Kernel panic|partman|mdadm|(?:^|\s)error:).*$',
                         diagnostic,re.MULTILINE,
                     )
                     text='\n'.join(evidence)[-5000:]+'\n'+diagnostic[-3500:]
