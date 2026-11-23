@@ -277,6 +277,9 @@ where
         async move { Ok::<_, Infallible>(dispatch(request, peer.ip(), secure, &site).await) }
     });
     let connection = http1::Builder::new()
+        // GRUB 2.12 matches Content-Length case-sensitively in its HTTP
+        // client. Secure Boot verification requires a known kernel size.
+        .title_case_headers(true)
         .timer(TokioTimer::new())
         .header_read_timeout(Duration::from_secs(10))
         .max_buf_size(32 * 1024)

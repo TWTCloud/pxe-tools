@@ -243,6 +243,8 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
                 output=docker('logs',client,check=False).stdout
                 if 'No bootable option or device was found' in output:
                     raise RuntimeError('UEFI firmware found no usable boot option')
+                if 'big file signature' in output:
+                    raise RuntimeError('GRUB could not determine the signed kernel size')
             if boot=='n':
                 if state['ExitCode']!=0:
                     raise RuntimeError(name+' QEMU guest failed')
@@ -466,8 +468,11 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s}' "$IP" "$(
     if '<h1>Serveurs</h1>' not in request(tls_url+'/admin/devices',*login):
         raise RuntimeError('The device label change did not preserve the canonical URL')
     kernel_url='/netboot/debian/13.0/amd64/linux'
-    if not request(pxe_url+kernel_url,'--head').startswith('HTTP/1.1 200 '):
+    kernel = request(pxe_url+kernel_url,'--output','/dev/null')
+    if not kernel.startswith('HTTP/1.1 200 '):
         raise RuntimeError('The PXE kernel should be available directly on HTTP')
+    if not re.search(r'^Content-Length: [1-9][0-9]*\s*$',kernel,re.MULTILINE):
+        raise RuntimeError('GRUB requires an exact Content-Length header on the signed kernel')
     # Drop the binary response body after checking the negotiated HTTPS range.
     partial=request(tls_url+kernel_url,'--range','0-15','--output','/dev/null')
     if not partial.startswith('HTTP/1.1 206 ') or 'content-range: bytes 0-15/' not in partial.lower():
