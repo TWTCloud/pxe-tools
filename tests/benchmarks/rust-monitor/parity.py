@@ -388,6 +388,51 @@ def compare_install(ports, paths):
     ):
         set_config({**recipe, "partition_custom_json": json.dumps(invalid_plan)})
         assert response(ports[1], PRESEED + query, peer="lan")[0] == 422
+    second = "/dev/nvme0n1"
+    second_proof = {**proof, "value": "PXE-TEST-TWO"}
+    layouts = [
+        {"path": target, "partitions": [
+            first, boot, {"id":"arrayA", "fs":"raid-member", "fill":True},
+        ]},
+        {"path": second, "partitions": [
+            {"id":"nvme_bios", "fs":"biosgrub", "size_mb":1},
+            {"id":"arrayB", "fs":"raid-member", "fill":True},
+        ]},
+    ]
+    array = {"name":"md0", "level":1, "members":["arrayA","arrayB"]}
+    multi = {"target_disks":[target,second], "disks":layouts,
+             "target_disk_identities":{target:proof,second:second_proof}}
+    raid_plan = {**multi, "raid_arrays":[array]}
+    multiconfig = {**config, "partition_mode":"custom", "review_boot_mode":"bios"}
+    for layout, method in (
+        (raid_plan, "raid"),
+        ({**raid_plan, "raid_arrays":[{**array,"is_pv":True}],
+          "vgs":[{**group, "pvs":["md0"]}], "logical_volumes":[lv_root]}, "raid"),
+        ({**multi, "disks":[{**layouts[0],"partitions":[first,boot,{**root,"id":"vda3"}]},
+                            {**layouts[1],"partitions":[layouts[1]["partitions"][0],
+                                {"id":"data", "fs":"ext4", "mount":"/srv", "fill":True}]}]}, "regular"),
+    ):
+        set_config({**multiconfig, "partition_custom_json":json.dumps(layout)})
+        seeds = [response(port, PRESEED + query, peer="lan") for port in ports]
+        assert [item[0] for item in seeds] == [200,200], seeds[1][3]
+        rendered = [item[3].decode() for item in seeds]
+        assert directives(rendered[0]) == directives(rendered[1]), (directives(rendered[0]),directives(rendered[1]))
+        assert partman_block(rendered[0]) == partman_block(rendered[1])
+        assert "pxe-disk-guard.sh strict " in rendered[1]
+        assert second + ":" + base64.b64encode(second_proof["value"].encode()).decode() in rendered[1]
+        assert f"d-i partman-auto/method string {method}" in rendered[1]
+        if method == "raid":
+            assert f"/dev/vda3#{second}p2" in rendered[1]
+    for invalid in (
+        {**raid_plan, "target_disk_identities":{target:proof}},
+        {**raid_plan, "target_disk_identities":{target:proof,second:proof}},
+        {**raid_plan, "raid_arrays":[{**array,"members":["arrayA","arrayA"]}]},
+        {**raid_plan, "raid_arrays":[{**array,"members":["arrayA","nvme_bios"]}]},
+        {**raid_plan, "raid_arrays":[{**array,"level":6}]},
+        {**raid_plan, "raid_arrays":[]},
+    ):
+        set_config({**multiconfig, "partition_custom_json":json.dumps(invalid)})
+        assert response(ports[1], PRESEED + query, peer="lan")[0] == 422
     set_config(config)
     assert compare(ports, START + query, 200)["installation_id"] == 1
     assert compare(ports, ARTIFACT, 200, peer="lan") == b"#!/bin/sh\ntrue\n"
@@ -573,7 +618,7 @@ def main():
             db.execute("DROP TRIGGER fail_event")
         assert response(ports[1], retry, peer="lan")[0] == 200
         compare_grub(ports, paths)
-    print("Parity OK: 69 summaries, GRUB menus and selection, discovery inventory, preseed with advanced networking and single-disk recipes, and installation callbacks")
+    print("Parity OK: 69 summaries, GRUB menus and selection, discovery inventory, preseed with advanced networking and single- and multi-disk recipes, and installation callbacks")
 
 
 if __name__ == "__main__":

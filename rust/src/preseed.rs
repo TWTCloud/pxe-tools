@@ -171,7 +171,7 @@ impl Profile {
                 .unwrap_or_default()
         };
         let bootdev = fallback(&advanced["bootloader"]["bootdev"], "default");
-        if bootdev != "default" && bootdev != partitions.disk {
+        if bootdev != "default" && !partitions.contains_disk(&bootdev) {
             return Err(invalid(
                 "la cible GRUB doit correspondre au disque vérifié.",
             ));
@@ -385,8 +385,8 @@ impl Profile {
             early.push('\n');
         }
         let guard = STANDARD.encode(DISK_GUARD.replace("__BOOTMODE__", self.partitions.firmware));
-        early.push_str(&format!("d-i partman/early_command string \\\n    echo {guard} | base64 -d > /tmp/pxe-disk-guard.sh ; /bin/sh /tmp/pxe-disk-guard.sh remap '{phase_url}' '{}' '{base_url}/static-bin/smartctl' '{}:{}'",
-            self.bootdev, self.partitions.disk, self.partitions.identity));
+        early.push_str(&format!("d-i partman/early_command string \\\n    echo {guard} | base64 -d > /tmp/pxe-disk-guard.sh ; /bin/sh /tmp/pxe-disk-guard.sh {} '{phase_url}' '{}' '{base_url}/static-bin/smartctl' {}",
+            self.partitions.guard_mode(), self.bootdev, self.partitions.guard_specs()));
         let blocks = [
             ("EARLY_COMMAND_BLOCK", early),
             ("HOSTNAME_BLOCK", self.hostname_block()),

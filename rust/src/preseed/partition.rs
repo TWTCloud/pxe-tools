@@ -19,8 +19,8 @@ d-i partman/confirm boolean true
 d-i partman/confirm_nooverwrite boolean true";
 
 pub(super) struct Layout {
-    pub(super) disk: String,
-    pub(super) identity: String,
+    targets: Vec<(String, String)>,
+    strict: bool,
     pub(super) firmware: &'static str,
     pub(super) directives: String,
     reserved: Vec<(String, u8)>,
@@ -36,8 +36,8 @@ impl Layout {
                     .filter(|path| valid_disk(path))
                     .ok_or("chemin du disque système absent ou invalide.")?;
                 Ok(Self {
-                    disk: disk.to_owned(),
-                    identity: identity(&config["system_disk_identity"])?,
+                    targets: vec![(disk.to_owned(), identity(&config["system_disk_identity"])? )],
+                    strict: false,
                     firmware: "",
                     directives: ATOMIC.to_owned(),
                     reserved: Vec::new(),
@@ -52,92 +52,143 @@ impl Layout {
 
     fn custom(config: &Value) -> Option<Self> {
         let plan: Value = serde_json::from_str(config["partition_custom_json"].as_str()?).ok()?;
-        if !empty_collection(&plan["raid_arrays"]) {
+        let arrays = collection(&plan["raid_arrays"])?;
+        let lvm = Lvm::parse(&plan)?;
+        let mut targets = Vec::new();
+        let plan_targets = plan["target_disks"].as_array()?;
+        let recipes = plan["disks"].as_array()?;
+        if plan_targets.is_empty() || recipes.len() != plan_targets.len() {
             return None;
         }
-        let lvm = Lvm::parse(&plan)?;
-        let [disk] = plan["target_disks"].as_array()?.as_slice() else {
-            return None;
-        };
-        let disk = disk.as_str().filter(|disk| whole_disk(disk))?;
-        let [recipe] = plan["disks"].as_array()?.as_slice() else {
-            return None;
-        };
-        let proof = &plan["target_disk_identities"][disk];
-        let identity = identity(proof).ok()?;
+        let multi = plan_targets.len() > 1;
         let constraints = &config["disk_target_constraints"];
-        if recipe["path"] != disk || !constraint_matches(constraints, disk, proof) {
+        if multi && !empty_collection(constraints) {
             return None;
+        }
+        for disk in plan_targets {
+            let disk = disk.as_str().filter(|disk| whole_disk(disk))?;
+            let proof = &plan["target_disk_identities"][disk];
+            let identity = identity(proof).ok()?;
+            if !constraint_matches(constraints, disk, proof)
+                || targets
+                    .iter()
+                    .any(|(path, saved)| path == disk || *saved == identity)
+            {
+                return None;
+            }
+            targets.push((disk.to_owned(), identity));
         }
 
         let mut bios_partition = false;
         let mut efi_partition = false;
-        let mut fill = false;
         let mut ids = HashSet::new();
+        let mut assigned = HashSet::new();
+        let mut pv_ids = HashSet::new();
+        let mut raid_members = HashMap::new();
         let mut mounts = HashSet::new();
         let mut reserved = Vec::new();
         let mut segments = Vec::new();
 
-        for (position, entry) in recipe["partitions"].as_array()?.iter().enumerate() {
-            let id = entry["id"].as_str().filter(|id| !id.is_empty())?;
-            let fs = entry["fs"].as_str()?;
-            let uses_fill = php_truthy(&entry["fill"]);
-            if !ids.insert(id) || (uses_fill && fill) {
+        for recipe in recipes {
+            let disk = recipe["path"].as_str()?;
+            if !assigned.insert(disk) || !targets.iter().any(|(path, _)| path == disk) {
                 return None;
             }
-            fill |= uses_fill;
-            let size = php_string(&entry["size_mb"]).parse::<u32>().ok();
-            let size = if uses_fill {
-                0
+            let disk_flag = if multi {
+                format!(" $disk{{ {disk} }}")
             } else {
-                size.filter(|size| *size > 0)?
+                String::new()
             };
-            if fs == "biosgrub" {
-                if position != 0 || uses_fill || size > 4 || lvm.physical.contains_key(id) {
+            let mut fill = false;
+            let entries = recipe["partitions"]
+                .as_array()
+                .filter(|entries| !entries.is_empty())?;
+            for (position, entry) in entries.iter().enumerate() {
+                let id = entry["id"].as_str().filter(|id| !id.is_empty())?;
+                let fs = entry["fs"].as_str()?;
+                let uses_fill = php_truthy(&entry["fill"]);
+                if !ids.insert(id) || (uses_fill && fill) {
                     return None;
                 }
-                bios_partition = true;
-                segments.push(format!(
-                    "{size} {size} {size} free $bios_boot{{ }} method{{ biosgrub }} ."
-                ));
-                continue;
-            }
-            let mut segment;
-            if fs == "lvm-pv" {
-                let group = lvm.physical.get(id)?;
-                if !entry["mount"].is_null() || !empty_collection(&entry["mount_options"]) {
-                    return None;
-                }
-                segment = sized_segment(uses_fill, size, "ext4");
-                segment.push_str(&format!(
-                    " $primary{{ }} $defaultignore{{ }} method{{ lvm }} vg_name{{ {group} }}"
-                ));
-            } else {
-                // A PV name in the inventory must resolve to a physical PV in this recipe.
-                if lvm.physical.contains_key(id) {
-                    return None;
+                fill |= uses_fill;
+                let size = if uses_fill {
+                    0
+                } else {
+                    php_string(&entry["size_mb"])
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|size| *size > 0)?
+                };
+                if fs == "biosgrub" {
+                    if position != 0 || uses_fill || size > 4 {
+                        return None;
+                    }
+                    bios_partition = true;
+                    segments.push(format!(
+                        "{size} {size} {size} free $bios_boot{{ }}{disk_flag} method{{ biosgrub }} ."
+                    ));
+                    continue;
                 }
                 let filesystem = match fs {
                     "swap" => "linux-swap",
                     "efi" if !uses_fill => "fat32",
                     "ext2" | "ext3" | "ext4" | "xfs" => fs,
+                    "lvm-pv" | "raid-member" => "ext4",
                     _ => return None,
                 };
-                segment = sized_segment(uses_fill, size, filesystem);
-                segment.push_str(" $primary{ }");
-                filesystem_directives(entry, fs, true, &mut segment, &mut mounts, &mut reserved)?;
-                efi_partition |= fs == "efi";
+                let mut segment = sized_segment(uses_fill, size, filesystem);
+                segment.push_str(&format!(" $primary{{ }}{disk_flag}"));
+                match fs {
+                    "lvm-pv" => {
+                        let group = lvm.physical.get(id)?;
+                        pv_ids.insert(id);
+                        if !entry["mount"].is_null() || !empty_collection(&entry["mount_options"]) {
+                            return None;
+                        }
+                        segment.push_str(&format!(
+                            " $defaultignore{{ }} method{{ lvm }} vg_name{{ {group} }}"
+                        ));
+                    }
+                    "raid-member" => {
+                        let separator = if disk.as_bytes().last()?.is_ascii_digit() {
+                            "p"
+                        } else {
+                            ""
+                        };
+                        let path = format!("{disk}{separator}{}", position + 1);
+                        raid_members.insert(id, (disk, path));
+                        segment.push_str(" method{ raid }");
+                    }
+                    _ => {
+                        filesystem_directives(
+                            entry,
+                            fs,
+                            true,
+                            &mut segment,
+                            &mut mounts,
+                            &mut reserved,
+                        )?;
+                        efi_partition |= fs == "efi";
+                    }
+                }
+                segment.push_str(" .");
+                segments.push(segment);
             }
-            segment.push_str(" .");
-            segments.push(segment);
         }
-        if !lvm.physical.keys().all(|id| ids.contains(id))
-            || (lvm.first_group.is_some() && !mounts.contains("/boot"))
-        {
+        if (multi || lvm.first_group.is_some() || !arrays.is_empty()) && !mounts.contains("/boot") {
+            return None;
+        }
+        let raid = raid_directives(arrays, &raid_members, &lvm, &mut pv_ids, &mut mounts)?;
+        if !lvm.physical.keys().all(|id| pv_ids.contains(id)) {
             return None;
         }
         lvm.render_volumes(&mut segments, &mut mounts, &mut reserved)?;
         if !mounts.contains("/") || (bios_partition && efi_partition) {
+            return None;
+        }
+        // The RAID recipe fixes physical partition numbers. GPT keeps those
+        // numbers independent of the number of primary partitions.
+        if !arrays.is_empty() && !bios_partition && !efi_partition {
             return None;
         }
         let firmware = if efi_partition { "uefi" } else { "bios" };
@@ -153,12 +204,22 @@ impl Layout {
             "msdos"
         };
         let recipe = segments.join(" \\\n      ");
-        let (method, lvm_directives) = match lvm.first_group {
+        let (base_method, lvm_directives) = match lvm.first_group {
             Some(group) => ("lvm", format!(
                 "d-i partman-auto-lvm/new_vg_name string {group}\nd-i partman-auto-lvm/guided_size string max\nd-i partman-lvm/device_remove_lvm boolean true\nd-i partman-lvm/confirm boolean true\nd-i partman-lvm/confirm_nooverwrite boolean true\nd-i partman-auto/purge_lvm_from_device boolean true\n"
             )),
             None => ("regular", String::new()),
         };
+        let method = if arrays.is_empty() {
+            base_method
+        } else {
+            "raid"
+        };
+        let disk = targets
+            .iter()
+            .map(|(disk, _)| disk.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         let directives = format!(
             "d-i partman-auto/disk string {disk}
 d-i partman/unmount_active boolean true
@@ -166,7 +227,7 @@ d-i partman-auto/method string {method}
 d-i partman-partitioning/default_label string {label}
 d-i partman-basicfilesystems/default_label string {label}
 d-i partman/default_filesystem string ext4
-{lvm_directives}d-i partman-md/device_remove_md boolean true
+{lvm_directives}{raid}d-i partman-md/device_remove_md boolean true
 d-i partman-auto/expert_recipe string custom_recipe :: \\\n      {recipe}
 d-i partman-auto/choose_recipe select custom_recipe
 d-i partman-partitioning/confirm_write_new_label boolean true
@@ -176,12 +237,32 @@ d-i partman/confirm_nooverwrite boolean true
 d-i partman-basicfilesystems/no_swap boolean false"
         );
         Some(Self {
-            disk: disk.to_owned(),
-            identity,
+            targets,
+            strict: multi || !arrays.is_empty(),
             firmware,
             directives,
             reserved,
         })
+    }
+
+    pub(super) fn contains_disk(&self, disk: &str) -> bool {
+        self.targets.iter().any(|(path, _)| path == disk)
+    }
+
+    pub(super) fn guard_mode(&self) -> &'static str {
+        if self.strict {
+            "strict"
+        } else {
+            "remap"
+        }
+    }
+
+    pub(super) fn guard_specs(&self) -> String {
+        self.targets
+            .iter()
+            .map(|(disk, id)| format!("'{disk}:{id}'"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     pub(super) fn reserve_blocks(&self) -> Option<String> {
@@ -198,6 +279,81 @@ d-i partman-basicfilesystems/no_swap boolean false"
             r#"in-target /bin/bash -c 'for pair in {args}; do mp="${{pair%%:*}}"; pct="${{pair##*:}}"; d=$(findmnt -n -o SOURCE "$mp" 2>/dev/null) || continue; tune2fs -m "$pct" "$d" || true; done'"#
         ))
     }
+}
+
+fn raid_directives<'a>(
+    arrays: &'a [Value],
+    members: &HashMap<&'a str, (&str, String)>,
+    lvm: &Lvm<'a>,
+    pv_ids: &mut HashSet<&'a str>,
+    mounts: &mut HashSet<&'a str>,
+) -> Option<String> {
+    let mut names = HashSet::new();
+    let mut used = HashSet::new();
+    let mut segments = Vec::new();
+    for array in arrays {
+        let name = lvm_name(&array["name"])?;
+        if !names.insert(name) {
+            return None;
+        }
+        let level = php_string(&array["level"]).parse::<u8>().ok()?;
+        let active = array["members"].as_array()?;
+        let spares = collection(&array["spares"])?;
+        let minimum = match level {
+            0 | 1 => 2,
+            5 => 3,
+            6 | 10 => 4,
+            _ => return None,
+        };
+        if active.len() < minimum || (level == 0 && !spares.is_empty()) {
+            return None;
+        }
+        let mut disks = HashSet::new();
+        let mut paths = |values: &'a [Value]| -> Option<String> {
+            let paths = values
+                .iter()
+                .map(|value| {
+                    let id = value.as_str()?;
+                    let (disk, path) = members.get(id)?;
+                    (used.insert(id) && disks.insert(*disk)).then_some(path.as_str())
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(paths.join("#"))
+        };
+        let devices = paths(active)?;
+        let spare_devices = if spares.is_empty() {
+            "-".to_owned()
+        } else {
+            paths(spares)?
+        };
+        let (filesystem, mount) = if php_truthy(&array["is_pv"]) {
+            // partman uses new_vg_name for MD devices marked as physical volumes.
+            if !pv_ids.insert(name) || lvm.physical.get(name).copied()? != lvm.first_group? {
+                return None;
+            }
+            ("lvm", "-")
+        } else {
+            if !mounts.insert("/") {
+                return None;
+            }
+            ("ext4", "/")
+        };
+        segments.push(format!(
+            "{level} {} {} {filesystem} {mount} {devices} {spare_devices}",
+            active.len(),
+            spares.len()
+        ));
+    }
+    if used.len() != members.len() {
+        return None;
+    }
+    if segments.is_empty() {
+        return Some(String::new());
+    }
+    let continued = " \\\n      ";
+    let separator = format!("{continued}.{continued}");
+    let body = segments.join(&separator);
+    Some(format!("d-i partman-auto-raid/recipe string{continued}{body}{continued}.\nd-i partman-md/confirm boolean true\nd-i partman-md/confirm_nooverwrite boolean true\n"))
 }
 
 struct Lvm<'a> {

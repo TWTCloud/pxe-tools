@@ -158,8 +158,11 @@ l’import des modèles utilisent encore PHP CLI. Le renderer couvre les recette
 sur un disque identifié, avec partitions physiques BIOS ou UEFI. Un plan
 LVM sur ce disque peut définir ses groupes de volumes et volumes logiques.
 La vérification compare le rendu à PHP et refuse les volumes qui désignent
-un groupe ou une partition physique absente. Les recettes multi-disques et RAID, le wipe et les tests de disques
-restent à porter. Le renderer prend en charge les interfaces
+un groupe ou une partition physique absente. Les recettes multi-disques
+sont liées aux chemins et identités vérifiés de chaque disque. Le rendu
+RAID demande GPT et refuse les membres ambigus ou réutilisés. Le banc APT
+amd64 vérifie le scénario RAID1 à deux disques. Le wipe et les tests de
+disques restent à porter. Le renderer prend en charge les interfaces
 secondaires DHCP ou statiques, les VLAN secondaires et les bonds. Ces
 profils réseau sont vérifiés par comparaison de leur preseed et de leurs
 scripts générés. Le parcours de bout en bout utilise une seule interface.

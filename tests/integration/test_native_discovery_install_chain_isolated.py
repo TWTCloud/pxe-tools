@@ -191,11 +191,19 @@ RUN apt-get update && apt-get install --yes --no-install-recommends ovmf python3
     return helper
 
 
-def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None, uefi_image=None):
+def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None, uefi_image=None, raid_disk=False):
     use_kvm=os.uname().machine=='x86_64' and Path('/dev/kvm').is_char_device()
     accelerator='kvm' if use_kvm else 'tcg'
     devices=['--device','/dev/kvm'] if use_kvm else []
     print('QEMU client accelerator:',accelerator,flush=True)
+    extra_disk=[]
+    if raid_disk:
+        docker('run','--rm','--network','none','--mount',f'type=bind,src={root},dst=/fixture-data',
+               '--entrypoint','qemu-img',image,'create','-f','qcow2','/fixture-data/fixture-raid.qcow2','12G')
+        extra_disk=[
+            '-drive','file=/fixture-data/fixture-raid.qcow2,if=none,id=raid,format=qcow2',
+            '-device','virtio-blk-pci,drive=raid,serial=PXE-TEST-TWO',
+        ]
     paths_seen=set()
     next_trace=0.0
     for name, boot, marker, timeout in (
@@ -223,7 +231,7 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
                '--entrypoint','qemu-system-x86_64',uefi_image or image,
                *firmware,'-smp','1','-m','1024','-display','none',
                '-drive','file=/fixture-data/fixture.qcow2,if=none,id=disk,format=qcow2',
-               '-device',disk_device,
+               '-device',disk_device,*extra_disk,
                '-serial','stdio','-monitor','unix:/fixture-data/qemu-monitor.sock,server=on,wait=off',
                '-no-reboot','-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
                '-device',network_device)
@@ -393,12 +401,15 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         source=(ROOT/'docker/worker/templates/postboot.sh.j2').read_text()
         original=next(line for line in source.splitlines() if line.startswith('PAYLOAD='))
         instrument=r'''layout=unexpected
-if [ "$(findmnt -n -o SOURCE /)" = /dev/mapper/pxefixture-system ] \
-        && [ "$(findmnt -n -o SOURCE /boot)" = /dev/vda2 ] \
+md_source="$(findmnt -n -o SOURCE /)"
+md_name="$(basename "$(readlink -f "$md_source")")"
+if [ "$(findmnt -n -o SOURCE /boot)" = /dev/vda2 ] \
         && [ "$(lsblk -dn -o PTTYPE /dev/vda)" = gpt ] \
-        && [ "$(lsblk -dn -o FSTYPE /dev/vda3)" = LVM2_member ] \
-        && [ "$(lsblk -dn -o FSTYPE /dev/mapper/pxefixture-swap)" = swap ]; then
-    layout=gpt-lvm-pxefixture
+        && [ "$(lsblk -dn -o PTTYPE /dev/vdb)" = gpt ] \
+        && [ "$(cat "/sys/block/$md_name/md/level" 2>/dev/null)" = raid1 ] \
+        && [ -d "/sys/block/$md_name/slaves/vda4" ] \
+        && [ -d "/sys/block/$md_name/slaves/vdb2" ]; then
+    layout=gpt-raid1-two-disks
 fi
 PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_layout":"%s"}' "$IP" "$(uname -r)" "$layout")"'''
         postboot=root/'postboot.sh.j2'
@@ -582,11 +593,11 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s}' "$IP" "$(
            'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
     status=fixture/'native-status.log'
     wait_for(lambda:status.is_file() and 'PXE_NATIVE_READY' in status.read_text(),30,'packaged Rust fixture ready')
-    run_rust_guests(lan,client,root,status,screen_login=True,uefi_image=uefi_image)
+    run_rust_guests(lan,client,root,status,screen_login=True,uefi_image=uefi_image,raid_disk=custom_partition)
     if custom_partition:
-        if 'Custom GPT/LVM partition recipe verified from the installed guest' not in status.read_text():
-            raise RuntimeError('Missing proof of the custom GPT/LVM recipe')
-        print('Custom GPT/LVM partition recipe verified from the installed guest',flush=True)
+        if 'Custom GPT/RAID1 partition recipe verified from the installed guest' not in status.read_text():
+            raise RuntimeError('Missing proof of the custom GPT/RAID1 recipe')
+        print('Custom GPT/RAID1 partition recipe verified from the installed guest',flush=True)
     if native:
         logs=docker('exec',app,'journalctl','--no-pager','-u','pxe-tools-pxe-http.service','-o','cat').stdout
     else:
