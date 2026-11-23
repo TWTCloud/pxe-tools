@@ -7,6 +7,7 @@ exec </dev/null >/dev/ttyS1 2>&1
 fail() {
     printf 'PXE_NATIVE_FAILED line=%s status=%s\n' "$1" "$2"
     if [ -f /run/pxe-lab-apt.log ]; then tail -n 24 /run/pxe-lab-apt.log; fi
+    if [ -f /run/pxe-lab-dhcp.log ]; then tail -n 24 /run/pxe-lab-dhcp.log; fi
     journalctl -b --no-pager -n 35 -u pxe-tools-rust-lab -u pxe-tools-init -u pxe-tools-pxe-http -u pxe-tools-dnsmasq || true
 }
 trap 'fail "$LINENO" "$?"' ERR
@@ -67,9 +68,11 @@ ip netns exec pxe-lease ip addr add 192.0.2.2/24 dev veth-lease
 ip netns exec pxe-lease ip link set veth-lease up
 [ -z "$(ip -4 route show default)" ]
 [ -z "$(ip netns exec pxe-lease ip -4 route show default)" ]
-ip netns exec pxe-lease dnsmasq -k --interface=veth-lease --bind-interfaces \
+# The PXE ROM, installer and installed OS can send different DHCP client IDs.
+ip netns exec pxe-lease dnsmasq -k --interface=veth-lease --bind-interfaces --dhcp-authoritative \
     --no-resolv --no-hosts --address=/pxe-native-lab.example.test/192.0.2.1 \
-    --dhcp-range=192.0.2.100,192.0.2.100,255.255.255.0,1h \
+    --dhcp-range=192.0.2.0,static,255.255.255.0,1h \
+    --dhcp-host='02:00:00:00:00:01,id:*,192.0.2.100' \
     --dhcp-option=3 --dhcp-option-force=6,192.0.2.2 \
     --dhcp-leasefile=/run/pxe-lab-leases --log-dhcp --log-facility=/run/pxe-lab-dhcp.log &
 lease_pid=$!

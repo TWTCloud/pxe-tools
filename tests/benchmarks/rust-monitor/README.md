@@ -105,7 +105,8 @@ démarre en PXE sur un commutateur Ethernet privé, avec le vrai
 `pxe-tools-dnsmasq.service` en proxy DHCP/TFTP et un serveur de baux
 dans un namespace distinct. La VM serveur accède au miroir Debian
 authentifié par un unique relais QEMU vers un socket Unix. La VM cliente
-dispose uniquement de la liaison Ethernet privée.
+dispose uniquement de la liaison Ethernet privée. Un bail réservé par
+MAC garde son adresse lors du passage du firmware à Debian.
 
 Le banc remplace le backend du vhost PXE par Rust dans la VM jetable.
 Il conserve le démarrage des services natifs, les répertoires protégés,
