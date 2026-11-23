@@ -197,13 +197,17 @@ if [ "$BOOT_MODE" = "UEFI" ]; then
     sb_name=SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
     sb_mounted=0
     if [ ! -r "$sb_dir/$sb_name" ] && [ -d "$sb_dir" ] \
-        && ! grep -q ' /sys/firmware/efi/efivars efivarfs ' /proc/mounts \
-        && mount -t efivarfs -o ro,nosuid,nodev,noexec efivarfs "$sb_dir" 2>/dev/null; then
-        sb_mounted=1
+        && ! grep -q ' /sys/firmware/efi/efivars efivarfs ' /proc/mounts; then
+        modprobe efivarfs 2>/dev/null || true
+        if mount -t efivarfs -o ro,nosuid,nodev,noexec efivarfs "$sb_dir" 2>/dev/null; then
+            sb_mounted=1
+        fi
     fi
     if [ -r "$sb_dir/$sb_name" ]; then
-        # Four bytes of efivar attributes precede the SecureBoot data byte.
-        sb_byte=$(od -An -j 4 -N 1 -t u1 "$sb_dir/$sb_name" 2>/dev/null | tr -d '[:space:]')
+        # The installer includes dd and tr even when od is unavailable.
+        # Read the four attribute bytes and the data byte in one efivarfs read.
+        sb_byte=$(dd if="$sb_dir/$sb_name" bs=5 count=1 2>/dev/null \
+            | dd bs=1 skip=4 count=1 2>/dev/null | tr -cd '\000\001' | tr '\000\001' '01')
         case "$sb_byte" in
             1) SECURE_BOOT="true" ;;
             0) SECURE_BOOT="false" ;;
