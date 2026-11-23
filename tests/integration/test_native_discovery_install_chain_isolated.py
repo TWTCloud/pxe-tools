@@ -161,11 +161,13 @@ def rust_first_boot(app, dhcp, client, root, fixture):
     run_rust_guests(app,client,root,log)
 
 
-def run_rust_guests(lan,client,root,log, *, screen_login=False):
+def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None):
     use_kvm=os.uname().machine=='x86_64' and Path('/dev/kvm').is_char_device()
     accelerator='kvm' if use_kvm else 'tcg'
     devices=['--device','/dev/kvm'] if use_kvm else []
     print('QEMU client accelerator:',accelerator,flush=True)
+    paths_seen=set()
+    next_trace=0.0
     for name, boot, marker, timeout in (
         ('Discovery','n','PXE_NATIVE_DISCOVERY_OK',1500),
         ('Installer','n','PXE_NATIVE_INSTALL_OK',3000),
@@ -186,11 +188,18 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False):
         next_screen=0.0
 
         def completed():
-            nonlocal wakeup,next_screen
+            nonlocal wakeup,next_screen,next_trace
             state=inspect(client)['State']
             receipt=log.read_text()
             if 'Traceback (most recent call last)' in receipt:
                 raise RuntimeError('Rust server validation failed')
+            if access_log and time.monotonic() >= next_trace:
+                next_trace=time.monotonic()+20
+                access=docker('exec',*access_log[:1],'tail','-n','80',access_log[1],check=False).stdout
+                for path,code in re.findall(r'"(?:GET|POST|HEAD) (/[^ ?"\\]*)(?:\?[^ "]+)? HTTP/[\d.]+" (\d{3})',access):
+                    if (path,code) not in paths_seen:
+                        paths_seen.add((path,code))
+                        print('PXE HTTP:',path,code,flush=True)
             if boot=='n':
                 if state['ExitCode']!=0:
                     raise RuntimeError(name+' QEMU guest failed')
@@ -227,8 +236,7 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     http_root='/var/lib/pxe-tools-http' if native else '/srv/http'
     tftp_root='/var/lib/pxe-tools-tftp' if native else '/srv/tftp'
     kernel=('language=en country=US locale=en_US.UTF-8 keymap=us '
-            'console=tty0 console=ttyS0,115200n8 net.ifnames=0 ipv6.disable=1 '
-            'netcfg/no_default_route=true netcfg/get_nameservers=192.0.2.2 mirror/udeb/suite=trixie')
+            'net.ifnames=0 ipv6.disable=1 netcfg/no_default_route=true netcfg/get_nameservers=192.0.2.2')
     env=[
         'TFTP_ROOT='+tftp_root, 'HTTP_ROOT='+http_root,
         'PXE_DB_PATH=/var/lib/pxe-tools/stale.sqlite', 'WORKER_POLL_S=1', 'KERNEL_OPTS='+kernel,
@@ -244,7 +252,7 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         mounts.extend(('--mount',f'type=bind,src={source},dst={target}'))
 
     if native:
-        env.append('PXE_TOOLS_DATA_DIR=/var/lib/pxe-tools-native/rendered')
+        env.extend(('PXE_TOOLS_DATA_DIR=/var/lib/pxe-tools-native/rendered','MOK_DIR=/var/lib/pxe-tools-native/mok'))
         runtime=root/'runtime.env'
         runtime.write_text('\n'.join(item if ' ' not in item else
                                       f'{item.split("=",1)[0]}="{item.split("=",1)[1]}"' for item in env) + '\n')
@@ -324,7 +332,8 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
            'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
     status=fixture/'native-status.log'
     wait_for(lambda:status.is_file() and 'PXE_NATIVE_READY' in status.read_text(),30,'packaged Rust fixture ready')
-    run_rust_guests(lan,client,root,status,screen_login=True)
+    log_path='/var/lib/pxe-tools-native/log/nginx-access.log' if native else '/var/log/nginx/pxe-access.log'
+    run_rust_guests(lan,client,root,status,screen_login=True,access_log=(app,log_path))
 
 
 def main():
@@ -369,13 +378,18 @@ def main():
         needle="{{ '{{ADMIN_USER_BLOCK}}' }}"
         if instrument.count(needle)!=1: raise RuntimeError('unexpected preseed template')
         serial=(" ; in-target /bin/sh -c 'printf \"\\nGRUB_CMDLINE_LINUX=\\\"console=tty0 console=ttyS0,115200n8\\\"\\n\" >> /etc/default/grub; update-grub' ; printf 'PXE_FULL_LATE_DONE\\n' >/dev/ttyS0")
-        instrument=instrument.replace(needle,needle+serial)+"\nd-i mirror/udeb/suite string trixie\n"
+        instrument=instrument.replace(needle,needle+serial)
         template=root/'preseed-base.cfg.j2';template.write_text(instrument)
         discovery=(ROOT/'docker/worker/templates/discovery-preseed.cfg.j2').read_text()
         discovery_needle='d-i mirror/http/hostname string deb.debian.org'
         if discovery.count(discovery_needle)!=1: raise RuntimeError('unexpected discovery mirror template')
         mirror_ip='192.0.2.2' if packaged else '192.0.2.1'
         discovery=discovery.replace(discovery_needle,f'd-i mirror/http/hostname string {mirror_ip}')
+        if packaged:
+            discovery=discovery.replace('fr_FR.UTF-8','en_US.UTF-8')
+            discovery=discovery.replace('xkb-keymap select fr','xkb-keymap select us')
+            discovery=discovery.replace('debian-installer/language string fr','debian-installer/language string en')
+            discovery=discovery.replace('debian-installer/country string FR','debian-installer/country string US')
         discovery=discovery.replace('d-i clock-setup/ntp boolean true','d-i clock-setup/ntp boolean false')
         discovery+='\nd-i mirror/udeb/suite string trixie\n'
         discovery_template=root/'discovery-preseed.cfg.j2';discovery_template.write_text(discovery)

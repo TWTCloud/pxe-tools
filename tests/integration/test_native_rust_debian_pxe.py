@@ -50,7 +50,6 @@ def native_vhost(mirror_upstream="http://10.0.2.100"):
     location = /preseed.php {{
         proxy_pass http://unix:/run/pxe-tools-rust-lab/http.sock:;
         sub_filter_types text/plain;
-        sub_filter 'd-i mirror/suite string trixie' 'd-i mirror/suite string trixie\\nd-i mirror/udeb/suite string trixie';
         sub_filter "{hook}" "{instrument}";
     }}
     location /api/ {{ proxy_pass http://unix:/run/pxe-tools-rust-lab/http.sock:; }}

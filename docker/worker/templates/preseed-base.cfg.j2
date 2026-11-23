@@ -28,6 +28,7 @@ d-i netcfg/wireless_wep string
 ### --- Miroir -------------------------------------------------------------
 {{ '{{MIRROR_BLOCK}}' }}
 d-i mirror/suite string {{ '{{DISTRO_CODENAME}}' }}
+d-i mirror/udeb/suite string {{ '{{DISTRO_CODENAME}}' }}
 
 ### --- Comptes utilisateur -----------------------------------------------
 # Bloc dynamique : selon root_login_mode du preset, soit root activé +
