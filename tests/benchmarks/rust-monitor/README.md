@@ -127,23 +127,30 @@ importé et le service le recharge au redémarrage.
 être conservé avec les données sensibles de l’instance, avec les permissions
 du service.
 
-Pour activer ACME, définir `PXE_PUBLIC_HOST` avec le nom DNS et choisir
-`PXE_ACME=staging` ou `PXE_ACME=production` pour Let’s Encrypt. Renseigner
-`PXE_ACME_EMAIL` pour ajouter un contact. L’activation accepte les
-conditions de l’autorité choisie. Sur APT, placer ces variables dans
-`/etc/pxe-tools/acme.env`. Pour Docker, utiliser l’environnement du
-conteneur. Ce nom doit permettre à l’autorité d’atteindre le port HTTP 80.
-Le serveur répond au défi HTTP-01 sans modifier les routes PXE. Il renouvelle
+Pour activer ACME, définir `PXE_PUBLIC_HOST` avec le nom DNS, puis ouvrir
+`/admin/certificates` et choisir le mode de test ou de production de
+Let’s Encrypt. Le formulaire enregistre le consentement et peut renseigner
+un contact. Le nom DNS doit permettre à l’autorité d’atteindre le port
+HTTP 80. Le serveur répond au défi HTTP-01 sur ce port. Il renouvelle
 le certificat au dernier tiers de sa durée de vie et conserve la paire
-précédente si le renouvellement échoue. Un certificat externe importé
-prend la priorité et suspend ACME. Les fichiers `acme-account.json` et
-`acme-certificate.json` restent dans le répertoire privé d’import TLS.
+précédente si le renouvellement échoue. La désactivation rétablit le
+certificat de l’instance. Le certificat externe importé est prioritaire.
 
-Pour une autorité privée, `PXE_ACME=private` nécessite une URL HTTPS dans
-`PXE_ACME_DIRECTORY_URL` et le certificat de confiance dans
-`PXE_ACME_CA_FILE`, sous un chemin absolu lisible par le service.
-Le banc `test_rust_acme_pebble.py` exerce deux défis HTTP-01 et la reprise
-sans l’autorité après redémarrage, avec Pebble et son serveur DNS de test.
+Les exploitants peuvent imposer un mode en définissant `PXE_ACME`
+(`off`, `staging`, `production` ou `private`) et un contact facultatif
+`PXE_ACME_EMAIL`. Sur APT, placer ces variables dans
+`/etc/pxe-tools/acme.env`. Pour Docker, utiliser l’environnement du conteneur.
+Pour une autorité privée, fournir son URL HTTPS dans
+`PXE_ACME_DIRECTORY_URL` et un chemin absolu lisible vers son autorité de
+confiance dans `PXE_ACME_CA_FILE`. Ces deux valeurs rendent également
+l’autorité privée disponible dans la console quand le mode est piloté
+depuis la console. Les fichiers `acme-settings.json`, `acme-account.json`
+et `acme-certificate.json` restent dans le dossier privé d’import TLS.
+
+Le banc `test_rust_acme_pebble.py` active le mode privé depuis la console,
+exerce deux défis HTTP-01, vérifie la reprise sans l’autorité après
+redémarrage, puis désactive ACME. Pebble et son serveur DNS restent sur
+la boucle locale.
 La page `/settings/images` affiche l’état du catalogue et la progression des
 images enregistrées. Elle permet de demander une actualisation du catalogue
 et d’ajouter une image Debian amd64 ou arm64. Le téléchargement reste assuré

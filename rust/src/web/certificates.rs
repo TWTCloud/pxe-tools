@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{
-    acme, plain,
+    acme,
+    admin::escape,
+    plain,
     setup::{page, redirect},
     ErrorBox, Reply,
 };
@@ -16,13 +18,16 @@ use std::{
     sync::{Arc, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::watch;
 use tokio_rustls::{rustls::ServerConfig, TlsAcceptor};
 
 pub(super) const ROUTE: &str = "/admin/certificates";
+pub(super) const ACME_ROUTE: &str = "/admin/certificates/acme";
 pub(super) const MAX_FORM: usize = 64 * 1024;
 const MAX_BUNDLE: u64 = 2 * MAX_FORM as u64;
 const BUNDLE: &str = "external.json";
 const MANAGED: &str = "acme-certificate.json";
+const PREFERENCE: &str = "acme-settings.json";
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -41,31 +46,46 @@ struct Managed {
 struct Active {
     acceptor: TlsAcceptor,
     external: bool,
-    renew_at: Option<i64>,
+    renewal: Option<(String, i64)>,
 }
 
 pub(super) struct Certificates {
     directory: PathBuf,
     active: RwLock<Active>,
+    default: TlsAcceptor,
+    public_host: Option<String>,
+    acme_from_env: bool,
+    acme: watch::Sender<Option<Arc<acme::Config>>>,
 }
 
 impl Certificates {
-    pub(super) fn new(default: TlsAcceptor, acme: Option<&acme::Config>) -> Result<Self, ErrorBox> {
+    pub(super) fn new(default: TlsAcceptor, public_host: Option<String>) -> Result<Self, ErrorBox> {
         let directory = env::var_os("PXE_TLS_IMPORT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/var/lib/pxe-tools/tls-import".into());
         if !directory.is_absolute() {
             return Err("TLS import directory must have an absolute path".into());
         }
+        let acme_from_env = env::var_os("PXE_ACME").is_some();
+        let acme = if acme_from_env {
+            acme::Config::from_env(public_host.as_deref())?
+        } else {
+            let configured = load::<acme::Preference>(&directory, PREFERENCE)
+                .and_then(|pref| pref.unwrap_or_default().config(public_host.as_deref()));
+            configured.unwrap_or_else(|error| {
+                eprintln!("Console ACME settings suspended: {error}");
+                None
+            })
+        };
         let external: Option<Pair> = load(&directory, BUNDLE)?;
         let active = if let Some(pair) = external {
             Active {
                 acceptor: pair.acceptor()?,
                 external: true,
-                renew_at: None,
+                renewal: None,
             }
         } else {
-            let cached = acme.and_then(|config| {
+            let cached = acme.as_ref().and_then(|config| {
                 let certificate = load::<Managed>(&directory, MANAGED);
                 match certificate {
                     Ok(Some(managed))
@@ -87,14 +107,18 @@ impl Certificates {
                 }
             });
             cached.unwrap_or(Active {
-                acceptor: default,
+                acceptor: default.clone(),
                 external: false,
-                renew_at: None,
+                renewal: None,
             })
         };
         Ok(Self {
             directory,
             active: RwLock::new(active),
+            default,
+            public_host,
+            acme_from_env,
+            acme: watch::Sender::new(acme.map(Arc::new)),
         })
     }
 
@@ -106,12 +130,20 @@ impl Certificates {
             .clone()
     }
 
-    pub(super) fn managed_delay(&self) -> Option<Duration> {
+    pub(super) fn acme_configuration(&self) -> watch::Receiver<Option<Arc<acme::Config>>> {
+        self.acme.subscribe()
+    }
+
+    pub(super) fn managed_delay(&self, config: &acme::Config) -> Option<Duration> {
         let active = self.active.read().ok()?;
-        if active.external {
+        if active.external || self.acme.borrow().as_deref() != Some(config) {
             return None;
         }
-        let seconds = active.renew_at.unwrap_or_default().saturating_sub(now());
+        let seconds = active
+            .renewal
+            .as_ref()
+            .filter(|(directory, _)| directory == &config.directory)
+            .map_or(0, |(_, timestamp)| timestamp.saturating_sub(now()));
         Some(Duration::from_secs(seconds.max(0) as u64))
     }
 
@@ -131,7 +163,7 @@ impl Certificates {
         };
         let next = managed.active()?;
         let mut active = self.active.write().map_err(|_| "TLS config lock")?;
-        if !active.external {
+        if !active.external && self.acme.borrow().as_deref() == Some(config) {
             persist(&self.directory, MANAGED, &managed)?;
             *active = next;
         }
@@ -157,11 +189,12 @@ impl Certificates {
         let active = self.active.read().expect("TLS config lock");
         let status = if active.external {
             "Certificat externe"
-        } else if active.renew_at.is_some() {
+        } else if active.renewal.is_some() {
             "Certificat ACME"
         } else {
             "Certificat auto-signé de l’instance"
         };
+        let acme = self.acme_form(&active);
         page(
             "Certificats TLS",
             &format!(
@@ -170,9 +203,97 @@ impl Certificates {
 <p><label>Certificat et chaîne PEM<br><textarea name="certificate" rows="8" cols="64" required spellcheck="false"></textarea></label></p>
 <p><label>Clé privée PEM<br><textarea name="private_key" rows="8" cols="64" required spellcheck="false" autocomplete="off"></textarea></label></p>
 <button>Importer et appliquer</button>
-</form><p><a href="/admin/devices">Retour à la console</a></p>"#
+</form>{acme}<p><a href="/admin/devices">Retour à la console</a></p>"#
             ),
         )
+    }
+
+    fn acme_form(&self, active: &Active) -> String {
+        let heading = "<h2>Renouvellement ACME</h2>";
+        if self.acme_from_env {
+            return format!("{heading}<p>Mode défini dans la configuration du service.</p>");
+        }
+        if active.external {
+            return format!("{heading}<p>Le certificat externe est prioritaire.</p>");
+        }
+        let Some(host) = self
+            .public_host
+            .as_deref()
+            .filter(|host| acme::dns_name(host))
+        else {
+            return format!("{heading}<p>Renseignez le nom DNS dans PXE_PUBLIC_HOST pour utiliser Let’s Encrypt.</p>");
+        };
+        let pref: acme::Preference = load(&self.directory, PREFERENCE)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let selection = |value| if value { " selected" } else { "" };
+        let off = selection(matches!(pref.mode, acme::Mode::Off));
+        let staging = selection(matches!(pref.mode, acme::Mode::Staging));
+        let production = selection(matches!(pref.mode, acme::Mode::Production));
+        let mut email = String::new();
+        escape(&mut email, &pref.contact);
+        let private = if acme::Config::private_endpoint().is_ok() {
+            let selected = selection(matches!(pref.mode, acme::Mode::Private));
+            format!("<option value=\"private\"{selected}>Autorité privée</option>")
+        } else {
+            String::new()
+        };
+        format!(
+            r#"{heading}<p>L’autorité doit pouvoir joindre {host} sur le port HTTP 80.</p>
+<form method="post" action="{ACME_ROUTE}">
+<p><label>Mode <select name="mode">
+<option value="off"{off}>Désactivé</option>
+<option value="staging"{staging}>Test</option>
+<option value="production"{production}>Production</option>
+{private}</select></label></p>
+<p><label>Adresse de contact <input name="email" type="email" maxlength="254" value="{email}"></label></p>
+<p><label><input type="checkbox" name="terms"> J’accepte les conditions de l’autorité choisie. <a href="https://letsencrypt.org/repository/">Conditions de Let’s Encrypt</a>.</label></p>
+<button>Enregistrer le mode ACME</button>
+</form>"#
+        )
+    }
+
+    pub(super) fn configure_acme(&self, form: &[u8]) -> Reply {
+        let Some(pref) = acme::Preference::parse(form) else {
+            return plain(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Vérifiez le mode ACME et les conditions d’utilisation.\n",
+            );
+        };
+        let Ok(config) = pref.config(self.public_host.as_deref()) else {
+            return plain(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Nom DNS ou adresse de contact ACME invalide.\n",
+            );
+        };
+        let Ok(mut active) = self.active.write() else {
+            return plain(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Configuration ACME indisponible\n",
+            );
+        };
+        if self.acme_from_env || active.external {
+            return plain(
+                StatusCode::CONFLICT,
+                "Le mode ACME est géré par le service ou un certificat externe est actif.\n",
+            );
+        }
+        if persist(&self.directory, PREFERENCE, &pref).is_err() {
+            return plain(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Enregistrement du mode ACME impossible\n",
+            );
+        }
+        if config.is_none() && active.renewal.is_some() {
+            *active = Active {
+                acceptor: self.default.clone(),
+                external: false,
+                renewal: None,
+            };
+        }
+        self.acme.send_replace(config.map(Arc::new));
+        redirect(StatusCode::SEE_OTHER, ROUTE)
     }
 
     pub(super) fn import(&self, form: &[u8]) -> Reply {
@@ -196,7 +317,7 @@ impl Certificates {
         *current = Active {
             acceptor,
             external: true,
-            renew_at: None,
+            renewal: None,
         };
         redirect(StatusCode::SEE_OTHER, ROUTE)
     }
@@ -264,7 +385,7 @@ impl Managed {
         Ok(Active {
             acceptor: self.pair.acceptor()?,
             external: false,
-            renew_at: Some(renew_at),
+            renewal: Some((self.directory.clone(), renew_at)),
         })
     }
 }

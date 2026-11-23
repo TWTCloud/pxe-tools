@@ -6,6 +6,7 @@ from contextlib import ExitStack
 from http.client import HTTPConnection
 import json
 import os
+import secrets
 from pathlib import Path
 import socket
 import ssl
@@ -15,7 +16,7 @@ import tempfile
 import time
 from urllib.request import urlopen
 
-from test_rust_initial_setup import generate_tls_pair
+from test_rust_initial_setup import Client, generate_tls_pair, setup
 
 
 HOST = 'pxe.example.test'
@@ -63,6 +64,28 @@ def tls_leaf(port, context):
             return tls.getpeercert(binary_form=True)
 
 
+def generate_authority_endpoint(directory):
+    options = {'cwd':directory, 'check':True, 'stdout':subprocess.DEVNULL, 'stderr':subprocess.DEVNULL}
+    subprocess.run([
+        'openssl','req','-x509','-nodes','-newkey','rsa:2048','-days','1',
+        '-subj','/CN=fixture-ca','-keyout','ca.key','-out','ca.pem',
+        '-addext','basicConstraints=critical,CA:TRUE',
+        '-addext','keyUsage=critical,keyCertSign,cRLSign',
+        '-addext','subjectKeyIdentifier=hash',
+    ], **options)
+    subprocess.run([
+        'openssl','req','-new','-nodes','-newkey','rsa:2048',
+        '-subj','/CN=fixture-pebble-endpoint','-keyout','key.pem','-out','endpoint.csr',
+    ], **options)
+    (directory/'endpoint.ext').write_text('basicConstraints=critical,CA:FALSE\n'
+                                          'extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\n'
+                                          'authorityKeyIdentifier=keyid:always\n')
+    subprocess.run([
+        'openssl','x509','-req','-in','endpoint.csr','-CA','ca.pem','-CAkey','ca.key','-CAcreateserial',
+        '-days','1','-extfile','endpoint.ext','-out','cert.pem',
+    ], **options)
+
+
 def check(binary, pebble, resolver):
     ca_port, admin_port, dns_port, dns_admin, http_port, https_port = fixture_ports()
     with tempfile.TemporaryDirectory(prefix='pxe-rust-acme-') as temporary, ExitStack() as stack:
@@ -70,7 +93,7 @@ def check(binary, pebble, resolver):
         ca, default, public = (root/name for name in ('ca','selfsigned','public'))
         for directory in (ca, default, public):
             directory.mkdir()
-        generate_tls_pair(ca, 'fixture-pebble-endpoint')
+        generate_authority_endpoint(ca)
         generate_tls_pair(default, 'fixture-instance')
         start(stack, [resolver, '-dns01', f'127.0.0.1:{dns_port}', '-management', f'127.0.0.1:{dns_admin}',
                       '-http01', '', '-https01', '', '-tlsalpn01', '', '-doh', '', '-defaultIPv6', ''])
@@ -84,7 +107,7 @@ def check(binary, pebble, resolver):
         authority = start(stack, [pebble, '-config', str(settings), '-dnsserver', f'127.0.0.1:{dns_port}'],
                           {**os.environ,'PEBBLE_VA_NOSLEEP':'1','PEBBLE_VA_ALWAYS_VALID':'0',
                            'PEBBLE_WFE_NONCEREJECT':'0','PEBBLE_AUTHZREUSE':'0'})
-        ca_context = ssl.create_default_context(cafile=str(ca/'cert.pem'))
+        ca_context = ssl.create_default_context(cafile=str(ca/'ca.pem'))
 
         def issuer_root():
             with urlopen(f'https://127.0.0.1:{admin_port}/roots/0', context=ca_context, timeout=2) as response:
@@ -92,12 +115,34 @@ def check(binary, pebble, resolver):
 
         issuer = ssl.create_default_context(cadata=wait_for(issuer_root, 'Pebble CA root'))
         store = root/'private'
-        command = [str(binary), '--serve-guided', str(root/'db.conf')]
+        data = root/'data'
+        data.mkdir()
+        config = root/'db.conf'
+        database = data/'fixture.sqlite'
+        (root/'master.key').write_bytes(secrets.token_bytes(32))
+        (default/'setup-code').write_text(secrets.token_hex(24)+'\n')
+        command = [str(binary), '--serve-guided', str(config)]
+        control = '/admin/certificates/acme'
+        console = '/admin/certificates'
         env = {**os.environ, 'CREDENTIALS_DIRECTORY':str(default), 'HTTP_ROOT':str(public),
                'PXE_TLS_IMPORT_DIR':str(store), 'PXE_HTTP_PORT':str(http_port), 'PXE_HTTPS_PORT':str(https_port),
-               'PXE_PUBLIC_HOST':HOST, 'PXE_ACME':'private',
-               'PXE_ACME_DIRECTORY_URL':f'https://127.0.0.1:{ca_port}/dir', 'PXE_ACME_CA_FILE':str(ca/'cert.pem')}
+               'PXE_PUBLIC_HOST':HOST, 'AUTH_MODE':'local', 'PXE_DB_PATH':str(database),
+               'PXE_DB_DRIVER':'sqlite', 'PXE_SETUP_DATA_ROOT':str(data),
+               'PXE_ACME_DIRECTORY_URL':f'https://127.0.0.1:{ca_port}/dir', 'PXE_ACME_CA_FILE':str(ca/'ca.pem')}
+        env.pop('PXE_ACME', None)
         service = start(stack, command, env)
+        client = Client(default, http_port, https_port)
+        client.ready(service)
+        authorization = setup(client, default, config, database)
+        assert b'Autorit' in client.request(console, authorization=authorization)[2]
+        choice = {'mode':'private','terms':'on','email':'lab@example.test'}
+        assert client.request(control, form=choice)[0] == 401
+        assert client.request(control, form=choice, authorization=authorization,
+                              origin='https://external.example')[0] == 403
+        assert client.request(control, form={'mode':'private'}, authorization=authorization)[0] == 422
+        assert not (store/'acme-settings.json').exists()
+        assert client.request(control, form=choice, authorization=authorization)[:2] == (303, console)
+        assert stat.S_IMODE((store/'acme-settings.json').stat().st_mode)==0o600
         first = wait_for(lambda:tls_leaf(https_port,issuer), 'ACME certificate signed by Pebble')
         account = store/'acme-account.json'
         managed = store/'acme-certificate.json'
@@ -111,7 +156,7 @@ def check(binary, pebble, resolver):
 
         second = wait_for(renewed, 'Automatic ACME renewal', seconds=65)
         assert account.read_bytes()==first_account
-        print('Pebble completed two real HTTP-01 challenges and Rust hot-reloaded both certificates', flush=True)
+        print('From the authenticated Rust console, Pebble validated HTTP-01 and Rust renewed TLS without restarting', flush=True)
         stop(authority)
         stop(service)
         start(stack, command, env)
@@ -123,6 +168,14 @@ def check(binary, pebble, resolver):
         finally:
             conn.close()
         print('Rust serves the persisted certificate after restart with the ACME authority offline', flush=True)
+        issuer.check_hostname = False
+        managed_client = Client(default, http_port, https_port)
+        managed_client.context = issuer
+        assert managed_client.request(control, form={'mode':'off'},
+                                      authorization=authorization)[:2] == (303, console)
+        assert b'auto-sign' in client.request(console, authorization=authorization)[2]
+        assert json.loads((store/'acme-settings.json').read_text())['mode']=='off'
+        print('Disabling ACME from the Rust console reinstated the instance certificate', flush=True)
 
 
 def main():

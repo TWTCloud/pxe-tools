@@ -60,7 +60,7 @@ struct Site {
     admin: admin::Console,
     setup: setup::Wizard,
     tls: Arc<certificates::Certificates>,
-    acme_challenge: Option<Arc<acme::ChallengeResponse>>,
+    acme_challenge: Arc<acme::ChallengeResponse>,
 }
 
 pub fn serve(config: &Path) -> Result<(), ErrorBox> {
@@ -88,11 +88,11 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
     let http_port = port("PXE_HTTP_PORT", 80)?;
     let https_port = port("PXE_HTTPS_PORT", 443)?;
     let default_tls = tls_config().map_err(|error| format!("TLS configuration: {error}"))?;
-    let acme = acme::Config::from_env(public_host.as_deref())?;
-    let tls = Arc::new(certificates::Certificates::new(default_tls, acme.as_ref())?);
-    let acme_challenge = acme
-        .as_ref()
-        .map(|config| Arc::new(acme::ChallengeResponse::new(config.host.clone())));
+    let tls = Arc::new(certificates::Certificates::new(
+        default_tls,
+        public_host.clone(),
+    )?);
+    let acme_challenge = Arc::new(acme::ChallengeResponse::default());
     let site = Arc::new(Site {
         database: config.to_owned(),
         assets: assets::Assets::new(
@@ -124,10 +124,9 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
     for (listener, tls) in listeners {
         servers.spawn(accept(listener, tls, site.clone(), connections.clone()));
     }
-    if let (Some(config), Some(challenge)) = (acme, site.acme_challenge.clone()) {
-        let tls = site.tls.clone();
-        task::spawn(async move { acme::run(config, &challenge, &tls).await });
-    }
+    let tls = site.tls.clone();
+    let challenge = site.acme_challenge.clone();
+    task::spawn(async move { acme::run(tls.acme_configuration(), &challenge, &tls).await });
     notify_ready().map_err(|error| format!("Systemd readiness notification: {error}"))?;
     let ip = pxe_ip.unwrap_or(Ipv4Addr::LOCALHOST);
     println!("PXE Tools Rust HTTP/HTTPS ready on {ip}:{http_port} and {ip}:{https_port}");
@@ -315,9 +314,9 @@ async fn dispatch(
     let path = parts.uri.path();
     let readable = matches!(parts.method, Method::GET | Method::HEAD);
     if !secure && parts.method == Method::GET && path.starts_with(acme::PREFIX) {
-        if let Some(challenge) = &site.acme_challenge {
-            return challenge.serve(path, single(&parts.headers, HOST.as_str()));
-        }
+        return site
+            .acme_challenge
+            .serve(path, single(&parts.headers, HOST.as_str()));
     }
     if path == "/healthz" && readable {
         return plain(StatusCode::OK, "ok\n");
@@ -422,7 +421,10 @@ async fn dispatch(
             )
             .await;
     }
-    if matches!(path, certificates::ROUTE | images::ROUTE) {
+    if matches!(
+        path,
+        certificates::ROUTE | certificates::ACME_ROUTE | images::ROUTE
+    ) {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
@@ -444,10 +446,13 @@ async fn dispatch(
         } else {
             return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
         };
-        let action = if path == certificates::ROUTE {
-            admin::Action::Certificates(site.tls.clone(), form)
-        } else {
-            admin::Action::Images(form)
+        let action = match (path, form) {
+            (certificates::ROUTE, form) => admin::Action::Certificates(site.tls.clone(), form),
+            (certificates::ACME_ROUTE, Some(form)) => admin::Action::Acme(site.tls.clone(), form),
+            (certificates::ACME_ROUTE, None) => {
+                return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n")
+            }
+            (_, form) => admin::Action::Images(form),
         };
         return site.admin.serve(&parts, peer, &site.database, action).await;
     }

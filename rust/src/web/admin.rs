@@ -42,6 +42,7 @@ pub(super) enum Action {
     Terminology(&'static str),
     Setup(String, Option<Bytes>),
     Certificates(Arc<super::certificates::Certificates>, Option<Bytes>),
+    Acme(Arc<super::certificates::Certificates>, Bytes),
 }
 
 pub(super) struct Console {
@@ -136,6 +137,9 @@ impl Console {
                     endpoint,
                     form.as_deref(),
                 ));
+            }
+            if let Action::Acme(tls, form) = &action {
+                return Some(tls.configure_acme(form));
             }
             if let Action::Certificates(tls, form) = &action {
                 return Some(match form {

@@ -8,14 +8,23 @@ use instant_acme::{
     NewAccount, NewOrder, OrderStatus, RetryPolicy,
 };
 use serde::{Deserialize, Serialize};
-use std::{env, path::PathBuf, sync::RwLock, time::Duration};
-use tokio::time::{sleep, timeout};
+use std::{
+    env,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
+use tokio::{
+    sync::watch,
+    time::{sleep, timeout},
+};
 
 pub(super) const PREFIX: &str = "/.well-known/acme-challenge/";
 const CHECK_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
 const RETRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const STATE_FILE: &str = "acme-account.json";
 
+#[derive(PartialEq, Eq)]
 pub(super) struct Config {
     pub(super) host: String,
     pub(super) directory: String,
@@ -31,30 +40,42 @@ impl Config {
             "production" => (LetsEncrypt::Production.url().to_owned(), None),
             "staging" => (LetsEncrypt::Staging.url().to_owned(), None),
             "private" => {
-                let url = env::var("PXE_ACME_DIRECTORY_URL")?;
-                let uri: http::Uri = url.parse()?;
-                let path =
-                    PathBuf::from(env::var_os("PXE_ACME_CA_FILE").ok_or("ACME CA file required")?);
-                if uri.scheme_str() != Some("https")
-                    || uri
-                        .authority()
-                        .is_none_or(|authority| authority.as_str().contains('@'))
-                    || !path.is_absolute()
-                {
-                    return Err(
-                        "ACME private mode requires an HTTPS directory and absolute CA path".into(),
-                    );
-                }
-                (url, Some(path))
+                let (url, root) = Self::private_endpoint()?;
+                (url, Some(root))
             }
             _ => return Err("Invalid PXE_ACME mode".into()),
         };
+        let contact = env::var("PXE_ACME_EMAIL").ok();
+        Self::new(host, directory, root, contact).map(Some)
+    }
+
+    pub(super) fn private_endpoint() -> Result<(String, PathBuf), ErrorBox> {
+        let url = env::var("PXE_ACME_DIRECTORY_URL")?;
+        let uri: http::Uri = url.parse()?;
+        let path = PathBuf::from(env::var_os("PXE_ACME_CA_FILE").ok_or("ACME CA file required")?);
+        if uri.scheme_str() != Some("https")
+            || uri
+                .authority()
+                .is_none_or(|authority| authority.as_str().contains('@'))
+            || !path.is_absolute()
+        {
+            return Err(
+                "ACME private mode requires an HTTPS directory and absolute CA path".into(),
+            );
+        }
+        Ok((url, path))
+    }
+
+    fn new(
+        host: Option<&str>,
+        directory: String,
+        root: Option<PathBuf>,
+        contact: Option<String>,
+    ) -> Result<Self, ErrorBox> {
         let host = host
             .filter(|host| dns_name(host))
             .ok_or("ACME requires a DNS name in PXE_PUBLIC_HOST")?;
-        let contact = env::var("PXE_ACME_EMAIL")
-            .ok()
-            .filter(|email| !email.is_empty());
+        let contact = contact.filter(|email| !email.is_empty());
         if contact.as_ref().is_some_and(|email| {
             !email.is_ascii()
                 || email.len() > 254
@@ -63,18 +84,18 @@ impl Config {
                     .bytes()
                     .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
         }) {
-            return Err("Invalid PXE_ACME_EMAIL address".into());
+            return Err("Invalid ACME email address".into());
         }
-        Ok(Some(Self {
+        Ok(Self {
             host: host.to_ascii_lowercase(),
             directory,
             root,
             contact,
-        }))
+        })
     }
 }
 
-fn dns_name(name: &str) -> bool {
+pub(super) fn dns_name(name: &str) -> bool {
     name.len() <= 253
         && name.contains('.')
         && name.parse::<std::net::Ipv4Addr>().is_err()
@@ -89,35 +110,104 @@ fn dns_name(name: &str) -> bool {
         })
 }
 
-pub(super) struct ChallengeResponse {
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum Mode {
+    #[default]
+    Off,
+    Staging,
+    Production,
+    Private,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Preference {
+    pub(super) mode: Mode,
+    pub(super) contact: String,
+}
+
+impl Preference {
+    pub(super) fn parse(form: &[u8]) -> Option<Self> {
+        let mut mode = None;
+        let mut contact = None;
+        let mut accepted = false;
+        for (field, value) in form_urlencoded::parse(form) {
+            match field.as_ref() {
+                "mode" if mode.is_none() => {
+                    mode = Some(match value.as_ref() {
+                        "off" => Mode::Off,
+                        "staging" => Mode::Staging,
+                        "production" => Mode::Production,
+                        "private" => Mode::Private,
+                        _ => return None,
+                    })
+                }
+                "email" if contact.is_none() => contact = Some(value.into_owned()),
+                "terms" if !accepted && value == "on" => accepted = true,
+                _ => return None,
+            }
+        }
+        let mode = mode?;
+        if !matches!(mode, Mode::Off) && !accepted {
+            return None;
+        }
+        Some(Self {
+            mode,
+            contact: contact.unwrap_or_default(),
+        })
+    }
+
+    pub(super) fn config(&self, host: Option<&str>) -> Result<Option<Config>, ErrorBox> {
+        let directory = match self.mode {
+            Mode::Off => return Ok(None),
+            Mode::Staging => LetsEncrypt::Staging,
+            Mode::Production => LetsEncrypt::Production,
+            Mode::Private => {
+                let (url, root) = Config::private_endpoint()?;
+                return Config::new(host, url, Some(root), Some(self.contact.clone())).map(Some);
+            }
+        };
+        Config::new(
+            host,
+            directory.url().to_owned(),
+            None,
+            Some(self.contact.clone()),
+        )
+        .map(Some)
+    }
+}
+
+struct Challenge {
     host: String,
-    active: RwLock<Option<(String, String)>>,
+    token: String,
+    answer: String,
+}
+
+#[derive(Default)]
+pub(super) struct ChallengeResponse {
+    active: RwLock<Option<Challenge>>,
 }
 
 impl ChallengeResponse {
-    pub(super) fn new(host: String) -> Self {
-        Self {
-            host,
-            active: RwLock::new(None),
-        }
-    }
-
     pub(super) fn serve(&self, path: &str, host: Option<&str>) -> Reply {
         let token = path.strip_prefix(PREFIX);
-        let named_host = host.and_then(|value| value.parse::<Authority>().ok());
-        let authorized =
-            named_host.is_some_and(|host| host.host().eq_ignore_ascii_case(&self.host));
+        let host = host.and_then(|value| value.parse::<Authority>().ok());
         let active = self.active.read().ok();
-        if let Some((_, answer)) = active
+        if let Some(challenge) = active
             .as_deref()
             .and_then(Option::as_ref)
-            .filter(|(pending, _)| authorized && Some(pending.as_str()) == token)
+            .filter(|challenge| {
+                host.as_ref()
+                    .is_some_and(|host| host.host().eq_ignore_ascii_case(&challenge.host))
+                    && token == Some(challenge.token.as_str())
+            })
         {
             return hyper::Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", "application/octet-stream")
                 .header("Cache-Control", "no-store")
-                .body(bytes(answer.clone()))
+                .body(bytes(challenge.answer.clone()))
                 .expect("valid ACME response");
         }
         plain(StatusCode::NOT_FOUND, "Not found\n")
@@ -142,12 +232,28 @@ struct AccountState {
 }
 
 pub(super) async fn run(
-    config: Config,
+    mut configuration: watch::Receiver<Option<Arc<Config>>>,
     challenges: &ChallengeResponse,
     certificates: &Certificates,
 ) {
     loop {
-        let Some(delay) = certificates.managed_delay() else {
+        let current = configuration.borrow_and_update().clone();
+        if let Some(config) = current {
+            tokio::select! {
+                changed = configuration.changed() => if changed.is_err() { return; },
+                () = renew(&config, challenges, certificates) => {
+                    if configuration.changed().await.is_err() { return; }
+                }
+            }
+        } else if configuration.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn renew(config: &Config, challenges: &ChallengeResponse, certificates: &Certificates) {
+    loop {
+        let Some(delay) = certificates.managed_delay(config) else {
             return;
         };
         if !delay.is_zero() {
@@ -156,13 +262,13 @@ pub(super) async fn run(
         }
         match timeout(
             Duration::from_secs(180),
-            issue(&config, challenges, certificates),
+            issue(config, challenges, certificates),
         )
         .await
         {
             Ok(Ok(())) => {
                 if certificates
-                    .managed_delay()
+                    .managed_delay(config)
                     .is_some_and(|delay| delay.is_zero())
                 {
                     sleep(RETRY_INTERVAL).await;
@@ -242,7 +348,11 @@ async fn issue(
         *challenges
             .active
             .write()
-            .map_err(|_| "ACME challenge lock")? = Some((token, answer));
+            .map_err(|_| "ACME challenge lock")? = Some(Challenge {
+            host: config.host.clone(),
+            token,
+            answer,
+        });
         challenge.set_ready().await?;
     }
     let policy = RetryPolicy::default();
