@@ -9,6 +9,7 @@ fixture. The native dnsmasq/packaging chain is exercised by a different bench.
 from __future__ import annotations
 
 import argparse
+import base64
 from contextlib import closing, ExitStack
 import json
 import os
@@ -46,8 +47,13 @@ FIXTURE_HASH = '$6$pxe-rust-fixture$3qZUDjjE3OJvYO8pbsw4RHkkfm57OLObfMO6T70WK4.i
 def write_nginx(root):
     conf = root / "nginx.conf"
     source = "in-target /bin/systemctl enable pxe-machine-ready.service"
-    serial = (" ; in-target /bin/sh -c 'echo GRUB_CMDLINE_LINUX=console=ttyS0,115200n8 "
-              ">> /etc/default/grub; update-grub'")
+    serial = base64.b64encode(
+        b'GRUB_CMDLINE_LINUX="console=ttyS0,115200n8 net.ifnames=0"\n'
+    ).decode("ascii")
+    settings = (
+        f" ; in-target /bin/sh -c 'echo {serial} | base64 -d "
+        ">> /etc/default/grub; update-grub'"
+    )
     conf.write_text(f"""
         daemon off;
         master_process off;
@@ -73,8 +79,8 @@ def write_nginx(root):
                 location = /preseed.php {{
                     proxy_pass http://rust_pxe;
                     sub_filter_types text/plain;
-                    sub_filter 'd-i mirror/suite string trixie' 'd-i mirror/suite string trixie\nd-i mirror/udeb/suite string trixie\nd-i debian-installer/add-kernel-opts string net.ifnames=0';
-                    sub_filter "{source}" "{source}{serial}";
+                    sub_filter 'd-i mirror/suite string trixie' 'd-i mirror/suite string trixie\nd-i mirror/udeb/suite string trixie';
+                    sub_filter "{source}" "{source}{settings}";
                 }}
                 location /debian/ {{ proxy_pass http://fixture_mirror; proxy_read_timeout 90s; }}
                 location / {{ try_files $uri =404; }}
