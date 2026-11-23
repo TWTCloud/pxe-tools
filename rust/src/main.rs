@@ -7,6 +7,7 @@ mod install;
 mod monitoring;
 mod preseed;
 mod pxe;
+mod web;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
@@ -19,7 +20,7 @@ use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tiny_http::{Header, Method, Request, Response, Server};
+use tiny_http::{Header, Method, Response, Server};
 
 const MONITORING: &str = "/api/monitoring/installs";
 const BOOT_SELECTED: &str = "/api/boot-selected";
@@ -28,6 +29,13 @@ const JSON: &str = "application/json; charset=utf-8";
 const TEXT: &str = "text/plain; charset=utf-8";
 type ApiResult = rusqlite::Result<(u16, Value)>;
 type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
+
+struct PxeRequest<'a> {
+    uri: String,
+    method: Method,
+    headers: Vec<(String, String)>,
+    body: &'a mut dyn Read,
+}
 
 enum Routes<'a> {
     Full(&'a Path),
@@ -59,6 +67,11 @@ fn configured_database(config: &Path) -> Option<PathBuf> {
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if let [flag, config] = args.as_slice() {
+        if flag == "--serve-guided" && Path::new(config).is_absolute() {
+            return web::serve(Path::new(config));
+        }
+    }
     let (routes, socket) = match args.as_slice() {
         [db, socket] if Path::new(db).is_absolute() && Path::new(db).is_file() => {
             (Routes::Full(Path::new(db)), socket)
@@ -91,14 +104,22 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             let routes = &routes;
             scope.spawn(move || {
                 for mut request in server.incoming_requests() {
-                    let response = handle(&mut request, routes, catalog).unwrap_or_else(|error| {
-                        eprintln!("SQLite request failed: {error}");
-                        response(
-                            500,
-                            JSON,
-                            json!({"error": "SQLite request failed"}).to_string(),
-                        )
-                    });
+                    let headers = request
+                        .headers()
+                        .iter()
+                        .map(|entry| (entry.field.as_str().to_string(), entry.value.to_string()))
+                        .collect();
+                    let mut input = PxeRequest {
+                        uri: request.url().to_owned(),
+                        method: request.method().clone(),
+                        headers,
+                        body: request.as_reader(),
+                    };
+                    // This legacy listener only accepts requests on its private
+                    // Unix socket. nginx supplies the original client address.
+                    let peer =
+                        request_header(&input, CLIENT_IP).and_then(|value| value.parse().ok());
+                    let response = handle_request(&mut input, routes, catalog, peer);
                     let response = if matches!(routes, Routes::Guided(_)) {
                         response.with_header(header("X-PXE-Backend", "rust-guided"))
                     } else {
@@ -113,13 +134,14 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn handle(
-    request: &mut Request,
+    request: &mut PxeRequest<'_>,
     routes: &Routes<'_>,
     catalog: &monitoring::Catalog,
+    ip: Option<IpAddr>,
 ) -> rusqlite::Result<HttpResponse> {
-    let uri = request.url().to_owned();
+    let uri = request.uri.clone();
     let (path, query) = uri.split_once('?').unwrap_or((&uri, ""));
-    let method = request.method().clone();
+    let method = request.method.clone();
     if matches!(routes, Routes::Monitor(_)) && (method != Method::Get || path != MONITORING) {
         return Ok(not_found(&method, path));
     }
@@ -140,10 +162,6 @@ fn handle(
             &configured_db
         }
     };
-    let peer = request_header(request, CLIENT_IP)
-        .unwrap_or_default()
-        .to_owned();
-    let ip: Option<IpAddr> = peer.parse().ok();
     match (method, path) {
         (Method::Get, MONITORING) => {
             let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -261,9 +279,14 @@ fn handle(
                     discovery::report(&mut db, ip, &body, arg(&form, "b64"), arg(&args, "b64"))
                 }
                 "/api/discovery-action" => discovery::poll(&mut db, mac),
-                "/api/install-start" => {
-                    install::start(&mut db, matches!(peer.as_str(), "127.0.0.1" | "::1"), mac)
-                }
+                "/api/install-start" => install::start(
+                    &mut db,
+                    ip.is_some_and(|peer| {
+                        peer == IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                            || peer == IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+                    }),
+                    mac,
+                ),
                 "/api/install-end" => {
                     let allowed = in_subnet(ip, &setting(&db, "pxe_subnet")?);
                     install::end(&mut db, allowed, mac, bearer(request), value("status"))
@@ -296,9 +319,9 @@ fn handle(
                     ["Forwarded", "X-Forwarded-For", "X-Real-IP"]
                         .iter()
                         .any(|name| {
-                            request.headers().iter().any(|entry| {
-                                entry.field.as_str().as_str().eq_ignore_ascii_case(name)
-                                    && !matches!(entry.value.as_str(), "" | "0")
+                            request.headers.iter().any(|(field, value)| {
+                                field.eq_ignore_ascii_case(name)
+                                    && !matches!(value.as_str(), "" | "0")
                             })
                         });
                 install::checkpoint(
@@ -446,12 +469,9 @@ fn serve_postboot(
     ))
 }
 
-fn read_body(request: &mut Request, limit: usize) -> std::io::Result<Vec<u8>> {
+fn read_body(request: &mut PxeRequest<'_>, limit: usize) -> std::io::Result<Vec<u8>> {
     let mut data = Vec::new();
-    request
-        .as_reader()
-        .take(limit as u64)
-        .read_to_end(&mut data)?;
+    request.body.take(limit as u64).read_to_end(&mut data)?;
     Ok(data)
 }
 
@@ -496,13 +516,12 @@ fn setting(db: &Connection, key: &str) -> rusqlite::Result<String> {
     Ok(subnet.flatten().unwrap_or_default())
 }
 
-fn request_header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
-    // The proxy replaces the peer header on the private Unix socket. Reject duplicates.
+fn request_header<'a>(request: &'a PxeRequest<'_>, name: &str) -> Option<&'a str> {
     let mut values = request
-        .headers()
+        .headers
         .iter()
-        .filter(|entry| entry.field.as_str().as_str().eq_ignore_ascii_case(name));
-    let value = values.next()?.value.as_str();
+        .filter(|(field, _)| field.eq_ignore_ascii_case(name));
+    let value = values.next()?.1.as_str();
     if values.next().is_some() {
         None
     } else {
@@ -510,12 +529,28 @@ fn request_header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
     }
 }
 
-fn bearer(request: &Request) -> &str {
+fn bearer<'a>(request: &'a PxeRequest<'_>) -> &'a str {
     let raw = request_header(request, "Authorization").unwrap_or_default();
     match raw.get(..7) {
         Some(prefix) if prefix.eq_ignore_ascii_case("bearer ") => php_trim(&raw[7..]),
         _ => "",
     }
+}
+
+fn handle_request(
+    request: &mut PxeRequest<'_>,
+    routes: &Routes<'_>,
+    catalog: &monitoring::Catalog,
+    ip: Option<IpAddr>,
+) -> HttpResponse {
+    handle(request, routes, catalog, ip).unwrap_or_else(|error| {
+        eprintln!("SQLite request failed: {error}");
+        response(
+            500,
+            JSON,
+            json!({"error": "SQLite request failed"}).to_string(),
+        )
+    })
 }
 
 type Params = HashMap<String, Option<String>>;

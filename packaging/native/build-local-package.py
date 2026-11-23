@@ -31,7 +31,7 @@ Version: {version}
 Architecture: {architecture}
 Maintainer: {maintainer}
 Pre-Depends: python3 (>= 3.11)
-Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, dnsmasq-base, gettext-base, git, gpgv, {grub_dependencies}, iproute2, ipxe, mokutil, nginx, openssh-client, openssl, php-cli | php8.4-cli | php8.3-cli | php8.2-cli, php-curl | php8.4-curl | php8.3-curl | php8.2-curl, {php_fpm_dependency}php-sqlite3 | php8.4-sqlite3 | php8.3-sqlite3 | php8.2-sqlite3, pxelinux, python3-jinja2, python3-nacl, sbsigntool, {shim_dependency}sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
+Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, dnsmasq-base, gettext-base, git, gpgv, {grub_dependencies}, iproute2, ipxe, mokutil, {nginx_dependency}openssh-client, openssl, php-cli | php8.4-cli | php8.3-cli | php8.2-cli, php-curl | php8.4-curl | php8.3-curl | php8.2-curl, {php_fpm_dependency}php-sqlite3 | php8.4-sqlite3 | php8.3-sqlite3 | php8.2-sqlite3, pxelinux, python3-jinja2, python3-nacl, sbsigntool, {shim_dependency}sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
 Section: admin
 Priority: optional
 Description: {description}
@@ -145,22 +145,13 @@ def native_php_routes(config: str) -> str:
 
 def configure_guided_units(units: Path) -> None:
     for name, php, guided in (
-        ('pxe-tools-pxe-http.service', 'pxe-tools-php.service pxe-tools-init.service',
-         'pxe-tools-rust-guided.service pxe-tools-init.service'),
         ('pxe-tools-worker.service', 'pxe-tools-nginx.service', 'pxe-tools-init.service'),
         ('pxe-tools.target', 'pxe-tools-php.service pxe-tools-nginx.service ', ''),
         ('pxe-tools-admin.target', 'pxe-tools-nginx.service pxe-tools-worker.service',
          'pxe-tools-init.service pxe-tools-worker.service'),
     ):
         path = units/name
-        config = replace_exact(path.read_text(), php, guided)
-        if name == 'pxe-tools-pxe-http.service':
-            # The native upgrade replays services with dependencies ignored.
-            # Start the backend explicitly during replay as well.
-            config = replace_exact(config, 'ExecStartPre=/usr/bin/python3',
-                                   'ExecStartPre=/usr/bin/systemctl start pxe-tools-rust-guided.service\n'
-                                   'ExecStartPre=/usr/bin/python3')
-        path.write_text(config)
+        path.write_text(replace_exact(path.read_text(), php, guided))
 
 
 def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-local-test',
@@ -204,6 +195,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         (control/'control').write_text(CONTROL.format(
             version=version, package_name=package_name, architecture=architecture,
             grub_dependencies=GRUB_DEPENDENCIES[architecture],
+            nginx_dependency='' if rust_guided else 'nginx, ',
             php_fpm_dependency='' if rust_guided else PHP_FPM_DEPENDENCY,
             shim_dependency='shim-signed, ' if architecture == 'amd64' else '',
             startup=('The Rust variant requires a configured SQLite database and PXE network.'
@@ -212,7 +204,10 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         cleanup = checked(ROOT/'packaging/native/prune-package-cache.py').read_text()
         lifecycle = checked(ROOT/'packaging/native/upgrade-lifecycle.py').read_text()
         preinst = PREINST.replace('@@PXE_CACHE_CLEANUP@@', cleanup)
-        for name, text in [('preinst',preinst),('postinst',POSTINST),('prerm',PRERM),('postrm',POSTRM)]:
+        postinst = POSTINST
+        if rust_guided:
+            postinst = replace_exact(postinst, '    python3 /usr/lib/pxe-tools/native/reconcile-nginx.py --configure\n', '')
+        for name, text in [('preinst',preinst),('postinst',postinst),('prerm',PRERM),('postrm',POSTRM)]:
             text = text.replace('@@PXE_UPGRADE_LIFECYCLE@@', lifecycle).replace('@@PXE_PACKAGE_VERSION@@', version)
             p=control/name; p.write_text(text.replace('pxe-tools-local-test', package_name)); p.chmod(0o755)
         copy_tree(ROOT/'app', root/'usr/lib/pxe-tools/app', tracked)
@@ -244,11 +239,10 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             shutil.copyfile(rust_binary, binary)
             binary.chmod(0o755)
         if rust_guided:
-            shutil.copy2(checked(rust_assets/'pxe-tools-rust-guided.service'), units)
+            shutil.copy2(checked(rust_assets/'pxe-tools-pxe-http.service'), units)
             configure_guided_units(units)
             with (native/'default.env').open('a') as environment:
-                environment.write('PXE_RUST_GUIDED=1\n')
-            shutil.copy2(checked(rust_assets/'guided.conf'), templates/'pxe-routes.conf')
+                environment.write('PXE_RUST_GUIDED=1\nPXE_RUST_DIRECT_HTTP=1\n')
         else:
             php_routes = checked(ROOT/'docker/pxe-tools/nginx/pxe-php.conf').read_text()
             (templates/'pxe-routes.conf').write_text(native_php_routes(php_routes))

@@ -26,6 +26,7 @@ NGINX_LOG = Path(os.environ.get("PXE_FIXTURE_NGINX_LOG", "/var/lib/pxe-tools-nat
 MAC = "02:00:00:00:00:01"
 SERIAL = "PXE-TEST-ONE"
 INSTALL_MENU = TFTP / "pxelinux.cfg" / ("01-" + MAC.replace(":", "-"))
+DIRECT_HTTP = os.environ.get("PXE_RUST_DIRECT_HTTP") == "1"
 USE_WORKER_QUEUE = os.environ.get("PXE_FIXTURE_USE_WORKER") == "1"
 
 
@@ -219,7 +220,7 @@ def first_boot(action):
     if payload["ip"] != CLIENT or payload["_observed_remote_ip"] != CLIENT or not payload["kernel"]:
         raise RuntimeError("The first-boot receipt lacks the original native client address or kernel")
     # The postboot client asked for an acknowledgement. "accepted\n" is nine bytes.
-    if not any(line.startswith(f"{CLIENT} ") and "code=os_first_boot&ack=1" in line and '" 200 9 ' in line
+    if not DIRECT_HTTP and not any(line.startswith(f"{CLIENT} ") and "code=os_first_boot&ack=1" in line and '" 200 9 ' in line
                for line in NGINX_LOG.read_text().splitlines()):
         return None
     return payload["kernel"]
@@ -249,9 +250,10 @@ def follow(_root):
                 "JOIN installations i ON i.action_id=a.id WHERE a.id=?", (action,),
             ).fetchone()
         print(f"First-boot fixture action and installation states: {action_state}", flush=True)
-        for entry in NGINX_LOG.read_text().splitlines():
-            if "code=os_first_boot&ack=1" in entry:
-                print("First-boot HTTP status and bytes:", entry.split('"')[2].strip(), flush=True)
+        if not DIRECT_HTTP:
+            for entry in NGINX_LOG.read_text().splitlines():
+                if "code=os_first_boot&ack=1" in entry:
+                    print("First-boot HTTP status and bytes:", entry.split('"')[2].strip(), flush=True)
         raise
     if USE_WORKER_QUEUE:
         def worker_finalized():
@@ -264,11 +266,12 @@ def follow(_root):
     if digest(STALE) != original_stale or digest(CONF / "master.key") != original_key:
         raise RuntimeError("The stale database or existing fixture master key was modified")
     assert_php_stopped()
-    log = NGINX_LOG.read_text().splitlines()
-    for path in ("/api/discovery", "/preseed.php?mac=", "/pxe/postboot/", "/api/install-end?",
-                 "/api/machine-ready?", "code=os_first_boot"):
-        if not any(line.startswith(f"{CLIENT} ") and path in line and '" 200 ' in line for line in log):
-            raise RuntimeError("Missing native HTTP evidence for " + path)
+    if not DIRECT_HTTP:
+        log = NGINX_LOG.read_text().splitlines()
+        for path in ("/api/discovery", "/preseed.php?mac=", "/pxe/postboot/", "/api/install-end?",
+                     "/api/machine-ready?", "code=os_first_boot"):
+            if not any(line.startswith(f"{CLIENT} ") and path in line and '" 200 ' in line for line in log):
+                raise RuntimeError("Missing native HTTP evidence for " + path)
     print(f"PXE_NATIVE_FIRST_BOOT_OK kernel={kernel} peer={CLIENT} action={action} ack=accepted", flush=True)
     while True:
         assert_php_stopped()

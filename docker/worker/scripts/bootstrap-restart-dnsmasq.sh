@@ -40,9 +40,13 @@ if [[ "$activation" == off ]]; then
             fi
         done
     else
-        /opt/pxe-tools/init/render-nginx-conf.sh
-        nginx -t
-        nginx -s reload
+        if [[ "${PXE_RUST_DIRECT_HTTP:-}" == 1 ]]; then
+            s6-svc -d /run/service/rust-guided
+        else
+            /opt/pxe-tools/init/render-nginx-conf.sh
+            nginx -t
+            nginx -s reload
+        fi
         s6-svc -d "$service"
         for _ in {1..12}; do
             [[ $(s6-svstat -o up "$service") == false ]] && break
@@ -90,9 +94,14 @@ fi
 
 if [[ "$manager" == s6 ]]; then
     if [[ "$render_ok" -eq 1 ]]; then
-        /opt/pxe-tools/init/render-nginx-conf.sh
-        nginx -t
-        nginx -s reload
+        if [[ "${PXE_RUST_DIRECT_HTTP:-}" == 1 ]]; then
+            s6-svc -u /run/service/rust-guided
+            s6-svc -r /run/service/rust-guided
+        else
+            /opt/pxe-tools/init/render-nginx-conf.sh
+            nginx -t
+            nginx -s reload
+        fi
     fi
     s6-svc -u "$service"
     read -r old_up old_pid < <(s6-svstat -o up,pid "$service")

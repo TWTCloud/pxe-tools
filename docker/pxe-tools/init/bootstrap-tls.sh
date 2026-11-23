@@ -30,13 +30,47 @@ if [ -e "$CERT" ] || [ -L "$CERT" ] || [ -e "$KEY" ] || [ -L "$KEY" ]; then
 fi
 
 echo "[bootstrap-tls] Génération cert self-signed CN=$CN ($DAYS jours)"
+SAN="DNS:localhost,DNS:$CN,IP:127.0.0.1"
+if [ "${PXE_RUST_DIRECT_HTTP:-}" = 1 ]; then
+    ADDITIONAL_SAN=$(PYTHONPATH="${PXE_APP_DIR:-/app}" python3 - <<'PYTHON'
+import ipaddress
+import os
+import re
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+
+from database_selection import select_database
+
+names = []
+host = os.environ.get('PXE_PUBLIC_HOST', '')
+if host:
+    try:
+        names.append('IP:' + str(ipaddress.ip_address(host)))
+    except ValueError:
+        if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]*', host):
+            names.append('DNS:' + host)
+try:
+    path = Path(select_database()[0])
+    if path.is_file():
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
+            row = db.execute("SELECT value FROM settings WHERE key='pxe_ip'").fetchone()
+            if row and row[0]:
+                names.append('IP:' + str(ipaddress.IPv4Address(row[0])))
+except (RuntimeError, sqlite3.Error, ValueError):
+    pass
+print(''.join(',' + name for name in dict.fromkeys(names)), end='')
+PYTHON
+)
+    SAN="$SAN$ADDITIONAL_SAN"
+fi
 openssl req -x509 -nodes \
     -newkey rsa:2048 \
     -keyout "$KEY" \
     -out "$CERT" \
     -days "$DAYS" \
     -subj "/CN=$CN" \
-    -addext "subjectAltName=DNS:localhost,DNS:$CN,IP:127.0.0.1"
+    -addext "subjectAltName=$SAN"
 
 chmod 0600 "$KEY"
 chmod 0644 "$CERT"

@@ -291,9 +291,8 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
 
     if native:
         docker('exec',app,'systemctl','start','pxe-tools.target')
-        for service in ('pxe-tools-rust-guided','pxe-tools-pxe-http','pxe-tools-dnsmasq','pxe-tools-worker'):
+        for service in ('pxe-tools-pxe-http','pxe-tools-dnsmasq','pxe-tools-worker'):
             docker('exec',app,'systemctl','is-active','--quiet',service+'.service')
-        nginx_command=['nginx','-T','-c','/usr/lib/pxe-tools/native/pxe-nginx.conf']
         dnsmasq_config='/var/lib/pxe-tools-native/rendered/dnsmasq.conf'
     else:
         args=[arg for item in env for arg in ('--env',item)]
@@ -303,7 +302,6 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         app_pid=int(inspect(app)['State']['Pid'])
         if not app_pid or os.stat(f'/proc/{app_pid}/ns/net').st_ino != os.stat(f'/proc/{expected_pid}/ns/net').st_ino:
             raise RuntimeError('appliance did not join its isolated network')
-        nginx_command=['nginx','-T']
         dnsmasq_config='/etc/dnsmasq.d/pxe.conf'
 
     pg=docker('exec',app,'dpkg','--print-architecture').stdout.strip()
@@ -316,9 +314,50 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
             raise RuntimeError('The packaged appliance stopped during startup')
         return docker('exec',dhcp,'curl','-fsS','--max-time','2',pxe_url+'/healthz',check=False).returncode==0
     wait_for(http_ready,90,'packaged PXE listener')
-    nginx_config=docker('exec',app,*nginx_command).stdout
-    if re.search(r'(?m)^\s*(?:fastcgi_pass|error_page)\s',nginx_config) or 'pxe-tools-rust-guided/http.sock' not in nginx_config:
-        raise RuntimeError('PXE listener has a PHP or fallback route, or Rust is missing')
+    for package_name in ('nginx','nginx-common','php8.4-fpm'):
+        state=docker('exec',app,'dpkg-query','-W','-f=${Status}',package_name,check=False).stdout
+        if state.strip()=='install ok installed':
+            raise RuntimeError(f'Unexpected package in the guided appliance: {package_name}')
+
+    tls_dir='/var/lib/pxe-tools-native/tls' if native else '/var/lib/pxe-tools/tls'
+    docker('cp',f'{app}:{tls_dir}/cert.pem',str(fixture/'rust-cert.pem'))
+    cert='/fixture-data/rust-cert.pem'
+    tls_url='https://192.0.2.1'
+
+    def request(url, *options):
+        return docker('exec',dhcp,'curl','-sS','--max-time','10','--cacert',cert,
+                      '-D','-',*options,url).stdout
+
+    redirect=request(pxe_url+'/')
+    if not redirect.startswith('HTTP/1.1 302 ') or 'location: https://192.0.2.1/admin/' not in redirect.lower():
+        raise RuntimeError('Expected the root redirect to the HTTPS console')
+    if not request(pxe_url+'/admin/devices').startswith('HTTP/1.1 404 '):
+        raise RuntimeError('The admin console should require HTTPS')
+    redirect=request(tls_url+'/admin/')
+    if not redirect.startswith('HTTP/1.1 302 ') or 'location: /admin/devices' not in redirect.lower():
+        raise RuntimeError('Expected the canonical devices URL')
+    if not request(tls_url+'/admin/devices').startswith('HTTP/1.1 401 '):
+        raise RuntimeError('Expected the devices list to require authentication')
+    login=('--user','fixture-admin:fixture-login-password')
+    devices=request(tls_url+'/admin/devices',*login)
+    if not devices.startswith('HTTP/1.1 200 ') or '<h1>Ordinateurs</h1>' not in devices:
+        raise RuntimeError('The Rust console did not apply the existing device label')
+    docker('exec',app,'sqlite3','/var/lib/pxe-tools/chosen.sqlite',
+           "UPDATE settings SET value='serveur' WHERE key='ui_device_term'")
+    if '<h1>Serveurs</h1>' not in request(tls_url+'/admin/devices',*login):
+        raise RuntimeError('The device label change did not preserve the canonical URL')
+    kernel_url='/netboot/debian/13.0/amd64/linux'
+    if not request(pxe_url+kernel_url,'--head').startswith('HTTP/1.1 200 '):
+        raise RuntimeError('The PXE kernel should be available directly on HTTP')
+    # Drop the binary response body after checking the negotiated HTTPS range.
+    partial=request(tls_url+kernel_url,'--range','0-15','--output','/dev/null')
+    if not partial.startswith('HTTP/1.1 206 ') or 'content-range: bytes 0-15/' not in partial.lower():
+        raise RuntimeError('The PXE kernel should support byte ranges on HTTPS')
+    origin=request(pxe_url+'/api/install-start','--header','X-Pxe-Client-Ip: 127.0.0.1')
+    if not origin.startswith('HTTP/1.1 404 '):
+        raise RuntimeError('A client header bypassed the install-start peer check')
+    print('Rust HTTP/HTTPS: trusted test certificate, redirect, canonical console, kernel range and peer check verified',flush=True)
+
     config=docker('exec',app,'cat',dnsmasq_config).stdout
     if 'dhcp-range=192.0.2.0,proxy,255.255.255.0' not in config:
         raise RuntimeError('Packaged dnsmasq proxy configuration is missing')
@@ -330,16 +369,31 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     tftp=root/'tftp'
     wait_for(lambda:(tftp/'lpxelinux.0').is_file() and (tftp/'pxelinux.cfg/default').is_file(),
              120,'worker rendering and bootloaders')
-    log_path='/var/lib/pxe-tools-native/log/pxe-access.log' if native else '/var/log/nginx/pxe-access.log'
     check_env=('set -a; source /usr/lib/pxe-tools/native/default.env; '
                'source /var/lib/pxe-tools-native/runtime.env; set +a; ') if native else (
                'export PXE_APP_DIR=/app; ')
-    docker('exec','-d','-e','PXE_FIXTURE_NGINX_LOG='+log_path,app,'bash','-ec',
+    docker('exec','-d',app,'bash','-ec',
            check_env+'export PXE_FIXTURE_MIRROR_IP=192.0.2.2 PXE_FIXTURE_USE_WORKER=1; '
            'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
     status=fixture/'native-status.log'
     wait_for(lambda:status.is_file() and 'PXE_NATIVE_READY' in status.read_text(),30,'packaged Rust fixture ready')
-    run_rust_guests(lan,client,root,status,screen_login=True,access_log=(app,log_path))
+    run_rust_guests(lan,client,root,status,screen_login=True)
+    if native:
+        logs=docker('exec',app,'journalctl','--no-pager','-u','pxe-tools-pxe-http.service','-o','cat').stdout
+    else:
+        result=docker('logs',app)
+        logs=result.stdout+result.stderr
+    for marker in (
+        'PXE request peer=192.0.2.100 route=/api/discovery status=200',
+        'PXE request peer=192.0.2.100 route=/preseed.php status=200',
+        'PXE request peer=192.0.2.100 route=/pxe/postboot/ status=200',
+        'PXE request peer=192.0.2.100 route=/api/install-end status=200',
+        'PXE request peer=192.0.2.100 route=/api/machine-ready status=200',
+        'PXE first boot peer=192.0.2.100 status=200 bytes=9',
+    ):
+        if marker not in logs.splitlines():
+            raise RuntimeError(f'Missing evidence in the Rust server log: {marker}')
+    print('Direct Rust access records and first-boot acknowledgement verified',flush=True)
 
 
 def main():
@@ -357,8 +411,9 @@ def main():
         (conf/'master.key').write_bytes(os.urandom(32));(conf/'master.key').chmod(0o600)
         (conf/'db.conf').write_text(json.dumps({'driver':'sqlite','path':'/var/lib/pxe-tools/chosen.sqlite'}))
         (conf/'db.conf').chmod(0o600)
-        if not rust_lab:
-            login_hash=docker('run','--rm','--network','none','--entrypoint','php',image,'-r',
+        if not rust_lab or packaged:
+            php_image=appliance_image if backend=='rust-docker' else image
+            login_hash=docker('run','--rm','--network','none','--entrypoint','php',php_image,'-r',
                               'echo password_hash("fixture-login-password", PASSWORD_DEFAULT);').stdout
         with sqlite3.connect(data/'chosen.sqlite') as db:
             db.executescript((ROOT/'app/db/schema.sqlite.sql').read_text())
@@ -367,8 +422,8 @@ def main():
                 ('dhcp_proxy_enabled','on'),('dhcp_proxy_network','192.0.2.0'),
                 ('dhcp_proxy_netmask','255.255.255.0'),('https_enabled','off'),
                 ('wizard_completed','1'),('db_init_done','1'),('admin_created','1'),('init_completed','1'),
-                ('ansible_enabled','off'),('catalog_auto_refresh_enabled','off')])
-            if not rust_lab:
+                ('ansible_enabled','off'),('catalog_auto_refresh_enabled','off'),('ui_device_term','ordinateur')])
+            if not rust_lab or packaged:
                 db.execute('INSERT INTO users(username,password_hash) VALUES(?,?)',('fixture-admin',login_hash))
             db.execute("INSERT INTO os_images(distro,version,arch,codename,version_full,enabled,status) VALUES('debian','13.0','amd64','trixie','13.0',1,'downloaded')")
         # A stale but valid DB must never drive the appliance, even when its

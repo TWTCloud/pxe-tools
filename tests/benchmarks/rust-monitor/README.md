@@ -92,22 +92,27 @@ avec `systemctl start pxe-tools.target` lorsque le réseau PXE est configuré.
 L'image prend les mêmes volumes et paramètres réseau de démarrage que
 l'appliance et lance son listener PXE via l'init s6.
 
-nginx sert les fichiers de démarrage et transmet les appels dynamiques
-à Rust sur un socket privé, avec l'adresse du client. Le preseed guidé,
-les menus GRUB de découverte et d'installation, les retours et les
-artefacts postboot sont disponibles dans cette variante. Les appels
-dynamiques répondent directement depuis Rust et l'indisponibilité du
-socket provoque une erreur HTTP. Les opérations de partitionnement
-personnalisé, de wipe ou de test de disques et la configuration réseau
-multi-interface restent hors de ce parcours.
+Le binaire Rust écoute sur le port 80 et le port 443 de l’adresse IPv4 PXE.
+La racine HTTP redirige vers `/admin/` en HTTPS. Le preseed, les ressources
+de démarrage et les retours d’installation restent disponibles en HTTP.
+Rust sert aussi ces ressources sur HTTPS. Le certificat auto-signé est
+créé au premier démarrage et conservé dans le répertoire TLS de l’instance.
 
-Ces variantes excluent PHP-FPM et l'interface web d'administration.
-L'initialisation SQLite et certaines opérations du worker utilisent
-encore PHP CLI. Les essais GitHub lancent les services fournis par les
-livrables et placent le véritable client Debian derrière un DNS/DHCP de
-fixture et un miroir Debian authentifié sur le réseau isolé. Le banc
-utilise un client BIOS amd64 et vérifie aussi l'API GRUB par comparaison
-avec le renderer PHP.
+La vue HTTPS `/admin/devices` permet de consulter la liste avec le compte
+local SQLite existant. Elle lit le réglage `ui_device_term` pour afficher
+le libellé choisi. Cette vue est en lecture seule. Le parcours de
+configuration initiale, la gestion des certificats et les autres écrans
+d’administration restent à porter.
+
+Les deux variantes fonctionnent sans installer Nginx ni PHP-FPM.
+L’initialisation SQLite et certaines opérations du worker utilisent PHP
+CLI. Les plans de partition personnalisés, le wipe, les tests de disques
+et les configurations réseau multi-interface restent hors de ce parcours.
+
+Les essais GitHub construisent les deux livrables sur les runners amd64
+et arm64. Ils vérifient HTTP et HTTPS, puis démarrent un client Debian
+BIOS amd64 sur un réseau isolé avec un proxy DHCP/TFTP et un miroir Debian
+authentifié. Le test de parité couvre également les réponses GRUB.
 
 ## Mesurer l'API de suivi
 

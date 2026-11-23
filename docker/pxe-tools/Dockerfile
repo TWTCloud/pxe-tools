@@ -1,6 +1,6 @@
 # PXE Tools — image appliance unique
-# Tout le stack (nginx + php-fpm + dnsmasq + worker.py + outils GRUB/PXE)
-# tourne sous s6-overlay v3 dans un seul container, network_mode: host.
+# Les services PXE et le worker tournent sous s6-overlay v3 dans un conteneur,
+# network_mode: host. Le service web dépend de la variante construite.
 # Construction locale et candidat de publication multiarchitecture.
 
 FROM debian:trixie-slim AS appliance
@@ -17,8 +17,7 @@ RUN set -eu; \
         *) echo 'Supported server architectures are amd64 and arm64.' >&2; exit 1 ;; \
     esac; \
     apt-get update && apt-get install -y --no-install-recommends \
-    # Web stack
-    nginx \
+    # SQLite compatibility while migrations are ported
     php8.4-sqlite3 \
     php8.4-cli \
     php8.4-curl \
@@ -27,6 +26,7 @@ RUN set -eu; \
     # Pas besoin d'un php8.4-sodium séparé (ce package n'existe pas).
     # DHCP/TFTP
     dnsmasq \
+    iproute2 \
     # Worker runtime
     python3 \
     python3-jinja2 \
@@ -174,22 +174,6 @@ conf-dir=/etc/dnsmasq.d/
 EOF
 
 # ----------------------------------------------------------------------------
-# Config nginx :
-#   - nginx.conf, pxe.conf : statiques (placés directement dans /etc/nginx/)
-#   - admin.conf.tmpl : templated avec envsubst au boot par s6 oneshot
-#     `render-nginx-conf` pour permettre override des ports via ADMIN_PORT /
-#     ADMIN_HTTP_PORT (env vars). Source : /opt/pxe-tools/nginx/, output :
-#     /etc/nginx/conf.d/admin.conf.
-# ----------------------------------------------------------------------------
-RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
-COPY docker/pxe-tools/nginx/nginx.conf       /etc/nginx/nginx.conf
-COPY docker/pxe-tools/nginx/pxe.conf         /opt/pxe-tools/nginx/pxe.conf.tmpl
-COPY docker/pxe-tools/nginx/pxe-php.conf     /opt/pxe-tools/nginx/pxe-routes.conf
-COPY docker/pxe-tools/nginx/admin-https.conf.tmpl         /opt/pxe-tools/nginx/admin-https.conf.tmpl
-COPY docker/pxe-tools/nginx/admin-http-redirect.conf.tmpl /opt/pxe-tools/nginx/admin-http-redirect.conf.tmpl
-COPY docker/pxe-tools/nginx/admin-http-serve.conf.tmpl    /opt/pxe-tools/nginx/admin-http-serve.conf.tmpl
-
-# ----------------------------------------------------------------------------
 # s6-overlay services (oneshots bootstrap + 4 longruns + bundle user)
 # ----------------------------------------------------------------------------
 COPY docker/pxe-tools/s6-rc/ /etc/s6-overlay/s6-rc.d/
@@ -261,7 +245,7 @@ RUN groupadd -g "${ANSIBLE_GID}" ansible \
 # Ports déclaratifs (informatif uniquement — network_mode: host les expose
 # directement sur l'host). Les ports admin réels sont contrôlés par les env
 # vars ADMIN_PORT / ADMIN_HTTP_PORT (default 8443/8080).
-EXPOSE 80 8443 8080 67/udp 69/udp 4011/udp
+EXPOSE 80 67/udp 69/udp 4011/udp
 
 # Healthcheck : PXE HTTP, admin HTTP et admin TLS lorsqu'il est activé.
 # start_period long car bootstrap-debian-images peut télécharger ~1.5 GB au 1er boot.
@@ -272,12 +256,29 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
 ENTRYPOINT ["/init"]
 
 FROM appliance AS php-appliance
+EXPOSE 8443 8080
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    php8.4-fpm php8.4-mysql php8.4-opcache mariadb-client \
+    nginx php8.4-fpm php8.4-mysql php8.4-opcache mariadb-client \
     && rm -f /etc/php/8.4/fpm/pool.d/www.conf \
     && rm -rf /var/lib/apt/lists/*
 COPY docker/pxe-tools/php-fpm/zz-pxe.conf /etc/php/8.4/fpm/pool.d/zz-pxe.conf
 COPY docker/pxe-tools/php-fpm/opcache.ini /etc/php/8.4/fpm/conf.d/99-opcache.ini
+
+# ----------------------------------------------------------------------------
+# Config nginx :
+#   - nginx.conf, pxe.conf : statiques (placés directement dans /etc/nginx/)
+#   - admin.conf.tmpl : templated avec envsubst au boot par s6 oneshot
+#     `render-nginx-conf` pour permettre override des ports via ADMIN_PORT /
+#     ADMIN_HTTP_PORT (env vars). Source : /opt/pxe-tools/nginx/, output :
+#     /etc/nginx/conf.d/admin.conf.
+# ----------------------------------------------------------------------------
+RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
+COPY docker/pxe-tools/nginx/nginx.conf       /etc/nginx/nginx.conf
+COPY docker/pxe-tools/nginx/pxe.conf         /opt/pxe-tools/nginx/pxe.conf.tmpl
+COPY docker/pxe-tools/nginx/pxe-php.conf     /opt/pxe-tools/nginx/pxe-routes.conf
+COPY docker/pxe-tools/nginx/admin-https.conf.tmpl         /opt/pxe-tools/nginx/admin-https.conf.tmpl
+COPY docker/pxe-tools/nginx/admin-http-redirect.conf.tmpl /opt/pxe-tools/nginx/admin-http-redirect.conf.tmpl
+COPY docker/pxe-tools/nginx/admin-http-serve.conf.tmpl    /opt/pxe-tools/nginx/admin-http-serve.conf.tmpl
 
 FROM rust:1.96.0-trixie AS rust-build
 WORKDIR /source
@@ -294,21 +295,24 @@ RUN printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rust-monitor/type \
     && touch /etc/s6-overlay/s6-rc.d/user/contents.d/rust-monitor
 
 FROM appliance AS rust-guided
-ENV PXE_RUST_GUIDED=1
+ENV PXE_RUST_GUIDED=1 PXE_RUST_DIRECT_HTTP=1
 COPY --from=rust-build /source/rust/target/release/pxe-tools-rust /usr/lib/pxe-tools/pxe-tools-rust
-COPY rust/packaging/guided.conf /opt/pxe-tools/nginx/pxe-routes.conf
 COPY --chmod=0755 rust/packaging/s6-guided-run /etc/s6-overlay/s6-rc.d/rust-guided/run
 RUN rm /etc/s6-overlay/s6-rc.d/user/contents.d/php-fpm \
-          /etc/s6-overlay/s6-rc.d/nginx/dependencies.d/php-fpm \
+          /etc/s6-overlay/s6-rc.d/user/contents.d/nginx \
           /etc/s6-overlay/s6-rc.d/worker/dependencies.d/php-fpm \
-    && rm -r /etc/s6-overlay/s6-rc.d/php-fpm \
+    && rm -r /etc/s6-overlay/s6-rc.d/php-fpm /etc/s6-overlay/s6-rc.d/nginx \
+             /etc/s6-overlay/s6-rc.d/render-nginx-conf \
     && mkdir /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d \
+             /etc/s6-overlay/s6-rc.d/bootstrap-tls/dependencies.d \
     && printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rust-guided/type \
     && touch /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/php-init \
-             /etc/s6-overlay/s6-rc.d/nginx/dependencies.d/rust-guided \
-             /etc/s6-overlay/s6-rc.d/user/contents.d/rust-guided \
-             /opt/pxe-tools/nginx/rust-guided
-HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
-    CMD curl -fsS http://127.0.0.1/healthz || exit 1
+             /etc/s6-overlay/s6-rc.d/bootstrap-tls/dependencies.d/php-init \
+             /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/bootstrap-tls \
+             /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/bootstrap-render-templates \
+             /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/wait-for-net \
+             /etc/s6-overlay/s6-rc.d/worker/dependencies.d/rust-guided \
+             /etc/s6-overlay/s6-rc.d/user/contents.d/rust-guided
+EXPOSE 443
 
 FROM php-appliance AS default

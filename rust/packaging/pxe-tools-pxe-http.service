@@ -1,0 +1,22 @@
+[Unit]
+Description=PXE Tools guided Rust HTTP and HTTPS
+Requires=pxe-tools-init.service
+After=pxe-tools-init.service
+
+[Service]
+Type=notify
+User=www-data
+Group=www-data
+EnvironmentFile=/usr/lib/pxe-tools/native/default.env
+EnvironmentFile=-/var/lib/pxe-tools-native/network.env
+EnvironmentFile=-/var/lib/pxe-tools-native/runtime.env
+RuntimeDirectory=pxe-tools-pxe-http
+LoadCredential=cert.pem:/var/lib/pxe-tools-native/tls/cert.pem
+LoadCredential=key.pem:/var/lib/pxe-tools-native/tls/key.pem
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+TimeoutStartSec=45s
+ExecStartPre=-/usr/bin/rm -f /run/pxe-tools-pxe-http/ready
+ExecStart=/usr/lib/pxe-tools/pxe-tools-rust --serve-guided /etc/pxe-tools/db.conf
+ExecStartPost=/usr/bin/touch /run/pxe-tools-pxe-http/ready
