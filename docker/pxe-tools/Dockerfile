@@ -1,7 +1,7 @@
 # PXE Tools — image appliance unique
 # Tout le stack (nginx + php-fpm + dnsmasq + worker.py + outils GRUB/PXE)
 # tourne sous s6-overlay v3 dans un seul container, network_mode: host.
-# Image locale de développement, sans publication.
+# Construction locale et candidat de publication multiarchitecture.
 
 FROM debian:trixie-slim
 

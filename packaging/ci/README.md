@@ -103,3 +103,19 @@ pas `wrangler triggers deploy` et ne gère pas les routes ou domaines. Vérifier
 la liaison du domaine séparément. Un échec après déploiement peut laisser une
 version effective malgré un run rouge : inspecter la version active et le
 snapshot public avant toute nouvelle publication.
+
+## Publication Docker
+
+Le workflow manuel `docker-release.yml` construit les images amd64 et arm64
+sur des runners natifs à partir du tag approuvé. Il vérifie le démarrage et la
+génération des chargeurs PXE, puis rapproche les versions installées des
+index de sources Debian authentifiés. Les offres de sources correspondant
+aux empreintes des images testées sont attachées à la release GitHub avant
+l'envoi au registre. Les archives de sources et de reliage des outils
+statiques font l'objet du même contrôle que pour APT.
+
+Le registre prévu pour la version publique est
+`ghcr.io/williamboglietti/pxe-tools-appliance`. Une publication crée un index
+pour les deux plateformes sous le tag de la release. Vérifier le
+téléchargement anonyme des deux images après le réglage de visibilité du
+nouveau paquet.
