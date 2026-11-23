@@ -166,8 +166,12 @@ de confirmation et de reprise. Rust rend aussi le script et l’unité postboot
 par action à partir des variables du worker. Ce rendu accepte les variables
 `pxe_ip`, `mac` et `token` des templates livrés. Rust reprend les anciens
 réglages réseau SQLite en gardant les choix explicites et le mode PXE
-existant. Les autres migrations et l’import des modèles utilisent encore
-PHP CLI. Le renderer couvre les recettes de partition
+existant. La variante guidée applique aussi en Rust les évolutions de
+colonnes et d’index SQLite après les contrôles de compatibilité de
+l’installateur. La reprise du worker remet en file les téléchargements
+et suppressions interrompus et conserve le journal de suppression.
+Les transformations historiques restantes et l’import des modèles
+utilisent encore PHP CLI. Le renderer couvre les recettes de partition
 sur un disque identifié, avec partitions physiques BIOS ou UEFI. Un plan
 LVM sur ce disque peut définir ses groupes de volumes et volumes logiques.
 La vérification compare le rendu à PHP et refuse les volumes qui désignent

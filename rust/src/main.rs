@@ -11,6 +11,7 @@ mod postboot;
 mod preseed;
 mod pxe;
 mod web;
+mod worker;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
@@ -82,6 +83,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
         if flag == "--migrate-network-settings" && Path::new(config).is_absolute() {
             return migrations::network_settings(Path::new(config));
+        }
+        if flag == "--recover-interrupted-jobs" && Path::new(config).is_absolute() {
+            return worker::recover(Path::new(config));
         }
         if flag == "--render-postboot" {
             return postboot::render(Path::new(config));

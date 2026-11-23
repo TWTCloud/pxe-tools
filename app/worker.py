@@ -3305,22 +3305,34 @@ def main() -> None:
     except Exception as e:
         print(f"[worker] bootstrap_ansible_workspace failed: {e}", file=sys.stderr, flush=True)
 
-    # Reaper en premier : un précédent crash/restart laisse des rows status='running'
-    # (init_jobs) ou 'downloading' (os_images). Sans reset elles bloquent la file
-    # de façon invisible (fetch ne les voit pas).
-    try:
-        reaped = reap_running_zombies()
-        if reaped > 0:
-            print(f"[worker] reaped {reaped} init_jobs zombie(s) status=running → failed", flush=True)
-    except Exception as e:
-        print(f"[worker] reaper init_jobs failed: {e}", file=sys.stderr, flush=True)
+    if os.environ.get("PXE_RUST_GUIDED") == "1":
+        try:
+            recovered = subprocess.run(
+                ["/usr/lib/pxe-tools/pxe-tools-rust", "--recover-interrupted-jobs", DB_PATH],
+                text=True, capture_output=True, check=True, timeout=15,
+            )
+            counts = json.loads(recovered.stdout)
+            if any(counts.values()):
+                print(f"[worker] restored interrupted jobs: {counts}", flush=True)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print(f"[worker] interrupted job recovery failed: {error}", file=sys.stderr, flush=True)
+    else:
+        # Reaper en premier : un précédent crash/restart laisse des rows status='running'
+        # (init_jobs) ou 'downloading' (os_images). Sans reset elles bloquent la file
+        # de façon invisible (fetch ne les voit pas).
+        try:
+            reaped = reap_running_zombies()
+            if reaped > 0:
+                print(f"[worker] reaped {reaped} init_jobs zombie(s) status=running → failed", flush=True)
+        except Exception as e:
+            print(f"[worker] reaper init_jobs failed: {e}", file=sys.stderr, flush=True)
 
-    try:
-        reaped_img = reap_image_zombies()
-        if reaped_img > 0:
-            print(f"[worker] reaped {reaped_img} os_images zombie(s) status=downloading → pending", flush=True)
-    except Exception as e:
-        print(f"[worker] reaper os_images failed: {e}", file=sys.stderr, flush=True)
+        try:
+            reaped_img = reap_image_zombies()
+            if reaped_img > 0:
+                print(f"[worker] reaped {reaped_img} os_images zombie(s) status=downloading → pending", flush=True)
+        except Exception as e:
+            print(f"[worker] reaper os_images failed: {e}", file=sys.stderr, flush=True)
 
     # Enqueue les jobs bootstrap si nécessaire (au premier démarrage du container)
     try:

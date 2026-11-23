@@ -438,6 +438,33 @@ def verify_worker_commands(binary):
     print('Rust network migration preserves explicit choices and historical DHCP fallback atomically', flush=True)
 
 
+def verify_worker_recovery(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-recovery-') as temporary:
+        database = Path(temporary).resolve()/'fixture.sqlite'
+        schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+        command = [str(binary),'--recover-interrupted-jobs',str(database)]
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            db.executemany("INSERT INTO init_jobs(job_type,status,log) VALUES(?,?,?)", [
+                ('image:delete:17','running','fixture journal'),
+                ('bootstrap:render_templates','running','render log'),
+                ('bootstrap:build_grub','success',None),
+            ])
+            db.execute("INSERT INTO os_images(distro,version,status,error_msg) VALUES('debian','13','downloading','prior')")
+        first = subprocess.run(command, check=True, capture_output=True)
+        assert json.loads(first.stdout)=={'deletions':1,'failed':1,'downloads':1}
+        repeat = subprocess.run(command, check=True, capture_output=True)
+        assert json.loads(repeat.stdout)=={'deletions':0,'failed':0,'downloads':0}
+        with closing(sqlite3.connect(database)) as db, db:
+            assert db.execute('SELECT status,log,ended_at IS NOT NULL FROM init_jobs ORDER BY id').fetchall()==[
+                ('pending','fixture journal',False),('failed','render log',True),('success',None,False),
+            ]
+            assert db.execute('SELECT status,error_msg FROM os_images').fetchone()==(
+                'pending','prior [reaper: worker redémarré]',
+            )
+    print('Rust worker recovery resumes image work and preserves staged deletion journals', flush=True)
+
+
 def verify_schema_migration(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-schema-') as temporary:
         root = Path(temporary).resolve()
@@ -530,6 +557,7 @@ def local(binary):
         verify_job_console(updated, database, authorization)
         verify_activity(updated, database, authorization)
     verify_worker_commands(binary)
+    verify_worker_recovery(binary)
     verify_schema_migration(binary)
 
 
