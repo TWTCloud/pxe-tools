@@ -29,23 +29,30 @@ trap cleanup EXIT
 chmod 0755 "$work"
 
 if [ "$mode" = apt ]; then
+    version="${PXE_TEST_APT_VERSION:-0.1.0~lab1}"
     for arch in amd64 arm64; do
-        python3 packaging/native/build-local-package.py "$work/$arch.deb" --architecture "$arch"
         python3 packaging/native/build-apt-package-candidate.py "$work/candidate-$arch.deb" \
-            --architecture "$arch" --version '0.1.0~lab1' --maintainer 'Fixture <fixture@example.invalid>'
+            --architecture "$arch" --version "$version" --maintainer 'Fixture <fixture@example.invalid>'
         test "$(dpkg-deb -f "$work/candidate-$arch.deb" Architecture)" = "$arch"
         test "$(stat -c %s "$work/candidate-$arch.deb")" -le 26214400
         stat -c '%s %n' "$work/candidate-$arch.deb"
     done
-    python3 packaging/native/build-local-ansible-package.py "$work/ansible.deb"
+    python3 packaging/native/build-local-ansible-package.py "$work/ansible.deb" --release --version "$version"
     install -d -m 0700 "$work/gnupg"
     gpg --homedir "$work/gnupg" --batch --pinentry-mode loopback --passphrase '' \
         --quick-generate-key 'PXE fixture <fixture@example.invalid>' rsa2048 sign 1d
     fingerprint=$(gpg --homedir "$work/gnupg" --batch --with-colons --list-keys | awk -F: '$1=="fpr" {print $10}')
     gpg --homedir "$work/gnupg" --batch --export > "$work/keyring.gpg"
-    python3 packaging/native/build-local-apt-repository.py "$work/amd64.deb" "$work/apt" \
+    python3 packaging/native/build-apt-release-candidate.py "$work/candidate-amd64.deb" "$work/apt" \
         --gnupg-home "$work/gnupg" --fingerprint "$fingerprint" \
-        --arm64-package "$work/arm64.deb" --ansible-package "$work/ansible.deb"
+        --source-commit "$(git rev-parse HEAD)" --build-run-id "${GITHUB_RUN_ID:-1}" \
+        --approved-package-sha256 "$(sha256sum "$work/candidate-amd64.deb" | cut -d' ' -f1)" \
+        --arm64-package "$work/candidate-arm64.deb" \
+        --approved-arm64-sha256 "$(sha256sum "$work/candidate-arm64.deb" | cut -d' ' -f1)" \
+        --ansible-package "$work/ansible.deb" \
+        --approved-ansible-sha256 "$(sha256sum "$work/ansible.deb" | cut -d' ' -f1)"
+    python3 packaging/native/prepare-static-apt.py "$work/apt" "$work/assets" \
+        --keyring "$work/keyring.gpg" --primary-fingerprint "$fingerprint" --signing-fingerprint "$fingerprint"
     for arch in amd64 arm64; do
         diff -u <(printf 'all\n%s\n' "$arch" | sort) \
             <(sed -n 's/^Architecture: //p' "$work/apt/dists/stable/main/binary-$arch/Packages" | sort)
@@ -58,20 +65,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends systemd systemd
 DOCKERFILE
     docker run -d --name "$name" --privileged --cgroupns private \
         --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
-        --mount "type=bind,src=$work/apt,dst=/mnt/pxe-apt,readonly" \
+        --mount "type=bind,src=$work/assets/apt,dst=/mnt/pxe-apt,readonly" \
         --mount "type=bind,src=$work/keyring.gpg,dst=/usr/share/keyrings/pxe-lab.gpg,readonly" \
+        --mount "type=bind,src=$PWD/packaging/ci/pxe-tools-next-public.gpg,dst=/usr/share/keyrings/pxe-beta11.gpg,readonly" \
         "$name" /lib/systemd/systemd --unit=basic.target >/dev/null
     for attempt in {1..60}; do
         if docker exec "$name" systemctl list-units --no-legend >/dev/null 2>&1; then break; fi
         sleep 1
     done
-    docker exec -i "$name" bash -eus -- "$architecture" <<'APT_GUEST'
+    if [ "${PXE_TEST_APT_UPGRADE:-0}" = 1 ]; then
+        test "$architecture" = amd64
+        docker exec -i "$name" bash -eus <<'BETA11_GUEST'
+export DEBIAN_FRONTEND=noninteractive
+printf '%s\n' 'deb [signed-by=/usr/share/keyrings/pxe-beta11.gpg] https://packages.pxetools.com/apt/ stable main' \
+    > /etc/apt/sources.list.d/pxe-beta11.list
+apt-get update
+apt-get install -y --no-install-recommends 'pxe-tools=0.1.0~beta11'
+systemctl is-active --quiet pxe-tools-admin.target
+curl -fsS http://127.0.0.1:8080/healthz
+sha256sum /etc/pxe-tools/master.key > /run/pxe-upgrade-master-key.sha256
+rm /etc/apt/sources.list.d/pxe-beta11.list
+BETA11_GUEST
+    fi
+    docker exec -i "$name" bash -eus -- "$architecture" "$version" <<'APT_GUEST'
 export DEBIAN_FRONTEND=noninteractive
 printf '%s\n' 'deb [signed-by=/usr/share/keyrings/pxe-lab.gpg] file:/mnt/pxe-apt stable main' \
     > /etc/apt/sources.list.d/pxe-lab.list
 apt-get update
-apt-get install -y --no-install-recommends pxe-tools-local-test
-test "$(dpkg-query -W -f='${Architecture}' pxe-tools-local-test)" = "$1"
+apt-get install -y --no-install-recommends pxe-tools
+test "$(dpkg-query -W -f='${Architecture}' pxe-tools)" = "$1"
+test "$(dpkg-query -W -f='${Version}' pxe-tools)" = "$2"
+if [ -f /run/pxe-upgrade-master-key.sha256 ]; then
+    sha256sum --check --status /run/pxe-upgrade-master-key.sha256
+    echo 'Beta 11 upgrade preserved the master key.'
+fi
 test -z "$(dpkg --print-foreign-architectures)"
 systemctl is-active --quiet pxe-tools-admin.target
 systemctl is-active --quiet pxe-tools-worker.service
@@ -81,9 +108,11 @@ if systemctl is-active --quiet pxe-tools-dnsmasq.service || command -v ansible; 
 fi
 APT_GUEST
 else
-    docker build --platform "linux/$architecture" -f docker/pxe-tools/Dockerfile -t "$name" .
+    docker build --platform "linux/$architecture" --build-arg "APP_VERSION=${PXE_TEST_APT_VERSION:-0.1.0~lab1}" \
+        -f docker/pxe-tools/Dockerfile -t "$name" .
     docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes' "$name"
     docker run -d --name "$name" "$name" >/dev/null
+    docker exec "$name" dpkg-query -W -f='Debian source: ${source:Package} ${source:Version}\n' | sort -u
 fi
 
 for attempt in {1..90}; do
@@ -131,8 +160,8 @@ GUEST
 
 if [ "$mode" = apt ]; then
     docker exec -e DEBIAN_FRONTEND=noninteractive "$name" apt-get install -y --no-install-recommends \
-        pxe-tools-ansible-local-test
+        pxe-tools-ansible
     docker exec "$name" ansible --version
-    test "$(docker exec "$name" dpkg-query -W -f='${Architecture}' pxe-tools-ansible-local-test)" = all
+    test "$(docker exec "$name" dpkg-query -W -f='${Architecture}' pxe-tools-ansible)" = all
 fi
 printf 'PXE_SERVER_ARCH_PASS=%s/%s\n' "$mode" "$architecture"
