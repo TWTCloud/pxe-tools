@@ -19,10 +19,7 @@ RUN set -eu; \
     apt-get update && apt-get install -y --no-install-recommends \
     # Web stack
     nginx \
-    php8.4-fpm \
     php8.4-sqlite3 \
-    php8.4-mysql \
-    php8.4-opcache \
     php8.4-cli \
     php8.4-curl \
     # NOTE : libsodium pour Admin\Util\Crypto est dispo par défaut dans
@@ -41,9 +38,6 @@ RUN set -eu; \
     sqlite3 \
     # Git client utilisé par les fonctions de synchronisation configurées
     git \
-    # Le pilote et le client restent présents pour compatibilité de construction ;
-    # MySQL/MariaDB ne sont pas activés dans la version actuelle.
-    mariadb-client \
     # Téléchargements & crypto
     wget \
     curl \
@@ -196,14 +190,6 @@ COPY docker/pxe-tools/nginx/admin-http-redirect.conf.tmpl /opt/pxe-tools/nginx/a
 COPY docker/pxe-tools/nginx/admin-http-serve.conf.tmpl    /opt/pxe-tools/nginx/admin-http-serve.conf.tmpl
 
 # ----------------------------------------------------------------------------
-# Config php-fpm (pool + opcache tuning)
-# ----------------------------------------------------------------------------
-COPY docker/pxe-tools/php-fpm/zz-pxe.conf  /etc/php/8.4/fpm/pool.d/zz-pxe.conf
-COPY docker/pxe-tools/php-fpm/opcache.ini  /etc/php/8.4/fpm/conf.d/99-opcache.ini
-# On désactive le pool 'www' par défaut de Debian (notre pool zz-pxe le remplace)
-RUN rm -f /etc/php/8.4/fpm/pool.d/www.conf
-
-# ----------------------------------------------------------------------------
 # s6-overlay services (oneshots bootstrap + 4 longruns + bundle user)
 # ----------------------------------------------------------------------------
 COPY docker/pxe-tools/s6-rc/ /etc/s6-overlay/s6-rc.d/
@@ -285,6 +271,14 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
 # s6-overlay init system
 ENTRYPOINT ["/init"]
 
+FROM appliance AS php-appliance
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    php8.4-fpm php8.4-mysql php8.4-opcache mariadb-client \
+    && rm -f /etc/php/8.4/fpm/pool.d/www.conf \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/pxe-tools/php-fpm/zz-pxe.conf /etc/php/8.4/fpm/pool.d/zz-pxe.conf
+COPY docker/pxe-tools/php-fpm/opcache.ini /etc/php/8.4/fpm/conf.d/99-opcache.ini
+
 FROM rust:1.96.0-trixie AS rust-build
 WORKDIR /source
 COPY rust/ rust/
@@ -292,7 +286,7 @@ COPY docker/worker/templates/preseed.php.j2 docker/worker/templates/preseed-base
 RUN cargo build --locked --release --manifest-path rust/Cargo.toml \
     && strip rust/target/release/pxe-tools-rust
 
-FROM appliance AS rust-experimental
+FROM php-appliance AS rust-experimental
 COPY --from=rust-build /source/rust/target/release/pxe-tools-rust /usr/lib/pxe-tools/pxe-tools-rust
 COPY rust/packaging/monitor.conf /opt/pxe-tools/nginx/rust-monitor.d/monitor.conf
 COPY --chmod=0755 rust/packaging/s6-run /etc/s6-overlay/s6-rc.d/rust-monitor/run
@@ -303,8 +297,7 @@ FROM appliance AS rust-guided
 COPY --from=rust-build /source/rust/target/release/pxe-tools-rust /usr/lib/pxe-tools/pxe-tools-rust
 COPY rust/packaging/guided.conf /opt/pxe-tools/nginx/pxe-routes.conf
 COPY --chmod=0755 rust/packaging/s6-guided-run /etc/s6-overlay/s6-rc.d/rust-guided/run
-RUN apt-get purge -y php8.4-fpm \
-    && rm /etc/s6-overlay/s6-rc.d/user/contents.d/php-fpm \
+RUN rm /etc/s6-overlay/s6-rc.d/user/contents.d/php-fpm \
           /etc/s6-overlay/s6-rc.d/nginx/dependencies.d/php-fpm \
           /etc/s6-overlay/s6-rc.d/worker/dependencies.d/php-fpm \
     && rm -r /etc/s6-overlay/s6-rc.d/php-fpm \
@@ -317,4 +310,4 @@ RUN apt-get purge -y php8.4-fpm \
 HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
     CMD curl -fsS http://127.0.0.1/healthz || exit 1
 
-FROM appliance AS default
+FROM php-appliance AS default

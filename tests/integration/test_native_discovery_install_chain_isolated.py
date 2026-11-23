@@ -316,7 +316,7 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     check_env=('set -a; source /usr/lib/pxe-tools/native/default.env; '
                'source /var/lib/pxe-tools-native/runtime.env; set +a; ') if native else (
                'export PXE_APP_DIR=/app PXE_FIXTURE_NGINX_LOG=/var/log/nginx/pxe-access.log; ')
-    docker('exec','-d',app,'bash','-ec',check_env+'export PXE_FIXTURE_MIRROR_IP=192.0.2.2; '
+    docker('exec','-d',app,'bash','-ec',check_env+'export PXE_FIXTURE_MIRROR_IP=192.0.2.2 PXE_FIXTURE_USE_WORKER=1; '
            'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
     status=fixture/'native-status.log'
     wait_for(lambda:status.is_file() and 'PXE_NATIVE_READY' in status.read_text(),30,'packaged Rust fixture ready')

@@ -26,6 +26,7 @@ NGINX_LOG = Path(os.environ.get("PXE_FIXTURE_NGINX_LOG", "/var/lib/pxe-tools-nat
 MAC = "02:00:00:00:00:01"
 SERIAL = "PXE-TEST-ONE"
 INSTALL_MENU = TFTP / "pxelinux.cfg" / ("01-" + MAC.replace(":", "-"))
+USE_WORKER_QUEUE = os.environ.get("PXE_FIXTURE_USE_WORKER") == "1"
 
 
 def create_db(path, schema, settings):
@@ -171,11 +172,27 @@ def schedule(machine, report):
         }
         db.execute("UPDATE machines SET status='configured',hostname='pxe-fixture',domain='example.test',"
                    " install_config_json=? WHERE id=?", (json.dumps(config), machine))
-    sys.path.insert(0, str(APP))
-    from worker import render_postboot_for_action
-    if render_postboot_for_action(action, token, MAC, PXE_IP) is None:
-        raise RuntimeError("The native worker could not render its postboot artifacts")
-    subprocess.run(["bash", "/opt/pxe-tools/scripts/render-per-mac-pxelinux.sh"], check=True)
+        if USE_WORKER_QUEUE:
+            jobs = [
+                db.execute("INSERT INTO init_jobs(job_type,status) VALUES(?,'pending')", (kind,)).lastrowid
+                for kind in (f"action:render_postboot:{action}", "bootstrap:render_templates")
+            ]
+    if USE_WORKER_QUEUE:
+        def rendered():
+            with closing(sqlite3.connect(DATABASE)) as db:
+                statuses = [status for status, in db.execute(
+                    "SELECT status FROM init_jobs WHERE id IN (?,?) ORDER BY id", jobs,
+                )]
+            if "failed" in statuses:
+                raise RuntimeError("The packaged worker failed to render its boot artifacts")
+            return statuses == ["success", "success"]
+        wait_for(rendered, 120, "packaged worker rendered menu and postboot artifacts")
+    else:
+        sys.path.insert(0, str(APP))
+        from worker import render_postboot_for_action
+        if render_postboot_for_action(action, token, MAC, PXE_IP) is None:
+            raise RuntimeError("The native worker could not render its postboot artifacts")
+        subprocess.run(["bash", "/opt/pxe-tools/scripts/render-per-mac-pxelinux.sh"], check=True)
     if "DEFAULT install\n" not in INSTALL_MENU.read_text():
         raise RuntimeError("The native renderer did not publish the install menu")
     with closing(sqlite3.connect(DATABASE)) as db, db:

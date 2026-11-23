@@ -72,6 +72,43 @@ base SQLite, une clé maître et une donnée chiffrée synthétiques.
 bash tests/integration/test_rust_monitor_distribution.sh "$(dpkg --print-architecture)"
 ```
 
+## Essayer le parcours Debian guidé sans PHP-FPM
+
+Sur Debian 13 amd64 ou arm64, les commandes suivantes construisent le
+paquet local de test et la cible Docker dédiée.
+
+```sh
+cargo build --locked --release --manifest-path rust/Cargo.toml
+strip rust/target/release/pxe-tools-rust
+python3 packaging/native/build-local-package.py /tmp/pxe-tools-guided.deb \
+  --architecture "$(dpkg --print-architecture)" --rust-guided \
+  --rust-binary rust/target/release/pxe-tools-rust
+docker build --target rust-guided -f docker/pxe-tools/Dockerfile -t pxe-tools:rust-guided .
+```
+
+Ces variantes utilisent une instance SQLite déjà configurée avec son
+`db.conf`, sa clé maître et ses données. Le paquet active le parcours
+avec `systemctl start pxe-tools.target` lorsque le réseau PXE est configuré.
+L'image prend les mêmes volumes et paramètres réseau de démarrage que
+l'appliance et lance son listener PXE via l'init s6.
+
+nginx sert les fichiers de démarrage et transmet les appels dynamiques
+à Rust sur un socket privé, avec l'adresse du client. Le preseed guidé,
+les menus GRUB de découverte et d'installation, les retours et les
+artefacts postboot sont disponibles dans cette variante. Les appels
+dynamiques répondent directement depuis Rust et l'indisponibilité du
+socket provoque une erreur HTTP. Les opérations de partitionnement
+personnalisé, de wipe ou de test de disques et la configuration réseau
+multi-interface restent hors de ce parcours.
+
+Ces variantes excluent PHP-FPM et l'interface web d'administration.
+L'initialisation SQLite et certaines opérations du worker utilisent
+encore PHP CLI. Les essais GitHub lancent les services fournis par les
+livrables et placent le véritable client Debian derrière un DNS/DHCP de
+fixture et un miroir Debian authentifié sur le réseau isolé. Le banc
+utilise un client BIOS amd64 et vérifie aussi l'API GRUB par comparaison
+avec le renderer PHP.
+
 ## Mesurer l'API de suivi
 
 ```sh
