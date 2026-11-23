@@ -14,6 +14,7 @@ http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+libc = "0.2"
 percent-encoding = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustls-pemfile = "2"

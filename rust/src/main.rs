@@ -3,6 +3,7 @@
 mod discovery;
 mod disk_identity;
 mod grub;
+mod images;
 mod install;
 mod monitoring;
 mod preseed;
@@ -76,6 +77,13 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if let [flag, config] = args.as_slice() {
         if flag == "--serve-guided" && Path::new(config).is_absolute() {
             return web::serve(Path::new(config));
+        }
+    }
+    if let [flag, id, job, db] = args.as_slice() {
+        if flag == "--reserve-image-deletion" {
+            let id = id.to_str().ok_or("Invalid image ID")?.parse()?;
+            let job = job.to_str().ok_or("Invalid job ID")?.parse()?;
+            return images::reserve_deletion(Path::new(db), id, job);
         }
     }
     let (routes, socket) = match args.as_slice() {
@@ -507,7 +515,7 @@ fn internal_reply(reply: HttpResponse) -> HttpResponse {
 fn connect(path: &Path, mode: OpenFlags) -> rusqlite::Result<Connection> {
     let db = Connection::open_with_flags(path, mode | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
     db.busy_timeout(Duration::from_secs(5))?;
-    if mode == OpenFlags::SQLITE_OPEN_READ_WRITE {
+    if mode.contains(OpenFlags::SQLITE_OPEN_READ_WRITE) {
         db.pragma_update(None, "foreign_keys", true)?;
     }
     Ok(db)

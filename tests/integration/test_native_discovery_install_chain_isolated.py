@@ -236,8 +236,11 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None)
 def verify_packaged_rust_setup(name):
     script=ROOT/'tests/integration/test_rust_initial_setup.py'
     probe='/fixture-tests/test_rust_initial_setup.py'
-    mount=('--mount',f'type=bind,src={script},dst={probe},readonly')
     native=backend=='rust-apt'
+    legacy_cli='/usr/lib/pxe-tools/app/cli/delete-image.php' if native else '/app/cli/delete-image.php'
+    mount=('--mount',f'type=bind,src={script},dst={probe},readonly',
+           '--mount',f'type=bind,src=/dev/null,dst={legacy_cli},readonly')
+    http_root='/var/lib/pxe-tools-http' if native else '/srv/http'
     try:
         if native:
             docker('run','-d','--name',name,'--network','none','--privileged','--cgroupns','private',
@@ -252,7 +255,8 @@ def verify_packaged_rust_setup(name):
                 raise RuntimeError('Fresh native setup started dnsmasq')
         else:
             docker('run','-d','--name',name,'--network','none',*mount,appliance_image)
-        result=docker('exec','-e','PXE_DISPOSABLE_SETUP_TEST=1',name,'python3',probe,'--installed',check=False)
+        result=docker('exec','-e','PXE_DISPOSABLE_SETUP_TEST=1',name,'python3',probe,'--installed',
+                      '--http-root',http_root,check=False)
         print(result.stdout, end='', flush=True)
         if result.returncode:
             print(result.stderr, end='', flush=True)

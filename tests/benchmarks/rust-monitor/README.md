@@ -121,8 +121,11 @@ et la validation du formulaire. La gestion des certificats et les autres
 écrans d'administration restent à porter.
 
 Les deux variantes fonctionnent sans installer Nginx ni PHP-FPM.
-Les migrations des bases existantes et certaines opérations du worker
-utilisent encore PHP CLI. Le renderer couvre les recettes de partition
+Dans la variante guidée, Rust réserve la suppression d’une image en
+contrôlant ses dépendances et en gardant le verrou SQLite pendant que
+le worker déplace les fichiers protégés. Le worker conserve son protocole
+de confirmation et de reprise. Les migrations des bases existantes et
+l’import des modèles utilisent encore PHP CLI. Le renderer couvre les recettes de partition
 sur un disque identifié, avec partitions physiques BIOS ou UEFI. Les
 recettes multi-disques, LVM et RAID, le wipe et les tests de disques
 restent à porter. Le renderer prend en charge les interfaces

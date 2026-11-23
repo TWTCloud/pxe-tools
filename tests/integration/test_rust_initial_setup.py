@@ -107,6 +107,34 @@ def setup(client, credentials, config, database):
     print('Rust first-run SQLite, single admin, HTTPS access, and inactive PXE verified', flush=True)
 
 
+def verify_worker_image_delete(database, http_root):
+    image = {'id': 1, 'distro': 'debian', 'version': 'fixture', 'version_full': '13.0-fixture', 'arch': 'amd64'}
+    material = http_root/'netboot'/image['distro']/image['version_full']/image['arch']
+    material.mkdir(parents=True, exist_ok=True)
+    files = ('linux', 'initrd.gz', 'firmware.cpio.gz')
+    for asset in (*files, 'unrelated'):
+        (material/asset).write_bytes(b'Disposable fixture')
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("""INSERT INTO os_images(id,distro,version,version_full,arch,enabled,status)
+                       VALUES(:id,:distro,:version,:version_full,:arch,0,'downloaded')""", image)
+        job = db.execute("INSERT INTO init_jobs(job_type,status,log) VALUES('image:delete:1','pending',?)",
+                         (json.dumps(image),)).lastrowid
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        with closing(sqlite3.connect(database)) as db:
+            status, message = db.execute('SELECT status,message FROM init_jobs WHERE id=?', (job,)).fetchone()
+            exists = db.execute('SELECT EXISTS(SELECT 1 FROM os_images WHERE id=1)').fetchone()[0]
+        if status == 'failed':
+            raise RuntimeError(f'The packaged image deletion job failed: {message}')
+        if status == 'success':
+            assert not exists
+            assert sorted(path.name for path in material.iterdir()) == ['unrelated']
+            print('Packaged worker committed the Rust image reservation and preserved the unrelated file', flush=True)
+            return
+        time.sleep(.3)
+    raise RuntimeError('The packaged worker did not finish the image deletion job')
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -149,6 +177,7 @@ def local(binary):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path)
+    parser.add_argument('--http-root', type=Path)
     parser.add_argument('--installed', action='store_true',
                         help='verify a newly installed test appliance in an isolated namespace')
     args = parser.parse_args()
@@ -163,7 +192,10 @@ def main():
             time.sleep(.2)
         client = Client(credentials, 80, 443)
         client.ready()
-        setup(client, credentials, Path('/etc/pxe-tools/db.conf'), Path('/var/lib/pxe-tools/pxe-tools.sqlite'))
+        database = Path('/var/lib/pxe-tools/pxe-tools.sqlite')
+        setup(client, credentials, Path('/etc/pxe-tools/db.conf'), database)
+        if args.http_root:
+            verify_worker_image_delete(database, args.http_root)
     else:
         binary = args.binary or Path(__file__).resolve().parents[2]/'rust/target/release/pxe-tools-rust'
         local(binary.resolve())

@@ -313,7 +313,7 @@ def _read_image_delete_signal(process: subprocess.Popen, expected: bytes) -> Non
 
 
 def run_image_delete(job: dict) -> None:
-    """Stage fixed files as root while an unprivileged PHP child holds the lock."""
+    """Stage fixed files as root while an unprivileged child holds the lock."""
     job_id = job.get('id')
     match = re.fullmatch(r'image:delete:([1-9][0-9]{0,18})', str(job.get('job_type', '')))
     if type(job_id) is not int or job_id <= 0 or match is None:
@@ -347,15 +347,18 @@ def run_image_delete(job: dict) -> None:
             if dict(row) != json.loads(job['log']):
                 raise ValueError('image changed after request')
             restore_staged(fd, job_id)
-            # Do not run PHP with root privileges or let it reread the mutable
-            # db.conf. The child gets only the parent's already-selected DB.
+            # Give the unprivileged child only the parent's selected database.
             account = pwd.getpwnam('www-data')
             if account.pw_uid == 0 or account.pw_gid == 0:
                 raise ValueError('invalid web account')
-            cli = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'cli', 'delete-image.php')
+            if os.environ.get('PXE_RUST_GUIDED') == '1':
+                command = ['/usr/lib/pxe-tools/pxe-tools-rust', '--reserve-image-deletion']
+            else:
+                cli = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'cli', 'delete-image.php')
+                command = ['/usr/bin/php', cli]
             env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8',
                    'PXE_HTTP_ROOT': HTTP_ROOT, 'HTTP_ROOT': HTTP_ROOT}
-            process = subprocess.Popen(['/usr/bin/php', cli, str(image_id), str(job_id), DB_PATH],
+            process = subprocess.Popen([*command, str(image_id), str(job_id), DB_PATH],
                                        env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.DEVNULL, user=account.pw_uid,
                                        group=account.pw_gid, extra_groups=())
