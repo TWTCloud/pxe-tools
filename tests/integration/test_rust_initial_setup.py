@@ -384,6 +384,50 @@ def verify_activity(client, database, authorization):
     print('Rust activity preserves action and legacy install links, authenticated filtering, and progress fragments', flush=True)
 
 
+def verify_guided_install(client, database, authorization):
+    inventory = {'disks':[{'name':'vda','serial':'FIXTURE-SERIAL',
+                           'identity':{'kind':'serial','source':'sysfs','value':'FIXTURE-SERIAL','status':'valid'}}]}
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE settings SET value='on' WHERE key='pxe_enabled'")
+        device = db.execute(
+            "INSERT INTO machines(mac,hostname,status,boot_arch,inventory_json) VALUES(?,?,'discovered','arm64',?)",
+            ('02:00:00:00:20:02', 'fixture-device', json.dumps(inventory)),
+        ).lastrowid
+        preset = db.execute(
+            "INSERT INTO presets(name,distro,admin_user_login,admin_user_pwhash,root_login_mode) "
+            "VALUES('Debian arm64','debian','fixture','$6$testing$hash','disabled')",
+        ).lastrowid
+        image = db.execute(
+            "INSERT INTO os_images(distro,version,arch,codename,version_full,enabled,status) "
+            "VALUES('debian','fixture-trixie','arm64','trixie','13.7.0',1,'downloaded')",
+        ).lastrowid
+    end = f'/machines/{device}/install'
+    form = {'hostname':'deb-fixture','disk':'/dev/vda:FIXTURE-SERIAL','preset':preset,'image':image,'confirm':'yes'}
+    assert client.request(end, form=form, authorization=authorization, secure=False)[0] == 404
+    assert client.request(end, form=form)[0] == 401
+    assert client.request(end, form=form, origin='https://outside.example', authorization=authorization)[0] == 403
+    result = client.request(end, authorization=authorization)
+    assert result[0] == 200 and b'FIXTURE-SERIAL' in result[2], result[:2]
+    assert client.request(end, form={**form,'disk':'/dev/vda:STALE'}, authorization=authorization)[0] == 409
+    assert client.request(end, form={**form,'confirm':'no'}, authorization=authorization)[0] == 422
+    status, location, _ = client.request(end, form=form, authorization=authorization)
+    assert status == 303, status
+    action = int(location.split('/')[-1])
+    assert client.request(end, form=form, authorization=authorization)[0] == 409
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute('SELECT count(*) FROM actions WHERE machine_id=?',(device,)).fetchone() == (1,)
+        state, next_action, snapshot = db.execute(
+            'SELECT status,next_action,install_config_json FROM machines WHERE id=?',(device,),
+        ).fetchone()
+        assert (state,next_action) == ('configured',None)
+        snapshot = json.loads(snapshot)
+        assert snapshot['system_disk_identity']['value'] == 'FIXTURE-SERIAL'
+        assert snapshot['version_full'] == '13.7.0' and snapshot['_pending_action_id'] == action
+        assert db.execute("SELECT length(token),status FROM actions WHERE id=?",(action,)).fetchone()==(64,'pending')
+        assert db.execute("SELECT status FROM init_jobs WHERE job_type=?",(f'action:render_postboot:{action}',)).fetchone() == ('pending',)
+    print('Rust guided scheduling rejected stale identity and replay, and atomically queued the selected install', flush=True)
+
+
 def verify_worker_commands(binary):
     templates = Path(__file__).resolve().parents[2]/'docker/worker/templates'
     parameters = {'pxe_ip':'192.0.2.9','mac':'02:00:00:00:00:01','token':'synthetic-token'}
@@ -556,6 +600,12 @@ def local(binary):
         verify_image_console(updated, database, authorization)
         verify_job_console(updated, database, authorization)
         verify_activity(updated, database, authorization)
+        replacement.terminate()
+        replacement.wait(timeout=5)
+        schedule_server = stack.enter_context(subprocess.Popen([str(binary), '--serve-guided', str(config)], env=env))
+        stack.callback(schedule_server.terminate)
+        updated.ready(schedule_server)
+        verify_guided_install(updated, database, authorization)
     verify_worker_commands(binary)
     verify_worker_recovery(binary)
     verify_schema_migration(binary)

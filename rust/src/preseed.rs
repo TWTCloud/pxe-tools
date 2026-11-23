@@ -2,6 +2,7 @@
 
 mod network;
 mod partition;
+pub(crate) use partition::whole_disk;
 
 use crate::install::{self, Machine};
 use crate::pxe::{array_values, is_php_array, log_event, normalize_mac, parse_subnet};
@@ -751,7 +752,7 @@ fn filter_user(raw: &str, comma: bool) -> String {
         .collect()
 }
 
-fn technical_account(user: &str) -> bool {
+pub(crate) fn technical_account(user: &str) -> bool {
     user != "root"
         && user.len() <= 32
         && user
@@ -761,7 +762,7 @@ fn technical_account(user: &str) -> bool {
         && filter_user(user, false) == user
 }
 
-fn sanitized_hash(hash: &str) -> Option<String> {
+pub(crate) fn sanitized_hash(hash: &str) -> Option<String> {
     hash.bytes()
         .all(|b| b.is_ascii_alphanumeric() || b"$./,!_*+=-".contains(&b))
         .then(|| hash.to_owned())

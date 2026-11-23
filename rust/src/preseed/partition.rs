@@ -543,7 +543,7 @@ fn constraint_matches(constraints: &Value, disk: &str, proof: &Value) -> bool {
                 .is_some_and(|intent| serial(&proof["value"]) == Some(intent)))
 }
 
-fn whole_disk(path: &str) -> bool {
+pub(crate) fn whole_disk(path: &str) -> bool {
     let Some(name) = path.strip_prefix("/dev/") else {
         return false;
     };

@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS presets (
     root_login_mode         TEXT NOT NULL DEFAULT 'disabled',       -- 'enabled' (root + late_command useradd) | 'disabled' (passwd/make-user natif d-i)
     admin_user_fullname     TEXT,                                   -- passwd/user-fullname (requis si root_login_mode='disabled')
     domain                  TEXT,
+    pre_wipe_mode           TEXT NOT NULL DEFAULT 'aucun',
+    pre_wipe_mode_json      TEXT,
+    based_on_machine_id     INTEGER,
+    hostname_pattern        TEXT,
+    hostname_random         INTEGER NOT NULL DEFAULT 0,
     variant                  TEXT NOT NULL DEFAULT 'debian',          -- 'debian' | 'proxmox-ve' (PVE 9 = Debian 13 + couche Ansible proxmox_ve posée au 1er boot)
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP

@@ -5,6 +5,7 @@ mod activity;
 mod admin;
 mod assets;
 mod certificates;
+mod devices;
 mod images;
 mod jobs;
 mod onboarding;
@@ -417,6 +418,33 @@ async fn dispatch(
         return site
             .admin
             .serve(&parts, peer, &site.database, admin::Action::Jobs(view))
+            .await;
+    }
+    if let Some(route) = devices::route(path) {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        let form = if readable {
+            None
+        } else if parts.method == Method::POST && route.accepts_post() {
+            if !admin_origin(&parts.headers, site) {
+                return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+            }
+            match read_form(&parts.headers, body, 2048).await {
+                Ok(form) => Some(form),
+                Err(reply) => return reply,
+            }
+        } else {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        };
+        return site
+            .admin
+            .serve(
+                &parts,
+                peer,
+                &site.database,
+                admin::Action::Device(route, form),
+            )
             .await;
     }
     if let Some(view) = activity::View::for_route(path) {

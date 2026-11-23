@@ -319,10 +319,10 @@ fn unavailable() -> Reply {
     )
 }
 
-pub(super) fn redirect(status: StatusCode, target: &'static str) -> Reply {
+pub(super) fn redirect(status: StatusCode, target: impl AsRef<str>) -> Reply {
     Response::builder()
         .status(status)
-        .header(LOCATION, target)
+        .header(LOCATION, target.as_ref())
         .header("Cache-Control", "no-store")
         .body(bytes(""))
         .expect("valid setup redirect")

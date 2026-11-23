@@ -37,6 +37,7 @@ pub(super) fn device_term(term: &str) -> Option<&'static str> {
 
 pub(super) enum Action {
     Devices,
+    Device(super::devices::DeviceRoute, Option<Bytes>),
     Images(Option<Bytes>),
     Jobs(super::jobs::View),
     Activity(super::activity::View),
@@ -126,6 +127,9 @@ impl Console {
                 .is_some_and(|hash| bcrypt::verify(password, hash).unwrap_or(false));
             if !authenticated {
                 return Some(unauthorized());
+            }
+            if let Action::Device(route, form) = &action {
+                return route.serve(&db, &db_path, form.as_deref(), &username).ok();
             }
             if let Action::Activity(view) = &action {
                 return view.serve(&db, &path, &query, page).ok();
@@ -241,7 +245,7 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
         .find(|(key, _, _)| *key == term)
         .unwrap_or(&DEVICE_TERMS[0]);
     let mut rows = db.prepare(
-        "SELECT COALESCE(hostname,''), mac, status FROM machines ORDER BY id LIMIT ? OFFSET ?",
+        "SELECT COALESCE(hostname,''), mac, status, id FROM machines ORDER BY id LIMIT ? OFFSET ?",
     )?;
     let mut rows = rows.query([PAGE_SIZE as u64 + 1, u64::from(page - 1) * PAGE_SIZE as u64])?;
     let mut html = format!(
@@ -271,8 +275,19 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
             has_next = true;
             break;
         }
-        html.push_str("<tr>");
-        for column in 0..3 {
+        let id = row.get::<_, i64>(3)?;
+        html.push_str(&format!("<tr><td><a href=\"/machines/{id}\">"));
+        let hostname = row.get::<_, String>(0)?;
+        escape(
+            &mut html,
+            if hostname.is_empty() {
+                "Ouvrir"
+            } else {
+                &hostname
+            },
+        );
+        html.push_str("</a></td>");
+        for column in 1..3 {
             html.push_str("<td>");
             escape(&mut html, &row.get::<_, String>(column)?);
             html.push_str("</td>");
