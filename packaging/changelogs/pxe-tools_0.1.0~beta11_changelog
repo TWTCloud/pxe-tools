@@ -1,0 +1,7 @@
+pxe-tools (0.1.0~beta11) stable; urgency=medium
+
+  * Enchaîner le premier démarrage de Debian et le provisionnement Ansible.
+  * Permettre de choisir le nom du compte technique des nouvelles installations.
+  * Améliorer la navigation de l’assistant et signaler les conflits sur le port HTTP de démarrage.
+
+ -- PXE Tools <security@pxetools.com>  Mon, 23 Nov 2026 05:54:08 +0000

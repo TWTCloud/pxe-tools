@@ -39,6 +39,7 @@ def allowed(relative: str) -> bool:
             or re.fullmatch(rf'{index}/Packages(?:\.gz)?', relative) is not None
             or re.fullmatch(rf'{index}/by-hash/SHA256/{HEX}', relative) is not None
             or re.fullmatch(rf'{index}/by-hash/SHA512/{HEX512}', relative) is not None
+            or re.fullmatch(r'changelogs/main/p/(pxe-tools(?:-ansible)?)/\1_[0-9][A-Za-z0-9.+~\-]{0,100}_changelog', relative) is not None
             or re.fullmatch(rf'pool/main/p/pxe-tools/pxe-tools-{HEX}\.deb', relative) is not None)
 
 
@@ -172,6 +173,7 @@ def main() -> None:
         validate(candidate / 'apt', keyring, primary, signing)
         (candidate / '_headers').write_text(
             '/apt/dists/*\n  Cache-Control: no-cache, max-age=0, must-revalidate\n'
+            '/apt/changelogs/*\n  Cache-Control: no-cache, max-age=0, must-revalidate\n'
             '/apt/pool/*\n  Cache-Control: public, max-age=31536000, immutable\n', encoding='utf-8')
         # Export only the public key. Never copy the supplied keyring verbatim.
         home = Path(temporary) / 'gpg'
