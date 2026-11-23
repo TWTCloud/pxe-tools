@@ -319,7 +319,7 @@ fn unavailable() -> Reply {
     )
 }
 
-fn redirect(status: StatusCode, target: &'static str) -> Reply {
+pub(super) fn redirect(status: StatusCode, target: &'static str) -> Reply {
     Response::builder()
         .status(status)
         .header(LOCATION, target)
@@ -328,7 +328,7 @@ fn redirect(status: StatusCode, target: &'static str) -> Reply {
         .expect("valid setup redirect")
 }
 
-fn page(title: &str, form: &str) -> Reply {
+pub(super) fn page(title: &str, form: &str) -> Reply {
     let html = format!(
         r#"<!doctype html><html lang="fr"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

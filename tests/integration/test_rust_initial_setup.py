@@ -6,6 +6,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 from http.client import HTTPConnection, HTTPSConnection
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -105,6 +106,64 @@ def setup(client, credentials, config, database):
         assert db.execute("SELECT value FROM settings WHERE key='wizard_completed'").fetchone() == ('0',)
     assert master_key.read_bytes() == original
     print('Rust first-run SQLite, single admin, HTTPS access, and inactive PXE verified', flush=True)
+    return winner+':fixture-password'
+
+
+class ConfirmationInputs(HTMLParser):
+    def __init__(self, html):
+        super().__init__()
+        self.values = {}
+        self.feed(html.decode())
+
+    def handle_starttag(self, tag, attributes):
+        values = dict(attributes)
+        if tag=='input' and values.get('type')=='hidden':
+            self.values[values['name']] = values['value']
+
+
+def verify_configuration(client, database, authorization, packaged):
+    def request(path, **kwargs):
+        return client.request(path, authorization=authorization, **kwargs)
+
+    assert client.request('/init/network')[0] == 401
+    assert client.request('/init/network', secure=False)[0] == 404
+    assert request('/init/network')[0] == 200
+    assert request('/init/done')[:2] == (302, '/init/network')
+
+    if packaged:
+        subprocess.run(['ip','link','add','br-setup-test','type','bridge'], check=True)
+        subprocess.run(['ip','addr','add','192.0.2.9/24','dev','br-setup-test'], check=True)
+        subprocess.run(['ip','link','set','br-setup-test','up'], check=True)
+        plan = {'role':'proxy','pxe_interface':'br-setup-test','pxe_ip':'192.0.2.9','pxe_subnet':'192.0.2.0/24'}
+        assert request('/init/network', form={**plan,'pxe_ip':'192.0.2.8'})[0] == 422
+        assert request('/init/network', form=plan, origin='https://other.example')[0] == 403
+        assert request('/init/network', form=plan)[:2] == (303, '/init/images')
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("""INSERT INTO catalog_entries(id,distro,version_full,arch,extract_method)
+                          VALUES(9001,'debian','13.0-fixture','amd64','direct')""")
+        assert b'13.0-fixture' in request('/init/images')[2]
+        assert request('/init/images', form={'image':'9002'})[0] == 422
+        for _ in range(2):
+            assert request('/init/images', form={'image':'9001'})[:2] == (303, '/init/done')
+        with closing(sqlite3.connect(database)) as db:
+            values = dict(db.execute('SELECT key,value FROM settings'))
+            assert db.execute("SELECT COUNT(*) FROM os_images WHERE version_full='13.0-fixture'").fetchone() == (1,)
+            assert values['pxe_enabled'] == 'off'
+        result = request('/init/complete', form={'confirmation':'yes',
+                         'plan':values['rust_wizard_network'], 'image':values['rust_wizard_image']})
+        assert result[0] == 422 and 'téléchargement' in result[2].decode(), result
+        print('Rust wizard validated the interface, queued Debian once, and kept PXE inactive during download', flush=True)
+
+    assert request('/init/network', form={'role':'console'})[:2] == (303, '/init/done')
+    fields = ConfirmationInputs(request('/init/done')[2]).values
+    assert request('/init/complete', form={**fields, 'plan':'old', 'confirmation':'yes'})[0] == 422
+    assert request('/init/complete', form={**fields, 'confirmation':'yes'})[:2] == (303, '/admin/devices')
+    assert request('/init/complete', form={**fields, 'confirmation':'yes'})[0] == 409
+    with closing(sqlite3.connect(database)) as db:
+        values = dict(db.execute('SELECT key,value FROM settings'))
+        assert values['wizard_completed']=='1' and values['pxe_enabled']=='off'
+        assert 'rust_wizard_network' not in values
+    print('Rust wizard finalized the console-only setup and refused a replay', flush=True)
 
 
 def verify_worker_image_delete(database, http_root):
@@ -171,7 +230,8 @@ def local(binary):
         assert client.request('/init/db', form={'code': code})[0] == 503
         assert not config.exists() and database.read_bytes() == original
         database.unlink()
-        setup(client, credentials, config, database)
+        authorization = setup(client, credentials, config, database)
+        verify_configuration(client, database, authorization, packaged=False)
 
 
 def main():
@@ -193,9 +253,10 @@ def main():
         client = Client(credentials, 80, 443)
         client.ready()
         database = Path('/var/lib/pxe-tools/pxe-tools.sqlite')
-        setup(client, credentials, Path('/etc/pxe-tools/db.conf'), database)
+        authorization = setup(client, credentials, Path('/etc/pxe-tools/db.conf'), database)
         if args.http_root:
             verify_worker_image_delete(database, args.http_root)
+        verify_configuration(client, database, authorization, packaged=True)
     else:
         binary = args.binary or Path(__file__).resolve().parents[2]/'rust/target/release/pxe-tools-rust'
         local(binary.resolve())

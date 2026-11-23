@@ -4,6 +4,7 @@ use super::{bytes, plain, single, Reply};
 use crate::{configured_database, connect};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hyper::{
+    body::Bytes,
     header::{AUTHORIZATION, LOCATION, WWW_AUTHENTICATE},
     http::request::Parts,
     Response, StatusCode,
@@ -34,6 +35,12 @@ pub(super) fn device_term(term: &str) -> Option<&'static str> {
         .map(|(key, _, _)| *key)
 }
 
+pub(super) enum Action {
+    Devices,
+    Terminology(&'static str),
+    Setup(String, Option<Bytes>),
+}
+
 pub(super) struct Console {
     attempts: Mutex<HashMap<IpAddr, (Instant, u8)>>,
     jobs: Semaphore,
@@ -52,7 +59,7 @@ impl Console {
         request: &Parts,
         peer: IpAddr,
         config: &Path,
-        device_label: Option<&'static str>,
+        action: Action,
     ) -> Reply {
         if request.uri.path() == "/admin/" {
             return Response::builder()
@@ -113,7 +120,15 @@ impl Console {
             if !authenticated {
                 return Some(unauthorized());
             }
-            if let Some(label) = device_label {
+            if let Action::Setup(endpoint, form) = &action {
+                return Some(super::onboarding::serve(
+                    &db,
+                    &db_path,
+                    endpoint,
+                    form.as_deref(),
+                ));
+            }
+            if let Action::Terminology(label) = action {
                 let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
                 db.execute(
                     "INSERT INTO settings(key, value) VALUES(?, ?)
@@ -219,6 +234,9 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
         ));
     }
     html.push_str("</select><button>Enregistrer</button></form>");
+    if crate::setting(db, "wizard_completed")? != "1" {
+        html.push_str(r#"<p><a href="/init/network">Poursuivre la configuration initiale</a></p>"#);
+    }
     html.push_str("<table><thead><tr><th>Nom d’hôte</th><th>Adresse MAC</th><th>État</th></tr></thead><tbody>");
     let mut count = 0;
     let mut has_next = false;
@@ -253,7 +271,7 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
     Ok(html)
 }
 
-fn escape(output: &mut String, value: &str) {
+pub(super) fn escape(output: &mut String, value: &str) {
     for char in value.chars() {
         match char {
             '&' => output.push_str("&amp;"),

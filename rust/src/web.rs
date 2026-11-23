@@ -2,6 +2,7 @@
 
 mod admin;
 mod assets;
+mod onboarding;
 mod setup;
 
 use crate::{configured_database, handle_request, monitoring, setting, PxeRequest, Routes};
@@ -351,7 +352,38 @@ async fn dispatch(
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
-        return site.admin.serve(&parts, peer, &site.database, None).await;
+        return site
+            .admin
+            .serve(&parts, peer, &site.database, admin::Action::Devices)
+            .await;
+    }
+    if onboarding::is_route(path) {
+        if !secure || !peer.is_loopback() || site.pxe_ip.is_some() {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        let endpoint = path.to_owned();
+        let form = if parts.method == Method::POST {
+            if !admin_origin(&parts.headers, site) {
+                return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+            }
+            match read_form(&parts.headers, body, 2048).await {
+                Ok(form) => Some(form),
+                Err(reply) => return reply,
+            }
+        } else if readable {
+            None
+        } else {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        };
+        return site
+            .admin
+            .serve(
+                &parts,
+                peer,
+                &site.database,
+                admin::Action::Setup(endpoint, form),
+            )
+            .await;
     }
     if path == admin::DEVICE_SETTINGS && parts.method == Method::POST && secure {
         if !admin_origin(&parts.headers, site) {
@@ -371,7 +403,12 @@ async fn dispatch(
         };
         return site
             .admin
-            .serve(&parts, peer, &site.database, Some(update))
+            .serve(
+                &parts,
+                peer,
+                &site.database,
+                admin::Action::Terminology(update),
+            )
             .await;
     }
 

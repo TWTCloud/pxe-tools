@@ -95,11 +95,13 @@ boucle locale. Le compte root peut lire le code de configuration dans
 `docker exec` depuis l'hôte pour lire le code à l'intérieur du conteneur.
 Le lanceur génère un nouveau code à chaque démarrage du service.
 
-L'assistant crée la base SQLite et le premier compte local. Le compte
-existant ferme cette phase. Cette première partie de l'assistant laisse
-le PXE désactivé. Le réglage du réseau, le choix des images et la validation
-finale sont encore en cours de portage. Pour une instance dont le réseau
-PXE est préparé, le paquet active le parcours avec
+L'assistant crée la base SQLite et le premier compte local. Après la
+connexion, il propose la console seule, le DHCP externe ou le proxy
+DHCP. Le mode PXE vérifie l'adresse IPv4 déjà attribuée à l'interface
+sur Linux. L'administrateur choisit ensuite une image Debian du
+catalogue. La confirmation finale vérifie les mêmes réglages et attend
+le téléchargement avant de mettre les tâches réseau en file. Un
+déploiement déjà configuré peut démarrer le paquet avec
 `systemctl start pxe-tools.target`. L'image utilise ses volumes et son
 superviseur s6.
 

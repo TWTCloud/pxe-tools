@@ -290,7 +290,7 @@ def verify_packaged_rust_setup(name):
             if docker('exec',name,'systemctl','is-active','--quiet','pxe-tools-dnsmasq.service',check=False).returncode==0:
                 raise RuntimeError('Fresh native setup started dnsmasq')
         else:
-            docker('run','-d','--name',name,'--network','none',*mount,appliance_image)
+            docker('run','-d','--name',name,'--network','none','--cap-add','NET_ADMIN',*mount,appliance_image)
         result=docker('exec','-e','PXE_DISPOSABLE_SETUP_TEST=1',name,'python3',probe,'--installed',
                       '--http-root',http_root,check=False)
         print(result.stdout, end='', flush=True)
