@@ -8,6 +8,7 @@ The test adds a serial console to observe the first boot of the installed OS.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -515,7 +516,7 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s}' "$IP" "$(
         kernel_bytes = (root/'http/netboot/debian/13.0/amd64/linux').read_bytes()
         expected = hashlib.sha256(kernel_bytes).hexdigest()
         actual = docker('exec',dhcp,'bash','-o','pipefail','-c',
-                        'curl -fsS --max-time 15 http://192.0.2.1/netboot/debian/13.0/amd64/linux | sha256sum').stdout
+                        'curl -fsS --max-time 15 http://192.0.2.1/netboot/trixie/amd64/linux | sha256sum').stdout
         if actual.split()[0] != expected:
             raise RuntimeError('The HTTP kernel differs from the authenticated fixture')
     docker('exec','-d',app,'bash','-ec',
@@ -649,6 +650,17 @@ done
                 import shutil
                 shutil.copyfile(fixture/item,netboot/item)
             if packaged:
+                # The downloader publishes both the versioned dir and the
+                # codename alias used by the dynamic GRUB menus. The virtual
+                # NIC needs no firmware, but GRUB loads the cpio alongside d-i.
+                alias = http/'netboot/trixie/amd64'
+                alias.parent.mkdir()
+                alias.symlink_to('../debian/13.0/amd64', target_is_directory=True)
+                fields = (0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 11, 0)
+                empty_cpio = ('070701' + ''.join(f'{field:08x}' for field in fields)).encode()
+                empty_cpio += b'TRAILER!!!\0'
+                empty_cpio += b'\0' * (-len(empty_cpio) % 4)
+                (netboot/'firmware.cpio.gz').write_bytes(gzip.compress(empty_cpio, mtime=0))
                 run_packaged_rust(app,lan,dhcp,client,root,fixture,discovery_template)
                 return
             mounts += ['--mount',f'type=bind,src={fixture},dst=/fixture-data']
