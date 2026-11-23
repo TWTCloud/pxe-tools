@@ -372,7 +372,7 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
         # is embedded in signed Release and calculated from canonical paths.
         if release_candidate:
             rows = []
-            for path in sorted(stage.rglob('*')):
+            for path in sorted(stage.rglob('*'), key=Path.as_posix):
                 if path.is_file() and path.parent != release_dir:
                     with path.open('rb') as stream:
                         checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
