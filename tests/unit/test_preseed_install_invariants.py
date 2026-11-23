@@ -14,12 +14,14 @@ ROOT = Path(__file__).resolve().parents[2]
 class PreseedInvariants(unittest.TestCase):
     def render(self, config, inventory=None, running_action_token=None, global_root_hash=None, template=None, expected_status=200,
                module_enabled=None, module_key=None, module_user=None, stale_key=None, machine_status='configured',
-               installation_status=None, previous_installation=False):
+               installation_status=None, previous_installation=False,
+               subnet='192.0.2.0/24', remote_addr='192.0.2.2'):
         with tempfile.TemporaryDirectory(prefix='pxe-preseed-review-') as tmp:
             data = Path(tmp)
             connection = sqlite3.connect(data / 'pxe-tools.sqlite')
             connection.executescript((ROOT / 'app/db/schema.sqlite.sql').read_text())
-            connection.execute("INSERT INTO settings(key,value) VALUES ('pxe_subnet','192.0.2.0/24')")
+            if subnet is not None:
+                connection.execute("INSERT INTO settings(key,value) VALUES ('pxe_subnet',?)", (subnet,))
             if module_enabled is not None:
                 connection.execute("INSERT INTO settings(key,value) VALUES ('ansible_enabled',?)", (module_enabled,))
             if module_key is not None:
@@ -46,9 +48,9 @@ class PreseedInvariants(unittest.TestCase):
                 renderer = renderer.replace("@file_get_contents('http://127.0.0.1/api/install-start?mac=' . urlencode($mac), false, $ctx)", "'{\"installation_id\": 42}'")
             renderer = renderer.replace('{{ pxe_data_dir }}', tmp).replace('{{ pxe_ip }}', '192.0.2.1')
             (data / 'renderer.php').write_text(renderer)
-            (data / 'run.php').write_text("<?php register_shutdown_function(function () { file_put_contents(__DIR__.'/http.status', (string)(http_response_code() ?: 200)); }); $_GET['mac']='02:00:00:00:00:01'; $_SERVER['REMOTE_ADDR']='192.0.2.2'; require __DIR__.'/renderer.php';")
+            (data / 'run.php').write_text("<?php register_shutdown_function(function () { file_put_contents(__DIR__.'/http.status', (string)(http_response_code() ?: 200)); }); $_GET['mac']='02:00:00:00:00:01'; $_SERVER['REMOTE_ADDR']=$argv[1]; $_SERVER['HTTP_X_FORWARDED_FOR']='192.0.2.2'; require __DIR__.'/renderer.php';")
             env = dict(os.environ, PXE_DB_DRIVER='sqlite', PXE_DB_PATH=str(data / 'pxe-tools.sqlite'))
-            result = subprocess.run([os.environ.get('PHP_BINARY','php'), '-d', 'allow_url_fopen=0', str(data / 'run.php')], env=env, capture_output=True, text=True)
+            result = subprocess.run([os.environ.get('PHP_BINARY','php'), '-d', 'allow_url_fopen=0', str(data / 'run.php'), remote_addr], env=env, capture_output=True, text=True)
             if result.returncode:
                 self.fail('preseed renderer failed: ' + result.stderr[:500])
             self.assertEqual(result.stderr, '')
@@ -98,6 +100,23 @@ if [ "$n" -le "$FAILURES" ]; then exit "$CODE"; fi
         self.assertIn('/api/install-end?mac=', output)
         without_action = self.render({'distro': 'debian'})
         self.assertNotIn('/api/install-end?mac=', without_action)
+
+    def test_preseed_checks_actual_source_before_rendering(self):
+        token = 'a' * 64
+        config = {'distro': 'debian'}
+        for subnet, addr, status in (
+            ('192.0.2.0/24', '198.51.100.2', 403),
+            ('192.0.2.0/24', '127.0.0.1', 403),
+            ('192.0.2.0/24', '::1', 403),
+            (None, '192.0.2.2', 503),
+            ('192.0.2.0/024', '192.0.2.2', 503),
+        ):
+            with self.subTest(subnet=subnet, addr=addr):
+                result = self.render(config, running_action_token=token, subnet=subnet,
+                                     remote_addr=addr, expected_status=status)
+                self.assertTrue(result.startswith('# ERREUR : '))
+                self.assertNotIn('d-i ', result)
+                self.assertNotIn(token, result)
 
     def test_preseed_closes_after_install_and_reopens_for_new_action(self):
         config = {'distro': 'debian'}

@@ -1,0 +1,195 @@
+{
+    "reinstall": [
+        {
+            "code": "dhcp_request_wipe",
+            "label": "Démarrage de la machine",
+            "phase": "wipe"
+        },
+        {
+            "code": "grub_config_served_wipe",
+            "label": "Préparation de l'effacement",
+            "phase": "wipe"
+        },
+        {
+            "code": "preseed_loaded_wipe",
+            "label": "Lancement du programme d'effacement",
+            "phase": "wipe"
+        },
+        {
+            "code": "wipe_script_started",
+            "label": "Effacement des disques",
+            "phase": "wipe",
+            "kind": "start"
+        },
+        {
+            "code": "wipe_disks_done",
+            "label": "Disques effacés",
+            "phase": "wipe"
+        },
+        {
+            "code": "wipe_reboot_signaled",
+            "label": "Redémarrage vers l'installation",
+            "phase": "wipe"
+        },
+        {
+            "code": "dhcp_request_install",
+            "label": "Démarrage de l'installation",
+            "phase": "install"
+        },
+        {
+            "code": "grub_config_served_install",
+            "label": "Préparation de l'installation",
+            "phase": "install"
+        },
+        {
+            "code": "preseed_loaded_install",
+            "label": "Lancement de l'installeur",
+            "phase": "install"
+        },
+        {
+            "code": "partitioning_started",
+            "label": "Installation du système d'exploitation",
+            "phase": "install",
+            "kind": "start"
+        },
+        {
+            "code": "late_command_started",
+            "label": "Finalisation de l'installation",
+            "phase": "install",
+            "kind": "start"
+        },
+        {
+            "code": "install_reboot_done",
+            "label": "Installation terminée, redémarrage de la machine",
+            "phase": "install"
+        },
+        {
+            "code": "os_first_boot",
+            "label": "Démarrage du système installé",
+            "phase": "post"
+        },
+        {
+            "code": "ansible_started",
+            "label": "Configuration de la machine",
+            "phase": "post",
+            "kind": "start"
+        },
+        {
+            "code": "ansible_finished",
+            "label": "Machine prête",
+            "phase": "post"
+        }
+    ],
+    "install_only": [
+        {
+            "code": "dhcp_request_install",
+            "label": "Démarrage de la machine",
+            "phase": "install"
+        },
+        {
+            "code": "grub_config_served_install",
+            "label": "Préparation de l'installation",
+            "phase": "install"
+        },
+        {
+            "code": "preseed_loaded_install",
+            "label": "Lancement de l'installeur",
+            "phase": "install"
+        },
+        {
+            "code": "partitioning_started",
+            "label": "Installation du système d'exploitation",
+            "phase": "install",
+            "kind": "start"
+        },
+        {
+            "code": "late_command_started",
+            "label": "Finalisation de l'installation",
+            "phase": "install",
+            "kind": "start"
+        },
+        {
+            "code": "install_reboot_done",
+            "label": "Installation terminée, redémarrage de la machine",
+            "phase": "install"
+        },
+        {
+            "code": "os_first_boot",
+            "label": "Démarrage du système installé",
+            "phase": "post"
+        },
+        {
+            "code": "ansible_started",
+            "label": "Configuration de la machine",
+            "phase": "post",
+            "kind": "start"
+        },
+        {
+            "code": "ansible_finished",
+            "label": "Machine prête",
+            "phase": "post"
+        }
+    ],
+    "wipe_only": [
+        {
+            "code": "dhcp_request_wipe",
+            "label": "Démarrage de la machine",
+            "phase": "wipe"
+        },
+        {
+            "code": "grub_config_served_wipe",
+            "label": "Préparation de l'effacement",
+            "phase": "wipe"
+        },
+        {
+            "code": "preseed_loaded_wipe",
+            "label": "Lancement du programme d'effacement",
+            "phase": "wipe"
+        },
+        {
+            "code": "wipe_script_started",
+            "label": "Effacement des disques",
+            "phase": "wipe",
+            "kind": "start"
+        },
+        {
+            "code": "wipe_disks_done",
+            "label": "Disques effacés",
+            "phase": "wipe"
+        },
+        {
+            "code": "wipe_poweroff",
+            "label": "Effacement terminé — extinction de la machine",
+            "phase": "wipe"
+        }
+    ],
+    "discovery": [],
+    "disktest": [
+        {
+            "code": "dhcp_request_disktest",
+            "label": "Démarrage de la machine",
+            "phase": "disktest"
+        },
+        {
+            "code": "grub_config_served_disktest",
+            "label": "Préparation des tests",
+            "phase": "disktest"
+        },
+        {
+            "code": "disktest_started",
+            "label": "Tests des disques (SMART, badblocks)",
+            "phase": "disktest",
+            "kind": "start"
+        },
+        {
+            "code": "disktest_finished",
+            "label": "Tests terminés",
+            "phase": "disktest"
+        },
+        {
+            "code": "disktest_results_posted",
+            "label": "Résultats disponibles",
+            "phase": "disktest"
+        }
+    ]
+}
