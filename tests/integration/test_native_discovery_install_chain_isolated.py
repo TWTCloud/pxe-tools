@@ -260,6 +260,8 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
                     raise RuntimeError('GRUB could not determine the signed kernel size')
                 if 'bad shim signature' in output:
                     raise RuntimeError('Shim refused the signature of the downloaded kernel')
+                if 'Kernel panic - not syncing:' in output:
+                    raise RuntimeError(name+' kernel panicked before completing the PXE test')
             if boot=='n':
                 if state['ExitCode']!=0:
                     raise RuntimeError(name+' QEMU guest failed')
@@ -372,7 +374,7 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     # which the installed system will name enp0s4.
     kernel=('language=en country=US locale=en_US.UTF-8 keymap=us '
             'ipv6.disable=1 netcfg/no_default_route=true netcfg/get_nameservers=192.0.2.2')
-    if secure_boot:
+    if secure_boot or custom_partition:
         kernel += ' console=tty0 console=ttyS0,115200n8'
     env=[
         'TFTP_ROOT='+tftp_root, 'HTTP_ROOT='+http_root,
@@ -582,12 +584,14 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s}' "$IP" "$(
         check_env+='export PXE_FIXTURE_SECURE_BOOT=1; '
         uefi_image=build_secure_boot_client()
         prepare_secure_boot(app,root,uefi_image)
-        kernel_bytes = (root/'http/netboot/debian/13.0/amd64/linux').read_bytes()
-        expected = hashlib.sha256(kernel_bytes).hexdigest()
-        actual = docker('exec',dhcp,'bash','-o','pipefail','-c',
-                        'curl -fsS --max-time 15 http://192.0.2.1/netboot/trixie/amd64/linux | sha256sum').stdout
-        if actual.split()[0] != expected:
-            raise RuntimeError('The HTTP kernel differs from the authenticated fixture')
+        for artifact in ('linux','initrd.gz','firmware.cpio.gz'):
+            with (boot_tree/artifact).open('rb') as stream:
+                expected=hashlib.file_digest(stream,'sha256').hexdigest()
+            actual=docker('exec',dhcp,'bash','-o','pipefail','-c',
+                          'curl -fsS --max-time 30 "$1" | sha256sum','check-boot-asset',
+                          pxe_url+'/netboot/trixie/amd64/'+artifact).stdout
+            if actual.split()[0] != expected:
+                raise RuntimeError(f'The HTTP {artifact} differs from the fixture')
     docker('exec','-d',app,'bash','-ec',
            check_env+'export PXE_FIXTURE_MIRROR_IP=192.0.2.2 PXE_FIXTURE_USE_WORKER=1; '
            'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
@@ -988,10 +992,18 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                     print(status_log.read_text()[-2000:],flush=True)
             for name, args in ((app, ('exec',app,'journalctl','--no-pager','-n','45','-u','pxe-tools-init','-u','pxe-tools-dnsmasq','-u','pxe-tools-pxe-http','-u','pxe-tools-worker')),
                                (dhcp, ('exec',dhcp,'cat','/tmp/fixture-dhcp.log')),
-                               (client, ('logs','--tail','20',client)),
+                               (client, ('logs','--tail','150',client)),
                                (mirror, ('logs','--tail','20',mirror))):
                 result=docker(*args,check=False)
-                text=(result.stdout+'\n'+result.stderr)[-3000:]
+                diagnostic=result.stdout+'\n'+result.stderr
+                if name==client and packaged:
+                    evidence=re.findall(
+                        r'^.*(?:EFI stub|RAMDISK|[Ii]nitrd|[Ii]nitramfs|Kernel panic|partman|mdadm|(?:^|\s)error:).*$',
+                        diagnostic,re.MULTILINE,
+                    )
+                    text='\n'.join(evidence)[-5000:]+'\n'+diagnostic[-3500:]
+                else:
+                    text=diagnostic[-3000:]
                 text=re.sub(r'https?://[^\s]+','[URL]',text)
                 text=re.sub(r'(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])','[IPv4]',text)
                 text=re.sub(r'(?i)(?<![0-9a-f])(?:[0-9a-f]{2}:){5}[0-9a-f]{2}(?![0-9a-f])','[MAC]',text)
