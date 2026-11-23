@@ -1,0 +1,233 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+"""Native guest side of the isolated Rust PXE fixture."""
+from contextlib import closing
+import hashlib
+import json
+import os
+from pathlib import Path
+import secrets
+import sqlite3
+import subprocess
+import sys
+import time
+
+DATA = Path("/var/lib/pxe-tools")
+CONF = Path("/etc/pxe-tools")
+APP = Path("/usr/lib/pxe-tools/app")
+HTTP = Path("/var/lib/pxe-tools-http")
+TFTP = Path("/var/lib/pxe-tools-tftp")
+UNIT = Path("/etc/systemd/system")
+DATABASE = DATA / "chosen.sqlite"
+STALE = DATA / "stale.sqlite"
+PXE_IP = "192.0.2.1"
+CLIENT = "192.0.2.100"
+MAC = "02:00:00:00:00:01"
+SERIAL = "PXE-TEST-ONE"
+
+
+def create_db(path, schema, settings):
+    with closing(sqlite3.connect(path)) as db, db:
+        db.executescript(schema)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.executemany("INSERT INTO settings(key,value) VALUES(?,?)", settings.items())
+    path.chmod(0o660)
+
+
+def seed(root):
+    if DATA.exists() or CONF.exists():
+        raise RuntimeError("The native fixture requires a fresh system")
+    DATA.mkdir(mode=0o755)
+    CONF.mkdir(mode=0o750)
+    (CONF / "db.conf").write_text(json.dumps({"driver": "sqlite", "path": str(DATABASE)}))
+    (CONF / "db.conf").chmod(0o640)
+    with (CONF / "master.key").open("xb") as key:
+        key.write(os.urandom(32))
+    (CONF / "master.key").chmod(0o600)
+    schema = (root / "schema.sqlite.sql").read_text()
+    create_db(DATABASE, schema, {
+        "pxe_ip": PXE_IP, "pxe_subnet": "192.0.2.0/24", "pxe_interface": "br-pxetest",
+        "pxe_enabled": "on", "dhcp_proxy_enabled": "on", "dhcp_proxy_network": "192.0.2.0",
+        "dhcp_proxy_netmask": "255.255.255.0", "https_enabled": "off",
+        "wizard_completed": "1", "db_init_done": "1", "admin_created": "1",
+        "init_completed": "1", "ansible_enabled": "off", "catalog_auto_refresh_enabled": "off",
+    })
+    with closing(sqlite3.connect(DATABASE)) as db, db:
+        db.execute("""INSERT INTO os_images (distro,version,arch,codename,version_full,enabled,status)
+                      VALUES ('debian','13.0','amd64','trixie','13.0',1,'downloaded')""")
+    create_db(STALE, schema, {"pxe_ip": "198.51.100.1", "pxe_subnet": "198.51.100.0/24",
+                              "pxe_interface": "fixture-stale", "fixture_marker": "preserved"})
+    with closing(sqlite3.connect(STALE)) as db, db:
+        db.execute("INSERT INTO machines(mac,status) VALUES(?,'wiping')", (MAC,))
+
+
+def wire(root):
+    binary = "/usr/local/libexec/pxe-tools-rust-lab"
+    (UNIT / "pxe-tools-rust-lab.service").write_text(f"""[Unit]
+Description=PXE Tools Rust backend for the native disposable fixture
+Requires=pxe-tools-init.service
+After=pxe-tools-init.service
+[Service]
+User=www-data
+Group=www-data
+RuntimeDirectory=pxe-tools-rust-lab
+RuntimeDirectoryMode=0700
+Environment=PXE_DB_PATH={STALE}
+ExecStart=/bin/sh -ec 'exec {binary} "$(/usr/bin/python3 {APP}/database_selection.py)" /run/pxe-tools-rust-lab/http.sock'
+""")
+    original = Path("/usr/lib/systemd/system/pxe-tools-pxe-http.service")
+    native = original.read_text()
+    for key in ("Requires=", "After="):
+        old = f"{key}pxe-tools-php.service pxe-tools-init.service"
+        if native.count(old) != 1:
+            raise RuntimeError("PXE HTTP unit no longer matches the expected dependency graph")
+        native = native.replace(old, f"{key}pxe-tools-rust-lab.service pxe-tools-init.service")
+    (UNIT / original.name).write_text(native)
+    boot_dir = HTTP / "netboot/debian/13.0/amd64"
+    boot_dir.mkdir(parents=True)
+    for item in ("linux", "initrd.gz"):
+        subprocess.run(["install", "-m", "0644", str(root / item), str(boot_dir / item)], check=True)
+    env = Path("/usr/lib/pxe-tools/native/default.env")
+    opts = ('language=en country=US locale=en_US.UTF-8 keymap=us console=ttyS0,115200n8 '
+            'net.ifnames=0 ipv6.disable=1 netcfg/no_default_route=true netcfg/get_nameservers=192.0.2.2')
+    env.write_text(env.read_text().replace(f"PXE_DB_PATH={DATA}/pxe-tools.sqlite", f"PXE_DB_PATH={STALE}")
+                   + f'\nKERNEL_OPTS="{opts}"\n')
+    template = Path("/opt/pxe-tools/templates/discovery-preseed.cfg.j2")
+    text = template.read_text()
+    for before, after in [
+        ("fr_FR.UTF-8", "en_US.UTF-8"), ("xkb-keymap select fr", "xkb-keymap select us"),
+        ("debian-installer/language string fr", "debian-installer/language string en"),
+        ("debian-installer/country string FR", "debian-installer/country string US"),
+        ("mirror/http/hostname string deb.debian.org", f"mirror/http/hostname string {PXE_IP}"),
+        ("clock-setup/ntp boolean true", "clock-setup/ntp boolean false"),
+    ]:
+        if text.count(before) != 1:
+            raise RuntimeError("Unexpected discovery fixture template")
+        text = text.replace(before, after)
+    template.write_text(text + "\nd-i mirror/udeb/suite string trixie\n")
+
+
+def assert_php_stopped():
+    for proc in Path("/proc").iterdir():
+        if proc.name.isdecimal():
+            try:
+                name = (proc / "comm").read_text().strip()
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            if name.startswith("php-fpm"):
+                raise RuntimeError("PHP-FPM started in the native PXE fixture")
+    for name in ("php8.4-fpm.service", "pxe-tools-php.service"):
+        state = subprocess.check_output(
+            ["systemctl", "show", "--property=UnitFileState,ActiveState", name], text=True
+        ).splitlines()
+        if set(state) != {"UnitFileState=masked", "ActiveState=inactive"}:
+            raise RuntimeError(f"PHP-FPM unit not masked and inactive: {state}")
+
+
+def wait_for(query, timeout, description):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        assert_php_stopped()
+        result = query()
+        if result:
+            return result
+        time.sleep(1)
+    raise RuntimeError("Timed out: " + description)
+
+
+def inventory():
+    with closing(sqlite3.connect(DATABASE)) as db:
+        return db.execute("SELECT id,inventory_json FROM machines WHERE mac=? AND status='discovered'", (MAC,)).fetchone()
+
+
+def schedule(machine, report):
+    target = next((item for item in json.loads(report)["disks"]
+                   if item["identity"]["value"] == SERIAL and item["identity"]["status"] == "valid"), None)
+    if target is None:
+        raise RuntimeError("Discovery failed to identify the disposable disk")
+    token = secrets.token_hex(32)
+    fixture_hash = subprocess.check_output(
+        ["openssl", "passwd", "-6", "-salt", "pxe-native-lab", "fixture-password"], text=True
+    ).strip()
+    with closing(sqlite3.connect(DATABASE)) as db, db:
+        action = db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES(?,'install_only','pending',?)",
+                            (machine, token)).lastrowid
+        config = {
+            "distro": "debian", "codename": "trixie", "version_full": "13.0",
+            "_pending_action_id": action, "network_mode": "dhcp", "partition_mode": "default",
+            "root_login_mode": "disabled", "admin_user_login": "fixture", "admin_user_pwhash": fixture_hash,
+            "system_disk_path": "/dev/" + target["name"].removeprefix("/dev/"),
+            "system_disk_identity": target["identity"],
+            "advanced": {"localization": {"locale": "en_US.UTF-8", "keymap": "us"},
+                         "mirror": {"hostname": PXE_IP}, "timezone": {"zone": "UTC", "ntp": False},
+                         "packages": {"tasksel": ["ssh-server"], "pkgsel_include": ["sudo", "openssh-server", "curl"],
+                                      "upgrade": "none"},
+                         "apt": {"services_select": [], "contrib": False, "non_free_firmware": False,
+                                 "hw_detect_load_firmware": False}, "finish": {"reboot": "quiet"}},
+        }
+        db.execute("UPDATE machines SET status='configured',hostname='pxe-fixture',domain='example.test',"
+                   " install_config_json=? WHERE id=?", (json.dumps(config), machine))
+    sys.path.insert(0, str(APP))
+    from worker import render_postboot_for_action
+    if render_postboot_for_action(action, token, MAC, PXE_IP) is None:
+        raise RuntimeError("The native worker could not render its postboot artifacts")
+    subprocess.run(["bash", "/opt/pxe-tools/scripts/render-per-mac-pxelinux.sh"], check=True)
+    menu = TFTP / "pxelinux.cfg/01-02-00-00-00-01"
+    if "DEFAULT install\n" not in menu.read_text():
+        raise RuntimeError("The native renderer did not publish the install menu")
+    with closing(sqlite3.connect(DATABASE)) as db, db:
+        db.execute("UPDATE machines SET next_action='reboot' WHERE id=?", (machine,))
+    return action
+
+
+def successful_install(action):
+    with closing(sqlite3.connect(DATABASE)) as db:
+        return db.execute("""SELECT i.install_status,m.status,m.local_boot_source
+                             FROM installations i JOIN machines m ON m.id=i.machine_id
+                             WHERE i.action_id=?""", (action,)).fetchone() == ("success", "installed", "pxe")
+
+
+def first_boot(action):
+    with closing(sqlite3.connect(DATABASE)) as db:
+        receipt = db.execute("SELECT message FROM machine_events WHERE action_id=? AND checkpoint='os_first_boot'",
+                             (action,)).fetchone()
+        ready = db.execute("SELECT 1 FROM machine_events WHERE message LIKE 'Machine signalée online%'").fetchone()
+        guard = db.execute("SELECT 1 FROM task_phases WHERE phase_key='disk-guard' AND status='success'").fetchone()
+    if not (receipt and ready and guard):
+        return None
+    payload = json.loads(receipt[0].removeprefix("checkpoint:os_first_boot "))
+    if payload["ip"] != CLIENT or payload["_observed_remote_ip"] != CLIENT or not payload["kernel"]:
+        raise RuntimeError("The first-boot receipt lacks the original native client address or kernel")
+    return payload["kernel"]
+
+
+def follow(_root):
+    def digest(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    original_stale = digest(STALE)
+    original_key = digest(CONF / "master.key")
+    assert_php_stopped()
+    print("PXE_NATIVE_READY", flush=True)
+    machine, report = wait_for(inventory, 1200, "native inventory")
+    action = schedule(machine, report)
+    print("PXE_NATIVE_DISCOVERY_OK", flush=True)
+    wait_for(lambda: successful_install(action), 2400, "native install callback")
+    print("PXE_NATIVE_INSTALL_OK", flush=True)
+    kernel = wait_for(lambda: first_boot(action), 900, "native first-boot receipt")
+    if digest(STALE) != original_stale or digest(CONF / "master.key") != original_key:
+        raise RuntimeError("The stale database or existing fixture master key was modified")
+    assert_php_stopped()
+    log = Path("/var/lib/pxe-tools-native/log/nginx-access.log").read_text().splitlines()
+    for path in ("/api/discovery", "/preseed.php?mac=", "/pxe/postboot/", "/api/install-end?",
+                 "/api/machine-ready?", "code=os_first_boot"):
+        if not any(line.startswith(f"{CLIENT} ") and path in line and '" 200 ' in line for line in log):
+            raise RuntimeError("Missing native HTTP evidence for " + path)
+    print(f"PXE_NATIVE_FIRST_BOOT_OK kernel={kernel} peer={CLIENT} action={action}", flush=True)
+    while True:
+        assert_php_stopped()
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    phase, directory = sys.argv[1:]
+    {"seed": seed, "wire": wire, "follow": follow}[phase](Path(directory))

@@ -97,6 +97,41 @@ ajoute les paramètres série et de miroir propres à la fixture. Aucun PHP-FPM
 n'entre dans ce parcours. Le worker et la console sont remplacés par la
 programmation et le dépôt d'artefacts de la fixture.
 
+## Qualification native Debian 13 avec dnsmasq
+
+Le [banc natif Rust](../../integration/test_native_rust_debian_pxe.py)
+installe le paquet APT local dans une VM Debian 13 amd64. Une seconde VM
+démarre en PXE sur un commutateur Ethernet privé, avec le vrai
+`pxe-tools-dnsmasq.service` en proxy DHCP/TFTP et un serveur de baux
+dans un namespace distinct. La VM serveur accède au miroir Debian
+authentifié par un unique relais QEMU vers un socket Unix. La VM cliente
+dispose uniquement de la liaison Ethernet privée.
+
+Le banc remplace le backend du vhost PXE par Rust dans la VM jetable.
+Il conserve le démarrage des services natifs, les répertoires protégés,
+la sélection SQLite par `db.conf`, les menus PXELINUX générés et le
+rendu des artefacts postboot par la fonction du worker. Il masque les
+unités PHP-FPM et surveille leur état et les processus pendant tout
+le parcours. Il exige l'invite de connexion Debian, la fin d'installation
+en SQLite et le checkpoint `os_first_boot` associé à l'action. Le vhost
+doit observer l'adresse IPv4 réelle du client, y compris au premier boot.
+
+```sh
+python3 packaging/native/build-local-package.py /tmp/pxe-tools-local.deb --version 0.0.1~local1
+PXE_NATIVE_RUST_QEMU_TEST=1 python3.13 tests/integration/test_native_rust_debian_pxe.py \
+    --cloud-image "$debian13_amd64_qcow2" --cloud-sha512 "$debian13_sha512" \
+    --inputs "$debian_netboot_inputs" --package /tmp/pxe-tools-local.deb \
+    --rust "$pxe_tools_rust_linux_amd64"
+```
+
+L'image est fournie avec sa somme SHA-512. Le répertoire des entrées
+netboot correspond à celui conservé par le banc QEMU précédent avec
+`--fetch-inputs --keep-fixture`. Le binaire Rust doit être exécutable
+sur Debian 13 amd64 et le paquet local se construit hors publication.
+Le banc requiert QEMU x86-64, `qemu-img`, `xorriso`, `gpgv` et assez
+d'espace pour deux disques QCOW2 jetables. L'option `--mirror-cache`
+réutilise les fichiers déjà authentifiés d'un précédent essai.
+
 ## Périmètre du renderer et étapes restantes
 
 - Le renderer Rust lit les snapshots SQLite du mode Debian guidé avec une
@@ -106,14 +141,11 @@ programmation et le dépôt d'artefacts de la fixture.
   VLAN et bonds ainsi que les templates personnalisés restent à porter.
   Le renderer expérimental refuse les plans qu'il ne sait pas interpréter.
 - Le binaire de banc reçoit le chemin SQLite explicitement. Il lit les
-  empreintes stockées pour préparer Debian. Le choix de la base via
-  `db.conf` et la reprise des données chiffrées avec la clé maître devront
-  être éprouvés pour un futur service installé. La console PHP et le
+  empreintes stockées pour préparer Debian. Le banc natif passe le chemin
+  choisi par le sélecteur de base existant et vérifie la conservation
+  de la clé de fixture pendant le parcours. La reprise des données
+  chiffrées avec la clé maître reste à éprouver. La console PHP et le
   worker restent les points d'entrée de l'appliance.
-- Le [banc natif dnsmasq](../../integration/test_native_discovery_install_chain_isolated.py)
-  reste nécessaire pour qualifier le proxy DHCP, les menus générés et les
-  services de l'appliance dans une VM Linux jetable. Le banc QEMU ci-dessus
-  utilise le DHCP/TFTP de QEMU et le chargeur BIOS PXELINUX.
 - Sur Debian 13 amd64 avec environ 1 Gio de RAM, mesurer la PSS du service
   et du worker, la pression mémoire PSI, les latences, le débit et la durée
   d'installation. Comparer le `.deb` et l'image Docker complets une fois le
