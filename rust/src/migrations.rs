@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use rusqlite::{OpenFlags, TransactionBehavior};
-use std::{error::Error, path::Path};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use serde_json::Value;
+use std::{collections::HashSet, error::Error, path::Path};
 
 pub fn network_settings(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     let path = crate::configured_database(config).ok_or("Existing SQLite database required")?;
@@ -121,13 +122,14 @@ pub fn schema(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    check_upgrade_compatibility(&tx)?;
     let mut initialize_local_boot = false;
     for (table, additions) in LEGACY_COLUMNS {
         // Missing tables are handled by the embedded current schema below.
         let mut prepare = tx.prepare("SELECT name FROM pragma_table_info(?1)")?;
         let columns = prepare
             .query_map([table], |row| row.get::<_, String>(0))?
-            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+            .collect::<Result<HashSet<_>, _>>()?;
         if columns.is_empty() {
             continue;
         }
@@ -154,6 +156,124 @@ pub fn schema(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     tx.commit()?;
     println!("Rust applied the SQLite schema evolution");
     Ok(())
+}
+
+fn check_upgrade_compatibility(db: &Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
+    for (table, column) in [
+        ("presets", "static_cidr"),
+        ("machines", "install_config_json"),
+    ] {
+        let found: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+            [table, column],
+            |row| row.get(0),
+        )?;
+        if !found {
+            return Err(format!("Migration refusée : colonne {table}.{column} absente.").into());
+        }
+    }
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('presets') WHERE name IN ('partition_target_disk','partition_lvm_vg'))",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Err("Migration refusée : colonnes historiques de partition à examiner.".into());
+    }
+    let mut presets = db.prepare("SELECT partition_mode,partition_custom_json FROM presets")?;
+    let mut rows = presets.query([])?;
+    while let Some(row) = rows.next()? {
+        let mode: Option<String> = row.get(0)?;
+        let layout: Option<String> = row.get(1)?;
+        if legacy_partition_mode(mode.as_deref()) || layout.as_deref().is_some_and(legacy_layout) {
+            return Err("Migration refusée : recette de partition historique à examiner.".into());
+        }
+    }
+
+    let mut machines = db.prepare(
+        "SELECT install_config_json FROM machines WHERE install_config_json IS NOT NULL",
+    )?;
+    let mut rows = machines.query([])?;
+    while let Some(row) = rows.next()? {
+        let snapshot: String = row.get(0)?;
+        let Ok(snapshot) = serde_json::from_str::<Value>(&snapshot) else {
+            continue;
+        };
+        let layout = &snapshot["partition_custom_json"];
+        if legacy_partition_mode(snapshot["partition_mode"].as_str())
+            || layout.as_str().is_some_and(legacy_layout)
+            || list_layout(layout)
+        {
+            return Err("Migration refusée : configuration machine historique à examiner.".into());
+        }
+    }
+
+    let sensitive: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key IN ('ansible_vault_password','ansible_vault_applied_hash'))",
+        [],
+        |row| row.get(0),
+    )?;
+    if sensitive {
+        return Err("Migration refusée : anciennes données sensibles à traiter séparément.".into());
+    }
+    let unknown_dhcp: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key='dhcp_mode' AND (value IS NULL OR value NOT IN ('proxy','tftp_only')))",
+        [],
+        |row| row.get(0),
+    )?;
+    if unknown_dhcp {
+        return Err("Migration refusée : ancien mode réseau non reconnu.".into());
+    }
+
+    let supported: HashSet<_> = SCHEMA
+        .lines()
+        .filter_map(|line| {
+            line.trim_start()
+                .strip_prefix("CREATE TABLE IF NOT EXISTS ")
+        })
+        .filter_map(|definition| definition.split_ascii_whitespace().next())
+        .collect();
+    let mut tables = db.prepare(
+        "SELECT name FROM sqlite_schema WHERE type='table' AND substr(name,1,7)<>'sqlite_'",
+    )?;
+    let mut rows = tables.query([])?;
+    while let Some(row) = rows.next()? {
+        let table: String = row.get(0)?;
+        if supported.contains(table.as_str()) {
+            continue;
+        }
+        let quoted = table.replace('"', "\"\"");
+        let populated = db.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM \"{quoted}\")"),
+            [],
+            |row| row.get::<_, bool>(0),
+        );
+        if !matches!(populated, Ok(false)) {
+            return Err("Migration refusée : données externes ou tables non reconnues à examiner séparément.".into());
+        }
+    }
+    Ok(())
+}
+
+fn legacy_partition_mode(mode: Option<&str>) -> bool {
+    matches!(
+        mode,
+        Some("atomic_lvm" | "home_separate" | "var_separate" | "encrypted")
+    )
+}
+
+fn legacy_layout(raw: &str) -> bool {
+    serde_json::from_str(raw).is_ok_and(|value| list_layout(&value))
+}
+
+fn list_layout(value: &Value) -> bool {
+    match value {
+        Value::Array(_) => true,
+        // PHP decodes objects with sequential numeric keys as lists.
+        Value::Object(fields) => {
+            (0..fields.len()).all(|index| fields.contains_key(&index.to_string()))
+        }
+        _ => false,
+    }
 }
 
 pub fn preset_network(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {

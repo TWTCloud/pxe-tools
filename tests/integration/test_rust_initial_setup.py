@@ -543,6 +543,28 @@ def verify_schema_migration(binary):
             assert db.execute("SELECT name FROM pragma_table_info('installations') WHERE name='action_id'").fetchone() is None
             assert db.execute("SELECT name FROM sqlite_schema WHERE name='boot_sessions'").fetchone() is None
             db.execute('DROP TRIGGER refusal')
+            db.execute('CREATE TABLE "independent "" module" (payload TEXT)')
+        refusal_cases = [
+            ('INSERT INTO "independent "" module" VALUES(\'external\')',
+             'DELETE FROM "independent "" module"', 'tables non reconnues'),
+            ("UPDATE presets SET partition_custom_json='[]'",
+             'UPDATE presets SET partition_custom_json=NULL', 'recette de partition historique'),
+            ('UPDATE machines SET install_config_json=\'{"partition_mode":"home_separate"}\'',
+             'UPDATE machines SET install_config_json=NULL', 'configuration machine historique'),
+            ("INSERT INTO settings(key,value) VALUES('ansible_vault_applied_hash','fixture')",
+             "DELETE FROM settings WHERE key='ansible_vault_applied_hash'", 'données sensibles'),
+            ("INSERT INTO settings(key,value) VALUES('dhcp_mode','foreign')",
+             "DELETE FROM settings WHERE key='dhcp_mode'", 'mode réseau non reconnu'),
+        ]
+        for insert, cleanup, reason in refusal_cases:
+            with closing(sqlite3.connect(database)) as db, db:
+                db.execute(insert)
+            original = database.read_bytes()
+            refused = subprocess.run(command, capture_output=True, text=True)
+            assert refused.returncode and reason in refused.stderr, refused.stderr
+            assert database.read_bytes() == original
+            with closing(sqlite3.connect(database)) as db, db:
+                db.execute(cleanup)
         subprocess.run(command, check=True, capture_output=True)
         with closing(sqlite3.connect(database)) as db, db:
             assert db.execute('SELECT local_boot_source,root_password_cipher FROM machines ORDER BY id').fetchall()==[

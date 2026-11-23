@@ -97,74 +97,6 @@ function isLegacyPartitionsJson(?string $raw): bool {
     return array_is_list($d);
 }
 
-// Avant toute modification, refuser les données que cette migration ne peut
-// pas convertir sans perte. Une sauvegarde et un outil dédié sont nécessaires.
-foreach (['partition_target_disk', 'partition_lvm_vg'] as $column) {
-    if (Db::columnExists('presets', $column)) {
-        fwrite(STDERR, "Migration refusée : colonnes historiques de partition à examiner.\n");
-        exit(2);
-    }
-}
-$legacyModes = ['atomic_lvm', 'home_separate', 'var_separate', 'encrypted'];
-foreach ($pdo->query('SELECT partition_mode, partition_custom_json FROM presets')->fetchAll(PDO::FETCH_ASSOC) as $preset) {
-    if (in_array($preset['partition_mode'], $legacyModes, true) || isLegacyPartitionsJson($preset['partition_custom_json'])) {
-        fwrite(STDERR, "Migration refusée : recette de partition historique à examiner.\n");
-        exit(2);
-    }
-}
-foreach ($pdo->query('SELECT install_config_json FROM machines WHERE install_config_json IS NOT NULL')->fetchAll(PDO::FETCH_COLUMN) as $rawConfig) {
-    $config = json_decode((string)$rawConfig, true);
-    if (!is_array($config)) continue;
-    $partitions = $config['partition_custom_json'] ?? null;
-    if (in_array($config['partition_mode'] ?? null, $legacyModes, true)
-        || (is_string($partitions) && isLegacyPartitionsJson($partitions))
-        || (is_array($partitions) && array_is_list($partitions))) {
-        fwrite(STDERR, "Migration refusée : configuration machine historique à examiner.\n");
-        exit(2);
-    }
-}
-$keyQ = Db::quoteIdent('key');
-$sensitiveLegacy = (int)$pdo->query("SELECT COUNT(*) FROM settings WHERE $keyQ IN ('ansible_vault_password', 'ansible_vault_applied_hash')")->fetchColumn();
-if ($sensitiveLegacy > 0) {
-    fwrite(STDERR, "Migration refusée : anciennes données sensibles à traiter séparément.\n");
-    exit(2);
-}
-$legacyDhcp = $pdo->query("SELECT value FROM settings WHERE $keyQ='dhcp_mode'")->fetchColumn();
-if ($legacyDhcp !== false && !in_array($legacyDhcp, ['proxy', 'tftp_only'], true)) {
-    fwrite(STDERR, "Migration refusée : ancien mode réseau non reconnu.\n");
-    exit(2);
-}
-// Refuse populated tables outside the current core schema. They may contain
-// independently managed data that this edition cannot safely migrate or delete.
-// Empty unknown tables are left untouched. A future module registry must make
-// module-owned tables explicit before this conservative guard can be relaxed.
-$schemaFile = __DIR__ . '/schema.' . ($driver === 'sqlite' ? 'sqlite' : 'mysql') . '.sql';
-$schema = @file_get_contents($schemaFile);
-if ($schema === false || !preg_match_all('/^[ \t]*CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([a-zA-Z_][a-zA-Z0-9_]*)/mi', $schema, $matches)) {
-    fwrite(STDERR, "Migration refusée : schéma de référence indisponible.\n");
-    exit(2);
-}
-$coreTables = array_fill_keys($matches[1], true);
-try {
-    $tableQuery = $driver === 'sqlite'
-        ? "SELECT name FROM sqlite_master WHERE type='table' AND substr(name, 1, 7) <> 'sqlite_'"
-        : "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE'";
-    $tables = $pdo->query($tableQuery)->fetchAll(PDO::FETCH_COLUMN);
-    foreach ($tables as $table) {
-        if (isset($coreTables[(string)$table])) continue;
-        $quoted = Db::quoteIdent((string)$table);
-        if ($pdo->query("SELECT 1 FROM $quoted LIMIT 1")->fetchColumn() !== false) {
-            throw new RuntimeException('unmanaged populated table');
-        }
-    }
-} catch (Throwable $error) {
-    fwrite(STDERR, "Migration refusée : données externes ou tables non reconnues à examiner séparément.\n");
-    exit(2);
-}
-if ($driver === 'sqlite') {
-    $pdo->exec('PRAGMA journal_mode = WAL');
-}
-
 $rustGuided = $driver === 'sqlite' && getenv('PXE_RUST_GUIDED') === '1';
 $runsRustMigration = static function (string $operation): void {
     $process = proc_open(
@@ -179,6 +111,74 @@ $runsRustMigration = static function (string $operation): void {
 };
 if ($rustGuided) {
     $runsRustMigration('--migrate-schema');
+} else {
+    // Avant toute modification, refuser les données que cette migration ne peut
+    // pas convertir sans perte. Une sauvegarde et un outil dédié sont nécessaires.
+    foreach (['partition_target_disk', 'partition_lvm_vg'] as $column) {
+        if (Db::columnExists('presets', $column)) {
+            fwrite(STDERR, "Migration refusée : colonnes historiques de partition à examiner.\n");
+            exit(2);
+        }
+    }
+    $legacyModes = ['atomic_lvm', 'home_separate', 'var_separate', 'encrypted'];
+    foreach ($pdo->query('SELECT partition_mode, partition_custom_json FROM presets')->fetchAll(PDO::FETCH_ASSOC) as $preset) {
+        if (in_array($preset['partition_mode'], $legacyModes, true) || isLegacyPartitionsJson($preset['partition_custom_json'])) {
+            fwrite(STDERR, "Migration refusée : recette de partition historique à examiner.\n");
+            exit(2);
+        }
+    }
+    foreach ($pdo->query('SELECT install_config_json FROM machines WHERE install_config_json IS NOT NULL')->fetchAll(PDO::FETCH_COLUMN) as $rawConfig) {
+        $config = json_decode((string)$rawConfig, true);
+        if (!is_array($config)) continue;
+        $partitions = $config['partition_custom_json'] ?? null;
+        if (in_array($config['partition_mode'] ?? null, $legacyModes, true)
+            || (is_string($partitions) && isLegacyPartitionsJson($partitions))
+            || (is_array($partitions) && array_is_list($partitions))) {
+            fwrite(STDERR, "Migration refusée : configuration machine historique à examiner.\n");
+            exit(2);
+        }
+    }
+    $keyQ = Db::quoteIdent('key');
+    $sensitiveLegacy = (int)$pdo->query("SELECT COUNT(*) FROM settings WHERE $keyQ IN ('ansible_vault_password', 'ansible_vault_applied_hash')")->fetchColumn();
+    if ($sensitiveLegacy > 0) {
+        fwrite(STDERR, "Migration refusée : anciennes données sensibles à traiter séparément.\n");
+        exit(2);
+    }
+    $legacyDhcp = $pdo->query("SELECT value FROM settings WHERE $keyQ='dhcp_mode'")->fetchColumn();
+    if ($legacyDhcp !== false && !in_array($legacyDhcp, ['proxy', 'tftp_only'], true)) {
+        fwrite(STDERR, "Migration refusée : ancien mode réseau non reconnu.\n");
+        exit(2);
+    }
+    // Refuse populated tables outside the current core schema. They may contain
+    // independently managed data that this edition cannot safely migrate or delete.
+    // Empty unknown tables are left untouched. A future module registry must make
+    // module-owned tables explicit before this conservative guard can be relaxed.
+    $schemaFile = __DIR__ . '/schema.' . ($driver === 'sqlite' ? 'sqlite' : 'mysql') . '.sql';
+    $schema = @file_get_contents($schemaFile);
+    if ($schema === false || !preg_match_all('/^[ \t]*CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([a-zA-Z_][a-zA-Z0-9_]*)/mi', $schema, $matches)) {
+        fwrite(STDERR, "Migration refusée : schéma de référence indisponible.\n");
+        exit(2);
+    }
+    $coreTables = array_fill_keys($matches[1], true);
+    try {
+        $tableQuery = $driver === 'sqlite'
+            ? "SELECT name FROM sqlite_master WHERE type='table' AND substr(name, 1, 7) <> 'sqlite_'"
+            : "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE'";
+        $tables = $pdo->query($tableQuery)->fetchAll(PDO::FETCH_COLUMN);
+        foreach ($tables as $table) {
+            if (isset($coreTables[(string)$table])) continue;
+            $quoted = Db::quoteIdent((string)$table);
+            if ($pdo->query("SELECT 1 FROM $quoted LIMIT 1")->fetchColumn() !== false) {
+                throw new RuntimeException('unmanaged populated table');
+            }
+        }
+    } catch (Throwable $error) {
+        fwrite(STDERR, "Migration refusée : données externes ou tables non reconnues à examiner séparément.\n");
+        exit(2);
+    }
+}
+if ($driver === 'sqlite') {
+    $pdo->exec('PRAGMA journal_mode = WAL');
 }
 
 // ---------------------------------------------------------------------------
