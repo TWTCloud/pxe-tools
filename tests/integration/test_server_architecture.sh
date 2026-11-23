@@ -94,6 +94,9 @@ else
     docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes' "$name"
     docker run -d --name "$name" "$name" >/dev/null
     docker exec "$name" dpkg-query -W -f='Debian source: ${source:Package} ${source:Version}\n' | sort -u
+    if [ -n "${PXE_DOCKER_SOURCE_OFFER:-}" ]; then
+        python3 packaging/ci/docker-source-offer.py "$name" > "$PXE_DOCKER_SOURCE_OFFER"
+    fi
 fi
 
 for attempt in {1..90}; do
