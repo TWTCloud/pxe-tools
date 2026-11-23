@@ -1214,6 +1214,7 @@ class AptSourceTests(unittest.TestCase):
         self.assertFalse(self.anchor.exists())
 
     def test_proven_key_with_root_group_writable_zorin_source(self):
+        import errno
         from types import SimpleNamespace
 
         self.prove_created_key()
@@ -1231,9 +1232,14 @@ class AptSourceTests(unittest.TestCase):
 
         with patch.object(os, 'stat', side_effect=root_owned_stat), \
                 patch('grp.getgrgid', return_value=SimpleNamespace(gr_name='root', gr_mem=[])), \
-                patch('pwd.getpwall', return_value=[SimpleNamespace(pw_uid=0, pw_gid=0)]) as accounts:
+                patch('pwd.getpwall', return_value=[SimpleNamespace(pw_uid=0, pw_gid=0)]) as accounts, \
+                patch.object(os, 'getxattr', create=True, side_effect=OSError(errno.ENODATA, 'No ACL')) as acl:
             self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=0, apt_config=self.standard), (False, True))
             accounts.return_value.append(SimpleNamespace(pw_uid=1000, pw_gid=0))
+            self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=0, apt_config=self.standard), (False, False))
+            accounts.return_value.pop()
+            acl.side_effect = None
+            acl.return_value = b'extended ACL'
             self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=0, apt_config=self.standard), (False, False))
 
     def test_in_place_changed_proven_key_is_preserved(self):
