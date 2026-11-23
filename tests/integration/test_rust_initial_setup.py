@@ -379,26 +379,32 @@ def verify_worker_commands(binary):
         with closing(sqlite3.connect(database)) as db, db:
             db.execute('CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
             db.executemany('INSERT INTO settings VALUES(?,?)',[
-                ('orchestrator_ip','192.0.2.9'),('dhcp_mode','invalid'),
+                ('orchestrator_ip','192.0.2.9'),('dhcp_mode','historical'),
                 ('wizard_completed','1'),('pxe_enabled','off'),
             ])
+            db.execute("""CREATE TRIGGER fixture_rollback BEFORE INSERT ON settings
+                          WHEN NEW.key='dhcp_proxy_enabled' BEGIN SELECT RAISE(ABORT,'fixture'); END""")
         refused = subprocess.run(command, capture_output=True, text=True)
         assert refused.returncode
         with closing(sqlite3.connect(database)) as db, db:
             assert db.execute('SELECT COUNT(*) FROM settings').fetchone()==(4,)
-            db.execute("UPDATE settings SET value='proxy' WHERE key='dhcp_mode'")
-        for _ in range(2):
-            subprocess.run(command, check=True, capture_output=True)
+            db.execute('DROP TRIGGER fixture_rollback')
+        subprocess.run(command, check=True, capture_output=True)
         with closing(sqlite3.connect(database)) as db, db:
             assert dict(db.execute('SELECT key,value FROM settings'))=={
-                'orchestrator_ip':'192.0.2.9','dhcp_mode':'proxy','wizard_completed':'1',
-                'pxe_enabled':'off','pxe_ip':'192.0.2.9','dhcp_proxy_enabled':'on',
+                'orchestrator_ip':'192.0.2.9','dhcp_mode':'historical','wizard_completed':'1',
+                'pxe_enabled':'off','pxe_ip':'192.0.2.9','dhcp_proxy_enabled':'off',
             }
-            db.execute("UPDATE settings SET value='off' WHERE key='dhcp_proxy_enabled'")
+            db.execute("UPDATE settings SET value='proxy' WHERE key='dhcp_mode'")
         subprocess.run(command, check=True, capture_output=True)
-        with closing(sqlite3.connect(database)) as db:
+        with closing(sqlite3.connect(database)) as db, db:
             assert db.execute("SELECT value FROM settings WHERE key='dhcp_proxy_enabled'").fetchone()==('off',)
-    print('Rust network migration preserves existing settings and rolls back on an unknown DHCP mode', flush=True)
+            db.execute("DELETE FROM settings WHERE key='dhcp_proxy_enabled'")
+        for _ in range(2):
+            subprocess.run(command, check=True, capture_output=True)
+        with closing(sqlite3.connect(database)) as db:
+            assert db.execute("SELECT value FROM settings WHERE key='dhcp_proxy_enabled'").fetchone()==('on',)
+    print('Rust network migration preserves explicit choices and historical DHCP fallback atomically', flush=True)
 
 
 def local(binary):
