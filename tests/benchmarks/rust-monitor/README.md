@@ -434,6 +434,16 @@ python3 tests/integration/verify_windows_pxe_deployment.py \
   --network-proof "$network_proof" --serial "$serial_log"
 ```
 
+Le banc Linux `tests/integration/test_windows_pxe_isolated.py` requiert
+un runner amd64 jetable avec KVM, les images de test Docker et un
+répertoire de médias préparé pour le test. Y placer `windows.iso`,
+`case.json`, `boot/` et les deux binaires Secure Boot amd64 issus de la
+même livraison iPXE dans `ipxe/`, `ipxe-shim.efi` et `ipxe.efi`. Le
+manifeste ajoute leurs empreintes dans `ipxe_sha256`. Le banc vérifie
+les médias, crée son propre réseau sans route par défaut, un TPM
+jetable et un disque qcow2 neuf. Le second démarrage ne monte plus l’ISO
+et doit produire la preuve Windows sur le port série.
+
 L’option `--boot-root` vérifie aussi les quatre fichiers publiés avec
 `wimboot_sha256`, `bcd_sha256`, `boot_sdi_sha256` et `winpe_sha256` dans le
 manifeste. Le banc des paquets utilise des fichiers synthétiques pour vérifier
