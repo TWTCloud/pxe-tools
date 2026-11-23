@@ -53,7 +53,7 @@ def write_nginx(root):
         master_process off;
         error_log stderr warn;
         pid "{root}/nginx.pid";
-        events {{ worker_connections 128; }}
+        events {{ worker_connections 1024; }}
         http {{
             access_log "{root}/access.log";
             client_body_temp_path "{root}/client";
@@ -73,7 +73,7 @@ def write_nginx(root):
                 location = /preseed.php {{
                     proxy_pass http://rust_pxe;
                     sub_filter_types text/plain;
-                    sub_filter 'd-i mirror/suite string trixie' 'd-i mirror/suite string trixie\nd-i mirror/udeb/suite string trixie';
+                    sub_filter 'd-i mirror/suite string trixie' 'd-i mirror/suite string trixie\nd-i mirror/udeb/suite string trixie\nd-i debian-installer/add-kernel-opts string net.ifnames=0';
                     sub_filter "{source}" "{source}{serial}";
                 }}
                 location /debian/ {{ proxy_pass http://fixture_mirror; proxy_read_timeout 90s; }}
