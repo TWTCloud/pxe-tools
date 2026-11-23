@@ -387,16 +387,23 @@ def verify_activity(client, database, authorization):
 def verify_guided_install(client, database, authorization):
     inventory = {'disks':[{'name':'vda','serial':'FIXTURE-SERIAL',
                            'identity':{'kind':'serial','source':'sysfs','value':'FIXTURE-SERIAL','status':'valid'}}]}
+    new_profile = {'name':'Debian <test>', 'login':'fixture','password':'fixture-password','confirm':'fixture-password'}
+    assert client.request('/presets', form=new_profile)[0] == 401
+    assert client.request('/presets', form={**new_profile,'confirm':'mismatch'}, authorization=authorization)[0] == 422
+    created = client.request('/presets', form=new_profile, authorization=authorization)
+    assert created[:2] == (303, '/presets'), created[:2]
+    assert client.request('/presets', form=new_profile, authorization=authorization)[0] == 409
+    rendered = client.request('/presets', authorization=authorization)
+    assert b'Debian &lt;test&gt;' in rendered[2] and b'fixture-password' not in rendered[2]
     with closing(sqlite3.connect(database)) as db, db:
         db.execute("UPDATE settings SET value='on' WHERE key='pxe_enabled'")
         device = db.execute(
             "INSERT INTO machines(mac,hostname,status,boot_arch,inventory_json) VALUES(?,?,'discovered','arm64',?)",
             ('02:00:00:00:20:02', 'fixture-device', json.dumps(inventory)),
         ).lastrowid
-        preset = db.execute(
-            "INSERT INTO presets(name,distro,admin_user_login,admin_user_pwhash,root_login_mode) "
-            "VALUES('Debian arm64','debian','fixture','$6$testing$hash','disabled')",
-        ).lastrowid
+        preset, password_hash = db.execute("SELECT id,admin_user_pwhash FROM presets WHERE name=?",
+                                           (new_profile['name'],)).fetchone()
+        assert password_hash.startswith('$6$') and 'fixture-password' not in password_hash
         image = db.execute(
             "INSERT INTO os_images(distro,version,arch,codename,version_full,enabled,status) "
             "VALUES('debian','fixture-trixie','arm64','trixie','13.7.0',1,'downloaded')",

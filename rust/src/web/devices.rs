@@ -3,6 +3,7 @@
 use super::{
     admin::escape,
     plain,
+    presets::GUIDED,
     setup::{page, redirect},
     ErrorBox, Reply,
 };
@@ -124,15 +125,6 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
     Ok(page("Appareil", &output))
 }
 
-const ENABLED_PRESETS: &str = "distro='debian' AND variant='debian' AND network_mode='dhcp'
-     AND partition_mode='default' AND root_login_mode='disabled'
-     AND COALESCE(pre_wipe_mode,'aucun') IN ('aucun','none') AND COALESCE(pre_wipe_mode_json,'')=''
-     AND COALESCE(ansible_role,'')='' AND COALESCE(ansible_extra_vars,'')=''
-     AND COALESCE(advanced_config_json,'') IN ('','{}','[]')
-     AND COALESCE(NULLIF(admin_user_groups,''),'sudo')='sudo'
-     AND (codename IS NULL OR codename='' OR codename='trixie')
-     AND COALESCE(admin_user_pwhash,'')<>''";
-
 fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> {
     let Some(arch @ ("amd64" | "arm64")) = device.arch.as_deref() else {
         return Ok(plain(StatusCode::CONFLICT, "Inventaire PXE requis\n"));
@@ -163,7 +155,7 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
     }
     output.push_str("</select></label></p><p><label>Modèle DHCP <select name=\"preset\" required><option value=\"\">Sélectionner</option>");
     let mut presets = db.prepare(&format!(
-        "SELECT id,name FROM presets WHERE {ENABLED_PRESETS} ORDER BY name"
+        "SELECT id,name FROM presets WHERE {GUIDED} ORDER BY name"
     ))?;
     let mut rows = presets.query([])?;
     while let Some(row) = rows.next()? {
@@ -171,7 +163,7 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
         escape(&mut output, &row.get::<_, String>(1)?);
         output.push_str("</option>");
     }
-    output.push_str("</select></label></p><p><label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE</label></p><button>Programmer</button></form>");
+    output.push_str("</select></label> <a href=\"/presets\">Gérer les modèles</a></p><p><label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE</label></p><button>Programmer</button></form>");
     Ok(page("Installation Debian guidée", &output))
 }
 
@@ -273,7 +265,7 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
     };
     let Some((login, password, fullname, keys)) = tx.query_row(
         &format!("SELECT admin_user_login,admin_user_pwhash,admin_user_fullname,admin_user_pubkeys FROM presets
-                 WHERE id=? AND {ENABLED_PRESETS} AND (version_full IS NULL OR version_full='' OR version_full=?)"),
+                 WHERE id=? AND {GUIDED} AND (version_full IS NULL OR version_full='' OR version_full=?)"),
         params![selection.preset, version],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                    row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?)),

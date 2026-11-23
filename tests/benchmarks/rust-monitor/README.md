@@ -127,6 +127,14 @@ importé et le service le recharge au redémarrage.
 être conservé avec les données sensibles de l’instance, avec les permissions
 du service.
 
+Depuis la fiche d’un appareil inventorié, l’installation guidée choisit
+une image Debian 13 publiée pour son architecture et un modèle compatible.
+La page `/presets` permet de créer ce modèle. L’opérateur confirme le disque
+identifié avant le repartitionnement. Rust vérifie de nouveau l’identité,
+l’état de l’appareil et les travaux concurrents avant de programmer le
+prochain boot PXE. Le mot de passe du compte installé est stocké sous forme
+de hash SHA-512 crypt.
+
 Pour activer ACME, définir `PXE_PUBLIC_HOST` avec le nom DNS, puis ouvrir
 `/admin/certificates` et choisir le mode de test ou de production de
 Let’s Encrypt. Le formulaire enregistre le consentement et peut renseigner

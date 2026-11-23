@@ -9,6 +9,7 @@ mod devices;
 mod images;
 mod jobs;
 mod onboarding;
+mod presets;
 mod setup;
 mod winpe;
 
@@ -486,7 +487,7 @@ async fn dispatch(
     }
     if matches!(
         path,
-        certificates::ROUTE | certificates::ACME_ROUTE | images::ROUTE
+        certificates::ROUTE | certificates::ACME_ROUTE | images::ROUTE | presets::ROUTE
     ) {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
@@ -497,6 +498,8 @@ async fn dispatch(
             }
             let limit = if path == certificates::ROUTE {
                 certificates::MAX_FORM
+            } else if path == presets::ROUTE {
+                2048
             } else {
                 256
             };
@@ -515,6 +518,7 @@ async fn dispatch(
             (certificates::ACME_ROUTE, None) => {
                 return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n")
             }
+            (presets::ROUTE, form) => admin::Action::Presets(form),
             (_, form) => admin::Action::Images(form),
         };
         return site.admin.serve(&parts, peer, &site.database, action).await;
