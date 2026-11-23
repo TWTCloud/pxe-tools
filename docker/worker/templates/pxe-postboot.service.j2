@@ -8,8 +8,9 @@
 # laisserait le service "started" mais inerte aux yeux de systemctl).
 Description=PXE Tools — post-install first-boot checkpoint
 ConditionPathExists=!/var/lib/pxe-tools-postboot.done
-After=network-online.target
-Wants=network-online.target
+After=network-online.target ssh.service
+Wants=network-online.target ssh.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -18,6 +19,10 @@ Type=oneshot
 # relancer même avec le marqueur (cas où la condition est ré-évaluée).
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/postboot.sh
+Restart=on-failure
+RestartSec=15s
+TimeoutStartSec=20s
+SuccessExitStatus=2
 
 [Install]
 WantedBy=multi-user.target
