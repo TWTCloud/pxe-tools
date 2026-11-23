@@ -154,5 +154,85 @@ class ResidualPurge(unittest.TestCase):
                 source, key = m.apt_cleanup_plan(self.root, owner=0, apt_config=self.config, allow_reviewed=True)
         self.assertFalse(key)
 
+    def old_instance(self):
+        self.docker_state = 'inactive'
+        (self.root / 'proc').mkdir()
+        for path in m.ORPHAN_TREES:
+            (self.root / path.lstrip('/')).mkdir(parents=True)
+        compose = self.root / 'opt/pxe-tools/compose'
+        compose.mkdir()
+        manifest = compose / 'docker-compose.yml'
+        manifest.write_text('services:\n  pxe-tools:\n    container_name: pxe-tools\n'
+                            '    volumes:\n      - /etc/pxe-tools:/etc/pxe-tools\n')
+        (self.root / 'var/lib/pxe-tools').chmod(0o775)
+        (self.root / 'etc/pxe-tools').chmod(0o770)
+        return manifest
+
+    def orphan_preview(self, mounts=()):
+        from types import SimpleNamespace
+
+        def runner(command, **kwargs):
+            if command[0] == 'dpkg-query':
+                return SimpleNamespace(returncode=0, stdout='dpkg\tinstalled\tok\n')
+            state = self.docker_state if command[-1] == 'docker.service' else 'inactive'
+            return SimpleNamespace(returncode=0, stdout=state)
+
+        return m.orphan_plan(self.root, runner, mounts, owner=os.getuid(),
+                             opener=self.opener, identity=self.identity)
+
+    def test_orphan_purge_covers_old_config_payload_and_data(self):
+        self.old_instance()
+        outside = self.root / 'outside'
+        outside.write_text('keep')
+        (self.root / 'var/lib/pxe-tools/linked').symlink_to(outside)
+        proofs = self.orphan_preview(('/var',))
+        self.assertEqual(set(proofs), set(m.ORPHAN_TREES))
+        plan = m.residual_plan(self.root, self.preview, ('/var',), owner=os.getuid(),
+                               apt_config=self.config, opener=self.opener, identity=self.identity,
+                               orphan=proofs)
+        self.complete(self.journal(plan))
+        for path in m.ORPHAN_TREES:
+            self.assertFalse((self.root / path.lstrip('/')).exists())
+            self.assertFalse((self.root / m.orphan_stage(path).lstrip('/')).exists())
+        self.assertEqual(outside.read_text(), 'keep')
+
+    def test_orphan_detects_unrelated_manifest_and_active_runtime(self):
+        manifest = self.old_instance()
+        initial = manifest.read_text()
+        manifest.write_text('services:\n  other-service:\n    container_name: unrelated\n')
+        self.assertEqual(self.orphan_preview(), {})
+        manifest.write_text(initial)
+        self.docker_state = 'active'
+        with self.assertRaisesRegex(RuntimeError, 'docker.service'):
+            self.orphan_preview()
+
+    def test_orphan_preserves_nested_mount_and_replaced_directory(self):
+        self.old_instance()
+        with self.assertRaisesRegex(ValueError, 'mount within'):
+            self.orphan_preview(('/var/lib/pxe-tools/data',))
+        plan = {'format': 1, 'source': None, 'key': None, 'log': None,
+                'orphan': self.orphan_preview()}
+        journal = self.journal(plan)
+        config = self.root / 'etc/pxe-tools'
+        config.rename(config.with_name('original'))
+        config.mkdir()
+        with self.assertRaisesRegex(ValueError, 'directory changed'):
+            self.complete(journal)
+        self.assertTrue(config.is_dir())
+
+    def test_orphan_resumes_after_quarantine(self):
+        self.old_instance()
+        plan = {'format': 1, 'source': None, 'key': None, 'log': None,
+                'orphan': self.orphan_preview()}
+        journal = self.journal(plan)
+        with patch.object(m, '_clear_residual_directory', side_effect=OSError('interrupted')):
+            with self.assertRaisesRegex(OSError, 'interrupted'):
+                self.complete(journal)
+        staged = self.root / m.orphan_stage(m.ORPHAN_TREES[0]).lstrip('/') / 'tree'
+        self.assertTrue(staged.is_dir())
+        self.complete(m.ResidualJournal(self.root, owner=os.getuid(), opener=self.opener))
+        self.assertFalse(staged.exists())
+        self.assertFalse((self.root / 'opt/pxe-tools').exists())
+
 if __name__ == '__main__':
     unittest.main()

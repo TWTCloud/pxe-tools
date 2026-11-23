@@ -3273,9 +3273,12 @@ RESIDUAL_SOURCE = '/etc/apt/sources.list.d/pxe-tools.sources'
 RESIDUAL_KEY = '/etc/apt/keyrings/pxe-tools-archive-keyring.gpg'
 RESIDUAL_LOG = '/var/log/pxe-tools'
 RESIDUAL_JOURNAL = 'pxe-tools-residual-purge'
+ORPHAN_TREES = ('/etc/pxe-tools', '/var/lib/pxe-tools', '/opt/pxe-tools')
+ORPHAN_STAGE = '.pxe-tools-orphan-purge'
 
 
-def _residual_directory(root, parts, *, owner=0, writable_log_parent=False, opener=None):
+def _residual_directory(root, parts, *, owner=0, writable_log_parent=False, opener=None,
+                        cross_system_mounts=False):
     """Pin trusted ancestors; only /var/log may have a writable group."""
     import sys
     if opener is None:
@@ -3293,13 +3296,119 @@ def _residual_directory(root, parts, *, owner=0, writable_log_parent=False, open
             if owner is not None and (info.st_uid != owner or info.st_mode & (0o002 if allow_group else 0o022)):
                 raise ValueError('untrusted residual cleanup ancestor')
             if index < len(parts):
-                child = opener(fd, parts[index])
+                if cross_system_mounts:
+                    # A trusted /var or /opt can be a separate filesystem.
+                    # The purge roots are still opened with NO_XDEV.
+                    child = os.open(parts[index], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                else:
+                    child = opener(fd, parts[index])
                 os.close(fd)
                 fd = child
         return fd
     except BaseException:
         os.close(fd)
         raise
+
+
+def orphan_stage(path):
+    return str(Path(path).parent / ORPHAN_STAGE)
+
+
+def reject_orphan_mounts(paths, mounts):
+    for path in paths:
+        for protected in (path, orphan_stage(path)):
+            if any(mount == protected or mount.startswith(protected + '/') for mount in mounts):
+                raise ValueError('mount within old instance path; preserved: ' + protected)
+
+
+def require_idle_orphan(root, runner):
+    """Refuse orphan cleanup if packages, native receipts or runtimes are present."""
+    if not packages_absent(runner):
+        raise RuntimeError('PXE Tools APT packages appeared; old instance preserved')
+    native_paths = (TREES - set(ORPHAN_TREES) - {RESIDUAL_LOG}) | {
+        '/usr/lib/pxe-tools', '/var/lib/pxe-tools-ownership', '/var/lib/pxe-tools-nginx-ownership',
+        '/var/lib/pxe-tools-uninstall', '/var/lib/pxe-tools-uninstall-complete',
+        '/var/lib/pxe-tools-uninstall-aborted',
+    }
+    if any(os.path.lexists(root / path.lstrip('/')) for path in native_paths):
+        raise RuntimeError('Native PXE Tools state requires review before old instance cleanup')
+    runtimes = ('docker.service', 'docker.socket', 'containerd.service', 'podman.service', 'podman.socket')
+    for unit in UNITS + runtimes:
+        status = runner(['systemctl', 'show', '--property=ActiveState', '--value', unit],
+                        check=False, text=True, stdout=-1, stderr=-1, timeout=30)
+        if status.returncode or status.stdout.strip() not in ('inactive', 'failed'):
+            raise RuntimeError('Stop the runtime before old instance cleanup: ' + unit)
+    paths = ORPHAN_TREES + tuple(orphan_stage(path) for path in ORPHAN_TREES)
+    for proc in (root / 'proc').iterdir():
+        if not proc.name.isascii() or not proc.name.isdecimal():
+            continue
+        try:
+            command = (proc / 'comm').read_text(encoding='utf-8', errors='replace').strip()
+            if command in {'dockerd', 'containerd', 'podman', 'conmon', 'rootlesskit', 'containerd-shim'}:
+                raise RuntimeError('A container runtime is running; old instance preserved')
+            handles = [proc / name for name in ('cwd', 'root', 'exe')]
+            handles.extend((proc / 'fd').iterdir())
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        for handle in handles:
+            try:
+                target = os.readlink(handle).removesuffix(' (deleted)')
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            if any(target == path or target.startswith(path + '/') for path in paths):
+                raise RuntimeError('Process still uses an old instance path: PID ' + proc.name)
+
+
+def orphan_plan(root, runner, mounts, *, owner=0, opener=_openat2_no_mount, identity=legacy_birth_identity):
+    """Recognise the historical Compose deployment only at its documented paths."""
+    import re
+    from contextlib import ExitStack
+
+    root = Path(root)
+    manifest_path = root / 'opt/pxe-tools/compose/docker-compose.yml'
+    if not os.path.lexists(manifest_path) or not packages_absent(runner):
+        return {}
+    reject_orphan_mounts(ORPHAN_TREES, mounts)
+    with ExitStack() as stack:
+        def opened(fd):
+            stack.callback(os.close, fd)
+            return fd
+        parent = opened(_residual_directory(root, ('opt',), owner=owner, cross_system_mounts=True))
+        payload = opened(opener(parent, 'pxe-tools'))
+        compose = opened(opener(payload, 'compose'))
+        for directory in (payload, compose):
+            info = os.fstat(directory)
+            if owner is not None and (info.st_uid != owner or info.st_mode & 0o022):
+                raise ValueError('untrusted old Compose directory')
+        if set(os.listdir(payload)) != {'compose'}:
+            return {}
+        fd = opened(os.open('docker-compose.yml', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=compose))
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                (owner is not None and (info.st_uid != owner or info.st_mode & 0o022))):
+            raise ValueError('untrusted old Compose manifest')
+        with os.fdopen(os.dup(fd), 'rb') as file:
+            data = file.read(1048577)
+        if len(data) > 1048576 or not all((
+                re.search(rb'(?m)^  pxe-tools:[ \t]*(?:#.*)?$', data),
+                re.search(rb'(?m)^    container_name:[ \t]*["\x27]?pxe-tools["\x27]?[ \t]*(?:#.*)?$', data),
+                b'/etc/pxe-tools:/etc/pxe-tools' in data,
+        )):
+            return {}
+        require_idle_orphan(root, runner)
+        proofs = {}
+        for path in ORPHAN_TREES:
+            target = root / path.lstrip('/')
+            if os.path.lexists(root / orphan_stage(path).lstrip('/')):
+                raise ValueError('Orphan cleanup staging requires inspection')
+            if not os.path.lexists(target):
+                continue
+            fd = opened(_residual_directory(root, Path(path).parts[1:-1], owner=owner, cross_system_mounts=True))
+            tree = opened(opener(fd, target.name))
+            if path == '/opt/pxe-tools' and not os.path.samestat(os.fstat(tree), os.fstat(payload)):
+                raise ValueError('old Compose directory changed during inspection')
+            proofs[path] = identity(tree)
+        return proofs
 
 
 def _residual_file_snapshot(root, path, *, owner=0, opener=None):
@@ -3327,11 +3436,13 @@ def _residual_file_snapshot(root, path, *, owner=0, opener=None):
         os.close(parent)
 
 
-def residual_plan(root, preview, mounts, *, owner=0, apt_config=None, opener=None, identity=None):
+def residual_plan(root, preview, mounts, *, owner=0, apt_config=None, opener=None, identity=None, orphan=None):
     """Inspect three bounded legacy resources; never claim creation provenance."""
     root = Path(root)
     identity = identity or legacy_birth_identity
     plan = {'format': 1, 'source': None, 'key': None, 'log': None}
+    if orphan:
+        plan['orphan'] = orphan
     if (root / 'var/lib' / RESIDUAL_JOURNAL).exists() or (root / 'var/lib' / RESIDUAL_JOURNAL).is_symlink():
         raise RuntimeError('An interrupted residual purge requires --resume')
     source_ok, key_ok = apt_cleanup_plan(root, owner=owner, apt_config=apt_config, allow_reviewed=True)
@@ -3349,7 +3460,7 @@ def residual_plan(root, preview, mounts, *, owner=0, apt_config=None, opener=Non
     if RESIDUAL_LOG in preview['preserved']:
         if not any(m == RESIDUAL_LOG or m.startswith(RESIDUAL_LOG + '/') for m in mounts):
             parent = _residual_directory(root, ('var', 'log'), owner=owner,
-                                         writable_log_parent=True, opener=opener)
+                                         writable_log_parent=True, opener=opener, cross_system_mounts=True)
             fd = None
             try:
                 flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -3378,13 +3489,14 @@ def residual_plan_hash(plan):
 
 
 class ResidualJournal:
-    """Durable, private authorisation for the three reviewed legacy resources."""
+    """Durable, private authorisation for reviewed residual resources."""
     def __init__(self, root, *, owner=0, opener=None):
         self.root, self.owner, self.opener = Path(root), owner, opener
         self.state = None
 
     def base(self):
-        return _residual_directory(self.root, ('var', 'lib'), owner=self.owner, opener=self.opener)
+        return _residual_directory(self.root, ('var', 'lib'), owner=self.owner,
+                                   opener=self.opener, cross_system_mounts=True)
 
     def directory(self):
         base = self.base()
@@ -3403,11 +3515,16 @@ class ResidualJournal:
     def validate(value):
         import re
         if (not isinstance(value, dict) or set(value) != {'format', 'plan', 'steps'} or value['format'] != 1 or
-                not isinstance(value['plan'], dict) or set(value['plan']) != {'format', 'source', 'key', 'log'} or
+                not isinstance(value['plan'], dict) or set(value['plan']) - {'format', 'source', 'key', 'log', 'orphan'} or
+                not {'format', 'source', 'key', 'log'} <= value['plan'].keys() or
                 value['plan']['format'] != 1 or not isinstance(value['steps'], dict) or
-                set(value['steps']) != {'source', 'key', 'log'} or
                 any(step not in ('pending', 'intent', 'moved', 'done') for step in value['steps'].values())):
             raise ValueError('invalid residual purge receipt')
+        orphan = value['plan'].get('orphan', {})
+        if (not isinstance(orphan, dict) or set(orphan) - set(ORPHAN_TREES) or
+                ('orphan' in value['plan'] and '/opt/pxe-tools' not in orphan) or
+                set(value['steps']) != {'source', 'key', 'log'} | orphan.keys()):
+            raise ValueError('invalid residual purge paths')
         for name in ('source', 'key'):
             item = value['plan'][name]
             if item is not None and (not isinstance(item, dict) or set(item) != {'dev', 'ino', 'sha256'} or
@@ -3415,12 +3532,16 @@ class ResidualJournal:
                     item['ino'] == 0 or not isinstance(item['sha256'], str) or
                     not re.fullmatch(r'[0-9a-f]{64}', item['sha256'])):
                 raise ValueError('invalid residual file identity')
-        item = value['plan']['log']
-        if item is not None and (not isinstance(item, dict) or set(item) != {'dev', 'ino', 'btime_sec', 'btime_nsec'} or
-                any(type(item[k]) is not int or item[k] < 0 for k in item) or item['ino'] == 0 or
-                item['btime_nsec'] >= 1000000000):
-            raise ValueError('invalid residual log identity')
-        for name, step in value['steps'].items():
+        for item in (value['plan']['log'], *orphan.values()):
+            if item is not None and (not isinstance(item, dict) or
+                    set(item) != {'dev', 'ino', 'btime_sec', 'btime_nsec'} or
+                    any(type(item[k]) is not int or item[k] < 0 for k in ('dev', 'ino', 'btime_sec', 'btime_nsec')) or
+                    item['ino'] == 0 or item['btime_nsec'] >= 1000000000):
+                raise ValueError('invalid residual directory identity')
+        if any(item is None for item in orphan.values()):
+            raise ValueError('missing orphan directory identity')
+        for name in ('source', 'key', 'log'):
+            step = value['steps'][name]
             if (name != 'log' and step == 'moved') or (value['plan'][name] is None and step != 'done'):
                 raise ValueError('invalid residual purge step')
         return value
@@ -3447,8 +3568,9 @@ class ResidualJournal:
 
     def create(self, plan):
         self.state = self.validate({'format': 1, 'plan': plan,
-                                    'steps': {name: 'pending' if plan[name] is not None else 'done'
-                                              for name in ('source', 'key', 'log')}})
+                                    'steps': {**{name: 'pending' if plan[name] is not None else 'done'
+                                                for name in ('source', 'key', 'log')},
+                                              **dict.fromkeys(plan.get('orphan', {}), 'pending')}})
         base = self.base()
         try:
             os.mkdir(RESIDUAL_JOURNAL, 0o700, dir_fd=base)
@@ -3543,6 +3665,86 @@ def _clear_residual_directory(fd, opener):
     os.fsync(fd)
 
 
+def complete_orphan_trees(journal, mounts, opener, identity_matches):
+    """Quarantine on each original filesystem and resume only the approved inode."""
+    from contextlib import ExitStack
+
+    root, owner, state = journal.root, journal.owner, journal.state
+    proofs = state['plan'].get('orphan', {})
+    if not proofs:
+        return
+    reject_orphan_mounts(ORPHAN_TREES, mounts)
+    for path in ORPHAN_TREES:
+        active = os.path.lexists(root / path.lstrip('/'))
+        staged = os.path.lexists(root / orphan_stage(path).lstrip('/'))
+        if (path not in proofs or state['steps'][path] == 'done') and (active or staged):
+            raise ValueError('Unapproved old instance path appeared: ' + path)
+    for path, proof in proofs.items():
+        step = state['steps'][path]
+        if step == 'done':
+            continue
+        with ExitStack() as stack:
+            parent = _residual_directory(root, Path(path).parts[1:-1], owner=owner, cross_system_mounts=True)
+            stack.callback(os.close, parent)
+            name = Path(path).name
+            try:
+                stage = opener(parent, ORPHAN_STAGE)
+            except FileNotFoundError:
+                stage = None
+            if stage is None and step == 'moved':
+                if os.path.lexists(root / path.lstrip('/')):
+                    raise ValueError('Old instance path reappeared: ' + path)
+                state['steps'][path] = 'done'
+                journal.save()
+                continue
+            if stage is None:
+                tree = opener(parent, name)
+                stack.callback(os.close, tree)
+                if not identity_matches(tree, proof):
+                    raise ValueError('Old instance directory changed: ' + path)
+                state['steps'][path] = 'intent'
+                journal.save()
+                os.mkdir(ORPHAN_STAGE, 0o700, dir_fd=parent)
+                os.fsync(parent)
+                stage = opener(parent, ORPHAN_STAGE)
+                step = 'intent'
+            stack.callback(os.close, stage)
+            stage_info = os.fstat(stage)
+            entries = set(os.listdir(stage))
+            if (step == 'pending' or stat.S_IMODE(stage_info.st_mode) != 0o700 or
+                    (owner is not None and stage_info.st_uid != owner) or entries - {'tree'}):
+                raise ValueError('Untrusted old instance staging: ' + path)
+            if not entries and step != 'moved':
+                tree = opener(parent, name)
+                try:
+                    if not identity_matches(tree, proof):
+                        raise ValueError('Old instance directory changed: ' + path)
+                    os.rename(name, 'tree', src_dir_fd=parent, dst_dir_fd=stage)
+                    os.fsync(parent)
+                    os.fsync(stage)
+                finally:
+                    os.close(tree)
+                entries = {'tree'}
+            if os.path.lexists(root / path.lstrip('/')):
+                raise ValueError('Old instance path reappeared: ' + path)
+            if entries:
+                tree = opener(stage, 'tree')
+                try:
+                    if not identity_matches(tree, proof):
+                        raise ValueError('Staged old instance directory changed: ' + path)
+                    state['steps'][path] = 'moved'
+                    journal.save()
+                    _clear_residual_directory(tree, opener)
+                finally:
+                    os.close(tree)
+                os.rmdir('tree', dir_fd=stage)
+                os.fsync(stage)
+            os.rmdir(ORPHAN_STAGE, dir_fd=parent)
+            os.fsync(parent)
+            state['steps'][path] = 'done'
+            journal.save()
+
+
 def complete_residual_purge(journal, mounts, *, apt_config=None, opener=None, identity_matches=None):
     """Resume a confirmed plan; a shared or changed resource is never deleted."""
     import sys
@@ -3583,7 +3785,7 @@ def complete_residual_purge(journal, mounts, *, apt_config=None, opener=None, id
             raise ValueError('mount within legacy logs; preserved')
         directory = journal.directory()
         parent = _residual_directory(root, ('var', 'log'), owner=owner,
-                                     writable_log_parent=True, opener=opener)
+                                     writable_log_parent=True, opener=opener, cross_system_mounts=True)
         try:
             try:
                 staged = os.stat('logs', dir_fd=directory, follow_symlinks=False)
@@ -3627,7 +3829,19 @@ def complete_residual_purge(journal, mounts, *, apt_config=None, opener=None, id
         finally:
             os.close(parent)
             os.close(directory)
+    complete_orphan_trees(journal, mounts, opener, identity_matches)
     journal.finish()
+
+
+def complete_orphan_purge(journal, runner, mounts_provider):
+    """The website's installer lock is already held by the caller."""
+    with dpkg_frontend_lock(journal.root / 'var/lib/dpkg/lock-frontend'):
+        require_idle_orphan(journal.root, runner)
+        mounts = mounts_provider()
+        reject_orphan_mounts(ORPHAN_TREES, mounts)
+        source_removed, key_removed = remove_apt_config(journal.root, mounts=mounts)
+        complete_residual_purge(journal, mounts)
+    return source_removed, key_removed
 
 
 UNITS = ('pxe-tools.target', 'pxe-tools-admin.target', 'pxe-tools-worker.service',
@@ -3774,6 +3988,14 @@ def main(argv):
                              ('pxe-tools-uninstall', 'pxe-tools-uninstall-complete', 'pxe-tools-uninstall-aborted')]
             if has_residual:
                 residual.read()
+                if residual.state['plan'].get('orphan'):
+                    complete_orphan_purge(residual, subprocess.run, mounts)
+                    kept = remaining_apt_resources(Path('/')) + tuple(
+                        path for path in (*ORPHAN_TREES, RESIDUAL_LOG) if os.path.lexists(path))
+                    for path in kept:
+                        print('Preserved for manual review:', path)
+                    print('Interrupted old instance cleanup resumed.')
+                    return int(bool(kept))
             if has_residual and packages_intact(subprocess.run) and not any(p.exists() or p.is_symlink() for p in core_receipts):
                 if any(step not in ('pending', 'done') for step in residual.state['steps'].values()):
                     raise RuntimeError('Packages are installed but residual cleanup has started; inspect the receipt')
@@ -3817,12 +4039,17 @@ def main(argv):
         record = None
     account_lookup = lambda: account_snapshot(Path('/'), list(pwd.getpwall()), list(grp.getgrall()))
     preview = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=False, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy)
+    if args.purge_residuals and os.path.lexists(Path('/var/lib') / RESIDUAL_JOURNAL):
+        raise RuntimeError('An interrupted residual purge requires --resume')
+    orphan = {}
+    if args.purge_residuals and lifecycle is None and ownership is None and record is None:
+        orphan = orphan_plan(Path('/'), subprocess.run, mounts())
     outside = external_paths(lifecycle, preview['trees']) if lifecycle is not None else ()
     outside = tuple(path for path in outside if Path(path).exists() or Path(path).is_symlink())
     blocked_reason = preview['blocked_reason']
     if outside and not blocked_reason:
         blocked_reason = 'Configured paths outside recognised roots require review; no package was removed'
-    if blocked_reason:
+    if blocked_reason and not orphan:
         preserved = set(preview['preserved']) | set(outside)
         if packages_absent(subprocess.run):
             print('APT packages: already absent.')
@@ -3831,7 +4058,7 @@ def main(argv):
             print('Preserved for manual review:', path)
         print('Review the installation paths and keep a backup before a new installation.', flush=True)
         raise RuntimeError(blocked_reason)
-    residual = residual_plan(Path('/'), preview, mounts()) if args.purge_residuals else None
+    residual = residual_plan(Path('/'), preview, mounts(), orphan=orphan) if args.purge_residuals else None
     print('WARNING: removal destroys the PXE Tools database, configuration, local keys, certificates,')
     print('boot files and local upgrade snapshots in recognised paths. Keep a verified external backup.')
     print('Package removal: pxe-tools-ansible and pxe-tools; dependencies are retained.')
@@ -3850,6 +4077,11 @@ def main(argv):
         print('Legacy plan SHA256:', preview['legacy_plan_sha256'])
     for path in preview['trees']:
         print('Candidate data path, if present:', path)
+    if orphan:
+        print('APT packages: already absent.')
+        print('An old PXE Tools Compose deployment was found; its local directories require explicit consent.')
+        for path in sorted(orphan):
+            print('Candidate old instance path, if confirmed:', path)
     apt_preserved = remaining_apt_resources(Path('/'), source_removed=preview['source'], key_removed=preview['key'])
     residual_paths = {path for name, path in (('source', RESIDUAL_SOURCE), ('key', RESIDUAL_KEY), ('log', RESIDUAL_LOG))
                       if residual is not None and residual[name] is not None}
@@ -3857,7 +4089,7 @@ def main(argv):
         print('Candidate legacy residual, if confirmed:', path)
     if residual is not None:
         print('Residual plan SHA256:', residual_plan_hash(residual))
-    for path in sorted((set(preview['preserved']) | set(outside) | set(apt_preserved)) - residual_paths):
+    for path in sorted((set(preview['preserved']) | set(outside) | set(apt_preserved)) - residual_paths - orphan.keys()):
         print('Preserved for manual review:', path)
     if preview['legacy']:
         print('Legacy APT files not listed as candidates are preserved.')
@@ -3874,18 +4106,25 @@ def main(argv):
         receipt = None
         if residual is not None and args.residual_plan_sha256 != residual_plan_hash(residual):
             raise ValueError('residual resources changed or were not approved; inspect a fresh preview')
-        if residual_paths:
+        if residual_paths or orphan:
             receipt = ResidualJournal(Path('/'))
             receipt.create(residual)
-        try:
-            result = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=True, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy, legacy_expected=args.legacy_plan_sha256)
-        except BaseException:
-            if receipt is not None and packages_intact(subprocess.run) and not (Path('/var/lib/pxe-tools-uninstall').exists()):
-                receipt.finish()
-            raise
-        if receipt is not None:
-            complete_residual_purge(receipt, mounts())
-    print('Requested package purge completed; recognised data paths were removed where present.')
+        if orphan:
+            source_removed, key_removed = complete_orphan_purge(receipt, subprocess.run, mounts)
+            result = dict(preview, source_removed=source_removed, key_removed=key_removed)
+        else:
+            try:
+                result = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=True, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy, legacy_expected=args.legacy_plan_sha256)
+            except BaseException:
+                if receipt is not None and packages_intact(subprocess.run) and not (Path('/var/lib/pxe-tools-uninstall').exists()):
+                    receipt.finish()
+                raise
+            if receipt is not None:
+                complete_residual_purge(receipt, mounts())
+    if orphan:
+        print('Old PXE Tools instance purge completed.')
+    else:
+        print('Requested package purge completed; recognised data paths were removed where present.')
     print('APT source removed:', 'yes' if result['source_removed'] else 'no')
     print('APT key removed:', 'yes' if result['key_removed'] else 'no')
     remaining_apt = remaining_apt_resources(Path('/'))
