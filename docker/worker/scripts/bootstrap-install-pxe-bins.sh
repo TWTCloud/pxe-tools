@@ -38,7 +38,10 @@ host_suite=''
 if [ "${PXE_SERVICE_MANAGER:-}" = systemd ]; then
     host_suite=$(/bin/sh "$(dirname "${BASH_SOURCE[0]}")/host-base.sh" --detect)
 fi
-if [[ "$host_suite" == ubuntu:* ]]; then
+if [ "$(dpkg --print-architecture)" = arm64 ]; then
+    # Le build GRUB publie le shim x86 et son MokManager depuis l'archive Debian.
+    echo "[bootstrap-pxe-bins] La paire EFI x86 sera publiée avec GRUB"
+elif [[ "$host_suite" == ubuntu:* ]]; then
     : "${DEBIAN_ARCHIVE_KEYRING=/usr/share/keyrings/debian-archive-keyring.gpg}"
     python3 "$(dirname "${BASH_SOURCE[0]}")/prepare-debian-shim.py" "$TFTP_ROOT" "$DEBIAN_ARCHIVE_KEYRING"
 else

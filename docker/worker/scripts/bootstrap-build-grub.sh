@@ -59,7 +59,7 @@ python3 "$BOOTSTRAP_SCRIPTS_DIR/render_template.py" \
 # Modules essentiels — équivalent orchestrator_grub_modules dans defaults Ansible
 GRUB_MODULES=(all_video boot cat chain configfile echo efifwsetup efinet ext2 fat font gettext gfxmenu gfxterm gzio halt help http iso9660 keystatus linux loadenv loopback ls memdisk minicmd net normal part_gpt part_msdos png reboot regexp search search_fs_file search_fs_uuid search_label sleep test tftp true video)
 
-# build_one_arch <grub_arch> <output_basename> <sign:0|1>
+# build_one_arch <grub_arch> <output_basename> <sign:0|1> <module_directory>
 #   <grub_arch>     : x86_64-efi | arm64-efi (passé à grub-mkimage -O)
 #   <output_basename> : grubx64.efi pour le chargeur appelé par shim,
 #                       grubnetaa64.efi pour le chargeur ARM expérimental.
@@ -69,7 +69,7 @@ build_one_arch() {
     local grub_arch="$1" out_name="$2" sign="$3"
     local out_path="$TFTP_ROOT/$out_name"
     local unsigned="$WORK_DIR/${out_name}.unsigned"
-    local pkg_dir="/usr/lib/grub/$grub_arch"
+    local pkg_dir="$4"
 
     if [ ! -d "$pkg_dir" ]; then
         echo "[bootstrap-grub] WARN: paquet grub $grub_arch absent ($pkg_dir) — skip" >&2
@@ -89,11 +89,12 @@ build_one_arch() {
         echo "[bootstrap-grub] Building $out_name ($grub_arch, TFTP from $PXE_IP)..."
         local -a sbat_args=()
         if [ "$sign" = "1" ]; then
-            python3 "$BOOTSTRAP_SCRIPTS_DIR/extract-grub-sbat.py" > "$WORK_DIR/grub-sbat.csv"
+            python3 "$BOOTSTRAP_SCRIPTS_DIR/extract-grub-sbat.py" "${sbat_source_args[@]}" > "$WORK_DIR/grub-sbat.csv"
             sbat_args=(--sbat "$WORK_DIR/grub-sbat.csv")
         fi
         grub-mkimage \
             -O "$grub_arch" \
+            -d "$pkg_dir" \
             -o "$unsigned" \
             -p "(tftp,$PXE_IP)/grub" \
             -c "$EARLY_CFG" \
@@ -132,11 +133,24 @@ build_one_arch() {
     fi
 }
 
+x86_modules=/usr/lib/grub/x86_64-efi
+grub_stage=''
+sbat_source_args=()
+if [ "$(dpkg --print-architecture)" = arm64 ]; then
+    : "${DEBIAN_ARCHIVE_KEYRING=/usr/share/keyrings/debian-archive-keyring.gpg}"
+    grub_stage=$(mktemp -d /run/pxe-grub-amd64.XXXXXXXX)
+    trap 'rm -rf -- "$grub_stage"' EXIT
+    python3 "$BOOTSTRAP_SCRIPTS_DIR/prepare-debian-shim.py" "$grub_stage" "$DEBIAN_ARCHIVE_KEYRING" --with-grub
+    x86_modules="$grub_stage/x86_64-efi"
+    module_version=$(cat "$grub_stage/grub.version")
+    sbat_source_args=(--signed-efi "$grub_stage/grubnetx64.efi.signed" --module-version "$module_version")
+fi
+
 # Keep shim at the DHCP entry point and the MOK-signed GRUB at the name shim
 # expects. Older builds put GRUB at the shim path; restore shim only after the
 # new loader has been built and signed successfully.
-build_one_arch x86_64-efi grubx64.efi 1
-build_one_arch arm64-efi  grubnetaa64.efi 0
+build_one_arch x86_64-efi grubx64.efi 1 "$x86_modules"
+build_one_arch arm64-efi  grubnetaa64.efi 0 /usr/lib/grub/arm64-efi
 if [ ! -f "$TFTP_ROOT/grubx64.efi" ]; then
     echo '[bootstrap-grub] ERREUR : GRUB signé indisponible.' >&2
     exit 1
@@ -145,7 +159,9 @@ host_suite=''
 if [ "${PXE_SERVICE_MANAGER:-}" = systemd ]; then
     host_suite=$(/bin/sh "$BOOTSTRAP_SCRIPTS_DIR/host-base.sh" --detect)
 fi
-if [[ "$host_suite" == ubuntu:* ]]; then
+if [ -n "$grub_stage" ]; then
+    python3 "$BOOTSTRAP_SCRIPTS_DIR/prepare-debian-shim.py" --publish-pair "$grub_stage" "$TFTP_ROOT"
+elif [[ "$host_suite" == ubuntu:* ]]; then
     : "${DEBIAN_ARCHIVE_KEYRING=/usr/share/keyrings/debian-archive-keyring.gpg}"
     python3 "$BOOTSTRAP_SCRIPTS_DIR/prepare-debian-shim.py" "$TFTP_ROOT" "$DEBIAN_ARCHIVE_KEYRING"
 else
