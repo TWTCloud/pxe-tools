@@ -1097,6 +1097,9 @@ class TransactionTests(unittest.TestCase):
         unproven = self.root / 'var/lib/pxe-tools-ansible'
         unproven.mkdir()
         (unproven / 'preserve').write_text('unproven')
+        preview = self.execute(apply=False)
+        self.assertIn('/var/lib/pxe-tools-ansible', preview['preserved'])
+        self.assertIn('ownership', preview['blocked_reason'])
         with self.assertRaisesRegex(RuntimeError, 'ownership'):
             self.execute(apply=True)
         self.assertEqual((unproven / 'preserve').read_text(), 'unproven')
@@ -1107,6 +1110,7 @@ class TransactionTests(unittest.TestCase):
         (self.unproven / 'preserve').write_text('old log')
         preview = self.execute(apply=False)
         self.assertEqual(preview['preserved'], ('/var/log/pxe-tools',))
+        self.assertIsNone(preview['blocked_reason'])
         self.execute(apply=True)
         self.assertEqual((self.unproven / 'preserve').read_text(), 'old log')
         self.assertFalse(self.data.exists())
