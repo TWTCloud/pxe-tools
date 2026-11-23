@@ -8,6 +8,7 @@ The test adds a serial console to observe the first boot of the installed OS.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -169,11 +170,14 @@ def prepare_secure_boot(app, root, client_image):
              180,'shim and MOK-signed GRUB')
     mok='/etc/pxe-tools/mok/MOK.pem'
     docker('exec',app,'sbverify','--cert',mok,'/srv/tftp/grubx64.efi')
+    for artifact in ('/srv/tftp/grubnetx64.efi','/srv/http/netboot/debian/13.0/amd64/linux'):
+        print(f'UEFI signature listing for {artifact}:',flush=True)
+        print(docker('exec',app,'sbverify','--list',artifact).stdout,flush=True)
     docker('cp',app+':'+mok,str(root/'fixture-mok.pem'))
     docker('run','--rm','--network','none','--mount',f'type=bind,src={root},dst=/fixture-data',
            '--entrypoint','virt-fw-vars',client_image,
            '--input','/usr/share/OVMF/OVMF_VARS_4M.ms.fd',
-           '--output','/fixture-data/ovmf-vars.fd','--add-mok',str(uuid.uuid4()),'/fixture-data/fixture-mok.pem')
+           '--output','/fixture-data/ovmf-vars.fd','--set-shim-verbose','--add-mok',str(uuid.uuid4()),'/fixture-data/fixture-mok.pem')
     print('Secure Boot fixture enrolled the instance public MOK in a private OVMF variable store',flush=True)
 
 
@@ -245,6 +249,8 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
                     raise RuntimeError('UEFI firmware found no usable boot option')
                 if 'big file signature' in output:
                     raise RuntimeError('GRUB could not determine the signed kernel size')
+                if 'bad shim signature' in output:
+                    raise RuntimeError('Shim refused the signature of the downloaded kernel')
             if boot=='n':
                 if state['ExitCode']!=0:
                     raise RuntimeError(name+' QEMU guest failed')
@@ -506,6 +512,12 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s}' "$IP" "$(
         check_env+='export PXE_FIXTURE_SECURE_BOOT=1; '
         uefi_image=build_secure_boot_client()
         prepare_secure_boot(app,root,uefi_image)
+        kernel_bytes = (root/'http/netboot/debian/13.0/amd64/linux').read_bytes()
+        expected = hashlib.sha256(kernel_bytes).hexdigest()
+        actual = docker('exec',dhcp,'bash','-o','pipefail','-c',
+                        'curl -fsS --max-time 15 http://192.0.2.1/netboot/debian/13.0/amd64/linux | sha256sum').stdout
+        if actual.split()[0] != expected:
+            raise RuntimeError('The HTTP kernel differs from the authenticated fixture')
     docker('exec','-d',app,'bash','-ec',
            check_env+'export PXE_FIXTURE_MIRROR_IP=192.0.2.2 PXE_FIXTURE_USE_WORKER=1; '
            'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
