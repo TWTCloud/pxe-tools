@@ -218,7 +218,7 @@ def _installer_source_bytes_valid(data):
 
 
 def apt_cleanup_plan(root, *, owner=0, apt_config=None, allow_reviewed=False):
-    """Identify the installer source and a proven key unused by system APT.
+    """Identify the installer source and a dedicated key unused by system APT.
 
     APT invocations with a later, explicitly supplied alternative configuration
     are outside this inspection. The CLI never exposes the fixture override.
@@ -327,23 +327,22 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None, allow_reviewed=False):
         key_exists = key.exists() or key.is_symlink()
         if allow_reviewed and not anchors and key_exists:
             anchor = key
-            if (not safe_file(key) or key.stat().st_size > 1048576 or
-                    hashlib.sha256(key.read_bytes()).hexdigest() != '567738b56ab1d566a2d943012fd3f43c1814e0a98c9afc7da2a873207c5dff47'):
+            if not safe_file(key):
                 return source_ok, False
+            key_paths = (key,)
         else:
             if len(anchors) != 1:
                 return source_ok, False
             anchor = anchors[0]
-            proof = re.fullmatch(r'\.pxe-tools-archive-keyring\.([0-9a-f]{64})\.created', anchor.name)
-            if proof is None:
+            if not re.fullmatch(r'\.pxe-tools-archive-keyring\.[0-9a-f]{64}\.created', anchor.name):
                 return source_ok, False
-            if key_exists:
-                if not safe_file(key, links=2) or not safe_file(anchor, links=2) or not os.path.samefile(key, anchor):
-                    return source_ok, False
-            elif not safe_file(anchor):
+            # A replacement may leave the original witness on a separate inode.
+            # Neither path needs to contain a valid key to be removed.
+            key_paths = (key, anchor) if key_exists else (anchor,)
+            links = 2 if key_exists and os.path.samefile(key, anchor) else 1
+            if not all(safe_file(path, links=links) for path in key_paths):
                 return source_ok, False
-            if anchor.stat().st_size > 1048576 or hashlib.sha256(anchor.read_bytes()).hexdigest() != proof.group(1):
-                return source_ok, False
+        key_identities = {(info.st_dev, info.st_ino) for info in (path.stat() for path in key_paths)}
 
         if apt_config is None:
             if root != Path('/'):
@@ -363,13 +362,17 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None, allow_reviewed=False):
         # closed; alternative APT_CONFIG/-o invocations are not discoverable.
         trusted = root / 'etc/apt/trusted.gpg'
         trusted_parts = root / 'etc/apt/trusted.gpg.d'
-        if trusted.is_symlink() or (trusted.exists() and (not trusted.is_file() or os.path.samefile(trusted, anchor))):
+        def is_key_alias(path):
+            info = path.stat()
+            return (info.st_dev, info.st_ino) in key_identities
+
+        if trusted.is_symlink() or (trusted.exists() and (not trusted.is_file() or is_key_alias(trusted))):
             return source_ok, False
         if trusted_parts.is_symlink() or (trusted_parts.exists() and not safe_dir(trusted_parts)):
             return source_ok, False
         if trusted_parts.exists():
             for item in trusted_parts.iterdir():
-                if item.is_symlink() or (item.exists() and (not item.is_file() or os.path.samefile(item, anchor))):
+                if item.is_symlink() or (item.exists() and (not item.is_file() or is_key_alias(item))):
                     return source_ok, False
         others = [root / 'etc/apt/sources.list']
         others.extend(path for path in source.parent.iterdir()
@@ -393,11 +396,10 @@ def apt_cleanup_plan(root, *, owner=0, apt_config=None, allow_reviewed=False):
                     return source_ok, False
                 candidate = root / name.lstrip('/')
                 try:
-                    candidate_info = candidate.stat()
+                    if is_key_alias(candidate):
+                        return source_ok, False
                 except FileNotFoundError:
                     continue
-                if os.path.samestat(candidate_info, anchor.stat()):
-                    return source_ok, False
         return source_ok, True
     except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
         return source_ok, False
@@ -572,7 +574,7 @@ def service_barrier(runner, units, before_mask=lambda: None):
 
 
 def remove_apt_config(root, *, mounts, owner=0, apt_config=None, opener=None):
-    """Remove the recognised source and a proven, system-unshared key."""
+    """Remove the recognised source and a dedicated, system-unshared key."""
     import hashlib
     import re
     import sys
@@ -590,7 +592,7 @@ def remove_apt_config(root, *, mounts, owner=0, apt_config=None, opener=None):
     def mounted(path):
         return any(m != '/' and (path == m or path.startswith(m + '/')) for m in mounts)
 
-    def unlink_checked(path, *, links=1, expected_bytes=None, digest=None, identity=None):
+    def unlink_checked(path, *, links=1, digest=None, identity=None):
         parts = Path(path).parts[1:]
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         fd = os.open(root, flags)
@@ -608,20 +610,16 @@ def remove_apt_config(root, *, mounts, owner=0, apt_config=None, opener=None):
                 raise ValueError('untrusted APT ancestor')
             opened = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
             info = os.fstat(opened)
-            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != links or info.st_size > 1048576 or
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != links or
                     (owner is not None and (info.st_uid != owner or info.st_mode & 0o022))):
                 raise ValueError('untrusted APT file')
             if identity is not None and (info.st_dev, info.st_ino) != identity:
                 raise ValueError('APT file identity changed')
-            data = bytearray()
-            while len(data) <= 1048576:
-                part = os.read(opened, min(65536, 1048577 - len(data)))
-                if not part:
-                    break
-                data.extend(part)
-            if (len(data) > 1048576 or (expected_bytes is not None and data != expected_bytes) or
-                    (digest is not None and hashlib.sha256(data).hexdigest() != digest)):
-                raise ValueError('APT file content changed')
+            if digest is not None:
+                with os.fdopen(os.dup(opened), 'rb') as stream:
+                    data = stream.read(1048577)
+                if len(data) > 1048576 or hashlib.sha256(data).hexdigest() != digest:
+                    raise ValueError('APT file content changed')
             current = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
             if ((current.st_dev, current.st_ino, current.st_nlink) !=
                     (info.st_dev, info.st_ino, info.st_nlink)):
@@ -667,12 +665,13 @@ def remove_apt_config(root, *, mounts, owner=0, apt_config=None, opener=None):
     anchor_name = '/etc/apt/keyrings/' + anchors[0].name
     if match is None or mounted(key_name) or mounted(anchor_name):
         return source_removed, False
-    info = anchors[0].stat()
-    identity = (info.st_dev, info.st_ino)
+    anchor_info = anchors[0].stat()
     key_path = Path(root) / key_name.lstrip('/')
     if key_path.exists() or key_path.is_symlink():
-        unlink_checked(key_name, links=2, digest=match.group(1), identity=identity)
-    unlink_checked(anchor_name, links=1, digest=match.group(1), identity=identity)
+        key_info = key_path.stat()
+        links = 2 if os.path.samestat(key_info, anchor_info) else 1
+        unlink_checked(key_name, links=links, identity=(key_info.st_dev, key_info.st_ino))
+    unlink_checked(anchor_name, identity=(anchor_info.st_dev, anchor_info.st_ino))
     return source_removed, True
 
 

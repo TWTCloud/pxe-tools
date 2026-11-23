@@ -109,9 +109,22 @@ class ResidualPurge(unittest.TestCase):
         self.assertFalse((self.root / 'var/log/pxe-tools').exists())
         self.assertFalse((self.root / 'var/lib' / m.RESIDUAL_JOURNAL).exists())
 
-    def test_changed_key_and_mount_are_preserved_in_preview(self):
+    def test_unrecognized_key_bytes_are_removable_after_review(self):
         self.key.write_bytes(b'not the trusted key')
-        plan = m.residual_plan(self.root, self.preview, (m.RESIDUAL_LOG,), owner=os.getuid(), apt_config=self.config, opener=self.opener, identity=self.identity)
+        plan = self.plan()
+        self.assertIsNotNone(plan['key'])
+        self.complete(self.journal(plan))
+        self.assertFalse(self.key.exists())
+
+    def test_key_changed_after_confirmation_is_preserved(self):
+        journal = self.journal(self.plan())
+        self.key.write_bytes(b'changed after confirmation')
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            self.complete(journal)
+        self.assertTrue(self.key.exists())
+
+    def test_mounted_key_and_log_are_preserved_in_preview(self):
+        plan = m.residual_plan(self.root, self.preview, (m.RESIDUAL_LOG, m.RESIDUAL_KEY), owner=os.getuid(), apt_config=self.config, opener=self.opener, identity=self.identity)
         self.assertIsNone(plan['key'])
         self.assertIsNone(plan['log'])
 
