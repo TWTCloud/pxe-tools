@@ -1242,11 +1242,29 @@ class AptSourceTests(unittest.TestCase):
             acl.return_value = b'extended ACL'
             self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=0, apt_config=self.standard), (False, False))
 
-    def test_in_place_changed_proven_key_is_preserved(self):
+    def test_corrupted_dedicated_key_and_witness_are_removed(self):
         self.prove_created_key()
-        self.key.write_bytes(b'administrator changed it')
+        self.key.write_bytes(b'not an OpenPGP key')
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, True))
+        self.assertFalse(self.key.exists())
+        self.assertFalse(self.anchor.exists())
+
+    def test_replaced_dedicated_key_and_stale_witness_are_removed(self):
+        self.prove_created_key()
+        self.key.unlink()
+        self.key.write_bytes(b'a different key')
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, True))
+        self.assertFalse(self.key.exists())
+        self.assertFalse(self.anchor.exists())
+
+    def test_alias_of_replaced_key_protects_both_inodes(self):
+        self.prove_created_key()
+        self.key.unlink()
+        self.key.write_bytes(b'a different key')
+        (self.root / 'alias.gpg').symlink_to(self.key)
+        (self.source.parent / 'other.sources').write_text('Types: deb\nURIs: https://example.invalid\nSigned-By: /alias.gpg\n')
         self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, False))
-        self.assertEqual(self.key.read_bytes(), b'administrator changed it')
+        self.assertTrue(self.key.exists())
         self.assertTrue(self.anchor.exists())
 
     def test_redirected_apt_configuration_preserves_even_a_proven_key(self):
