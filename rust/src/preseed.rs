@@ -392,11 +392,17 @@ impl Profile {
         if let Some((id, _)) = action {
             let postboot = format!("{base_url}/pxe/postboot/{id}");
             // The Debian Installer has wget even when the target system is minimal.
+            // network-online.target can be reached before DHCP grants the lease.
+            let ordering = write_target(
+                "/etc/systemd/system/pxe-postboot.service.d/ready.conf",
+                "[Unit]\nRequires=pxe-machine-ready.service\nAfter=pxe-machine-ready.service\n",
+            );
             late.push(format!(
                 "/usr/bin/wget -q --timeout=10 -O /target/usr/local/bin/postboot.sh '{postboot}/postboot.sh' \
                  && /bin/chmod 0755 /target/usr/local/bin/postboot.sh \
                  && /usr/bin/wget -q --timeout=10 -O /target/etc/systemd/system/pxe-postboot.service '{postboot}/pxe-postboot.service' \
-                 && in-target /bin/systemctl enable pxe-postboot.service || true"
+                 && /bin/mkdir -p /target/etc/systemd/system/pxe-postboot.service.d \
+                 && {ordering} && in-target /bin/systemctl enable pxe-postboot.service || true"
             ));
         }
         late.push(phase("late-command", "success"));

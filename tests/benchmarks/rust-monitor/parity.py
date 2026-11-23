@@ -227,6 +227,10 @@ def compare_install(ports, paths):
     assert re.search(guard, decoded[0]).group(1) == re.search(guard, decoded[1]).group(1)
     assert "/usr/bin/wget -q --timeout=10 -O /target/usr/local/bin/postboot.sh" in decoded[1]
     assert "/usr/bin/wget -q --timeout=10 -O /target/etc/systemd/system/pxe-postboot.service" in decoded[1]
+    dependency = re.search(r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /etc/systemd/system/pxe-postboot.service.d/ready.conf", decoded[1])
+    assert base64.b64decode(dependency.group(1)) == (
+        b"[Unit]\nRequires=pxe-machine-ready.service\nAfter=pxe-machine-ready.service\n"
+    )
     for seed in decoded:
         assert "Bearer " + token in seed and "$6$hidden" not in seed
         assert "services-select multiselect" in seed
