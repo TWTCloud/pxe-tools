@@ -8,7 +8,7 @@ TOKEN="{{ token }}"
 MAC="{{ mac }}"
 
 DONE_MARKER="/var/lib/pxe-tools-postboot.done"
-route="$(ip -4 route get "$PXE_IP")"
+route="$(ip -4 route get "$PXE_IP")" || exit 1
 IP="$(printf '%s\n' "$route" | awk '{for (i=1; i<NF; i++) if ($i=="src") {print $(i+1); exit}}')"
 [ -n "$IP" ] || exit 1
 PAYLOAD="$(printf '{"ip":"%s","kernel":"%s"}' "$IP" "$(uname -r)")"
@@ -17,7 +17,7 @@ receipt="$(curl -fsS --connect-timeout 5 --max-time 10 -X POST \
     "http://${PXE_IP}/api/internal/checkpoint?mac=${MAC}&code=os_first_boot&ack=1" \
     -H "Authorization: Bearer ${TOKEN}" \
     -H 'Content-Type: application/json' \
-    --data-raw "$PAYLOAD")"
+    --data-raw "$PAYLOAD")" || exit 1
 case "$receipt" in
     accepted) touch "$DONE_MARKER" ;;
     closed) exit 2 ;;

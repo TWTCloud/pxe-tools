@@ -121,7 +121,7 @@ if [ "$n" -le "$FAILURES" ]; then exit "$CODE"; fi
             root = Path(tmp)
             marker = root / 'done'
             ip = root / 'ip'
-            ip.write_text('#!/bin/sh\necho "192.0.2.1 dev eth0 src 192.0.2.2"\n')
+            ip.write_text('#!/bin/sh\n[ "$ROUTE_STATUS" = 0 ] || exit "$ROUTE_STATUS"\necho "192.0.2.1 dev eth0 src 192.0.2.2"\n')
             curl = root / 'curl'
             curl.write_text('#!/bin/sh\nprintf "%s" "$RECEIPT"\nexit "$CURL_STATUS"\n')
             for binary in (ip, curl):
@@ -129,10 +129,12 @@ if [ "$n" -le "$FAILURES" ]; then exit "$CODE"; fi
             script = (script.replace('{{ pxe_ip }}', '192.0.2.1')
                       .replace('{{ token }}', 'a' * 64).replace('{{ mac }}', '02:00:00:00:00:01')
                       .replace('/var/lib/pxe-tools-postboot.done', str(marker)))
-            for receipt, curl_status, expected in [('', 7, 7), ('', 0, 1), ('closed', 0, 2), ('accepted', 0, 0)]:
-                with self.subTest(receipt=receipt, curl_status=curl_status):
+            for route_status, receipt, curl_status, expected in [(2, '', 0, 1), (0, '', 2, 1),
+                                                                 (0, '', 7, 1), (0, '', 0, 1),
+                                                                 (0, 'closed', 0, 2), (0, 'accepted', 0, 0)]:
+                with self.subTest(route_status=route_status, receipt=receipt, curl_status=curl_status):
                     env = dict(os.environ, PATH=f"{tmp}:{os.environ['PATH']}", RECEIPT=receipt,
-                               CURL_STATUS=str(curl_status))
+                               CURL_STATUS=str(curl_status), ROUTE_STATUS=str(route_status))
                     run = subprocess.run(['sh', '-c', script], env=env, capture_output=True)
                     self.assertEqual(run.returncode, expected)
                     self.assertEqual(marker.exists(), expected == 0)
