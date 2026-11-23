@@ -336,6 +336,8 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     # which the installed system will name enp0s4.
     kernel=('language=en country=US locale=en_US.UTF-8 keymap=us '
             'ipv6.disable=1 netcfg/no_default_route=true netcfg/get_nameservers=192.0.2.2')
+    if secure_boot:
+        kernel += ' console=tty0 console=ttyS0,115200n8'
     env=[
         'TFTP_ROOT='+tftp_root, 'HTTP_ROOT='+http_root,
         'PXE_DB_PATH=/var/lib/pxe-tools/stale.sqlite', 'WORKER_POLL_S=1', 'KERNEL_OPTS='+kernel,
@@ -902,6 +904,14 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
             print('Only the disposable qcow2 disk and isolated bridge were used.',flush=True)
         except Exception:
             diagnostic_screen(root)
+            if packaged:
+                with sqlite3.connect(data/'chosen.sqlite') as db:
+                    for label, query in (
+                        ('machine state', 'SELECT status,boot_arch,next_action FROM machines ORDER BY id LIMIT 4'),
+                        ('UEFI boot sessions', 'SELECT default_menu,selected_menu FROM boot_sessions ORDER BY id DESC LIMIT 6'),
+                        ('installation phases', 'SELECT phase_key,status FROM task_phases ORDER BY id DESC LIMIT 12'),
+                    ):
+                        print(f'{label}: {db.execute(query).fetchall()}',flush=True)
             if backend=='rust-docker':
                 output=docker('logs','--tail','45',app,check=False)
                 print((output.stdout+'\n'+output.stderr)[-4500:],flush=True)
