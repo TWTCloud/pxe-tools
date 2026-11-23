@@ -10,7 +10,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # ----------------------------------------------------------------------------
 # Paquets système — tout ce que faisaient les 4 images custom précédentes
 # ----------------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) set -- grub-efi-amd64-bin grub-efi-amd64-signed shim-signed ;; \
+        arm64) set -- grub-efi-arm64-bin ;; \
+        *) echo 'Supported server architectures are amd64 and arm64.' >&2; exit 1 ;; \
+    esac; \
+    apt-get update && apt-get install -y --no-install-recommends \
     # Web stack
     nginx \
     php8.4-fpm \
@@ -54,15 +60,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Templates / envsubst
     gettext-base \
     # GRUB EFI signé MOK
-    grub-efi-amd64-bin \
-    grub-efi-amd64-signed \
+    "$@" \
     sbsigntool \
     mokutil \
-    shim-signed \
-    # NOTE Spec D : grub-efi-arm64-bin est Architecture:arm64 → nécessite
-    # dpkg --add-architecture arm64 + repo Debian arm64. À ajouter quand on
-    # aura une machine ARM pour test e2e. Le script bootstrap-build-grub.sh
-    # skip silencieusement si /usr/lib/grub/arm64-efi/ absent (no-op pour amd64).\
     # PXE BIOS bootloader + modules
     pxelinux \
     syslinux-common \
@@ -88,16 +88,25 @@ ARG S6_OVERLAY_VERSION=3.2.0.0
 # attaquant capable de substituer le tarball (asset GitHub compromis, MITM du
 # réseau CI, cache GitHub Actions empoisonné) substituerait aussi son .sha256
 # → vérif au vert. Le hash figé, lui, casse le build dans ces trois cas.
-# Au bump de S6_OVERLAY_VERSION, régénérer les deux valeurs via :
-#   curl -sL .../releases/download/v<VERSION>/s6-overlay-{noarch,x86_64}.tar.xz.sha256
+# Au bump de S6_OVERLAY_VERSION, vérifier les empreintes officielles des trois archives.
 ARG S6_OVERLAY_NOARCH_SHA256=4b0c0907e6762814c31850e0e6c6762c385571d4656eb8725852b0b1586713b6
 ARG S6_OVERLAY_X86_64_SHA256=ad982a801bd72757c7b1b53539a146cf715e640b4d8f0a6a671a3d1b560fe1e2
+ARG S6_OVERLAY_AARCH64_SHA256=868973e98210257bba725ff5b17aa092008c9a8e5174499e38ba611a8fc7e473
 ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz /tmp/
-ADD https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-x86_64.tar.xz /tmp/
-RUN echo "${S6_OVERLAY_NOARCH_SHA256}  /tmp/s6-overlay-noarch.tar.xz" | sha256sum -c - \
-    && echo "${S6_OVERLAY_X86_64_SHA256}  /tmp/s6-overlay-x86_64.tar.xz" | sha256sum -c - \
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) s6_arch=x86_64; s6_sha="$S6_OVERLAY_X86_64_SHA256" ;; \
+        arm64) s6_arch=aarch64; s6_sha="$S6_OVERLAY_AARCH64_SHA256" ;; \
+        *) exit 1 ;; \
+    esac; \
+    archive="/tmp/s6-overlay-$s6_arch.tar.xz"; \
+    curl --proto '=https' --proto-redir '=https' -fsSL \
+        "https://github.com/just-containers/s6-overlay/releases/download/v$S6_OVERLAY_VERSION/s6-overlay-$s6_arch.tar.xz" \
+        -o "$archive"; \
+    echo "${S6_OVERLAY_NOARCH_SHA256}  /tmp/s6-overlay-noarch.tar.xz" | sha256sum -c - \
+    && echo "$s6_sha  $archive" | sha256sum -c - \
     && tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz \
-    && tar -C / -Jxpf /tmp/s6-overlay-x86_64.tar.xz \
+    && tar -C / -Jxpf "$archive" \
     && rm /tmp/s6-overlay-*.tar.xz
 
 # Licences et notices des composants redistribués avec cette image.

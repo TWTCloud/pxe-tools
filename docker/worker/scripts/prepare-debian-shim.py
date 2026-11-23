@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-only
-"""Acquire Debian's authenticated and matching PXE shim and MokManager.
+"""Acquire authentic Debian PXE firmware and optionally its amd64 GRUB modules.
 
 This uses an isolated temporary APT state and never installs a Debian package or
 changes the host's APT configuration. Candidate binaries are published only
@@ -32,6 +32,8 @@ MAX_APT_FILE = 64 * 1024 * 1024
 SCRIPTS = Path(__file__).resolve().parent
 SHIM_MEMBER = './usr/lib/shim/shimx64.efi.signed'
 MOK_MEMBER = './usr/lib/shim/mmx64.efi.signed'
+GRUB_SIGNED_MEMBER = './usr/lib/grub/x86_64-efi-signed/grubnetx64.efi.signed'
+GRUB_MODULE_PREFIX = './usr/lib/grub/x86_64-efi/'
 
 
 def constrained():
@@ -93,31 +95,58 @@ def shim_build(value):
     return matches[0]
 
 
-def extract_member(deb, name):
-    # dpkg-deb decompresses into a bounded temporary file. tarfile reads only
-    # the one fixed path, never extracting archive paths or following links.
+@contextmanager
+def package_tar(deb):
+    # Decompress into a bounded file and let callers select regular members.
     with tempfile.TemporaryFile() as data:
         subprocess.run(['dpkg-deb', '--fsys-tarfile', str(deb)], stdout=data,
                        stderr=subprocess.PIPE, check=True, timeout=60,
                        preexec_fn=constrained)
         data.seek(0)
-        found = []
         with tarfile.open(fileobj=data, mode='r:') as tar:
             members = tar.getmembers()
             if len(members) > 4096:
                 raise ValueError('too many package entries')
-            for member in members:
-                if member.name != name:
-                    continue
-                if not member.isfile() or member.size < 1 or member.size > LIMIT:
-                    raise ValueError('invalid selected package entry')
-                src = tar.extractfile(member)
-                if src is None:
-                    raise ValueError('selected package entry unreadable')
-                found.append(src.read(LIMIT + 1))
-        if len(found) != 1 or len(found[0]) > LIMIT or found[0][:2] != b'MZ':
-            raise ValueError('missing or ambiguous EFI image')
-        return found[0]
+            yield tar, members
+
+
+def extract_member(deb, name):
+    found = []
+    with package_tar(deb) as (archive, members):
+        for member in members:
+            if member.name != name:
+                continue
+            if not member.isfile() or member.size < 1 or member.size > LIMIT:
+                raise ValueError('invalid selected package entry')
+            with archive.extractfile(member) as source:
+                found.append(source.read(LIMIT + 1))
+    if len(found) != 1 or len(found[0]) > LIMIT or found[0][:2] != b'MZ':
+        raise ValueError('missing or ambiguous EFI image')
+    return found[0]
+
+
+def extract_grub_modules(deb, destination):
+    destination.mkdir()
+    with package_tar(deb) as (archive, members):
+        for member in members:
+            if not member.name.startswith(GRUB_MODULE_PREFIX) or member.name == GRUB_MODULE_PREFIX:
+                continue
+            name = member.name.removeprefix(GRUB_MODULE_PREFIX)
+            if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name)
+                    or not member.isfile() or member.size > LIMIT):
+                raise ValueError('invalid amd64 GRUB module file')
+            with archive.extractfile(member) as source, (destination / name).open('xb') as target:
+                target.write(source.read(LIMIT + 1))
+    if not all((destination / name).is_file() for name in
+               ('kernel.img', 'moddep.lst', 'modinfo.sh', 'http.mod', 'tftp.mod')):
+        raise ValueError('incomplete amd64 GRUB modules')
+
+
+def downloaded_package(work, name):
+    candidates = list(work.glob(name + '_*_amd64.deb'))
+    if len(candidates) != 1 or candidates[0].stat().st_size > LIMIT:
+        raise ValueError(f'missing, ambiguous or oversized amd64 package: {name}')
+    return candidates[0]
 
 
 def trusted_directory(destination):
@@ -214,13 +243,15 @@ def publish_pair(directory_fd, shim, mok):
                 pass
 
 
-def acquire(destination, keyring):
+def acquire(destination, keyring, *, with_grub=False):
     destination = Path(destination)
     keyring = Path(keyring)
     if (not keyring.is_absolute() or not keyring.is_file()
             or re.search(r'[\s\[\]]', str(keyring))):
         raise ValueError('Debian keyring missing or invalid')
     with locked_destination(destination) as directory_fd:
+        if with_grub and set(os.listdir(directory_fd)) - {'.pxe-debian-shim.lock'}:
+            raise ValueError('GRUB preparation requires a private empty staging directory')
         with tempfile.TemporaryDirectory(prefix='pxe-debian-shim-') as temporary:
             work = Path(temporary)
             inrelease = work / 'InRelease'
@@ -247,6 +278,7 @@ def acquire(destination, keyring):
                     '-o', 'Dir::Etc::preferencesparts=-', '-o', 'Dir::State::status=/dev/null',
                     '-o', f'Dir::State::lists={work / "lists"}',
                     '-o', f'Dir::Cache::archives={work / "archives"}',
+                    '-o', 'APT::Architecture=amd64',
                     '-o', 'Dir::Cache::pkgcache=', '-o', 'Dir::Cache::srcpkgcache=',
                     '-o', 'APT::Sandbox::User=root', '-o', 'Debug::NoLocking=1',
                     '-o', 'Acquire::Languages=none', '-o', 'Acquire::Max-ValidTime=15552000',
@@ -254,15 +286,11 @@ def acquire(destination, keyring):
                     '-o', 'APT::Get::List-Cleanup=0']
             env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': str(work), 'LC_ALL': 'C'}
             run(['apt-get', *opts, 'update'], cwd=work, env=env)
-            run(['apt-get', *opts, 'download', 'shim-signed', 'shim-helpers-amd64-signed'], cwd=work, env=env)
-            shim_packages = list(work.glob('shim-signed_*_amd64.deb'))
-            mok_packages = list(work.glob('shim-helpers-amd64-signed_*_amd64.deb'))
-            if len(shim_packages) != 1 or len(mok_packages) != 1:
-                raise ValueError('missing or ambiguous Debian shim packages')
-            for package in shim_packages + mok_packages:
-                if package.stat().st_size > LIMIT:
-                    raise ValueError('Debian shim package too large')
-            shim_deb, mok_deb = shim_packages[0], mok_packages[0]
+            packages = ['shim-signed', 'shim-helpers-amd64-signed']
+            if with_grub:
+                packages.extend(('grub-efi-amd64-bin', 'grub-efi-amd64-signed'))
+            run(['apt-get', *opts, 'download', *packages], cwd=work, env=env)
+            shim_deb, mok_deb = (downloaded_package(work, name) for name in packages[:2])
             shim_version = run(['dpkg-deb', '-f', str(shim_deb), 'Built-Using'], output=True).decode().strip()
             mok_version = run(['dpkg-deb', '-f', str(mok_deb), 'Built-Using'], output=True).decode().strip()
             if shim_build(shim_version) != shim_build(mok_version):
@@ -271,6 +299,16 @@ def acquire(destination, keyring):
             mok = extract_member(mok_deb, MOK_MEMBER)
             if hashlib.sha256(shim).hexdigest() != expected or shim != netboot:
                 raise ValueError('package shim does not match signed installer shim')
+            if with_grub:
+                modules_deb, signed_deb = (downloaded_package(work, name) for name in packages[2:])
+                version = run(['dpkg-deb', '-f', str(modules_deb), 'Version'], output=True).decode().strip()
+                native_version = run(['dpkg-query', '-W', '-f=${Version}', 'grub-common'],
+                                     output=True).decode().strip()
+                if version != native_version:
+                    raise ValueError('Debian amd64 GRUB modules must match the installed grub-common version')
+                extract_grub_modules(modules_deb, destination / 'x86_64-efi')
+                (destination / 'grub.version').write_text(version + '\n', encoding='ascii')
+                (destination / 'grubnetx64.efi.signed').write_bytes(extract_member(signed_deb, GRUB_SIGNED_MEMBER))
             # No existing binary is touched before every authenticated check passes.
             publish_pair(directory_fd, shim, mok)
             print('Authenticated Debian shim and matching MokManager prepared.')
@@ -278,8 +316,21 @@ def acquire(destination, keyring):
 
 if __name__ == '__main__':
     try:
-        if len(sys.argv) != 3 or os.geteuid() != 0:
-            raise ValueError('expected root, TFTP directory and Debian archive keyring')
-        acquire(sys.argv[1], sys.argv[2])
+        if sys.argv[1:2] == ['--publish-pair'] and len(sys.argv) == 4 and os.geteuid() == 0:
+            source = trusted_directory(sys.argv[2])
+            try:
+                shim = previous_target(source, 'grubnetx64.efi')
+                mok = previous_target(source, 'mmx64.efi')
+                if not shim or not mok or shim[:2] != b'MZ' or mok[:2] != b'MZ':
+                    raise ValueError('staged Debian EFI pair missing')
+                with locked_destination(sys.argv[3]) as target:
+                    publish_pair(target, shim, mok)
+            finally:
+                os.close(source)
+        else:
+            if ((len(sys.argv) != 3 and (len(sys.argv) != 4 or sys.argv[3] != '--with-grub'))
+                    or os.geteuid() != 0):
+                raise ValueError('expected root, destination, Debian archive keyring and optional --with-grub')
+            acquire(sys.argv[1], sys.argv[2], with_grub=len(sys.argv) == 4)
     except (OSError, ValueError, UnicodeError, tarfile.TarError, subprocess.SubprocessError) as exc:
         raise SystemExit(f'Debian shim preparation failed: {exc}')

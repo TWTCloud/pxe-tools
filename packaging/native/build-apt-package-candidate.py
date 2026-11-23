@@ -15,6 +15,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('destination', type=Path, help='new absolute output path')
     parser.add_argument('--version', required=True, help='Debian version for this candidate')
+    parser.add_argument('--architecture', choices=('amd64', 'arm64'), default='amd64')
     parser.add_argument('--maintainer', required=True, help='one maintainer name and email')
     args = parser.parse_args()
     spec = importlib.util.spec_from_file_location('pxe_package_builder', Path(__file__).with_name('build-local-package.py'))
@@ -22,7 +23,8 @@ def main() -> None:
         raise RuntimeError('native package builder unavailable')
     builder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(builder)
-    builder.build(args.destination, args.version, package_name='pxe-tools', maintainer=args.maintainer)
+    builder.build(args.destination, args.version, package_name='pxe-tools',
+                  architecture=args.architecture, maintainer=args.maintainer)
     print('Built unpublished PXE Tools package:', args.destination)
 
 

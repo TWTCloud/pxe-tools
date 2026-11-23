@@ -21,12 +21,16 @@ if _inventory_spec is None or _inventory_spec.loader is None:
     raise RuntimeError('Package source inventory unavailable')
 source_inventory = importlib.util.module_from_spec(_inventory_spec)
 _inventory_spec.loader.exec_module(source_inventory)
+GRUB_DEPENDENCIES = {
+    'amd64': 'grub-efi-amd64-bin, grub-efi-amd64-signed',
+    'arm64': 'grub-efi-arm64-bin',
+}
 CONTROL = '''Package: {package_name}
 Version: {version}
-Architecture: amd64
+Architecture: {architecture}
 Maintainer: {maintainer}
 Pre-Depends: python3 (>= 3.11)
-Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, dnsmasq-base, gettext-base, git, gpgv, grub-efi-amd64-bin, grub-efi-amd64-signed, iproute2, ipxe, mokutil, nginx, openssh-client, openssl, php-cli | php8.4-cli | php8.3-cli | php8.2-cli, php-curl | php8.4-curl | php8.3-curl | php8.2-curl, php-fpm | php8.4-fpm | php8.3-fpm | php8.2-fpm, php-sqlite3 | php8.4-sqlite3 | php8.3-sqlite3 | php8.2-sqlite3, pxelinux, python3-jinja2, python3-nacl, sbsigntool, shim-signed, sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
+Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, dnsmasq-base, gettext-base, git, gpgv, {grub_dependencies}, iproute2, ipxe, mokutil, nginx, openssh-client, openssl, php-cli | php8.4-cli | php8.3-cli | php8.2-cli, php-curl | php8.4-curl | php8.3-curl | php8.2-curl, php-fpm | php8.4-fpm | php8.3-fpm | php8.2-fpm, php-sqlite3 | php8.4-sqlite3 | php8.3-sqlite3 | php8.2-sqlite3, pxelinux, python3-jinja2, python3-nacl, sbsigntool, {shim_dependency}sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
 Section: admin
 Priority: optional
 Description: {description}
@@ -133,9 +137,12 @@ def replace_exact(text: str, old: str, new: str) -> str:
 
 
 def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-local-test',
+          architecture: str = 'amd64',
           maintainer: str = 'PXE Tools local test <maintainers@example.invalid>') -> None:
     if package_name not in ('pxe-tools-local-test', 'pxe-tools'):
         raise ValueError('unsupported package name')
+    if architecture not in GRUB_DEPENDENCIES:
+        raise ValueError('supported package architectures are amd64 and arm64')
     if not re.fullmatch(r'[^<>\r\n]{1,100} <[A-Za-z0-9._+\-]+@[A-Za-z0-9.\-]+>', maintainer):
         raise ValueError('maintainer must be a single name and email address')
     if not destination.is_absolute() or not destination.parent.is_dir():
@@ -153,8 +160,11 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
                                 if package_name == 'pxe-tools' else
                                 ('experimental local test of PXE Tools',
                                  'This package is intended for isolated test environments.'))
-        (control/'control').write_text(CONTROL.format(version=version, package_name=package_name,
-                                                       maintainer=maintainer, description=description, details=details))
+        (control/'control').write_text(CONTROL.format(
+            version=version, package_name=package_name, architecture=architecture,
+            grub_dependencies=GRUB_DEPENDENCIES[architecture],
+            shim_dependency='shim-signed, ' if architecture == 'amd64' else '',
+            maintainer=maintainer, description=description, details=details))
         cleanup = checked(ROOT/'packaging/native/prune-package-cache.py').read_text()
         lifecycle = checked(ROOT/'packaging/native/upgrade-lifecycle.py').read_text()
         preinst = PREINST.replace('@@PXE_CACHE_CLEANUP@@', cleanup)
@@ -231,6 +241,7 @@ if __name__ == '__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('destination',type=Path)
     parser.add_argument('--version',default='0.0.1~local2')
+    parser.add_argument('--architecture', choices=GRUB_DEPENDENCIES, default='amd64')
     args=parser.parse_args()
-    build(args.destination,args.version)
+    build(args.destination, args.version, architecture=args.architecture)
     print('Experimental local package built:',args.destination)
