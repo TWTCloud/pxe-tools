@@ -92,7 +92,7 @@ def main():
         with sqlite3.connect(data/'chosen.sqlite') as db:
             db.executescript((ROOT/'app/db/schema.sqlite.sql').read_text())
             db.executemany('INSERT INTO settings(key,value) VALUES(?,?)',[
-                ('pxe_ip','192.0.2.1'),('pxe_subnet','192.0.2.0/24'),('pxe_interface','br-pxetest'),
+                ('pxe_enabled','on'),('pxe_ip','192.0.2.1'),('pxe_subnet','192.0.2.0/24'),('pxe_interface','br-pxetest'),
                 ('dhcp_proxy_enabled','on'),('dhcp_proxy_network','192.0.2.0'),
                 ('dhcp_proxy_netmask','255.255.255.0'),('https_enabled','off'),
                 ('wizard_completed','1'),('db_init_done','1'),('admin_created','1'),('init_completed','1'),
@@ -108,15 +108,6 @@ def main():
                 ('pxe_interface','fixture-stale'), ('fixture_marker','preserved')])
             db.execute("INSERT INTO machines(id,mac,hostname,status) VALUES(1,'02:00:00:00:00:01','stale-fixture','wiping')")
         netboot=http/'netboot/debian/13.0/amd64';netboot.mkdir(parents=True)
-        nginx=(ROOT/'docker/pxe-tools/nginx/pxe.conf').read_text()
-        nginx=nginx.replace('/app/public','/usr/lib/pxe-tools/app/public')
-        nginx=nginx.replace('/srv/http','/var/lib/pxe-tools/http')
-        nginx=nginx.replace('/run/php/php8.4-fpm.sock','/run/pxe-tools-php/fpm.sock')
-        nginx=nginx.replace('/var/log/nginx/','/var/log/pxe-tools/')
-        nginx=nginx.replace('include fastcgi_params;','include /etc/nginx/fastcgi_params;')
-        nginx=nginx.replace('    location /netboot/ {',
-            '    location ^~ /debian/ { proxy_pass http://unix:/fixture-data/mirror.sock:; proxy_read_timeout 120s; }\n\n    location /netboot/ {')
-        nginx_file=root/'pxe.conf'; nginx_file.write_text(nginx)
         instrument=(ROOT/'docker/worker/templates/preseed-base.cfg.j2').read_text()
         needle="{{ '{{ADMIN_USER_BLOCK}}' }}"
         if instrument.count(needle)!=1: raise RuntimeError('unexpected preseed template')
@@ -148,7 +139,7 @@ done
         docker('run','--rm','--network','none','--mount',f'type=bind,src={root},dst=/fixture-data',
                '--entrypoint','qemu-img',image,'create','-f','qcow2','/fixture-data/fixture.qcow2','12G')
         mounts=[]
-        for src,dst in ((data,'/var/lib/pxe-tools'),(conf,'/etc/pxe-tools'),(http,'/var/lib/pxe-tools/http'),(tftp,'/var/lib/pxe-tools/tftp')):
+        for src,dst in ((data,'/var/lib/pxe-tools'),(conf,'/etc/pxe-tools'),(http,'/var/lib/pxe-tools-http'),(tftp,'/var/lib/pxe-tools-tftp')):
             mounts+=['--mount',f'type=bind,src={src},dst={dst}']
         try:
             prototype=str(ROOT/'tests/support/prototype')
@@ -176,13 +167,26 @@ done
             package=docker('exec',app,'dpkg-query','-W','-f=${Status}|${Version}','pxe-tools-local-test').stdout
             if package.strip()!='install ok installed|0.0.1~local1':
                 raise RuntimeError('Expected locally installed native test package')
+            architecture=docker('exec',app,'dpkg','--print-architecture').stdout.strip()
+            if architecture != os.environ.get('PXE_NATIVE_PXE_ARCH', 'amd64'):
+                raise RuntimeError('Unexpected PXE Tools server architecture')
+            print('Native Debian PXE Tools server architecture:', architecture, flush=True)
+            nginx=docker('exec',app,'cat','/usr/lib/pxe-tools/native/pxe.conf').stdout
+            nginx=nginx.replace('    location /netboot/ {',
+                '    location ^~ /debian/ { proxy_pass http://unix:/fixture-data/mirror.sock:; proxy_read_timeout 120s; }\n\n    location /netboot/ {')
+            nginx_file=root/'pxe.conf'; nginx_file.write_text(nginx)
             for source,target in ((nginx_file,'/usr/lib/pxe-tools/native/pxe.conf'),
                                   (template,'/opt/pxe-tools/templates/preseed-base.cfg.j2'),
                                   (discovery_template,'/opt/pxe-tools/templates/discovery-preseed.cfg.j2'),
                                   (discover_template,'/opt/pxe-tools/templates/discover.sh.j2')):
                 docker('cp',str(source),app+':'+target)
             docker('exec',app,'sh','-c',
-                   "sed -i 's|^PXE_DB_PATH=.*|PXE_DB_PATH=/var/lib/pxe-tools/stale.sqlite|;s|^WORKER_POLL_S=.*|WORKER_POLL_S=1|' /usr/lib/pxe-tools/native/default.env; printf '%s\\n' 'KERNEL_OPTS=\"language=fr country=FR locale=fr_FR.UTF-8 keymap=fr ipv6.disable=1 net.ifnames=0\"' >> /usr/lib/pxe-tools/native/default.env")
+                   "install -d -m 0755 /var/lib/pxe-tools-native/rendered && "
+                   "printf '%s\\n' TFTP_ROOT=/var/lib/pxe-tools-tftp HTTP_ROOT=/var/lib/pxe-tools-http "
+                   "PXE_TOOLS_DATA_DIR=/var/lib/pxe-tools-native/rendered MOK_DIR=/var/lib/pxe-tools-native/mok "
+                   "PXE_DB_PATH=/var/lib/pxe-tools/stale.sqlite WORKER_POLL_S=1 "
+                   "'KERNEL_OPTS=\"language=fr country=FR locale=fr_FR.UTF-8 keymap=fr ipv6.disable=1 net.ifnames=0\"' "
+                   "> /var/lib/pxe-tools-native/runtime.env")
             docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
                    '--entrypoint','/bin/sh',image,'-c','exec sleep 4200')
             app_ns=endpoint(app); dhcp_ns=endpoint(dhcp)
@@ -217,7 +221,7 @@ done
             config=docker('exec',app,'cat','/var/lib/pxe-tools-native/rendered/dnsmasq.conf').stdout
             if 'dhcp-range=192.0.2.0,proxy,255.255.255.0' not in config:
                 raise RuntimeError('actual proxy DHCP configuration not active')
-            docker('exec','-e','TFTP_ROOT=/var/lib/pxe-tools/tftp',app,'bash',
+            docker('exec','-e','TFTP_ROOT=/var/lib/pxe-tools-tftp','-e','PXE_SERVICE_MANAGER=systemd',app,'bash',
                    '/opt/pxe-tools/scripts/bootstrap-install-pxe-bins.sh')
             menu=tftp/'pxelinux.cfg/01-02-00-00-00-00-01'
             default_menu=tftp/'pxelinux.cfg/default'
@@ -285,7 +289,7 @@ response=post('/machines/1/install',values)
 if not re.fullmatch(re.escape(base)+r'/tasks/[0-9]+',response.geturl()):
     raise RuntimeError('Install submission did not redirect to activity')
 response.read()
-menu=Path('/var/lib/pxe-tools/tftp/pxelinux.cfg/01-02-00-00-00-00-01')
+menu=Path('/var/lib/pxe-tools-tftp/pxelinux.cfg/01-02-00-00-00-00-01')
 deadline=time.monotonic()+90
 while time.monotonic()<deadline:
     if menu.is_file() and 'DEFAULT install' in menu.read_text(): break
@@ -363,7 +367,7 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
             print('OK Discovery, authenticated scheduling, PXE install callback and Debian first boot',flush=True)
             print('Only the disposable qcow2 disk and isolated bridge were used.',flush=True)
         except Exception:
-            for name, args in ((app, ('logs','--tail','35',app)),
+            for name, args in ((app, ('exec',app,'journalctl','--no-pager','-n','45','-u','pxe-tools-init','-u','pxe-tools-dnsmasq','-u','pxe-tools-pxe-http','-u','pxe-tools-worker')),
                                (dhcp, ('exec',dhcp,'cat','/tmp/fixture-dhcp.log')),
                                (client, ('logs','--tail','20',client)),
                                (mirror, ('logs','--tail','20',mirror))):
