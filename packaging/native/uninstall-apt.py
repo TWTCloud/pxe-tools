@@ -1668,19 +1668,23 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
         with nginx_journal_guard(root, reconciler, owner=owner, mounts=mounts):
             pass
     initial = isinstance(record, dict) and record.get('base_phase') == 'runtime-prepared'
+    allowed_preserved = set(record['preserved']) if legacy else {'/var/log/pxe-tools'}
+    critical = ('/etc/pxe-tools', '/var/lib/pxe-tools', '/var/lib/pxe-tools-native')
+    blocked_reason = None
+    if set(preserved) - allowed_preserved or (legacy and set(preserved) != allowed_preserved):
+        blocked_reason = 'Cannot establish ownership of all instance paths; no package was removed'
+    elif lifecycle is None and any((root / path.lstrip('/')).exists() or
+                                   (root / path.lstrip('/')).is_symlink() for path in critical):
+        blocked_reason = 'Cannot establish whether previous PXE operations are active; preserve data and inspect the partial installation'
     plan = {'trees': paths, 'source': source, 'key': key, 'preserved': preserved, 'legacy': legacy,
             'initial_incomplete': initial,
             'approved_account': approved_account,
+            'blocked_reason': blocked_reason,
             'legacy_plan_sha256': legacy_plan_hash(record, source, key) if explicit_plan else None}
     if not apply:
         return plan
-    allowed_preserved = set(record['preserved']) if legacy else {'/var/log/pxe-tools'}
-    if set(preserved) - allowed_preserved or (legacy and set(preserved) != allowed_preserved):
-        raise RuntimeError('Cannot establish ownership of all instance paths; no package was removed')
-    critical = ('/etc/pxe-tools', '/var/lib/pxe-tools', '/var/lib/pxe-tools-native')
-    if lifecycle is None and any((root / p.lstrip('/')).exists() or
-                                 (root / p.lstrip('/')).is_symlink() for p in critical):
-        raise RuntimeError('Cannot establish whether previous PXE operations are active; preserve data and inspect the partial installation')
+    if blocked_reason:
+        raise RuntimeError(blocked_reason)
     with dpkg_frontend_lock(root / 'var/lib/dpkg/lock-frontend', owner=owner), \
             installer_lock(root / 'run/lock/pxe-tools-uninstall.lock', owner=owner):
         from contextlib import nullcontext
@@ -3813,9 +3817,21 @@ def main(argv):
         record = None
     account_lookup = lambda: account_snapshot(Path('/'), list(pwd.getpwall()), list(grp.getgrall()))
     preview = run_uninstall(Path('/'), subprocess.run, lifecycle, UNITS, mounts, apply=False, record=record, ownership=ownership, reconciler=reconciler, account_lookup=account_lookup, allow_legacy=args.allow_legacy)
-    residual = residual_plan(Path('/'), preview, mounts()) if args.purge_residuals else None
     outside = external_paths(lifecycle, preview['trees']) if lifecycle is not None else ()
     outside = tuple(path for path in outside if Path(path).exists() or Path(path).is_symlink())
+    blocked_reason = preview['blocked_reason']
+    if outside and not blocked_reason:
+        blocked_reason = 'Configured paths outside recognised roots require review; no package was removed'
+    if blocked_reason:
+        preserved = set(preview['preserved']) | set(outside)
+        if packages_absent(subprocess.run):
+            print('APT packages: already absent.')
+            preserved.update(remaining_package_paths(Path('/')))
+        for path in sorted(preserved):
+            print('Preserved for manual review:', path)
+        print('Review the installation paths and keep a backup before a new installation.', flush=True)
+        raise RuntimeError(blocked_reason)
+    residual = residual_plan(Path('/'), preview, mounts()) if args.purge_residuals else None
     print('WARNING: removal destroys the PXE Tools database, configuration, local keys, certificates,')
     print('boot files and local upgrade snapshots in recognised paths. Keep a verified external backup.')
     print('Package removal: pxe-tools-ansible and pxe-tools; dependencies are retained.')
@@ -3854,8 +3870,6 @@ def main(argv):
         print('When no PXE or Ansible work remains active, use --yes to consent;')
         print('the dedicated services will be stopped safely by the script.')
         return 0
-    if outside:
-        raise RuntimeError('Configured paths outside recognised roots require review; no package was removed')
     with installer_lock(Path('/run/lock/pxe-tools-apt-install.lock')):
         receipt = None
         if residual is not None and args.residual_plan_sha256 != residual_plan_hash(residual):
