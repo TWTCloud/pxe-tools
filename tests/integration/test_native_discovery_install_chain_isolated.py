@@ -237,8 +237,11 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     native=backend=='rust-apt'
     http_root='/var/lib/pxe-tools-http' if native else '/srv/http'
     tftp_root='/var/lib/pxe-tools-tftp' if native else '/srv/tftp'
+    # Keep the same interface naming policy in d-i and the installed kernel.
+    # An installer-only net.ifnames=0 writes an eth0 stanza for a device
+    # which the installed system will name enp0s4.
     kernel=('language=en country=US locale=en_US.UTF-8 keymap=us '
-            'net.ifnames=0 ipv6.disable=1 netcfg/no_default_route=true netcfg/get_nameservers=192.0.2.2')
+            'ipv6.disable=1 netcfg/no_default_route=true netcfg/get_nameservers=192.0.2.2')
     env=[
         'TFTP_ROOT='+tftp_root, 'HTTP_ROOT='+http_root,
         'PXE_DB_PATH=/var/lib/pxe-tools/stale.sqlite', 'WORKER_POLL_S=1', 'KERNEL_OPTS='+kernel,
