@@ -270,6 +270,7 @@ def verify_packaged_rust_setup(name):
 def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template):
     verify_packaged_rust_setup(app+'-setup')
     native=backend=='rust-apt'
+    custom_partition=native and os.environ.get('PXE_NATIVE_PXE_ARCH')=='amd64'
     http_root='/var/lib/pxe-tools-http' if native else '/srv/http'
     tftp_root='/var/lib/pxe-tools-tftp' if native else '/srv/tftp'
     # Keep the same interface naming policy in d-i and the installed kernel.
@@ -290,6 +291,19 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         (ROOT/'tests/support/native-rust-pxe/server.py','/fixture-data/rust-server.py'),
     ):
         mounts.extend(('--mount',f'type=bind,src={source},dst={target}'))
+
+    if custom_partition:
+        source=(ROOT/'docker/worker/templates/postboot.sh.j2').read_text()
+        original=next(line for line in source.splitlines() if line.startswith('PAYLOAD='))
+        instrument=r'''layout=unexpected
+if [ "$(findmnt -n -o SOURCE /)" = /dev/vda3 ] && [ "$(lsblk -dn -o PTTYPE /dev/vda)" = gpt ] \
+        && [ "$(lsblk -dn -o FSTYPE /dev/vda2)" = swap ]; then
+    layout=gpt-vda3-swap
+fi
+PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_layout":"%s"}' "$IP" "$(uname -r)" "$layout")"'''
+        postboot=root/'postboot.sh.j2'
+        postboot.write_text(source.replace(original,instrument))
+        mounts.extend(('--mount',f'type=bind,src={postboot},dst=/opt/pxe-tools/templates/postboot.sh.j2,readonly'))
 
     if native:
         env.extend(('PXE_TOOLS_DATA_DIR=/var/lib/pxe-tools-native/rendered','MOK_DIR=/var/lib/pxe-tools-native/mok'))
@@ -414,12 +428,18 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     check_env=('set -a; source /usr/lib/pxe-tools/native/default.env; '
                'source /var/lib/pxe-tools-native/runtime.env; set +a; ') if native else (
                'export PXE_APP_DIR=/app; ')
+    if custom_partition:
+        check_env+='export PXE_FIXTURE_CUSTOM_PARTITIONS=1; '
     docker('exec','-d',app,'bash','-ec',
            check_env+'export PXE_FIXTURE_MIRROR_IP=192.0.2.2 PXE_FIXTURE_USE_WORKER=1; '
            'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
     status=fixture/'native-status.log'
     wait_for(lambda:status.is_file() and 'PXE_NATIVE_READY' in status.read_text(),30,'packaged Rust fixture ready')
     run_rust_guests(lan,client,root,status,screen_login=True)
+    if custom_partition:
+        if 'Custom GPT partition recipe verified from the installed guest' not in status.read_text():
+            raise RuntimeError('Missing proof of the custom GPT recipe')
+        print('Custom GPT partition recipe verified from the installed guest',flush=True)
     if native:
         logs=docker('exec',app,'journalctl','--no-pager','-u','pxe-tools-pxe-http.service','-o','cat').stdout
     else:

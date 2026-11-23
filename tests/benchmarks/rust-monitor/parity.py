@@ -329,6 +329,35 @@ def compare_install(ports, paths):
     invalid_vlan = {**multi, "network": {"interfaces": [vlan, primary], "primary": 0}}
     set_config(invalid_vlan)
     assert response(ports[1], PRESEED + query, peer="lan")[0] == 422
+    target = "/dev/vda"
+    proof = {"kind": "serial", "value": "PXE-TEST-ONE", "status": "valid"}
+    root = {"id": "vda2", "fs": "ext4", "mount": "/", "fill": True, "reserved_pct": 2,
+            "mount_options": ["noatime"]}
+    for firmware, first in (
+        ("bios", {"id": "vda1", "fs": "biosgrub", "size_mb": 1}),
+        ("uefi", {"id": "vda1", "fs": "efi", "mount": "/boot/efi", "size_mb": 512}),
+    ):
+        plan = {"target_disks": [target], "target_disk_identities": {target: proof},
+                "disks": [{"path": target, "partitions": [first, root]}]}
+        recipe = {**config, "partition_mode": "custom", "partition_custom_json": json.dumps(plan),
+                  "review_boot_mode": firmware, "disk_target_constraints": {target: "PXE-TEST-ONE"}}
+        set_config(recipe)
+        seeds = [response(port, PRESEED + query, peer="lan") for port in ports]
+        assert [item[0] for item in seeds] == [200, 200]
+        rendered = [item[3].decode() for item in seeds]
+        assert directives(rendered[0]) == directives(rendered[1])
+        def partman_block(seed):
+            return re.search(r"custom_recipe ::.*?\nd-i partman-auto/choose_recipe", seed, re.S).group(0)
+        assert partman_block(rendered[0]) == partman_block(rendered[1])
+        for seed in rendered:
+            assert "for pair in /:2;" in seed
+            assert target + ":" + base64.b64encode(proof["value"].encode()).decode() in seed
+            embedded = base64.b64decode(re.search(guard, seed).group(1))
+            assert f"EXPECTED_BOOT_MODE='{firmware}'".encode() in embedded
+        set_config({**recipe, "review_boot_mode": "bios" if firmware == "uefi" else "uefi"})
+        assert response(ports[1], PRESEED + query, peer="lan")[0] == 422
+        set_config({**recipe, "disk_target_constraints": {target: "OTHER-DISK"}})
+        assert response(ports[1], PRESEED + query, peer="lan")[0] == 422
     set_config(config)
     assert compare(ports, START + query, 200)["installation_id"] == 1
     assert compare(ports, ARTIFACT, 200, peer="lan") == b"#!/bin/sh\ntrue\n"
@@ -514,7 +543,7 @@ def main():
             db.execute("DROP TRIGGER fail_event")
         assert response(ports[1], retry, peer="lan")[0] == 200
         compare_grub(ports, paths)
-    print("Parity OK: 69 summaries, GRUB menus and selection, discovery inventory, multi-interface preseed and installation callbacks")
+    print("Parity OK: 69 summaries, GRUB menus and selection, discovery inventory, preseed with advanced networking and single-disk recipes, and installation callbacks")
 
 
 if __name__ == "__main__":

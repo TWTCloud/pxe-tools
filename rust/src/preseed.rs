@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 mod network;
+mod partition;
 
-use crate::disk_identity::{serial, valid_wwid};
 use crate::install::{self, Machine};
 use crate::pxe::{array_values, is_php_array, log_event, normalize_mac, parse_subnet};
 use crate::{header, php_string, php_trim, php_truthy, response, setting, HttpResponse, TEXT};
@@ -16,17 +16,6 @@ const BASE: &str = include_str!("../../docker/worker/templates/preseed-base.cfg.
 const DISK_GUARD: &str = include_str!(concat!(env!("OUT_DIR"), "/disk-guard.sh"));
 const INSTALL_LOG: &str = include_str!(concat!(env!("OUT_DIR"), "/install-log.sh"));
 const TARGET_HOSTNAME: &str = include_str!(concat!(env!("OUT_DIR"), "/target-hostname.sh"));
-const ATOMIC: &str = "d-i partman-auto/method string lvm
-d-i partman-auto/choose_recipe select atomic
-d-i partman-auto-lvm/guided_size string max
-d-i partman-lvm/device_remove_lvm boolean true
-d-i partman-md/device_remove_md boolean true
-d-i partman-lvm/confirm boolean true
-d-i partman-lvm/confirm_nooverwrite boolean true
-d-i partman/choose_partition select finish
-d-i partman/confirm boolean true
-d-i partman/confirm_nooverwrite boolean true";
-
 pub fn serve(
     db: &mut Connection,
     source: Option<Ipv4Addr>,
@@ -141,8 +130,7 @@ struct Profile {
     domain: String,
     distro: String,
     network: network::Network,
-    disk: String,
-    guard_identity: String,
+    partitions: partition::Layout,
     bootdev: String,
     user: String,
     fullname: String,
@@ -171,40 +159,9 @@ impl Profile {
                 "distribution non prise en charge par le preseed Rust.",
             ));
         }
-        if !matches!(
-            config["partition_mode"].as_str(),
-            None | Some("" | "default")
-        ) {
-            return Err(invalid(
-                "le partitionnement personnalisé nécessite le renderer PHP.",
-            ));
-        }
         let net = network::Network::new(config)
             .ok_or_else(|| invalid("plan réseau non pris en charge par le preseed Rust."))?;
-        let disk = config["system_disk_path"]
-            .as_str()
-            .filter(|path| valid_disk(path))
-            .ok_or_else(|| invalid("chemin du disque système absent ou invalide."))?;
-        let identity = &config["system_disk_identity"];
-        let value = serial(&identity["value"])
-            .ok_or_else(|| invalid("identité du disque système absente ou invalide."))?;
-        if identity["status"]
-            .as_str()
-            .is_some_and(|status| status != "valid")
-        {
-            return Err(invalid("identité du disque système non vérifiée."));
-        }
-        let guard_identity = match identity["kind"].as_str() {
-            Some("serial") => STANDARD.encode(value),
-            Some("wwid") if identity["source"] == "sysfs-wwid" && valid_wwid(&value) => {
-                format!("wwid={}", STANDARD.encode(value))
-            }
-            _ => {
-                return Err(invalid(
-                    "type d'identité du disque système non pris en charge.",
-                ))
-            }
-        };
+        let partitions = partition::Layout::new(config).map_err(invalid)?;
         let advanced = if is_php_array(&config["advanced"]) {
             config["advanced"].clone()
         } else {
@@ -214,7 +171,7 @@ impl Profile {
                 .unwrap_or_default()
         };
         let bootdev = fallback(&advanced["bootloader"]["bootdev"], "default");
-        if bootdev != "default" && bootdev != disk {
+        if bootdev != "default" && bootdev != partitions.disk {
             return Err(invalid(
                 "la cible GRUB doit correspondre au disque vérifié.",
             ));
@@ -307,8 +264,7 @@ impl Profile {
             domain,
             distro,
             network: net,
-            disk: disk.into(),
-            guard_identity,
+            partitions,
             bootdev,
             user,
             fullname,
@@ -391,6 +347,9 @@ impl Profile {
             READY_UNIT,
         ));
         late.push("in-target /bin/systemctl enable pxe-machine-ready.service".into());
+        if let Some(command) = self.partitions.reserve_blocks() {
+            late.push(command);
+        }
         if let Some((id, _)) = action {
             let postboot = format!("{base_url}/pxe/postboot/{id}");
             let download =
@@ -425,9 +384,9 @@ impl Profile {
         if !early.is_empty() {
             early.push('\n');
         }
-        let guard = STANDARD.encode(DISK_GUARD.replace("__BOOTMODE__", ""));
+        let guard = STANDARD.encode(DISK_GUARD.replace("__BOOTMODE__", self.partitions.firmware));
         early.push_str(&format!("d-i partman/early_command string \\\n    echo {guard} | base64 -d > /tmp/pxe-disk-guard.sh ; /bin/sh /tmp/pxe-disk-guard.sh remap '{phase_url}' '{}' '{base_url}/static-bin/smartctl' '{}:{}'",
-            self.bootdev, self.disk, self.guard_identity));
+            self.bootdev, self.partitions.disk, self.partitions.identity));
         let blocks = [
             ("EARLY_COMMAND_BLOCK", early),
             ("HOSTNAME_BLOCK", self.hostname_block()),
@@ -440,7 +399,7 @@ impl Profile {
             ("PACKAGES_BLOCK", self.packages_block(action.is_some())),
             ("APT_BLOCK", self.apt_block()),
             ("BOOTLOADER_BLOCK", self.bootloader_block()),
-            ("PARTITION_BLOCK", ATOMIC.into()),
+            ("PARTITION_BLOCK", self.partitions.directives.clone()),
             ("FINISH_BLOCK", self.finish_block()),
             ("ADMIN_USER_BLOCK", commands("preseed/late_command", &late)),
         ];

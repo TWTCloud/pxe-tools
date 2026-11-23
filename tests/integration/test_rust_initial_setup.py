@@ -20,9 +20,6 @@ import time
 from urllib.parse import urlencode
 
 
-ROOT = Path(__file__).resolve().parents[2]
-
-
 class Client:
     def __init__(self, credentials, http_port, https_port):
         self.context = ssl.create_default_context(cafile=str(credentials/'cert.pem'))
@@ -150,7 +147,7 @@ def local(binary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--binary', default=ROOT/'rust/target/release/pxe-tools-rust', type=Path)
+    parser.add_argument('--binary', type=Path)
     parser.add_argument('--installed', action='store_true',
                         help='verify a newly installed test appliance in an isolated namespace')
     args = parser.parse_args()
@@ -162,7 +159,8 @@ def main():
         client.ready()
         setup(client, credentials, Path('/etc/pxe-tools/db.conf'), Path('/var/lib/pxe-tools/pxe-tools.sqlite'))
     else:
-        local(args.binary.resolve())
+        binary = args.binary or Path(__file__).resolve().parents[2]/'rust/target/release/pxe-tools-rust'
+        local(binary.resolve())
 
 
 if __name__ == '__main__':

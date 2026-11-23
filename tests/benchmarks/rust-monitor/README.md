@@ -122,8 +122,10 @@ et la validation du formulaire. La gestion des certificats et les autres
 
 Les deux variantes fonctionnent sans installer Nginx ni PHP-FPM.
 Les migrations des bases existantes et certaines opérations du worker
-utilisent encore PHP CLI. Les plans de partition personnalisés, le wipe et les tests de
-disques restent à porter. Le renderer prend en charge les interfaces
+utilisent encore PHP CLI. Le renderer couvre les recettes de partition
+sur un disque identifié, avec partitions physiques BIOS ou UEFI. Les
+recettes multi-disques, LVM et RAID, le wipe et les tests de disques
+restent à porter. Le renderer prend en charge les interfaces
 secondaires DHCP ou statiques, les VLAN secondaires et les bonds. Ces
 profils réseau sont vérifiés par comparaison de leur preseed et de leurs
 scripts générés. Le parcours de bout en bout utilise une seule interface.
@@ -237,9 +239,10 @@ réutilise les fichiers déjà authentifiés d'un précédent essai.
 - Le renderer Rust lit les snapshots SQLite du mode Debian guidé et
   leurs configurations réseau. Il réutilise la base preseed du dépôt et
   les scripts d’identité disque, de journal, de nom d’hôte et de bond du
-  renderer PHP. Les plans de partition et les templates personnalisés
-  restent à porter. Le renderer refuse les plans qu’il ne sait pas
-  interpréter.
+  renderer PHP. Le banc compare aussi les recettes personnalisées d'un
+  disque physique et vérifie le garde-fou BIOS ou UEFI. Les recettes
+  multi-disques, LVM et RAID ainsi que les templates personnalisés
+  restent à porter.
 - Le binaire de banc reçoit le chemin SQLite explicitement. Il lit les
   empreintes stockées pour préparer Debian. Le banc natif passe le chemin
   choisi par le sélecteur de base existant et vérifie la conservation
