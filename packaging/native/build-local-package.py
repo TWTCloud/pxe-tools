@@ -148,7 +148,7 @@ def configure_guided_units(units: Path) -> None:
         ('pxe-tools-worker.service', 'pxe-tools-nginx.service', 'pxe-tools-init.service'),
         ('pxe-tools.target', 'pxe-tools-php.service pxe-tools-nginx.service ', ''),
         ('pxe-tools-admin.target', 'pxe-tools-nginx.service pxe-tools-worker.service',
-         'pxe-tools-init.service pxe-tools-worker.service'),
+         'pxe-tools-pxe-http.service pxe-tools-worker.service'),
     ):
         path = units/name
         path.write_text(replace_exact(path.read_text(), php, guided))
@@ -198,7 +198,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             nginx_dependency='' if rust_guided else 'nginx, ',
             php_fpm_dependency='' if rust_guided else PHP_FPM_DEPENDENCY,
             shim_dependency='shim-signed, ' if architecture == 'amd64' else '',
-            startup=('The Rust variant requires a configured SQLite database and PXE network.'
+            startup=('The Rust variant starts its initial administration on the loopback interface.'
                      if rust_guided else 'On a fresh system the administration interface starts without enabling PXE.'),
             maintainer=maintainer, description=description, details=details))
         cleanup = checked(ROOT/'packaging/native/prune-package-cache.py').read_text()

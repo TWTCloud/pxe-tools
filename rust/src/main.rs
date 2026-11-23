@@ -49,6 +49,12 @@ struct DatabaseConfig {
     path: Option<PathBuf>,
 }
 
+fn random_token() -> std::io::Result<String> {
+    let mut random = [0; 16];
+    fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+    Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn configured_database(config: &Path) -> Option<PathBuf> {
     let config: DatabaseConfig = serde_json::from_slice(&fs::read(config).ok()?).ok()?;
     if !config.driver.eq_ignore_ascii_case("sqlite") {

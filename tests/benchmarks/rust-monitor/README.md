@@ -86,11 +86,22 @@ python3 packaging/native/build-local-package.py /tmp/pxe-tools-guided.deb \
 docker build --target rust-guided -f docker/pxe-tools/Dockerfile -t pxe-tools:rust-guided .
 ```
 
-Ces variantes utilisent une instance SQLite déjà configurée avec son
-`db.conf`, sa clé maître et ses données. Le paquet active le parcours
-avec `systemctl start pxe-tools.target` lorsque le réseau PXE est configuré.
-L'image prend les mêmes volumes et paramètres réseau de démarrage que
-l'appliance et lance son listener PXE via l'init s6.
+Ces variantes réutilisent le `db.conf`, la clé maître et les données
+d'une instance SQLite existante. Sur une instance vierge, la console
+écoute uniquement sur `127.0.0.1`. Ouvrir
+`https://127.0.0.1/admin/` localement ou par un tunnel SSH vers cette
+boucle locale. Le compte root peut lire le code de configuration dans
+`/run/pxe-tools-rust-guided/setup-code`. Pour Docker, utiliser
+`docker exec` depuis l'hôte pour lire le code à l'intérieur du conteneur.
+Le lanceur génère un nouveau code à chaque démarrage du service.
+
+L'assistant crée la base SQLite et le premier compte local. Le compte
+existant ferme cette phase. Cette première partie de l'assistant laisse
+le PXE désactivé. Le réglage du réseau, le choix des images et la validation
+finale sont encore en cours de portage. Pour une instance dont le réseau
+PXE est préparé, le paquet active le parcours avec
+`systemctl start pxe-tools.target`. L'image utilise ses volumes et son
+superviseur s6.
 
 Le binaire Rust écoute sur le port 80 et le port 443 de l’adresse IPv4 PXE.
 La racine HTTP redirige vers `/admin/` en HTTPS. Le preseed, les ressources
@@ -106,12 +117,12 @@ La vue HTTPS `/admin/devices` permet de consulter la liste avec le compte
 local SQLite existant. Le formulaire d’appellation enregistre le réglage
 `ui_device_term` dans la même base et revient à `/admin/devices`. Pour un
 accès par nom DNS, définir `PXE_PUBLIC_HOST` avec ce nom pour la redirection
-et la validation du formulaire. Le parcours de configuration initiale, la
-gestion des certificats et les autres écrans restent à porter.
+et la validation du formulaire. La gestion des certificats et les autres
+écrans d'administration restent à porter.
 
 Les deux variantes fonctionnent sans installer Nginx ni PHP-FPM.
-L’initialisation SQLite et certaines opérations du worker utilisent PHP
-CLI. Les plans de partition personnalisés, le wipe et les tests de
+Les migrations des bases existantes et certaines opérations du worker
+utilisent encore PHP CLI. Les plans de partition personnalisés, le wipe et les tests de
 disques restent à porter. Le renderer prend en charge les interfaces
 secondaires DHCP ou statiques, les VLAN secondaires et les bonds. Ces
 profils réseau sont vérifiés par comparaison de leur preseed et de leurs
@@ -268,6 +279,17 @@ d'accès des artefacts postboot et des payloads netboot.
   servent de référence fonctionnelle. Proxmox VE utilise par défaut un
   certificat signé par la CA du cluster, tandis que PXE Tools génère le
   certificat d'instance auto-signé demandé. [Gestion des certificats dans Proxmox VE](https://pve.proxmox.com/pve-docs/pve-admin-guide.pdf)
+
+### Chantiers du portage
+
+| Chantier | Critère de passage |
+| --- | --- |
+| Assistant initial et données | Sur APT et Docker vierges, créer le compte, confirmer le réseau et choisir une image avant d’activer le PXE. Sur une instance reprise, conserver les utilisateurs, les chemins SQLite, les données chiffrées et la clé maître. |
+| Console et API | Porter la connexion locale et Authentik, le parc, les modèles et leurs imports, les installations, les tâches, les images et les réglages. Qualifier les formulaires, l’autorisation et les actions de la fiche appareil jusqu’au worker. |
+| Certificats | Servir une paire importée après validation depuis la console. Tester l’émission et le renouvellement ACME avec une autorité de test. Conserver la paire précédente lorsqu’une opération échoue. |
+| Profils avancés | Porter les recettes de partition personnalisées, les templates et les opérations de diagnostic. Comparer le rendu et les refus à PHP, puis vérifier l’identité de chaque disque et le système installé sur un banc jetable. |
+| Worker et migrations | Porter les migrations SQLite, l’import de modèles et la suppression d’images, puis les familles de tâches en conservant transactions, reprises et compatibilité Ansible. Contrôler le lancement et les tâches sur des livrables sans PHP. |
+| Qualification | Construire les deux formats sur Debian 13 amd64 et arm64, valider la reprise d’une instance et les démarrages BIOS et UEFI, puis mesurer les tailles et la mémoire du livrable. |
 
 ### Contrôles des deux distributions
 

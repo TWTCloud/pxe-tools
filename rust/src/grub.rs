@@ -4,8 +4,7 @@ use crate::pxe::{log_event, machine_for_mac, menu_label, normalize_mac, parse_su
 use crate::{header, response, setting, HttpResponse, TEXT};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 
 const DISCOVERY: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-discovery.cfg"));
@@ -58,7 +57,7 @@ pub fn serve(
     if kernel.contains(['\r', '\n', '\0']) {
         return Ok(reply(503, "# Invalid PXE kernel options\n"));
     }
-    let Ok(token) = boot_token() else {
+    let Ok(token) = crate::random_token() else {
         return Ok(reply(503, "# PXE boot token unavailable\n"));
     };
 
@@ -296,12 +295,6 @@ fn arp_mac(peer: Ipv4Addr) -> Option<String> {
                 None
             }
         })
-}
-
-fn boot_token() -> io::Result<String> {
-    let mut random = [0; 16];
-    File::open("/dev/urandom")?.read_exact(&mut random)?;
-    Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn reply(status: u16, body: impl Into<String>) -> HttpResponse {

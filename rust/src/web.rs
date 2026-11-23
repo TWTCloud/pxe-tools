@@ -2,6 +2,7 @@
 
 mod admin;
 mod assets;
+mod setup;
 
 use crate::{configured_database, handle_request, monitoring, setting, PxeRequest, Routes};
 use http::uri::Authority;
@@ -14,7 +15,7 @@ use hyper::{
     Method, Request, Response, StatusCode,
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::OpenFlags;
 use std::{
     convert::Infallible,
     env,
@@ -44,11 +45,12 @@ struct Site {
     database: PathBuf,
     assets: assets::Assets,
     catalog: monitoring::Catalog,
-    ip: Ipv4Addr,
+    pxe_ip: Option<Ipv4Addr>,
     https_port: u16,
     public_host: Option<String>,
     requests: Semaphore,
     admin: admin::Console,
+    setup: setup::Wizard,
 }
 
 pub fn serve(config: &Path) -> Result<(), ErrorBox> {
@@ -61,33 +63,18 @@ pub fn serve(config: &Path) -> Result<(), ErrorBox> {
 }
 
 async fn run(config: &Path) -> Result<(), ErrorBox> {
-    let db_path = configured_database(config).ok_or("SQLite configuration unavailable")?;
-    let (ip, public_host) = {
-        let db = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        if !matches!(setting(&db, "pxe_enabled")?.as_str(), "" | "on") {
-            return Err("PXE network is disabled".into());
-        }
-        // An absent or unrelated NIC must not expose the boot service.
-        let ip: Ipv4Addr = setting(&db, "pxe_ip")?.parse()?;
-        #[cfg(target_os = "linux")]
-        validate_interface(ip, &setting(&db, "pxe_interface")?)?;
-        if ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() {
-            return Err("Invalid PXE address".into());
-        }
-        let host = env::var("PXE_PUBLIC_HOST")
-            .ok()
-            .filter(|name| !name.is_empty());
-        let host = host
-            .map(|name| {
-                let uri = Authority::from_str(&name)?;
-                if uri.port().is_some() || uri.host() != name || name.contains('@') {
-                    return Err("PXE_PUBLIC_HOST must be a hostname or IPv4 address".into());
-                }
-                Ok::<String, ErrorBox>(name)
-            })
-            .transpose()?;
-        (ip, host)
-    };
+    let pxe_ip = active_pxe_address(config)?;
+    let public_host = env::var("PXE_PUBLIC_HOST")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            let uri = Authority::from_str(&name)?;
+            if uri.port().is_some() || uri.host() != name || name.contains('@') {
+                return Err("PXE_PUBLIC_HOST must be a hostname or IPv4 address".into());
+            }
+            Ok::<String, ErrorBox>(name)
+        })
+        .transpose()?;
     let http_port = port("PXE_HTTP_PORT", 80)?;
     let https_port = port("PXE_HTTPS_PORT", 443)?;
     let site = Arc::new(Site {
@@ -98,18 +85,17 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
                 .ok_or("HTTP_ROOT is required")?,
         )?,
         catalog: serde_json::from_str(include_str!("checkpoints.json"))?,
-        ip,
+        pxe_ip,
         https_port,
         public_host,
         requests: Semaphore::new(8),
         admin: admin::Console::new(),
+        setup: setup::Wizard::new(),
     });
     let tls = tls_config().map_err(|error| format!("TLS configuration: {error}"))?;
     let mut listeners = Vec::new();
     // Keep the loopback API used by the worker while exposing PXE only on its configured address.
-    for address in [ip, Ipv4Addr::LOCALHOST]
-        .into_iter()
-        .take(if ip == Ipv4Addr::LOCALHOST { 1 } else { 2 })
+    for address in std::iter::once(Ipv4Addr::LOCALHOST).chain(pxe_ip.filter(|ip| !ip.is_loopback()))
     {
         listeners.push((TcpListener::bind((address, http_port)).await?, None));
         listeners.push((
@@ -123,11 +109,40 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         servers.spawn(accept(listener, tls, site.clone(), connections.clone()));
     }
     notify_ready().map_err(|error| format!("Systemd readiness notification: {error}"))?;
+    let ip = pxe_ip.unwrap_or(Ipv4Addr::LOCALHOST);
     println!("PXE Tools Rust HTTP/HTTPS ready on {ip}:{http_port} and {ip}:{https_port}");
     tokio::select! {
         result = servers.join_next() => result.ok_or("HTTP listeners unavailable")??,
         signal = tokio::signal::ctrl_c() => signal.map_err(Into::into),
     }
+}
+
+fn active_pxe_address(config: &Path) -> Result<Option<Ipv4Addr>, ErrorBox> {
+    match std::fs::symlink_metadata(config) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    let path = configured_database(config).ok_or("SQLite configuration unavailable")?;
+    let db = crate::connect(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let enabled = setting(&db, "pxe_enabled")?;
+    if enabled == "off" {
+        return Ok(None);
+    }
+    let address = setting(&db, "pxe_ip")?;
+    if enabled.is_empty() && address.is_empty() {
+        return Ok(None);
+    }
+    if !matches!(enabled.as_str(), "" | "on") {
+        return Err("Invalid PXE activation setting".into());
+    }
+    let ip: Ipv4Addr = address.parse()?;
+    if ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() {
+        return Err("Invalid PXE address".into());
+    }
+    #[cfg(target_os = "linux")]
+    validate_interface(ip, &setting(&db, "pxe_interface")?)?;
+    Ok(Some(ip))
 }
 
 #[cfg(target_os = "linux")]
@@ -176,10 +191,7 @@ fn port(name: &str, default: u16) -> Result<u16, ErrorBox> {
 }
 
 fn tls_config() -> Result<TlsAcceptor, ErrorBox> {
-    let directory = env::var_os("CREDENTIALS_DIRECTORY")
-        .or_else(|| env::var_os("TLS_DIR"))
-        .map(PathBuf::from)
-        .ok_or("TLS_DIR is required")?;
+    let directory = credential_directory()?;
     let open = |name| {
         let path = directory.join(name);
         File::open(&path)
@@ -193,6 +205,13 @@ fn tls_config() -> Result<TlsAcceptor, ErrorBox> {
         .with_no_client_auth()
         .with_single_cert(certs, private_key)?;
     Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+fn credential_directory() -> Result<PathBuf, ErrorBox> {
+    env::var_os("CREDENTIALS_DIRECTORY")
+        .or_else(|| env::var_os("TLS_DIR"))
+        .map(PathBuf::from)
+        .ok_or_else(|| "TLS_DIR is required".into())
 }
 
 #[cfg(target_os = "linux")]
@@ -279,14 +298,17 @@ async fn dispatch(
             "/admin/".to_owned()
         } else {
             let host = site
-                .public_host
-                .as_deref()
+                .pxe_ip
+                .and(site.public_host.as_deref())
                 .map(str::to_owned)
                 .unwrap_or_else(|| {
                     single(&parts.headers, HOST.as_str())
                         .and_then(|value| value.parse::<Authority>().ok())
                         .filter(|authority| authority.host() == "localhost" && peer.is_loopback())
-                        .map_or_else(|| site.ip.to_string(), |_| "localhost".to_owned())
+                        .map_or_else(
+                            || site.pxe_ip.unwrap_or(Ipv4Addr::LOCALHOST).to_string(),
+                            |_| "localhost".to_owned(),
+                        )
                 });
             let port = if site.https_port == 443 {
                 String::new()
@@ -301,6 +323,30 @@ async fn dispatch(
             .body(bytes(""))
             .expect("valid redirect");
     }
+    if secure && readable && path == "/admin/" && peer.is_loopback() && site.pxe_ip.is_none() {
+        if let Some(reply) = site.setup.landing(&site.database).await {
+            return reply;
+        }
+    }
+    if matches!(path, "/init" | "/init/welcome" | "/init/db" | "/init/admin") {
+        if !secure || !peer.is_loopback() || site.pxe_ip.is_some() {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        if readable {
+            return site.setup.page(path, &site.database).await;
+        }
+        if parts.method == Method::POST && matches!(path, "/init/db" | "/init/admin") {
+            if !admin_origin(&parts.headers, site) {
+                return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+            }
+            let form = match read_form(&parts.headers, body, 2048).await {
+                Ok(form) => form,
+                Err(reply) => return reply,
+            };
+            return site.setup.submit(path, &site.database, &form).await;
+        }
+        return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+    }
     if matches!(path, "/admin/" | "/admin/devices") && readable {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
@@ -311,24 +357,10 @@ async fn dispatch(
         if !admin_origin(&parts.headers, site) {
             return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
         }
-        let form = single(&parts.headers, CONTENT_TYPE.as_str())
-            .and_then(|value| value.split(';').next())
-            .is_some_and(|value| {
-                value
-                    .trim()
-                    .eq_ignore_ascii_case("application/x-www-form-urlencoded")
-            });
-        if !form {
-            return plain(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "Expected an HTML form\n",
-            );
-        }
-        let Ok(Ok(data)) = timeout(Duration::from_secs(5), Limited::new(body, 256).collect()).await
-        else {
-            return plain(StatusCode::BAD_REQUEST, "Invalid device label\n");
+        let data = match read_form(&parts.headers, body, 256).await {
+            Ok(data) => data,
+            Err(reply) => return reply,
         };
-        let data = data.to_bytes();
         let mut fields = form_urlencoded::parse(&data);
         let update = match (fields.next(), fields.next()) {
             (Some((key, value)), None) if key == "ui_device_term" => admin::device_term(&value),
@@ -343,6 +375,9 @@ async fn dispatch(
             .await;
     }
 
+    if site.pxe_ip.is_none() {
+        return plain(StatusCode::NOT_FOUND, "Not found\n");
+    }
     if readable {
         if let Some(reply) = site
             .assets
@@ -446,6 +481,26 @@ async fn dispatch(
     reply.body(bytes(body)).expect("valid application response")
 }
 
+async fn read_form(headers: &HeaderMap, body: Incoming, max: usize) -> Result<Bytes, Reply> {
+    let is_form = single(headers, CONTENT_TYPE.as_str())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| {
+            value
+                .trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        });
+    if !is_form {
+        return Err(plain(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Expected an HTML form\n",
+        ));
+    }
+    match timeout(Duration::from_secs(5), Limited::new(body, max).collect()).await {
+        Ok(Ok(data)) => Ok(data.to_bytes()),
+        _ => Err(plain(StatusCode::BAD_REQUEST, "Invalid form data\n")),
+    }
+}
+
 fn admin_origin(headers: &HeaderMap, site: &Site) -> bool {
     let Some(host) = single(headers, HOST.as_str()).and_then(|raw| raw.parse::<Authority>().ok())
     else {
@@ -453,7 +508,7 @@ fn admin_origin(headers: &HeaderMap, site: &Site) -> bool {
     };
     let name = host.host();
     if host.port_u16().unwrap_or(443) != site.https_port
-        || !(name == site.ip.to_string()
+        || !(site.pxe_ip.is_some_and(|ip| name == ip.to_string())
             || name.eq_ignore_ascii_case("localhost")
             || name == "127.0.0.1"
             || site

@@ -233,7 +233,42 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None)
     print('Debian GNU/Linux 13 pxe-fixture login: verified with PHP-FPM stopped',flush=True)
 
 
+def verify_packaged_rust_setup(name):
+    script=ROOT/'tests/integration/test_rust_initial_setup.py'
+    probe='/fixture-tests/test_rust_initial_setup.py'
+    mount=('--mount',f'type=bind,src={script},dst={probe},readonly')
+    native=backend=='rust-apt'
+    try:
+        if native:
+            docker('run','-d','--name',name,'--network','none','--privileged','--cgroupns','private',
+                   '--tmpfs','/run','--tmpfs','/run/lock','--tmpfs','/tmp','--entrypoint','/lib/systemd/systemd',
+                   *mount,image,'--unit=basic.target')
+            wait_for(lambda:docker('exec',name,'systemctl','list-units','--no-legend',check=False).returncode==0,
+                     60,'fresh native systemd')
+            docker('exec',name,'python3','/usr/lib/pxe-tools/native/configure-secure-tftp.py','--initialize-instance')
+            for unit in ('pxe-tools-admin.target','pxe-tools-pxe-http.service'):
+                docker('exec',name,'systemctl','is-active','--quiet',unit)
+            if docker('exec',name,'systemctl','is-active','--quiet','pxe-tools-dnsmasq.service',check=False).returncode==0:
+                raise RuntimeError('Fresh native setup started dnsmasq')
+        else:
+            docker('run','-d','--name',name,'--network','none',*mount,appliance_image)
+        result=docker('exec','-e','PXE_DISPOSABLE_SETUP_TEST=1',name,'python3',probe,'--installed',check=False)
+        print(result.stdout, end='', flush=True)
+        if result.returncode:
+            print(result.stderr, end='', flush=True)
+            raise RuntimeError('Fresh Rust setup did not pass on the packaged appliance')
+    except Exception:
+        args=('exec',name,'journalctl','--no-pager','-n','60','-u','pxe-tools-init','-u','pxe-tools-pxe-http') \
+            if native else ('logs','--tail','60',name)
+        result=docker(*args,check=False)
+        print(result.stdout+result.stderr,flush=True)
+        raise
+    finally:
+        docker('rm','-fv',name,check=False)
+
+
 def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template):
+    verify_packaged_rust_setup(app+'-setup')
     native=backend=='rust-apt'
     http_root='/var/lib/pxe-tools-http' if native else '/srv/http'
     tftp_root='/var/lib/pxe-tools-tftp' if native else '/srv/tftp'

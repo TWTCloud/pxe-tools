@@ -283,6 +283,7 @@ COPY docker/pxe-tools/nginx/admin-http-serve.conf.tmpl    /opt/pxe-tools/nginx/a
 FROM rust:1.96.0-trixie AS rust-build
 WORKDIR /source
 COPY rust/ rust/
+COPY app/db/schema.sqlite.sql app/db/schema.sqlite.sql
 COPY docker/worker/templates/preseed.php.j2 docker/worker/templates/preseed-base.cfg.j2 docker/worker/templates/grub.php.j2 docker/worker/templates/
 RUN cargo build --locked --release --manifest-path rust/Cargo.toml \
     && strip rust/target/release/pxe-tools-rust
