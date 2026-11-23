@@ -333,6 +333,9 @@ def compare_install(ports, paths):
     proof = {"kind": "serial", "value": "PXE-TEST-ONE", "status": "valid"}
     root = {"id": "vda2", "fs": "ext4", "mount": "/", "fill": True, "reserved_pct": 2,
             "mount_options": ["noatime"]}
+    def partman_block(seed):
+        return re.search(r"custom_recipe ::.*?\nd-i partman-auto/choose_recipe", seed, re.S).group(0)
+
     for firmware, first in (
         ("bios", {"id": "vda1", "fs": "biosgrub", "size_mb": 1}),
         ("uefi", {"id": "vda1", "fs": "efi", "mount": "/boot/efi", "size_mb": 512}),
@@ -346,8 +349,6 @@ def compare_install(ports, paths):
         assert [item[0] for item in seeds] == [200, 200]
         rendered = [item[3].decode() for item in seeds]
         assert directives(rendered[0]) == directives(rendered[1])
-        def partman_block(seed):
-            return re.search(r"custom_recipe ::.*?\nd-i partman-auto/choose_recipe", seed, re.S).group(0)
         assert partman_block(rendered[0]) == partman_block(rendered[1])
         for seed in rendered:
             assert "for pair in /:2;" in seed
@@ -357,6 +358,35 @@ def compare_install(ports, paths):
         set_config({**recipe, "review_boot_mode": "bios" if firmware == "uefi" else "uefi"})
         assert response(ports[1], PRESEED + query, peer="lan")[0] == 422
         set_config({**recipe, "disk_target_constraints": {target: "OTHER-DISK"}})
+        assert response(ports[1], PRESEED + query, peer="lan")[0] == 422
+    # Keep a physical /boot with a verified PV and a named VG and logical root.
+    first = {"id": "vda1", "fs": "biosgrub", "size_mb": 1}
+    boot = {"id": "vda2", "fs": "ext4", "mount": "/boot", "size_mb": 768}
+    pv = {"id": "vda3", "fs": "lvm-pv", "fill": True}
+    lv_root = {"vg": "pxe-fixture", "name": "system", "fs": "ext4", "mount": "/",
+               "fill": True, "reserved_pct": 2, "mount_options": ["noatime"]}
+    lv_swap = {"vg": "pxe-fixture", "name": "swap", "fs": "swap", "size_mb": 512}
+    group = {"name": "pxe-fixture", "pvs": ["vda3"]}
+    plan = {"target_disks": [target], "target_disk_identities": {target: proof},
+            "disks": [{"path": target, "partitions": [first, boot, pv]}],
+            "vgs": [group], "logical_volumes": [lv_swap, lv_root]}
+    recipe = {**config, "partition_mode": "custom", "review_boot_mode": "bios",
+              "disk_target_constraints": {target: "PXE-TEST-ONE"}}
+    set_config({**recipe, "partition_custom_json": json.dumps(plan)})
+    seeds = [response(port, PRESEED + query, peer="lan") for port in ports]
+    assert [item[0] for item in seeds] == [200, 200], seeds[1][3]
+    rendered = [item[3].decode() for item in seeds]
+    assert directives(rendered[0]) == directives(rendered[1])
+    assert partman_block(rendered[0]) == partman_block(rendered[1])
+    assert "for pair in /:2;" in rendered[1]
+    for invalid_plan in (
+        {**plan, "vgs": [{**group, "pvs": ["vda2"]}]},
+        {**plan, "vgs": [{**group, "pvs": ["vda3", "vda4"]}]},
+        {**plan, "logical_volumes": [lv_root, {**lv_root, "name": "other", "mount": "/home"}]},
+        {**plan, "logical_volumes": [lv_swap, {**lv_root, "vg": "missing"}]},
+        {**plan, "logical_volumes": [lv_swap, {**lv_root, "name": " }injected"}]},
+    ):
+        set_config({**recipe, "partition_custom_json": json.dumps(invalid_plan)})
         assert response(ports[1], PRESEED + query, peer="lan")[0] == 422
     set_config(config)
     assert compare(ports, START + query, 200)["installation_id"] == 1

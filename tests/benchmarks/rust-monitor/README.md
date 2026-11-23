@@ -137,8 +137,10 @@ contrôlant ses dépendances et en gardant le verrou SQLite pendant que
 le worker déplace les fichiers protégés. Le worker conserve son protocole
 de confirmation et de reprise. Les migrations des bases existantes et
 l’import des modèles utilisent encore PHP CLI. Le renderer couvre les recettes de partition
-sur un disque identifié, avec partitions physiques BIOS ou UEFI. Les
-recettes multi-disques, LVM et RAID, le wipe et les tests de disques
+sur un disque identifié, avec partitions physiques BIOS ou UEFI. Un plan
+LVM sur ce disque peut définir ses groupes de volumes et volumes logiques.
+La vérification compare le rendu à PHP et refuse les volumes qui désignent
+un groupe ou une partition physique absente. Les recettes multi-disques et RAID, le wipe et les tests de disques
 restent à porter. Le renderer prend en charge les interfaces
 secondaires DHCP ou statiques, les VLAN secondaires et les bonds. Ces
 profils réseau sont vérifiés par comparaison de leur preseed et de leurs

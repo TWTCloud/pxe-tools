@@ -188,9 +188,14 @@ def schedule(machine, report):
                 "target_disk_identities": {disk: target["identity"]},
                 "disks": [{"path": disk, "partitions": [
                     {"id": "vda1", "fs": "biosgrub", "size_mb": 1},
-                    {"id": "vda2", "fs": "swap", "size_mb": 384},
-                    {"id": "vda3", "fs": "ext4", "mount": "/", "fill": True},
+                    {"id": "vda2", "fs": "ext4", "mount": "/boot", "size_mb": 768},
+                    {"id": "vda3", "fs": "lvm-pv", "fill": True},
                 ]}],
+                "vgs": [{"name": "pxefixture", "pvs": ["vda3"]}],
+                "logical_volumes": [
+                    {"vg": "pxefixture", "name": "swap", "fs": "swap", "size_mb": 512},
+                    {"vg": "pxefixture", "name": "system", "fs": "ext4", "mount": "/", "fill": True},
+                ],
             })
         db.execute("UPDATE machines SET status='configured',hostname='pxe-fixture',domain='example.test',"
                    " install_config_json=? WHERE id=?", (json.dumps(config), machine))
@@ -242,8 +247,8 @@ def first_boot(action):
         raise RuntimeError("The first-boot receipt lacks the original native client address or kernel")
     if SECURE_BOOT and payload.get("fixture_secure_boot") != 1:
         raise RuntimeError("The installed guest did not boot with Secure Boot enabled")
-    if CUSTOM_PARTITIONS and payload.get("fixture_layout") != "gpt-vda3-swap":
-        raise RuntimeError("The installed system did not boot from the requested GPT recipe")
+    if CUSTOM_PARTITIONS and payload.get("fixture_layout") != "gpt-lvm-pxefixture":
+        raise RuntimeError("The installed system did not boot from the requested GPT/LVM recipe")
     # The postboot client asked for an acknowledgement. "accepted\n" is nine bytes.
     if not DIRECT_HTTP and not any(line.startswith(f"{CLIENT} ") and "code=os_first_boot&ack=1" in line and '" 200 9 ' in line
                for line in NGINX_LOG.read_text().splitlines()):
@@ -298,7 +303,7 @@ def follow(_root):
             if not any(line.startswith(f"{CLIENT} ") and path in line and '" 200 ' in line for line in log):
                 raise RuntimeError("Missing native HTTP evidence for " + path)
     if CUSTOM_PARTITIONS:
-        print("Custom GPT partition recipe verified from the installed guest", flush=True)
+        print("Custom GPT/LVM partition recipe verified from the installed guest", flush=True)
     if SECURE_BOOT:
         print("UEFI Secure Boot verified in discovery and the installed guest", flush=True)
     print(f"PXE_NATIVE_FIRST_BOOT_OK kernel={kernel} peer={CLIENT} action={action} ack=accepted", flush=True)

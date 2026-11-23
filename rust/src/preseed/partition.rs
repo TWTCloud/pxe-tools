@@ -5,7 +5,7 @@ use crate::disk_identity::{serial, valid_wwid};
 use crate::{php_string, php_truthy};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const ATOMIC: &str = "d-i partman-auto/method string lvm
 d-i partman-auto/choose_recipe select atomic
@@ -43,20 +43,19 @@ impl Layout {
                     reserved: Vec::new(),
                 })
             }
-            "custom" => Self::regular(config).ok_or(
+            "custom" => Self::custom(config).ok_or(
                 "plan de partition personnalisé non pris en charge ou identité du disque non vérifiée.",
             ),
             _ => Err("mode de partitionnement non pris en charge."),
         }
     }
 
-    fn regular(config: &Value) -> Option<Self> {
+    fn custom(config: &Value) -> Option<Self> {
         let plan: Value = serde_json::from_str(config["partition_custom_json"].as_str()?).ok()?;
-        for field in ["raid_arrays", "vgs", "logical_volumes"] {
-            if !empty_collection(&plan[field]) {
-                return None;
-            }
+        if !empty_collection(&plan["raid_arrays"]) {
+            return None;
         }
+        let lvm = Lvm::parse(&plan)?;
         let [disk] = plan["target_disks"].as_array()?.as_slice() else {
             return None;
         };
@@ -94,7 +93,7 @@ impl Layout {
                 size.filter(|size| *size > 0)?
             };
             if fs == "biosgrub" {
-                if position != 0 || uses_fill || size > 4 {
+                if position != 0 || uses_fill || size > 4 || lvm.physical.contains_key(id) {
                     return None;
                 }
                 bios_partition = true;
@@ -103,62 +102,41 @@ impl Layout {
                 ));
                 continue;
             }
-            let filesystem = match fs {
-                "swap" => "linux-swap",
-                "efi" if !uses_fill => "fat32",
-                "ext2" | "ext3" | "ext4" | "xfs" => fs,
-                _ => return None,
-            };
-            let mut segment = if uses_fill {
-                format!("512 1000 -1 {filesystem}")
-            } else {
-                format!("{size} {size} {size} {filesystem}")
-            };
-            segment.push_str(" $primary{ }");
-            if fs == "swap" {
-                segment.push_str(" method{ swap } format{ }");
-            } else {
-                let mount = entry["mount"].as_str().filter(|mount| safe_mount(mount))?;
-                if !mounts.insert(mount) || (fs == "efi") != (mount == "/boot/efi") {
+            let mut segment;
+            if fs == "lvm-pv" {
+                let group = lvm.physical.get(id)?;
+                if !entry["mount"].is_null() || !empty_collection(&entry["mount_options"]) {
                     return None;
                 }
-                if fs == "efi" {
-                    efi_partition = true;
-                    segment.push_str(" $bootable{ } method{ efi } format{ }");
-                } else {
-                    if mount == "/boot" {
-                        segment.push_str(" $bootable{ }");
-                    }
-                    segment.push_str(&format!(
-                        " method{{ format }} format{{ }} use_filesystem{{ }} filesystem{{ {fs} }}"
-                    ));
+                segment = sized_segment(uses_fill, size, "ext4");
+                segment.push_str(&format!(
+                    " $primary{{ }} $defaultignore{{ }} method{{ lvm }} vg_name{{ {group} }}"
+                ));
+            } else {
+                // A PV name in the inventory must resolve to a physical PV in this recipe.
+                if lvm.physical.contains_key(id) {
+                    return None;
                 }
-                segment.push_str(&format!(" mountpoint{{ {mount} }}"));
-                if matches!(fs, "ext2" | "ext3" | "ext4") && !entry["reserved_pct"].is_null() {
-                    let pct = php_string(&entry["reserved_pct"]).parse::<u8>().ok()?;
-                    if pct > 100 {
-                        return None;
-                    }
-                    reserved.push((mount.to_owned(), pct));
-                }
-            }
-            if !entry["mount_options"].is_null() {
-                for option in entry["mount_options"].as_array()? {
-                    let option = option.as_str()?;
-                    if !option.is_empty()
-                        && option
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || b"_=,.-".contains(&byte))
-                    {
-                        segment.push_str(&format!(" options/{option}{{ {option} }}"));
-                    } else if !option.is_empty() {
-                        return None;
-                    }
-                }
+                let filesystem = match fs {
+                    "swap" => "linux-swap",
+                    "efi" if !uses_fill => "fat32",
+                    "ext2" | "ext3" | "ext4" | "xfs" => fs,
+                    _ => return None,
+                };
+                segment = sized_segment(uses_fill, size, filesystem);
+                segment.push_str(" $primary{ }");
+                filesystem_directives(entry, fs, true, &mut segment, &mut mounts, &mut reserved)?;
+                efi_partition |= fs == "efi";
             }
             segment.push_str(" .");
             segments.push(segment);
         }
+        if !lvm.physical.keys().all(|id| ids.contains(id))
+            || (lvm.first_group.is_some() && !mounts.contains("/boot"))
+        {
+            return None;
+        }
+        lvm.render_volumes(&mut segments, &mut mounts, &mut reserved)?;
         if !mounts.contains("/") || (bios_partition && efi_partition) {
             return None;
         }
@@ -175,14 +153,20 @@ impl Layout {
             "msdos"
         };
         let recipe = segments.join(" \\\n      ");
+        let (method, lvm_directives) = match lvm.first_group {
+            Some(group) => ("lvm", format!(
+                "d-i partman-auto-lvm/new_vg_name string {group}\nd-i partman-auto-lvm/guided_size string max\nd-i partman-lvm/device_remove_lvm boolean true\nd-i partman-lvm/confirm boolean true\nd-i partman-lvm/confirm_nooverwrite boolean true\nd-i partman-auto/purge_lvm_from_device boolean true\n"
+            )),
+            None => ("regular", String::new()),
+        };
         let directives = format!(
             "d-i partman-auto/disk string {disk}
 d-i partman/unmount_active boolean true
-d-i partman-auto/method string regular
+d-i partman-auto/method string {method}
 d-i partman-partitioning/default_label string {label}
 d-i partman-basicfilesystems/default_label string {label}
 d-i partman/default_filesystem string ext4
-d-i partman-md/device_remove_md boolean true
+{lvm_directives}d-i partman-md/device_remove_md boolean true
 d-i partman-auto/expert_recipe string custom_recipe :: \\\n      {recipe}
 d-i partman-auto/choose_recipe select custom_recipe
 d-i partman-partitioning/confirm_write_new_label boolean true
@@ -214,6 +198,166 @@ d-i partman-basicfilesystems/no_swap boolean false"
             r#"in-target /bin/bash -c 'for pair in {args}; do mp="${{pair%%:*}}"; pct="${{pair##*:}}"; d=$(findmnt -n -o SOURCE "$mp" 2>/dev/null) || continue; tune2fs -m "$pct" "$d" || true; done'"#
         ))
     }
+}
+
+struct Lvm<'a> {
+    physical: HashMap<&'a str, &'a str>,
+    groups: HashSet<&'a str>,
+    first_group: Option<&'a str>,
+    volumes: &'a [Value],
+}
+
+impl<'a> Lvm<'a> {
+    fn parse(plan: &'a Value) -> Option<Self> {
+        let groups = collection(&plan["vgs"])?;
+        let volumes = collection(&plan["logical_volumes"])?;
+        if groups.is_empty() != volumes.is_empty() {
+            return None;
+        }
+        let mut parsed = Self {
+            physical: HashMap::new(),
+            groups: HashSet::new(),
+            first_group: None,
+            volumes,
+        };
+        for group in groups {
+            let name = lvm_name(&group["name"])?;
+            let physical = group["pvs"].as_array().filter(|ids| !ids.is_empty())?;
+            if !parsed.groups.insert(name) {
+                return None;
+            }
+            parsed.first_group.get_or_insert(name);
+            for member in physical {
+                let id = member.as_str().filter(|id| !id.is_empty())?;
+                if parsed.physical.insert(id, name).is_some() {
+                    return None;
+                }
+            }
+        }
+        Some(parsed)
+    }
+
+    fn render_volumes<'b>(
+        &'b self,
+        segments: &mut Vec<String>,
+        mounts: &mut HashSet<&'b str>,
+        reserved: &mut Vec<(String, u8)>,
+    ) -> Option<()> {
+        let mut ids = HashSet::new();
+        let mut fills = HashSet::new();
+        for lv in self.volumes {
+            let group = lv["vg"].as_str().filter(|vg| self.groups.contains(vg))?;
+            let name = lvm_name(&lv["name"])?;
+            let fs = lv["fs"].as_str()?;
+            let filesystem = match fs {
+                "swap" => "linux-swap",
+                "ext2" | "ext3" | "ext4" | "xfs" => fs,
+                _ => return None,
+            };
+            let fill = php_truthy(&lv["fill"]);
+            if !ids.insert((group, name)) || (fill && !fills.insert(group)) {
+                return None;
+            }
+            let size = if fill {
+                0
+            } else {
+                php_string(&lv["size_mb"])
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|size| *size > 0)?
+            };
+            let mut segment = sized_segment(fill, size, filesystem);
+            segment.push_str(&format!(
+                " $defaultignore{{ }} $lvmok{{ }} in_vg{{ {group} }} lv_name{{ {name} }}"
+            ));
+            filesystem_directives(lv, fs, false, &mut segment, mounts, reserved)?;
+            segment.push_str(" .");
+            segments.push(segment);
+        }
+        Some(())
+    }
+}
+
+fn collection(value: &Value) -> Option<&[Value]> {
+    if empty_collection(value) {
+        Some(&[])
+    } else {
+        value.as_array().map(Vec::as_slice)
+    }
+}
+
+fn lvm_name(value: &Value) -> Option<&str> {
+    value.as_str().filter(|name| {
+        !name.is_empty()
+            && !name.starts_with('-')
+            && name.len() <= 127
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    })
+}
+
+fn sized_segment(fill: bool, size: u32, filesystem: &str) -> String {
+    if fill {
+        format!("512 1000 -1 {filesystem}")
+    } else {
+        format!("{size} {size} {size} {filesystem}")
+    }
+}
+
+fn filesystem_directives<'a>(
+    entry: &'a Value,
+    fs: &str,
+    physical: bool,
+    segment: &mut String,
+    mounts: &mut HashSet<&'a str>,
+    reserved: &mut Vec<(String, u8)>,
+) -> Option<()> {
+    if fs == "swap" {
+        segment.push_str(" method{ swap } format{ }");
+    } else {
+        let mount = entry["mount"].as_str().filter(|mount| safe_mount(mount))?;
+        if !mounts.insert(mount)
+            || (fs == "efi") != (mount == "/boot/efi")
+            || (!physical && mount == "/boot")
+        {
+            return None;
+        }
+        if fs == "efi" {
+            segment.push_str(" $bootable{ } method{ efi } format{ }");
+        } else {
+            if mount == "/boot" {
+                segment.push_str(" $bootable{ }");
+            }
+            segment.push_str(&format!(
+                " method{{ format }} format{{ }} use_filesystem{{ }} filesystem{{ {fs} }}"
+            ));
+        }
+        segment.push_str(&format!(" mountpoint{{ {mount} }}"));
+        if matches!(fs, "ext2" | "ext3" | "ext4") && !entry["reserved_pct"].is_null() {
+            let pct = php_string(&entry["reserved_pct"]).parse::<u8>().ok()?;
+            if pct > 100 {
+                return None;
+            }
+            reserved.push((mount.to_owned(), pct));
+        }
+    }
+    if !entry["mount_options"].is_null() {
+        for option in entry["mount_options"].as_array()? {
+            let option = option.as_str()?;
+            if option.is_empty() {
+                continue;
+            }
+            if !option
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_=,.-".contains(&byte))
+            {
+                return None;
+            }
+            segment.push_str(&format!(" options/{option}{{ {option} }}"));
+        }
+    }
+    Some(())
 }
 
 fn identity(proof: &Value) -> Result<String, &'static str> {

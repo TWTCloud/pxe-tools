@@ -347,9 +347,12 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         source=(ROOT/'docker/worker/templates/postboot.sh.j2').read_text()
         original=next(line for line in source.splitlines() if line.startswith('PAYLOAD='))
         instrument=r'''layout=unexpected
-if [ "$(findmnt -n -o SOURCE /)" = /dev/vda3 ] && [ "$(lsblk -dn -o PTTYPE /dev/vda)" = gpt ] \
-        && [ "$(lsblk -dn -o FSTYPE /dev/vda2)" = swap ]; then
-    layout=gpt-vda3-swap
+if [ "$(findmnt -n -o SOURCE /)" = /dev/mapper/pxefixture-system ] \
+        && [ "$(findmnt -n -o SOURCE /boot)" = /dev/vda2 ] \
+        && [ "$(lsblk -dn -o PTTYPE /dev/vda)" = gpt ] \
+        && [ "$(lsblk -dn -o FSTYPE /dev/vda3)" = LVM2_member ] \
+        && [ "$(lsblk -dn -o FSTYPE /dev/mapper/pxefixture-swap)" = swap ]; then
+    layout=gpt-lvm-pxefixture
 fi
 PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_layout":"%s"}' "$IP" "$(uname -r)" "$layout")"'''
         postboot=root/'postboot.sh.j2'
@@ -510,9 +513,9 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s}' "$IP" "$(
     wait_for(lambda:status.is_file() and 'PXE_NATIVE_READY' in status.read_text(),30,'packaged Rust fixture ready')
     run_rust_guests(lan,client,root,status,screen_login=True,uefi_image=uefi_image)
     if custom_partition:
-        if 'Custom GPT partition recipe verified from the installed guest' not in status.read_text():
-            raise RuntimeError('Missing proof of the custom GPT recipe')
-        print('Custom GPT partition recipe verified from the installed guest',flush=True)
+        if 'Custom GPT/LVM partition recipe verified from the installed guest' not in status.read_text():
+            raise RuntimeError('Missing proof of the custom GPT/LVM recipe')
+        print('Custom GPT/LVM partition recipe verified from the installed guest',flush=True)
     if native:
         logs=docker('exec',app,'journalctl','--no-pager','-u','pxe-tools-pxe-http.service','-o','cat').stdout
     else:
