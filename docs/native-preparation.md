@@ -1,10 +1,10 @@
 # Installation native et exploitation
 
-Le paquet natif vise actuellement Debian 13 amd64 avec systemd. Il installe
-l'application et ses dépendances sans Docker ni Ansible. L'installation APT,
-l'assistant, une installation Debian PXE et Secure Boot ont été vérifiés sur
-un banc Hyper-V isolé ; le matériel physique et les autres distributions ne
-sont pas encore validés.
+Le paquet natif prend en charge Debian 13 amd64 et arm64 avec systemd. Il
+installe l'application et ses dépendances sans Docker ni Ansible. Les essais
+APT couvrent les deux architectures. Un banc ARM64 isolé a installé Debian 13
+jusqu'à la première invite de connexion d'un client BIOS amd64. Secure Boot x86 a
+également été testé sur un banc Hyper-V isolé.
 
 ### Construire le candidat ARM64 pour Debian 13
 

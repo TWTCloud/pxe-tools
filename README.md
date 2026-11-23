@@ -5,11 +5,11 @@ Debian par le réseau. Le socle comprend les services PXE, l'interface et son
 worker. Ansible reste facultatif et absent du socle. Le [module complémentaire](modules/ansible/NATIVE.md) est disponible dans le
 dépôt APT et s’utilise avec le worker existant.
 
-La première cible native vérifiée est **Debian 13 amd64**. Les essais couvrent
-une installation APT, une installation Debian PXE et Secure Boot sur des VM
-Hyper-V isolées. Le matériel physique, Ubuntu et les autres distributions ne
-sont pas encore validés. Consultez les limites et instructions de sécurité dans
-[la documentation native](docs/native-preparation.md).
+Le serveur PXE Tools prend en charge **Debian 13 amd64 et arm64**. Les essais
+couvrent les paquets APT et les images Docker des deux architectures. Le
+serveur ARM64 a installé un client Debian 13 BIOS amd64 sur un banc isolé.
+Consultez [la documentation native](docs/native-preparation.md) pour les
+limites et instructions de sécurité.
 
 ## Installation avec APT
 
@@ -25,7 +25,7 @@ gpg --show-keys --fingerprint pxe-tools-archive-keyring.gpg
 L'empreinte attendue de la clé principale est :
 
 ```text
-CD8B 4493 876B 4FBD 1009 FE2D B195 E5DE 0268 07EC
+1741 0C3B 457E 5742 5728 1551 CFC3 5C53 6A61 C3CF
 ```
 
 Après comparaison, ajoutez le dépôt et installez le paquet :
@@ -53,7 +53,22 @@ port 80, l'assistant permet d'examiner le conflit ; l'arrêt de `nginx.service`
 nécessite une confirmation explicite.
 
 Pour Secure Boot, la clé MOK de votre instance doit être enrôlée sur chaque
-client concerné avant d'utiliser le chargeur signé par cette instance.
+client x86 concerné avant d'utiliser le chargeur signé par cette instance.
+
+## Installation avec Docker
+
+L'image bêta 12 est disponible pour Linux amd64 et arm64. Depuis la racine
+du dépôt sur un hôte Docker Linux, téléchargez l'image et démarrez l'appliance.
+
+```sh
+docker pull ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta12
+PXE_TOOLS_IMAGE=ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta12 \
+  docker compose -f compose/docker-compose.yml up -d
+```
+
+Le fichier Compose utilise le réseau de l'hôte pour le PXE. Ouvrez la console
+sur le port 8080 et confirmez l'interface PXE dans l'assistant. Les offres de
+sources des deux images accompagnent la [release bêta 12](https://github.com/williamboglietti/pxe-tools/releases/tag/v0.1.0-beta12).
 
 ## Données et limites
 
