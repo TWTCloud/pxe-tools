@@ -221,7 +221,9 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None)
                 return True
             if screen_login and time.monotonic() >= next_screen:
                 next_screen=time.monotonic()+5
-                if re.search(r'pxe.fixture\s+login',capture_screen(root),re.I):
+                screen=capture_screen(root)
+                if (re.search(r'Debian\s+GNU/Linux\s+13\s+[op]xe.fixture\s+tty',screen,re.I)
+                        and re.search(r'[op]xe.fixture\s+login\s*:',screen,re.I)):
                     return True
             return False
 
@@ -325,14 +327,15 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     tftp=root/'tftp'
     wait_for(lambda:(tftp/'lpxelinux.0').is_file() and (tftp/'pxelinux.cfg/default').is_file(),
              120,'worker rendering and bootloaders')
+    log_path='/var/lib/pxe-tools-native/log/pxe-access.log' if native else '/var/log/nginx/pxe-access.log'
     check_env=('set -a; source /usr/lib/pxe-tools/native/default.env; '
                'source /var/lib/pxe-tools-native/runtime.env; set +a; ') if native else (
-               'export PXE_APP_DIR=/app PXE_FIXTURE_NGINX_LOG=/var/log/nginx/pxe-access.log; ')
-    docker('exec','-d',app,'bash','-ec',check_env+'export PXE_FIXTURE_MIRROR_IP=192.0.2.2 PXE_FIXTURE_USE_WORKER=1; '
+               'export PXE_APP_DIR=/app; ')
+    docker('exec','-d','-e','PXE_FIXTURE_NGINX_LOG='+log_path,app,'bash','-ec',
+           check_env+'export PXE_FIXTURE_MIRROR_IP=192.0.2.2 PXE_FIXTURE_USE_WORKER=1; '
            'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
     status=fixture/'native-status.log'
     wait_for(lambda:status.is_file() and 'PXE_NATIVE_READY' in status.read_text(),30,'packaged Rust fixture ready')
-    log_path='/var/lib/pxe-tools-native/log/nginx-access.log' if native else '/var/log/nginx/pxe-access.log'
     run_rust_guests(lan,client,root,status,screen_login=True,access_log=(app,log_path))
 
 
