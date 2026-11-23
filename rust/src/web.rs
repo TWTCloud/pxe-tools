@@ -16,8 +16,7 @@ use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, Limited};
 use hyper::{
     body::{Bytes, Incoming},
     header::{
-        HeaderMap, HeaderName, HeaderValue, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST,
-        LOCATION, ORIGIN, USER_AGENT,
+        HeaderMap, HeaderName, CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION, ORIGIN, USER_AGENT,
     },
     server::conn::http1,
     service::service_fn,
@@ -307,14 +306,7 @@ where
             } else {
                 None
             };
-            let mut reply = dispatch(request, peer.ip(), secure, &site).await;
-            if grub {
-                // GRUB 2.12 opens a new connection for each file. Send EOF
-                // at the end of the response instead of waiting for reuse.
-                reply
-                    .headers_mut()
-                    .insert(CONNECTION, HeaderValue::from_static("close"));
-            }
+            let reply = dispatch(request, peer.ip(), secure, &site).await;
             if let Some(asset) = asset {
                 let length = single(reply.headers(), CONTENT_LENGTH.as_str()).unwrap_or("-");
                 println!(

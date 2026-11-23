@@ -206,6 +206,7 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
         ]
     paths_seen=set()
     next_trace=0.0
+    lan_identity=endpoint(lan) if uefi_image else None
     for name, boot, marker, timeout in (
         ('Discovery','n','PXE_NATIVE_DISCOVERY_OK',1500),
         ('Installer','n','PXE_NATIVE_INSTALL_OK',3000),
@@ -292,6 +293,21 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
         wait_for(completed,min(600,timeout) if uefi_image else timeout,name+' and '+marker)
         print(next(line for line in log.read_text().splitlines() if line.startswith(marker)), flush=True)
         docker('rm','-f',client)
+        if lan_identity and name=='Discovery':
+            # A fresh GRUB 2.12 starts again at the same TCP source port.
+            # The fixture recreates the whole guest with the same IP and MAC.
+            # Let the previous connections drain before reusing that identity.
+            def previous_connections():
+                if endpoint(lan)!=lan_identity:
+                    raise RuntimeError('The UEFI fixture network namespace changed')
+                return run('nsenter','-t',str(lan_identity[0]),'-n','ss','-Htn',
+                           'state','all','( sport = :80 and dst 192.0.2.100 )').stdout.strip()
+
+            remaining=previous_connections()
+            if remaining:
+                print(f'Draining {len(remaining.splitlines())} HTTP connection(s) before the next UEFI guest',
+                      flush=True)
+                wait_for(lambda:not previous_connections(),90,'previous GRUB HTTP connections to drain')
     print('Debian GNU/Linux 13 pxe-fixture login: verified with PHP-FPM stopped',flush=True)
 
 
@@ -563,8 +579,6 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s}' "$IP" "$(
         raise RuntimeError('The PXE kernel should be available directly on HTTP')
     if not re.search(r'^Content-Length: [1-9][0-9]*\s*$',kernel,re.MULTILINE):
         raise RuntimeError('GRUB requires an exact Content-Length header on the signed kernel')
-    if 'connection: close' not in kernel.lower():
-        raise RuntimeError('Expected the single-file GRUB HTTP connection to close')
     # Drop the binary response body after checking the negotiated HTTPS range.
     partial=request(tls_url+kernel_url,'--range','0-15','--output','/dev/null')
     if not partial.startswith('HTTP/1.1 206 ') or 'content-range: bytes 0-15/' not in partial.lower():
