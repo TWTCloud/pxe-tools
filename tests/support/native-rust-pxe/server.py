@@ -240,7 +240,27 @@ def follow(_root):
     print("PXE_NATIVE_DISCOVERY_OK", flush=True)
     wait_for(lambda: successful_install(action), 2400, "native install callback")
     print("PXE_NATIVE_INSTALL_OK", flush=True)
-    kernel = wait_for(lambda: first_boot(action), 900, "native first-boot checkpoint and HTTP acknowledgement")
+    try:
+        kernel = wait_for(lambda: first_boot(action), 900, "native first-boot checkpoint and HTTP acknowledgement")
+    except RuntimeError:
+        with closing(sqlite3.connect(DATABASE)) as db:
+            action_state = db.execute(
+                "SELECT a.status,i.install_status,i.ansible_status FROM actions a "
+                "JOIN installations i ON i.action_id=a.id WHERE a.id=?", (action,),
+            ).fetchone()
+        print(f"First-boot fixture action and installation states: {action_state}", flush=True)
+        for entry in NGINX_LOG.read_text().splitlines():
+            if "code=os_first_boot&ack=1" in entry:
+                print("First-boot HTTP status and bytes:", entry.split('"')[2].strip(), flush=True)
+        raise
+    if USE_WORKER_QUEUE:
+        def worker_finalized():
+            with closing(sqlite3.connect(DATABASE)) as db:
+                return db.execute(
+                    "SELECT a.status,i.ansible_status FROM actions a "
+                    "JOIN installations i ON i.action_id=a.id WHERE a.id=?", (action,),
+                ).fetchone() == ("success", "no_role")
+        wait_for(worker_finalized, 30, "packaged worker finalized the action after first boot")
     if digest(STALE) != original_stale or digest(CONF / "master.key") != original_key:
         raise RuntimeError("The stale database or existing fixture master key was modified")
     assert_php_stopped()

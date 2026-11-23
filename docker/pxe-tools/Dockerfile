@@ -294,6 +294,7 @@ RUN printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rust-monitor/type \
     && touch /etc/s6-overlay/s6-rc.d/user/contents.d/rust-monitor
 
 FROM appliance AS rust-guided
+ENV PXE_RUST_GUIDED=1
 COPY --from=rust-build /source/rust/target/release/pxe-tools-rust /usr/lib/pxe-tools/pxe-tools-rust
 COPY rust/packaging/guided.conf /opt/pxe-tools/nginx/pxe-routes.conf
 COPY --chmod=0755 rust/packaging/s6-guided-run /etc/s6-overlay/s6-rc.d/rust-guided/run

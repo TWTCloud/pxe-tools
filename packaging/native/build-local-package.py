@@ -246,6 +246,8 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         if rust_guided:
             shutil.copy2(checked(rust_assets/'pxe-tools-rust-guided.service'), units)
             configure_guided_units(units)
+            with (native/'default.env').open('a') as environment:
+                environment.write('PXE_RUST_GUIDED=1\n')
             shutil.copy2(checked(rust_assets/'guided.conf'), templates/'pxe-routes.conf')
         else:
             php_routes = checked(ROOT/'docker/pxe-tools/nginx/pxe-php.conf').read_text()

@@ -119,5 +119,52 @@ class DatabaseSelectionTest(unittest.TestCase):
         fetch.assert_not_called()
 
 
+class GuidedFirstBootQueueTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='pxe-worker-first-boot-')
+        self.addCleanup(temporary.cleanup)
+        self.path = Path(temporary.name) / 'fixture.sqlite'
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
+            db.executescript((ROOT / 'app/db/schema.sqlite.sql').read_text())
+            db.execute("INSERT INTO machines(id,mac) VALUES(1,'02:00:00:00:00:01')")
+            db.execute("INSERT INTO actions(id,machine_id,type,status,token) VALUES(1,1,'install_only','running','fixture')")
+            db.execute("""INSERT INTO installations(id,machine_id,action_id,ended_at,install_status,ansible_status)
+                          VALUES(1,1,1,CURRENT_TIMESTAMP,'success','pending')""")
+        database = patch.object(worker, 'DB_PATH', str(self.path))
+        database.start()
+        self.addCleanup(database.stop)
+        environment = patch.dict(os.environ, {'PXE_RUST_GUIDED': '1'})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_waiting_for_first_boot_releases_only_matching_installation(self):
+        self.assertIsNone(worker.fetch_pending_ansible())
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("INSERT INTO machines(id,mac) VALUES(2,'02:00:00:00:00:02')")
+            db.execute("""INSERT INTO installations(id,machine_id,ended_at,install_status,ansible_status)
+                          VALUES(2,2,CURRENT_TIMESTAMP,'success','pending')""")
+        self.assertEqual(worker.fetch_pending_ansible()['install_id'], 2)
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("""INSERT INTO machine_events(machine_id,action_id,checkpoint,message)
+                          VALUES(1,1,'os_first_boot','fixture')""")
+        self.assertEqual(worker.fetch_pending_ansible()['install_id'], 1)
+
+    def test_timeout_and_php_mode_can_close_installation_without_receipt(self):
+        with patch.dict(os.environ, {'PXE_RUST_GUIDED': '0'}):
+            self.assertEqual(worker.fetch_pending_ansible()['install_id'], 1)
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("UPDATE installations SET ended_at=datetime('now','-11 minutes')")
+        self.assertEqual(worker.fetch_pending_ansible()['install_id'], 1)
+
+    def test_ansible_with_a_role_keeps_its_own_first_boot_wait(self):
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("INSERT INTO settings(key,value) VALUES('ansible_enabled','on')")
+            db.execute("UPDATE machines SET install_config_json='incorrect'")
+        self.assertIsNone(worker.fetch_pending_ansible())
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("UPDATE machines SET install_config_json=?", (json.dumps({'ansible_role': 'fixture'}),))
+        self.assertEqual(worker.fetch_pending_ansible()['ansible_role'], 'fixture')
+
+
 if __name__ == '__main__':
     unittest.main()

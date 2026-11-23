@@ -1849,10 +1849,36 @@ def fetch_pending_ansible() -> dict | None:
         JOIN machines m ON i.machine_id = m.id
         LEFT JOIN actions a ON i.action_id = a.id
         WHERE i.ansible_status = 'pending'
+          AND (
+            :wait_for_boot = 0
+            OR a.id IS NULL
+            OR a.status NOT IN ('pending', 'running')
+            OR a.type NOT IN ('install_only', 'reinstall')
+            OR COALESCE(i.install_status, '') <> 'success'
+            OR COALESCE(unixepoch(i.ended_at), 0) + :boot_timeout <= unixepoch()
+            OR EXISTS (
+                SELECT 1 FROM machine_events
+                WHERE action_id = a.id AND checkpoint = 'os_first_boot'
+            )
+            OR (
+                EXISTS (SELECT 1 FROM settings WHERE key = 'ansible_enabled' AND value = 'on')
+                AND CASE WHEN json_valid(m.install_config_json) THEN
+                    json_type(m.install_config_json, '$.ansible_role') = 'text'
+                    AND trim(json_extract(m.install_config_json, '$.ansible_role')) <> ''
+                ELSE 0 END
+            )
+          )
         ORDER BY i.created_at LIMIT 1
     """
+    # In guided Rust mode, the no-role path must keep the action token
+    # valid through first boot. Real playbooks already wait for that
+    # checkpoint and must reach their existing timeout/fallback handling.
+    arguments = {
+        "wait_for_boot": os.environ.get("PXE_RUST_GUIDED") == "1",
+        "boot_timeout": _OS_FIRST_BOOT_TIMEOUT_S,
+    }
     with db_connect() as db:
-        row = db.execute(sql).fetchone()
+        row = db.execute(sql, arguments).fetchone()
         if not row:
             return None
         job = dict(row)
