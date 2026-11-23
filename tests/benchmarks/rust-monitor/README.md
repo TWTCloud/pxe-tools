@@ -125,7 +125,25 @@ vérification de la paire, les nouvelles connexions utilisent le certificat
 importé et le service le recharge au redémarrage.
 `/var/lib/pxe-tools/tls-import/external.json` contient la clé privée et doit
 être conservé avec les données sensibles de l’instance, avec les permissions
-du service. L’émission et le renouvellement ACME restent à porter.
+du service.
+
+Pour activer ACME, définir `PXE_PUBLIC_HOST` avec le nom DNS et choisir
+`PXE_ACME=staging` ou `PXE_ACME=production` pour Let’s Encrypt. Renseigner
+`PXE_ACME_EMAIL` pour ajouter un contact. L’activation accepte les
+conditions de l’autorité choisie. Sur APT, placer ces variables dans
+`/etc/pxe-tools/acme.env`. Pour Docker, utiliser l’environnement du
+conteneur. Ce nom doit permettre à l’autorité d’atteindre le port HTTP 80.
+Le serveur répond au défi HTTP-01 sans modifier les routes PXE. Il renouvelle
+le certificat au dernier tiers de sa durée de vie et conserve la paire
+précédente si le renouvellement échoue. Un certificat externe importé
+prend la priorité et suspend ACME. Les fichiers `acme-account.json` et
+`acme-certificate.json` restent dans le répertoire privé d’import TLS.
+
+Pour une autorité privée, `PXE_ACME=private` nécessite une URL HTTPS dans
+`PXE_ACME_DIRECTORY_URL` et le certificat de confiance dans
+`PXE_ACME_CA_FILE`, sous un chemin absolu lisible par le service.
+Le banc `test_rust_acme_pebble.py` exerce deux défis HTTP-01 et la reprise
+sans l’autorité après redémarrage, avec Pebble et son serveur DNS de test.
 La page `/settings/images` affiche l’état du catalogue et la progression des
 images enregistrées. Elle permet de demander une actualisation du catalogue
 et d’ajouter une image Debian amd64 ou arm64. Le téléchargement reste assuré

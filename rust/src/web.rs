@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod acme;
 mod admin;
 mod assets;
 mod certificates;
@@ -55,6 +56,7 @@ struct Site {
     admin: admin::Console,
     setup: setup::Wizard,
     tls: Arc<certificates::Certificates>,
+    acme_challenge: Option<Arc<acme::ChallengeResponse>>,
 }
 
 pub fn serve(config: &Path) -> Result<(), ErrorBox> {
@@ -82,7 +84,11 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
     let http_port = port("PXE_HTTP_PORT", 80)?;
     let https_port = port("PXE_HTTPS_PORT", 443)?;
     let default_tls = tls_config().map_err(|error| format!("TLS configuration: {error}"))?;
-    let tls = Arc::new(certificates::Certificates::new(default_tls)?);
+    let acme = acme::Config::from_env(public_host.as_deref())?;
+    let tls = Arc::new(certificates::Certificates::new(default_tls, acme.as_ref())?);
+    let acme_challenge = acme
+        .as_ref()
+        .map(|config| Arc::new(acme::ChallengeResponse::new(config.host.clone())));
     let site = Arc::new(Site {
         database: config.to_owned(),
         assets: assets::Assets::new(
@@ -98,6 +104,7 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         admin: admin::Console::new(),
         setup: setup::Wizard::new(),
         tls,
+        acme_challenge,
     });
     let mut listeners = Vec::new();
     // Keep the loopback API used by the worker while exposing PXE only on its configured address.
@@ -110,6 +117,10 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
     let mut servers = task::JoinSet::new();
     for (listener, tls) in listeners {
         servers.spawn(accept(listener, tls, site.clone(), connections.clone()));
+    }
+    if let (Some(config), Some(challenge)) = (acme, site.acme_challenge.clone()) {
+        let tls = site.tls.clone();
+        task::spawn(async move { acme::run(config, &challenge, &tls).await });
     }
     notify_ready().map_err(|error| format!("Systemd readiness notification: {error}"))?;
     let ip = pxe_ip.unwrap_or(Ipv4Addr::LOCALHOST);
@@ -297,6 +308,11 @@ async fn dispatch(
     let (parts, body) = request.into_parts();
     let path = parts.uri.path();
     let readable = matches!(parts.method, Method::GET | Method::HEAD);
+    if !secure && parts.method == Method::GET && path.starts_with(acme::PREFIX) {
+        if let Some(challenge) = &site.acme_challenge {
+            return challenge.serve(path, single(&parts.headers, HOST.as_str()));
+        }
+    }
     if path == "/healthz" && readable {
         return plain(StatusCode::OK, "ok\n");
     }
