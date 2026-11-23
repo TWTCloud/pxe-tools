@@ -75,7 +75,8 @@ def setup(client, credentials, config, database):
     assert not config.exists() and not database.exists()
 
     for _ in range(2):
-        assert client.request('/init/db', form={'code': code})[:2] == (303, '/init/admin')
+        result = client.request('/init/db', form={'code': code})
+        assert result[:2] == (303, '/init/admin'), result
     assert json.loads(config.read_text()) == {'driver': 'sqlite', 'path': str(database)}
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
     assert stat.S_IMODE(database.stat().st_mode) == 0o600
@@ -155,6 +156,11 @@ def main():
         if os.geteuid() != 0 or os.environ.get('PXE_DISPOSABLE_SETUP_TEST') != '1':
             raise SystemExit('Run the packaged check only in its disposable fixture')
         credentials = Path('/run/pxe-tools-rust-guided')
+        deadline = time.monotonic() + 40
+        while not (credentials/'setup-code').is_file():
+            if time.monotonic() >= deadline:
+                raise RuntimeError('The appliance did not prepare the first-run credentials')
+            time.sleep(.2)
         client = Client(credentials, 80, 443)
         client.ready()
         setup(client, credentials, Path('/etc/pxe-tools/db.conf'), Path('/var/lib/pxe-tools/pxe-tools.sqlite'))

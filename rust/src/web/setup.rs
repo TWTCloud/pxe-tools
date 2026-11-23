@@ -24,12 +24,19 @@ enum Stage {
 }
 
 pub(super) struct Wizard {
+    code: Option<String>,
     write: Arc<Semaphore>,
 }
 
 impl Wizard {
     pub(super) fn new() -> Self {
+        let code = credential_directory()
+            .ok()
+            .and_then(|directory| fs::read_to_string(directory.join("setup-code")).ok())
+            .map(|value| value.trim().to_owned())
+            .filter(|value| valid_setup_code(value));
         Self {
+            code,
             write: Arc::new(Semaphore::new(1)),
         }
     }
@@ -83,7 +90,12 @@ impl Wizard {
             }
         }
         let supplied = fields.remove("code").unwrap_or_default();
-        if !valid_setup_code(&supplied).await {
+        if !valid_setup_code(&supplied)
+            || !self
+                .code
+                .as_ref()
+                .is_some_and(|expected| bool::from(supplied.as_bytes().ct_eq(expected.as_bytes())))
+        {
             return plain(StatusCode::FORBIDDEN, "Code de configuration invalide\n");
         }
         let credentials = if path == "/init/db" {
@@ -139,17 +151,8 @@ impl Wizard {
     }
 }
 
-async fn valid_setup_code(supplied: &str) -> bool {
-    if supplied.len() != 48 || !supplied.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return false;
-    }
-    let Ok(directory) = credential_directory() else {
-        return false;
-    };
-    let Ok(expected) = tokio::fs::read_to_string(directory.join("setup-code")).await else {
-        return false;
-    };
-    bool::from(supplied.as_bytes().ct_eq(expected.trim().as_bytes()))
+fn valid_setup_code(code: &str) -> bool {
+    code.len() == 48 && code.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 async fn read_stage(config: &Path) -> Option<Stage> {
