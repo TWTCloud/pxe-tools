@@ -5,6 +5,7 @@ mod admin;
 mod assets;
 mod certificates;
 mod images;
+mod jobs;
 mod onboarding;
 mod setup;
 mod winpe;
@@ -382,6 +383,15 @@ async fn dispatch(
         return site
             .admin
             .serve(&parts, peer, &site.database, admin::Action::Devices)
+            .await;
+    }
+    if let Some(view) = jobs::View::for_route(path, parts.uri.query().unwrap_or_default()) {
+        if !secure || !readable {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        return site
+            .admin
+            .serve(&parts, peer, &site.database, admin::Action::Jobs(view))
             .await;
     }
     if onboarding::is_route(path) {

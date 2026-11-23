@@ -241,48 +241,60 @@ if (!Db::columnExists('init_jobs', 'updated_at')) {
     echo "migrate-init: added init_jobs.updated_at column (heartbeat watchdog)\n";
 }
 
-// Sentinel wizard_completed : ne pose '0' QUE si la row n'existe pas.
-// Bug historique : Db::upsert faisait ON CONFLICT DO UPDATE value=excluded
-// → écrasait la valeur '1' à chaque restart container → wizard re-déclenché
-// après chaque deploy. Maintenant : check d'existence + INSERT seulement
-// si absent → la value '1' posée par un /init/complete précédent est
-// préservée à travers les restarts.
-$keyQ = Db::quoteIdent('key');
-$exists = (int)$pdo->query("SELECT COUNT(*) FROM settings WHERE $keyQ='wizard_completed'")->fetchColumn();
-if ($exists === 0) {
-    $pdo->prepare("INSERT INTO settings ($keyQ, value) VALUES ('wizard_completed', '0')")->execute();
-    echo "migrate-auth: settings.wizard_completed sentinel posed (initial)\n";
+if ($driver === 'sqlite' && getenv('PXE_RUST_GUIDED') === '1') {
+    $process = proc_open(
+        ['/usr/lib/pxe-tools/pxe-tools-rust', '--migrate-network-settings', '/etc/pxe-tools/db.conf'],
+        [0 => ['file', '/dev/null', 'r'], 1 => STDOUT, 2 => STDERR],
+        $pipes
+    );
+    if (!is_resource($process) || proc_close($process) !== 0) {
+        fwrite(STDERR, "Migration réseau Rust refusée.\n");
+        exit(2);
+    }
 } else {
-    echo "migrate-auth: settings.wizard_completed sentinel already present (kept)\n";
-}
+    // Sentinel wizard_completed : ne pose '0' QUE si la row n'existe pas.
+    // Bug historique : Db::upsert faisait ON CONFLICT DO UPDATE value=excluded
+    // → écrasait la valeur '1' à chaque restart container → wizard re-déclenché
+    // après chaque deploy. Maintenant : check d'existence + INSERT seulement
+    // si absent → la value '1' posée par un /init/complete précédent est
+    // préservée à travers les restarts.
+    $keyQ = Db::quoteIdent('key');
+    $exists = (int)$pdo->query("SELECT COUNT(*) FROM settings WHERE $keyQ='wizard_completed'")->fetchColumn();
+    if ($exists === 0) {
+        $pdo->prepare("INSERT INTO settings ($keyQ, value) VALUES ('wizard_completed', '0')")->execute();
+        echo "migrate-auth: settings.wizard_completed sentinel posed (initial)\n";
+    } else {
+        echo "migrate-auth: settings.wizard_completed sentinel already present (kept)\n";
+    }
 
-// ---------------------------------------------------------------------------
-// 5bis. Renommage settings.orchestrator_ip → pxe_ip (rename 2026-05-12)
-// ---------------------------------------------------------------------------
-// Recopier l'ancienne valeur si nécessaire, sans supprimer l'originale.
-$keyQ = Db::quoteIdent('key');
-$oldIp = $pdo->query("SELECT value FROM settings WHERE $keyQ='orchestrator_ip'")->fetchColumn();
-$newIp = $pdo->query("SELECT value FROM settings WHERE $keyQ='pxe_ip'")->fetchColumn();
-if ($oldIp !== false && $newIp === false) {
-    $pdo->prepare("INSERT INTO settings ($keyQ, value) VALUES ('pxe_ip', ?)")->execute([$oldIp]);
-    echo "migrate-settings: copied the previous server setting\n";
-} elseif ($oldIp !== false && $newIp !== false) {
-    echo "migrate-settings: both server settings retained\n";
-}
+    // ---------------------------------------------------------------------------
+    // 5bis. Renommage settings.orchestrator_ip → pxe_ip (rename 2026-05-12)
+    // ---------------------------------------------------------------------------
+    // Recopier l'ancienne valeur si nécessaire, sans supprimer l'originale.
+    $keyQ = Db::quoteIdent('key');
+    $oldIp = $pdo->query("SELECT value FROM settings WHERE $keyQ='orchestrator_ip'")->fetchColumn();
+    $newIp = $pdo->query("SELECT value FROM settings WHERE $keyQ='pxe_ip'")->fetchColumn();
+    if ($oldIp !== false && $newIp === false) {
+        $pdo->prepare("INSERT INTO settings ($keyQ, value) VALUES ('pxe_ip', ?)")->execute([$oldIp]);
+        echo "migrate-settings: copied the previous server setting\n";
+    } elseif ($oldIp !== false && $newIp !== false) {
+        echo "migrate-settings: both server settings retained\n";
+    }
 
-// ---------------------------------------------------------------------------
-// 6. Renommage settings.dhcp_mode → dhcp_proxy_enabled (mai 2026)
-// ---------------------------------------------------------------------------
-$old = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='dhcp_mode'")->fetchColumn();
-$new = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='dhcp_proxy_enabled'")->fetchColumn();
-if ($old !== false && $new === false) {
-    $mapped = ($old === 'proxy') ? 'on' : 'off';
-    $pdo->prepare(
-        "INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('dhcp_proxy_enabled', ?)"
-    )->execute([$mapped]);
-    echo "migrate-settings: copied the previous network mode\n";
-} elseif ($old !== false && $new !== false) {
-    echo "migrate-settings: both network settings retained\n";
+    // ---------------------------------------------------------------------------
+    // 6. Renommage settings.dhcp_mode → dhcp_proxy_enabled (mai 2026)
+    // ---------------------------------------------------------------------------
+    $old = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='dhcp_mode'")->fetchColumn();
+    $new = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='dhcp_proxy_enabled'")->fetchColumn();
+    if ($old !== false && $new === false) {
+        $mapped = ($old === 'proxy') ? 'on' : 'off';
+        $pdo->prepare(
+            "INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('dhcp_proxy_enabled', ?)"
+        )->execute([$mapped]);
+        echo "migrate-settings: copied the previous network mode\n";
+    } elseif ($old !== false && $new !== false) {
+        echo "migrate-settings: both network settings retained\n";
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -5,7 +5,9 @@ mod disk_identity;
 mod grub;
 mod images;
 mod install;
+mod migrations;
 mod monitoring;
+mod postboot;
 mod preseed;
 mod pxe;
 mod web;
@@ -75,6 +77,12 @@ fn configured_database(config: &Path) -> Option<PathBuf> {
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if let [flag, config] = args.as_slice() {
+        if flag == "--migrate-network-settings" && Path::new(config).is_absolute() {
+            return migrations::network_settings(Path::new(config));
+        }
+        if flag == "--render-postboot" {
+            return postboot::render(Path::new(config));
+        }
         if flag == "--serve-guided" && Path::new(config).is_absolute() {
             return web::serve(Path::new(config));
         }

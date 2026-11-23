@@ -324,6 +324,83 @@ def verify_image_console(client, database, authorization):
     print('Rust image console displays legacy and live state and queues guided downloads and refreshes once', flush=True)
 
 
+def verify_job_console(client, database, authorization):
+    with closing(sqlite3.connect(database)) as db, db:
+        job = db.execute(
+            "INSERT INTO init_jobs(job_type,status,progress_percent,message,log) VALUES(?,?,?,?,?)",
+            ('bootstrap:restart_dnsmasq','running',30,'Application réseau','<fixture-log>'),
+        ).lastrowid
+    endpoint = f'/jobs/{job}'
+    assert client.request(endpoint)[0] == 401
+    assert client.request(endpoint, secure=False)[0] == 404
+    assert client.request('/api/init-job-status?job_type=bootstrap:restart_dnsmasq')[0] == 401
+    page = client.request('/jobs', authorization=authorization)
+    assert page[0] == 200 and endpoint.encode() in page[2]
+    page = client.request(endpoint, authorization=authorization)
+    assert page[0] == 200 and b'&lt;fixture-log&gt;' in page[2]
+    poll = client.request(endpoint+'/poll', authorization=authorization)
+    assert poll[0] == 200 and b'30 %' in poll[2]
+    status = client.request(endpoint+'/status', authorization=authorization)
+    assert status[0] == 200 and json.loads(status[2]) == {
+        'found':True,'id':job,'job_type':'bootstrap:restart_dnsmasq','status':'running',
+        'progress_percent':30,'message':'Application réseau',
+        'started_at':None,'ended_at':None,'updated_at':None,
+    }
+    latest = client.request('/api/init-job-status?job_type=bootstrap:restart_dnsmasq', authorization=authorization)
+    assert latest[0] == 200 and json.loads(latest[2]) == json.loads(status[2])
+    missing = client.request('/jobs/9223372036854775807/status', authorization=authorization)
+    assert missing[0] == 404 and json.loads(missing[2]) == {'found':False}
+    print('Rust job console preserves authenticated job status and escapes rendered logs', flush=True)
+
+
+def verify_worker_commands(binary):
+    templates = Path(__file__).resolve().parents[2]/'docker/worker/templates'
+    parameters = {'pxe_ip':'192.0.2.9','mac':'02:00:00:00:00:01','token':'synthetic-token'}
+    command = [str(binary),'--render-postboot',str(templates)]
+    result = subprocess.run(command, input=json.dumps(parameters), text=True,
+                            capture_output=True, check=True)
+    rendered = json.loads(result.stdout)
+    for field, name in (('script','postboot.sh.j2'),('service','pxe-postboot.service.j2')):
+        expected = (templates/name).read_text()
+        for key, value in parameters.items():
+            expected = expected.replace('{{ '+key+' }}', value)
+        assert rendered[field]==expected
+    unsafe = subprocess.run(command, input=json.dumps({**parameters,'token':'"$(fixture)"'}),
+                            text=True, capture_output=True)
+    assert unsafe.returncode and not unsafe.stdout and 'fixture' not in unsafe.stderr
+    print('Rust worker rendered the two postboot files and refused a token with shell syntax', flush=True)
+
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-settings-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        config = root/'db.conf'
+        config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
+        command = [str(binary),'--migrate-network-settings',str(config)]
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+            db.executemany('INSERT INTO settings VALUES(?,?)',[
+                ('orchestrator_ip','192.0.2.9'),('dhcp_mode','invalid'),
+                ('wizard_completed','1'),('pxe_enabled','off'),
+            ])
+        refused = subprocess.run(command, capture_output=True, text=True)
+        assert refused.returncode
+        with closing(sqlite3.connect(database)) as db, db:
+            assert db.execute('SELECT COUNT(*) FROM settings').fetchone()==(4,)
+            db.execute("UPDATE settings SET value='proxy' WHERE key='dhcp_mode'")
+        for _ in range(2):
+            subprocess.run(command, check=True, capture_output=True)
+        with closing(sqlite3.connect(database)) as db, db:
+            assert dict(db.execute('SELECT key,value FROM settings'))=={
+                'orchestrator_ip':'192.0.2.9','dhcp_mode':'proxy','wizard_completed':'1',
+                'pxe_enabled':'off','pxe_ip':'192.0.2.9','dhcp_proxy_enabled':'on',
+            }
+            db.execute("UPDATE settings SET value='off' WHERE key='dhcp_proxy_enabled'")
+        subprocess.run(command, check=True, capture_output=True)
+        with closing(sqlite3.connect(database)) as db:
+            assert db.execute("SELECT value FROM settings WHERE key='dhcp_proxy_enabled'").fetchone()==('off',)
+    print('Rust network migration preserves existing settings and rolls back on an unknown DHCP mode', flush=True)
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -371,6 +448,8 @@ def local(binary):
         assert b'Certificat externe' in updated.request('/admin/certificates', authorization=authorization)[2]
         print('The imported TLS pair survived a restart', flush=True)
         verify_image_console(updated, database, authorization)
+        verify_job_console(updated, database, authorization)
+    verify_worker_commands(binary)
 
 
 def main():

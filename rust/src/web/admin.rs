@@ -38,6 +38,7 @@ pub(super) fn device_term(term: &str) -> Option<&'static str> {
 pub(super) enum Action {
     Devices,
     Images(Option<Bytes>),
+    Jobs(super::jobs::View),
     Terminology(&'static str),
     Setup(String, Option<Bytes>),
     Certificates(Arc<super::certificates::Certificates>, Option<Bytes>),
@@ -121,6 +122,9 @@ impl Console {
                 .is_some_and(|hash| bcrypt::verify(password, hash).unwrap_or(false));
             if !authenticated {
                 return Some(unauthorized());
+            }
+            if let Action::Jobs(view) = &action {
+                return view.serve(&db, page).ok();
             }
             if let Action::Images(form) = &action {
                 return Some(super::images::serve(&db, &db_path, page, form.as_deref()));
@@ -245,7 +249,7 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
         ));
     }
     html.push_str("</select><button>Enregistrer</button></form>");
-    html.push_str(r#"<nav><a href="/settings/images">Images PXE</a> · <a href="/admin/certificates">Certificats TLS</a></nav>"#);
+    html.push_str(r#"<nav><a href="/jobs">Tâches</a> · <a href="/settings/images">Images PXE</a> · <a href="/admin/certificates">Certificats TLS</a></nav>"#);
     if crate::setting(db, "wizard_completed")? != "1" {
         html.push_str(r#"<p><a href="/init/network">Poursuivre la configuration initiale</a></p>"#);
     }

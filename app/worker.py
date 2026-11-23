@@ -2801,39 +2801,36 @@ def render_postboot_for_action(action_id: int, token: str, mac: str, pxe_ip: str
             action_id, bool(token), bool(mac), bool(pxe_ip),
         )
         return None
-    try:
-        # Import lazy : Jinja2 est dispo dans le container (cf. Dockerfile),
-        # mais on évite de l'importer au top-level pour ne pas crasher le worker
-        # si quelqu'un lance un script avec un PYTHONPATH cassé.
-        from jinja2 import Environment, FileSystemLoader, StrictUndefined
-    except ImportError as e:
-        logging.error("Jinja2 indisponible: %s", e)
-        return None
-
     out_dir = os.path.join(POSTBOOT_OUTPUT_DIR, str(action_id))
     try:
-        os.makedirs(out_dir, mode=0o750, exist_ok=True)
-        env = Environment(
-            loader=FileSystemLoader(POSTBOOT_TEMPLATES_DIR),
-            undefined=StrictUndefined,
-            keep_trailing_newline=True,
-        )
         ctx = {"pxe_ip": pxe_ip, "token": token, "mac": mac}
-
-        sh_tpl = env.get_template("postboot.sh.j2")
+        if os.environ.get("PXE_RUST_GUIDED") == "1":
+            result = subprocess.run(
+                ["/usr/lib/pxe-tools/pxe-tools-rust", "--render-postboot", POSTBOOT_TEMPLATES_DIR],
+                input=json.dumps(ctx), text=True, capture_output=True, timeout=15,
+            )
+            if result.returncode:
+                # The rendered files and input both contain the action token.
+                # Keep their contents out of worker logs on every path.
+                raise RuntimeError("Rust rejected the postboot rendering request")
+            rendered = json.loads(result.stdout)
+            script, service = rendered["script"], rendered["service"]
+        else:
+            from jinja2 import Environment, FileSystemLoader, StrictUndefined
+            env = Environment(
+                loader=FileSystemLoader(POSTBOOT_TEMPLATES_DIR),
+                undefined=StrictUndefined,
+                keep_trailing_newline=True,
+            )
+            script = env.get_template("postboot.sh.j2").render(**ctx)
+            service = env.get_template("pxe-postboot.service.j2").render(**ctx)
+        os.makedirs(out_dir, mode=0o750, exist_ok=True)
         sh_path = os.path.join(out_dir, "postboot.sh")
-        with open(sh_path, "w", encoding="utf-8") as f:
-            f.write(sh_tpl.render(**ctx))
-        # SEC-01 : 0640 — le script n'est plus exécuté par nginx, il est
-        # lu (readfile) par PHP-FPM qui le sert via Content-Type shellscript.
-        # Pas besoin du bit x ; readable owner+group (www-data) suffit.
-        os.chmod(sh_path, 0o640)
-
-        svc_tpl = env.get_template("pxe-postboot.service.j2")
         svc_path = os.path.join(out_dir, "pxe-postboot.service")
-        with open(svc_path, "w", encoding="utf-8") as f:
-            f.write(svc_tpl.render(**ctx))
-        os.chmod(svc_path, 0o640)
+        for path, contents in ((sh_path, script), (svc_path, service)):
+            with open(path, "w", encoding="utf-8") as output:
+                output.write(contents)
+            os.chmod(path, 0o640)
 
         # Best-effort chown www-data:www-data (worker tourne typiquement en
         # root dans le container). Skip silencieux hors container/tests.

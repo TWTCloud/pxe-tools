@@ -147,14 +147,20 @@ sans l’autorité après redémarrage, avec Pebble et son serveur DNS de test.
 La page `/settings/images` affiche l’état du catalogue et la progression des
 images enregistrées. Elle permet de demander une actualisation du catalogue
 et d’ajouter une image Debian amd64 ou arm64. Le téléchargement reste assuré
-par le worker.
+par le worker. La vue `/jobs` ouvre les tâches du worker, leurs états et
+les dernières lignes du journal. Les URL de suivi par identifiant et l’API
+de statut par type restent accessibles à la console authentifiée.
 
 Les deux variantes fonctionnent sans installer Nginx ni PHP-FPM.
 Dans la variante guidée, Rust réserve la suppression d’une image en
 contrôlant ses dépendances et en gardant le verrou SQLite pendant que
 le worker déplace les fichiers protégés. Le worker conserve son protocole
-de confirmation et de reprise. Les migrations des bases existantes et
-l’import des modèles utilisent encore PHP CLI. Le renderer couvre les recettes de partition
+de confirmation et de reprise. Rust rend aussi le script et l’unité postboot
+par action à partir des variables du worker. Ce rendu accepte les variables
+`pxe_ip`, `mac` et `token` des templates livrés. Rust reprend les anciens
+réglages réseau SQLite en gardant les choix explicites et le mode PXE
+existant. Les autres migrations et l’import des modèles utilisent encore
+PHP CLI. Le renderer couvre les recettes de partition
 sur un disque identifié, avec partitions physiques BIOS ou UEFI. Un plan
 LVM sur ce disque peut définir ses groupes de volumes et volumes logiques.
 La vérification compare le rendu à PHP et refuse les volumes qui désignent
