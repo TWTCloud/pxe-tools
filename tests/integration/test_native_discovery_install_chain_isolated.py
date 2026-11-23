@@ -25,6 +25,10 @@ if os.environ.get('PXE_NATIVE_PXE_TEST') != '1' or os.geteuid() != 0:
 image=os.environ.get('PXE_NATIVE_PXE_IMAGE','')
 if not re.fullmatch(r'pxe-native-e2e-[a-f0-9]{10}:local',image):
     raise SystemExit('A uniquely named local fixture image is required.')
+backend=os.environ.get('PXE_NATIVE_PXE_BACKEND','php')
+if backend not in ('php', 'rust'):
+    raise SystemExit('Unknown fixture backend.')
+rust_lab=backend=='rust'
 
 
 def run(*args, check=True, **kwargs):
@@ -91,6 +95,86 @@ def diagnostic_screen(root):
         pass
 
 
+def wire_rust(app, root):
+    from test_native_rust_debian_pxe import native_vhost
+
+    docker('exec',app,'systemctl','mask','--now','php8.4-fpm.service','pxe-tools-php.service','nginx.service')
+    docker('cp',str(ROOT/'tests/support/native-rust-pxe/server.py'),app+':/fixture-data/rust-server.py')
+    docker('exec',app,'python3','/fixture-data/rust-server.py','wire','/fixture-data')
+    nginx=root/'pxe-rust.conf'
+    nginx.write_text(native_vhost('http://unix:/fixture-data/mirror.sock:'))
+    docker('cp',str(nginx),app+':/usr/lib/pxe-tools/native/pxe.conf')
+    docker('exec',app,'systemctl','daemon-reload')
+
+
+def rust_first_boot(app, dhcp, client, root, fixture):
+    docker('exec',app,'systemctl','start','pxe-tools-dnsmasq.service')
+    for service in ('pxe-tools-rust-lab.service','pxe-tools-pxe-http.service','pxe-tools-dnsmasq.service'):
+        docker('exec',app,'systemctl','is-active','--quiet',service)
+    config=docker('exec',app,'cat','/var/lib/pxe-tools-native/rendered/dnsmasq.conf').stdout
+    if 'dhcp-range=192.0.2.0,proxy,255.255.255.0' not in config:
+        raise RuntimeError('Native proxy DHCP configuration not active')
+    status=docker('exec',dhcp,'curl','-sS','--max-time','5','-o','/dev/null','-w','%{http_code}',
+                  'http://192.0.2.1/preseed.php?mac=02:00:00:00:00:ff').stdout
+    if status!='404':
+        raise RuntimeError('Rust preseed did not reject the unknown machine from the lab subnet')
+    docker('exec',app,'bash','-ec',
+           'set -a; source /usr/lib/pxe-tools/native/default.env; source /var/lib/pxe-tools-native/runtime.env; set +a; '
+           'bash /opt/pxe-tools/scripts/bootstrap-install-pxe-bins.sh')
+    docker('exec','-d',app,'bash','-ec',
+           'set -a; source /usr/lib/pxe-tools/native/default.env; source /var/lib/pxe-tools-native/runtime.env; set +a; '
+           'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
+    log=fixture/'native-status.log'
+    wait_for(lambda: log.is_file() and 'PXE_NATIVE_READY' in log.read_text(), 30, 'Rust fixture ready')
+    print('Native dnsmasq and Rust HTTP are ready. Both PHP-FPM units are masked.', flush=True)
+
+    for name, boot, marker, timeout in (
+        ('Discovery','n','PXE_NATIVE_DISCOVERY_OK',1500),
+        ('Installer','n','PXE_NATIVE_INSTALL_OK',3000),
+        ('First boot','c','PXE_NATIVE_FIRST_BOOT_OK',900),
+    ):
+        (root/'qemu-monitor.sock').unlink(missing_ok=True)
+        docker('run','-di','--name',client,'--network','container:'+app,'--cap-add','NET_ADMIN',
+               '--device','/dev/net/tun','--mount',f'type=bind,src={root},dst=/fixture-data',
+               '--entrypoint','qemu-system-x86_64',image,
+               '-machine','pc,accel=tcg','-smp','1','-m','1024','-display','none',
+               '-drive','file=/fixture-data/fixture.qcow2,if=none,id=disk,format=qcow2',
+               '-device','virtio-blk-pci,drive=disk,serial=PXE-TEST-ONE',
+               '-serial','stdio','-monitor','unix:/fixture-data/qemu-monitor.sock,server=on,wait=off',
+               '-no-reboot','-boot',boot,'-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
+               '-device','e1000,netdev=lan,mac=02:00:00:00:00:01')
+        print(name+' started on the isolated guest network', flush=True)
+        wakeup=False
+
+        def completed():
+            nonlocal wakeup
+            state=inspect(client)['State']
+            receipt=log.read_text()
+            if 'Traceback (most recent call last)' in receipt:
+                raise RuntimeError('Rust server validation failed')
+            if boot=='n':
+                if state['ExitCode']!=0:
+                    raise RuntimeError(name+' QEMU guest failed')
+                return not state['Running'] and marker in receipt
+            if not state['Running']:
+                raise RuntimeError('The installed guest stopped before login')
+            output=docker('logs',client,check=False).stdout
+            if not wakeup and 'Debian GNU/Linux 13 pxe-fixture ttyS0' in output:
+                wakeup=True
+                try:
+                    subprocess.run(['docker','attach','--sig-proxy=false',client],input='\n',
+                                   text=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                                   timeout=5,check=False)
+                except subprocess.TimeoutExpired:
+                    pass
+            return 'pxe-fixture login:' in output and marker in receipt
+
+        wait_for(completed,timeout,name+' and '+marker)
+        print(next(line for line in log.read_text().splitlines() if line.startswith(marker)), flush=True)
+        docker('rm','-f',client)
+    print('Debian GNU/Linux 13 pxe-fixture login: verified with PHP-FPM masked',flush=True)
+
+
 def main():
     suffix=secrets.token_hex(5)
     app='pxe-l2-app-'+suffix; dhcp='pxe-l2-dhcp-'+suffix; client='pxe-l2-client-'+suffix
@@ -105,8 +189,9 @@ def main():
         (conf/'master.key').write_bytes(os.urandom(32));(conf/'master.key').chmod(0o600)
         (conf/'db.conf').write_text(json.dumps({'driver':'sqlite','path':'/var/lib/pxe-tools/chosen.sqlite'}))
         (conf/'db.conf').chmod(0o600)
-        login_hash=docker('run','--rm','--network','none','--entrypoint','php',image,'-r',
-                          'echo password_hash("fixture-login-password", PASSWORD_DEFAULT);').stdout
+        if not rust_lab:
+            login_hash=docker('run','--rm','--network','none','--entrypoint','php',image,'-r',
+                              'echo password_hash("fixture-login-password", PASSWORD_DEFAULT);').stdout
         with sqlite3.connect(data/'chosen.sqlite') as db:
             db.executescript((ROOT/'app/db/schema.sqlite.sql').read_text())
             db.executemany('INSERT INTO settings(key,value) VALUES(?,?)',[
@@ -115,7 +200,8 @@ def main():
                 ('dhcp_proxy_netmask','255.255.255.0'),('https_enabled','off'),
                 ('wizard_completed','1'),('db_init_done','1'),('admin_created','1'),('init_completed','1'),
                 ('ansible_enabled','off'),('catalog_auto_refresh_enabled','off')])
-            db.execute('INSERT INTO users(username,password_hash) VALUES(?,?)',('fixture-admin',login_hash))
+            if not rust_lab:
+                db.execute('INSERT INTO users(username,password_hash) VALUES(?,?)',('fixture-admin',login_hash))
             db.execute("INSERT INTO os_images(distro,version,arch,codename,version_full,enabled,status) VALUES('debian','13.0','amd64','trixie','13.0',1,'downloaded')")
         # A stale but valid DB must never drive the appliance, even when its
         # path is present in the inherited environment.
@@ -199,14 +285,22 @@ done
                                   (template,'/opt/pxe-tools/templates/preseed-base.cfg.j2'),
                                   (discovery_template,'/opt/pxe-tools/templates/discovery-preseed.cfg.j2'),
                                   (discover_template,'/opt/pxe-tools/templates/discover.sh.j2')):
+                if rust_lab and source!=discover_template:
+                    continue
                 docker('cp',str(source),app+':'+target)
+            kernel_opts=(
+                '' if rust_lab else
+                '\'KERNEL_OPTS="language=fr country=FR locale=fr_FR.UTF-8 keymap=fr ipv6.disable=1 net.ifnames=0"\' '
+            )
             docker('exec',app,'sh','-c',
                    "install -d -m 0755 /var/lib/pxe-tools-native/rendered && "
                    "printf '%s\\n' TFTP_ROOT=/var/lib/pxe-tools-tftp HTTP_ROOT=/var/lib/pxe-tools-http "
                    "PXE_TOOLS_DATA_DIR=/var/lib/pxe-tools-native/rendered MOK_DIR=/var/lib/pxe-tools-native/mok "
                    "PXE_DB_PATH=/var/lib/pxe-tools/stale.sqlite WORKER_POLL_S=1 "
-                   "'KERNEL_OPTS=\"language=fr country=FR locale=fr_FR.UTF-8 keymap=fr ipv6.disable=1 net.ifnames=0\"' "
+                   + kernel_opts +
                    "> /var/lib/pxe-tools-native/runtime.env")
+            if rust_lab:
+                wire_rust(app,root)
             docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
                    '--entrypoint','/bin/sh',image,'-c','exec sleep 4200')
             app_ns=endpoint(app); dhcp_ns=endpoint(dhcp)
@@ -228,9 +322,18 @@ done
             if links(app,app_ns)!={'lo','br-pxetest','veth-pxe','tap-pxetest'} or links(dhcp,dhcp_ns)!={'lo','veth-dhcp'}:
                 raise RuntimeError('unexpected interface attached to fixture')
             no_default_route(app,app_ns);no_default_route(dhcp,dhcp_ns)
-            docker('exec','-d',dhcp,'dnsmasq','-k','--port=0','--interface=veth-dhcp','--bind-interfaces',
-                   '--dhcp-range=192.0.2.100,192.0.2.120,255.255.255.0,1h',
-                   '--dhcp-option=6,192.0.2.1','--log-dhcp','--log-facility=/tmp/fixture-dhcp.log')
+            lease_opts=(
+                ('--no-resolv','--no-hosts','--address=/pxe-native-lab.example.test/192.0.2.1',
+                 '--dhcp-authoritative','--dhcp-range=192.0.2.0,static,255.255.255.0,1h',
+                 '--dhcp-host=02:00:00:00:00:01,id:*,192.0.2.100','--dhcp-option=3','--dhcp-option-force=6,192.0.2.2')
+                if rust_lab else
+                ('--port=0','--dhcp-range=192.0.2.100,192.0.2.120,255.255.255.0,1h','--dhcp-option=6,192.0.2.1')
+            )
+            docker('exec','-d',dhcp,'dnsmasq','-k','--interface=veth-dhcp','--bind-interfaces',
+                   *lease_opts,'--log-dhcp','--log-facility=/tmp/fixture-dhcp.log')
+            if rust_lab:
+                rust_first_boot(app,dhcp,client,root,fixture)
+                return
             docker('exec',app,'systemctl','start','pxe-tools.target')
             def ready():
                 if not inspect(app)['State']['Running']:raise RuntimeError('appliance stopped during startup')
@@ -413,6 +516,10 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
             print('Only the disposable qcow2 disk and isolated bridge were used.',flush=True)
         except Exception:
             diagnostic_screen(root)
+            if rust_lab:
+                status_log=fixture/'native-status.log'
+                if status_log.is_file():
+                    print(status_log.read_text()[-2000:],flush=True)
             for name, args in ((app, ('exec',app,'journalctl','--no-pager','-n','45','-u','pxe-tools-init','-u','pxe-tools-dnsmasq','-u','pxe-tools-pxe-http','-u','pxe-tools-worker')),
                                (dhcp, ('exec',dhcp,'cat','/tmp/fixture-dhcp.log')),
                                (client, ('logs','--tail','20',client)),

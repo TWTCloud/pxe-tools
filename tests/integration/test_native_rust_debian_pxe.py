@@ -37,7 +37,7 @@ SERIAL = "PXE-TEST-ONE"
 KEYRING = ROOT / "packaging/native/keyrings/debian-archive-2025.1.gpg"
 
 
-def native_vhost():
+def native_vhost(mirror_upstream="http://10.0.2.100"):
     serial = base64.b64encode(b'GRUB_CMDLINE_LINUX="console=ttyS0,115200n8 net.ifnames=0"\n').decode()
     hook = "in-target /bin/systemctl enable pxe-machine-ready.service"
     instrument = f"{hook} ; in-target /bin/sh -c 'echo {serial} | base64 -d >> /etc/default/grub; update-grub'"
@@ -55,7 +55,7 @@ def native_vhost():
     }}
     location /api/ {{ proxy_pass http://unix:/run/pxe-tools-rust-lab/http.sock:; }}
     location /pxe/postboot/ {{ proxy_pass http://unix:/run/pxe-tools-rust-lab/http.sock:; }}
-    location /debian/ {{ proxy_pass http://10.0.2.100; proxy_read_timeout 120s; }}
+    location /debian/ {{ proxy_pass {mirror_upstream}; proxy_read_timeout 120s; }}
     location ~ \\.php$ {{ return 404; }}
     location / {{ try_files $uri =404; }}
 }}

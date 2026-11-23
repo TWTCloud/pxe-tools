@@ -85,7 +85,7 @@ ExecStart=/bin/sh -ec 'exec {binary} "$(/usr/bin/python3 {APP}/database_selectio
         native = native.replace(old, f"{key}pxe-tools-rust-lab.service pxe-tools-init.service")
     (UNIT / original.name).write_text(native)
     boot_dir = HTTP / "netboot/debian/13.0/amd64"
-    boot_dir.mkdir(parents=True)
+    boot_dir.mkdir(parents=True, exist_ok=True)
     for item in ("linux", "initrd.gz"):
         subprocess.run(["install", "-m", "0644", str(root / item), str(boot_dir / item)], check=True)
     env = Path("/usr/lib/pxe-tools/native/default.env")

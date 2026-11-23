@@ -154,6 +154,9 @@ CHECK_MONITOR
 seed "$name-apt" /usr/lib/pxe-tools/app
 docker exec "$name-apt" systemctl restart pxe-tools-init.service
 check_key "$name-apt" /usr/lib/pxe-tools/app
+# The Docker fixture cannot freeze systemd service cgroups. Exercise a
+# quiescent upgrade through the same maintainer scripts.
+docker exec "$name-apt" systemctl stop pxe-tools-worker.service
 docker exec "$name-apt" bash -ec '
     export DEBIAN_FRONTEND=noninteractive
     apt-get install -y -qq --no-install-recommends /fixture/experimental.deb
