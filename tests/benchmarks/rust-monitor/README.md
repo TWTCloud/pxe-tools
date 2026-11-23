@@ -35,6 +35,43 @@ correspond à celui de PHP. Les pings de découverte et la sélection GRUB
 regroupent leurs écritures dans une transaction. Une erreur d'écriture
 annule l'ensemble de la mutation Rust.
 
+## Essayer la distribution du suivi Rust
+
+Les variantes locales amd64 et arm64 activent Rust pour
+`GET /api/monitoring/installs` sur le port PXE. nginx lui passe l'adresse
+réelle du client sur un socket Unix privé. Le suivi ouvre la base SQLite
+déclarée dans `/etc/pxe-tools/db.conf` en lecture seule. Si le service, le
+fichier de configuration ou SQLite est indisponible, nginx confie cette
+lecture à PHP. Un refus réseau reste un refus. Une réponse de Rust
+contient l'en-tête `X-PXE-Monitor-Backend: rust`.
+
+Depuis Debian 13, construire le paquet de test ou l'image expérimentale.
+
+```sh
+cargo build --locked --release --manifest-path rust/Cargo.toml
+strip rust/target/release/pxe-tools-rust
+python3 packaging/native/build-local-package.py /tmp/pxe-tools-rust-test.deb \
+  --architecture "$(dpkg --print-architecture)" \
+  --rust-binary rust/target/release/pxe-tools-rust
+docker build --target rust-experimental -f docker/pxe-tools/Dockerfile -t pxe-tools:rust-lab .
+```
+
+Le paquet de test lance le service expérimental avec le service HTTP de
+démarrage. Après une mise à niveau qui reprend un service HTTP déjà actif,
+`systemctl start pxe-tools-rust-monitor.service` active le suivi Rust.
+Pour vérifier le retour à PHP, arrêter ce service ou, dans le conteneur,
+utiliser `/command/s6-svc -d /run/service/rust-monitor`.
+
+L'interface d'administration, le preseed, les retours d'installation et
+les autres routes de ces variantes passent par PHP. Le parcours Rust
+complet utilise le banc dédié ci-dessous. Le script de distribution
+exerce les deux variantes sur un hôte Linux jetable, avec une ancienne
+base SQLite, une clé maître et une donnée chiffrée synthétiques.
+
+```sh
+bash tests/integration/test_rust_monitor_distribution.sh "$(dpkg --print-architecture)"
+```
+
 ## Mesurer l'API de suivi
 
 ```sh

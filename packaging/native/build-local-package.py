@@ -138,11 +138,23 @@ def replace_exact(text: str, old: str, new: str) -> str:
 
 def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-local-test',
           architecture: str = 'amd64',
-          maintainer: str = 'PXE Tools local test <maintainers@example.invalid>') -> None:
+          maintainer: str = 'PXE Tools local test <maintainers@example.invalid>',
+          rust_binary: Path | None = None) -> None:
     if package_name not in ('pxe-tools-local-test', 'pxe-tools'):
         raise ValueError('unsupported package name')
     if architecture not in GRUB_DEPENDENCIES:
         raise ValueError('supported package architectures are amd64 and arm64')
+    if rust_binary is not None:
+        if package_name != 'pxe-tools-local-test':
+            raise ValueError('Rust monitoring is only available in the local test package')
+        if rust_binary.is_symlink() or not rust_binary.is_file():
+            raise ValueError('Use a regular file for the Rust binary')
+        with rust_binary.open('rb') as binary:
+            header = binary.read(64)
+        machine = {'amd64': 62, 'arm64': 183}[architecture]
+        if (len(header) != 64 or header[:7] != b'\x7fELF\x02\x01\x01'
+                or int.from_bytes(header[18:20], 'little') != machine):
+            raise ValueError('The Rust binary must be a Linux ELF for the package architecture')
     if not re.fullmatch(r'[^<>\r\n]{1,100} <[A-Za-z0-9._+\-]+@[A-Za-z0-9.\-]+>', maintainer):
         raise ValueError('maintainer must be a single name and email address')
     if not destination.is_absolute() or not destination.parent.is_dir():
@@ -194,6 +206,22 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
                      + sorted((ROOT/'packaging/native').glob('pxe-tools-*.target'))):
             shutil.copy2(checked(unit), units/unit.name)
         templates=root/'opt/pxe-tools/nginx'; templates.mkdir(parents=True)
+        if rust_binary is not None:
+            rust_assets = ROOT/'rust/packaging'
+            monitor = root/'usr/lib/pxe-tools/pxe-tools-rust'
+            shutil.copyfile(rust_binary, monitor)
+            monitor.chmod(0o755)
+            shutil.copy2(checked(rust_assets/'pxe-tools-rust-monitor.service'), units)
+            drop_in = units/'pxe-tools-pxe-http.service.d'
+            drop_in.mkdir()
+            shutil.copy2(checked(rust_assets/'rust-monitor.conf'), drop_in/'50-rust-monitor.conf')
+            routing = templates/'rust-monitor.d'
+            routing.mkdir()
+            data = checked(rust_assets/'monitor.conf').read_text()
+            data = replace_exact(data, '/app/public', '/usr/lib/pxe-tools/app/public')
+            data = replace_exact(data, '/run/php/php8.4-fpm.sock', '/run/pxe-tools-php/fpm.sock')
+            data = replace_exact(data, 'include fastcgi_params;', 'include /etc/nginx/fastcgi_params;')
+            (routing/'monitor.conf').write_text(data)
         for name in ('admin-http-serve.conf.tmpl','admin-http-redirect.conf.tmpl','admin-https.conf.tmpl'):
             data=checked(ROOT/'docker/pxe-tools/nginx'/name).read_text()
             data=data.replace('/app/public','/usr/lib/pxe-tools/app/public')
@@ -242,6 +270,7 @@ if __name__ == '__main__':
     parser.add_argument('destination',type=Path)
     parser.add_argument('--version',default='0.0.1~local2')
     parser.add_argument('--architecture', choices=GRUB_DEPENDENCIES, default='amd64')
+    parser.add_argument('--rust-binary', type=Path, help='include the local experimental Rust monitor')
     args=parser.parse_args()
-    build(args.destination, args.version, architecture=args.architecture)
+    build(args.destination, args.version, architecture=args.architecture, rust_binary=args.rust_binary)
     print('Experimental local package built:',args.destination)

@@ -10,6 +10,7 @@ __pycache__/
 .DS_Store
 # Generated only in native package staging, never in Docker images.
 app/src/native-build-version.txt
+rust/target/
 
 # Git / IDE
 .git

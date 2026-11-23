@@ -3,7 +3,7 @@
 # tourne sous s6-overlay v3 dans un seul container, network_mode: host.
 # Construction locale et candidat de publication multiarchitecture.
 
-FROM debian:trixie-slim
+FROM debian:trixie-slim AS appliance
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -283,3 +283,19 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
 
 # s6-overlay init system
 ENTRYPOINT ["/init"]
+
+FROM rust:1.96.0-trixie AS rust-build
+WORKDIR /source
+COPY rust/ rust/
+COPY docker/worker/templates/preseed.php.j2 docker/worker/templates/preseed-base.cfg.j2 docker/worker/templates/
+RUN cargo build --locked --release --manifest-path rust/Cargo.toml \
+    && strip rust/target/release/pxe-tools-rust
+
+FROM appliance AS rust-experimental
+COPY --from=rust-build /source/rust/target/release/pxe-tools-rust /usr/lib/pxe-tools/pxe-tools-rust
+COPY rust/packaging/monitor.conf /opt/pxe-tools/nginx/rust-monitor.d/monitor.conf
+COPY --chmod=0755 rust/packaging/s6-run /etc/s6-overlay/s6-rc.d/rust-monitor/run
+RUN printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rust-monitor/type \
+    && touch /etc/s6-overlay/s6-rc.d/user/contents.d/rust-monitor
+
+FROM appliance AS default

@@ -8,6 +8,7 @@ mod preseed;
 mod pxe;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::error::Error;
@@ -15,7 +16,7 @@ use std::fs;
 use std::io::Read;
 use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -27,18 +28,48 @@ const TEXT: &str = "text/plain; charset=utf-8";
 type ApiResult = rusqlite::Result<(u16, Value)>;
 type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
 
+enum Routes<'a> {
+    Full(&'a Path),
+    Monitor(&'a Path),
+}
+
+#[derive(Deserialize)]
+struct MonitorDatabase {
+    driver: String,
+    path: Option<PathBuf>,
+}
+
+fn monitor_database(config: &Path) -> Option<PathBuf> {
+    let config: MonitorDatabase = serde_json::from_slice(&fs::read(config).ok()?).ok()?;
+    if !config.driver.eq_ignore_ascii_case("sqlite") {
+        return None;
+    }
+    // Leave implicit paths and unsupported configurations to the PHP application.
+    let path = config.path?;
+    (path.is_absolute()
+        && !path
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .any(|b| b.is_ascii_control())
+        && path.is_file())
+    .then_some(path)
+}
+
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let [db, socket] = args.as_slice() else {
-        return Err(
-            "Usage: pxe-tools-rust /absolute/path/to/test.sqlite /private/dir/http.sock".into(),
-        );
+    let (routes, socket) = match args.as_slice() {
+        [db, socket] if Path::new(db).is_absolute() && Path::new(db).is_file() => {
+            (Routes::Full(Path::new(db)), socket)
+        }
+        [flag, config, socket] if flag == "--monitor-only" && Path::new(config).is_absolute() => {
+            (Routes::Monitor(Path::new(config)), socket)
+        }
+        _ => return Err(
+            "Usage: pxe-tools-rust [--monitor-only] /absolute/path/to/database-or-config /private/dir/http.sock".into(),
+        ),
     };
-    let db = Path::new(db);
     let socket = Path::new(socket);
-    if !db.is_absolute() || !db.is_file() {
-        return Err("An absolute path to an existing SQLite database is required".into());
-    }
     if !socket.is_absolute()
         || socket.parent().is_none_or(|dir| {
             fs::metadata(dir).map_or(true, |meta| meta.permissions().mode() & 0o077 != 0)
@@ -53,9 +84,10 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         for _ in 0..3 {
             let server = &server;
             let catalog = &catalog;
+            let routes = &routes;
             scope.spawn(move || {
                 for mut request in server.incoming_requests() {
-                    let response = handle(&mut request, db, catalog).unwrap_or_else(|error| {
+                    let response = handle(&mut request, routes, catalog).unwrap_or_else(|error| {
                         eprintln!("SQLite request failed: {error}");
                         response(
                             500,
@@ -73,12 +105,32 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 fn handle(
     request: &mut Request,
-    path_to_db: &Path,
+    routes: &Routes<'_>,
     catalog: &monitoring::Catalog,
 ) -> rusqlite::Result<HttpResponse> {
     let uri = request.url().to_owned();
     let (path, query) = uri.split_once('?').unwrap_or((&uri, ""));
     let method = request.method().clone();
+    let monitor_db;
+    let path_to_db = match routes {
+        Routes::Full(db) => *db,
+        Routes::Monitor(config) => {
+            if method != Method::Get || path != MONITORING {
+                return Ok(not_found(&method, path));
+            }
+            // Read each time so an atomic wizard/administrator change takes effect
+            // immediately and requests cannot keep going to the previous database.
+            let Some(db) = monitor_database(config) else {
+                return Ok(response(
+                    503,
+                    JSON,
+                    r#"{"error":"SQLite configuration unavailable"}"#,
+                ));
+            };
+            monitor_db = db;
+            &monitor_db
+        }
+    };
     let peer = request_header(request, CLIENT_IP)
         .unwrap_or_default()
         .to_owned();
@@ -99,7 +151,11 @@ fn handle(
             } else {
                 json_response(failure(403, "forbidden"))?
             };
-            Ok(result.with_header(header("Cache-Control", "no-store")))
+            let result = result.with_header(header("Cache-Control", "no-store"));
+            Ok(match routes {
+                Routes::Full(_) => result,
+                Routes::Monitor(_) => result.with_header(header("X-PXE-Monitor-Backend", "rust")),
+            })
         }
         (Method::Get, BOOT_SELECTED) => {
             let db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -327,12 +383,12 @@ fn handle(
             let db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             serve_postboot(&db, ip, path)
         }
-        (method, path) => Ok(response(
-            404,
-            TEXT,
-            format!("404 Not Found: {method} {path}\n"),
-        )),
+        (method, path) => Ok(not_found(&method, path)),
     }
+}
+
+fn not_found(method: &Method, path: &str) -> HttpResponse {
+    response(404, TEXT, format!("404 Not Found: {method} {path}\n"))
 }
 
 fn serve_postboot(
