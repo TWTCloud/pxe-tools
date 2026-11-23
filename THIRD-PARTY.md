@@ -51,6 +51,14 @@ identifiée dans une chaîne amont correspondante ont été ajoutées dans
 `third_party/licenses/s6-bundled/`. La correspondance exacte de cette chaîne
 avec la construction publiée et les composants GCC restent à vérifier ; la correspondance exacte demeure à établir avant la distribution d’une image Docker.
 
+Pour le candidat bêta 12, les recettes amont de s6-overlay 3.2.0.0
+désignent les archives Skarnet GCC 14.1.0 `x86_64-linux-musl_pc` et
+`aarch64-linux-musl_pi4`. Les deux archives indiquent la même révision de
+musl, `007997299248b8682dcbb73595c53dfe86071c83`. Le fichier COPYRIGHT à
+cette révision correspond à la notice embarquée. Les références des
+composants s6 et des versions Debian sont relevées par architecture dans
+les offres de sources à joindre aux images.
+
 Les textes complets LGPL 2 et LGPL 2.1 associés aux notices des outils statiques
 sont inclus. Les preuves de construction et de reliage, leur portée et leurs
 limites sont précisées dans `static-helpers/SOURCE-PREPARATION.md`. Les archives sont disponibles à l’adresse indiquée dans cette notice et doivent
