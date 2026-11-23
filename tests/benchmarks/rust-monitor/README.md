@@ -393,6 +393,21 @@ empreintes SHA-256 approuvées. [Prérequis Windows 11](https://learn.microsoft.
   Publier les résultats et journaux de test. Conserver les ISO, WIM et
   secrets de laboratoire en dehors du dépôt et des artefacts publics.
 
+Sur le poste de préparation Windows isolé, le script
+`tests/support/windows-pxe/prepare-winpe.ps1` utilise l’ADK et son
+complément WinPE déjà installés. Il vérifie les empreintes de l’ISO et de
+`wimboot` fournies au banc, ajoute les composants nécessaires et lance la
+sonde depuis `startnet.cmd`. Le répertoire de sortie doit être neuf. Son
+sous-répertoire `boot` et son manifeste `case.json` restent privés et
+temporaires. [Personnalisation WinPE](https://learn.microsoft.com/windows-hardware/manufacture/desktop/winpe-mount-and-customize?view=windows-11)
+
+```powershell
+.\tests\support\windows-pxe\prepare-winpe.ps1 `
+  -WindowsIso $iso -WindowsIsoSha256 $isoSha256 -Wimboot $wimboot `
+  -WimbootSha256 $wimbootSha256 -OutputDirectory $output `
+  -GuestId $guestId -DiskSerial $diskSerial -Edition $edition
+```
+
 Le manifeste du cas contient `guest_id` (UUID), `disk_serial`,
 `edition` (par exemple `Professional`), `iso_sha256` et
 `winpe_sha256`. La preuve réseau produite côté serveur contient
