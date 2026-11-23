@@ -558,6 +558,38 @@ def verify_schema_migration(binary):
     print('Rust schema upgrade preserved historical defaults, encrypted bytes and explicit boot choices', flush=True)
 
 
+def verify_preset_network_migration(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-presets-migration-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        config = root/'db.conf'
+        config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
+        schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+        command = [str(binary),'--migrate-preset-network',str(config)]
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            db.executemany(
+                'INSERT INTO presets(name,distro,admin_user_login,static_netmask,static_cidr,static_dns) '
+                "VALUES(?,'debian','fixture',?,?,?)",
+                [
+                    ('legacy',' 255.255.254.0 ',None,'192.0.2.53, 2001:db8::53'),
+                    ('explicit','255.255.0.0',24,'[ "192.0.2.54" ]'),
+                    ('invalid-mask','255.0.255.0',None,None),
+                    ('unset',None,None,None),
+                ],
+            )
+        for _ in range(2):
+            subprocess.run(command, check=True, capture_output=True)
+            with closing(sqlite3.connect(database)) as db:
+                assert db.execute('SELECT static_cidr,static_dns FROM presets ORDER BY id').fetchall()==[
+                    (23,'["192.0.2.53","2001:db8::53"]'),
+                    (24,'[ "192.0.2.54" ]'),
+                    (None,None),
+                    (None,None),
+                ]
+    print('Rust migrated legacy preset network values and preserved explicit settings', flush=True)
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -616,6 +648,7 @@ def local(binary):
     verify_worker_commands(binary)
     verify_worker_recovery(binary)
     verify_schema_migration(binary)
+    verify_preset_network_migration(binary)
 
 
 def main():

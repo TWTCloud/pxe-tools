@@ -81,6 +81,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         if flag == "--migrate-schema" && Path::new(config).is_absolute() {
             return migrations::schema(Path::new(config));
         }
+        if flag == "--migrate-preset-network" && Path::new(config).is_absolute() {
+            return migrations::preset_network(Path::new(config));
+        }
         if flag == "--migrate-network-settings" && Path::new(config).is_absolute() {
             return migrations::network_settings(Path::new(config));
         }

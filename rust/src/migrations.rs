@@ -155,3 +155,72 @@ pub fn schema(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Rust applied the SQLite schema evolution");
     Ok(())
 }
+
+pub fn preset_network(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let path = crate::configured_database(config).ok_or("Existing SQLite database required")?;
+    let mut db = crate::connect(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut updates = Vec::new();
+    {
+        let mut presets = tx.prepare(
+            "SELECT id,static_netmask,static_cidr IS NULL,static_dns FROM presets
+                                      WHERE (static_cidr IS NULL AND static_netmask IS NOT NULL)
+                                         OR (static_dns IS NOT NULL AND static_dns<>'')",
+        )?;
+        let mut rows = presets.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let mask: Option<String> = row.get(1)?;
+            let missing_cidr: bool = row.get(2)?;
+            let raw: Option<String> = row.get(3)?;
+            let cidr = if missing_cidr {
+                mask.as_deref().and_then(legacy_netmask)
+            } else {
+                None
+            };
+            let dns = raw
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .and_then(legacy_dns);
+            if cidr.is_some() || dns.is_some() {
+                updates.push((cidr, dns, id));
+            }
+        }
+    }
+    let updated = updates.len();
+    for (cidr, dns, id) in updates {
+        tx.execute(
+            "UPDATE presets SET static_cidr=COALESCE(?1,static_cidr),static_dns=COALESCE(?2,static_dns) WHERE id=?3",
+            rusqlite::params![cidr,dns,id],
+        )?;
+    }
+    tx.commit()?;
+    println!("Rust normalized legacy network settings for {updated} preset(s)");
+    Ok(())
+}
+
+fn legacy_netmask(value: &str) -> Option<u32> {
+    let address = crate::php_trim(value).parse::<std::net::Ipv4Addr>().ok()?;
+    let mask = u32::from(address);
+    (mask.leading_ones() == mask.count_ones()).then_some(mask.count_ones())
+}
+
+fn legacy_dns(value: &str) -> Option<String> {
+    if matches!(
+        serde_json::from_str::<serde_json::Value>(value),
+        Ok(serde_json::Value::Object(_) | serde_json::Value::Array(_))
+    ) {
+        return None;
+    }
+    let list: Vec<_> = value
+        .split(|character: char| {
+            matches!(character, ',' | '\x0b') || character.is_ascii_whitespace()
+        })
+        .map(crate::php_trim)
+        .filter(|item| !item.is_empty())
+        .collect();
+    serde_json::to_string(&list).ok()
+}

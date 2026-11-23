@@ -184,39 +184,43 @@ if ($rustGuided) {
 // ---------------------------------------------------------------------------
 // 1. Presets : netmask / DNS / partition_mode legacy
 // ---------------------------------------------------------------------------
-$rows = $pdo->query('SELECT id, static_netmask, static_cidr, static_dns, partition_mode, partition_custom_json FROM presets')->fetchAll(PDO::FETCH_ASSOC);
-$migrated = 0;
+if ($rustGuided) {
+    $runsRustMigration('--migrate-preset-network');
+} else {
+    $rows = $pdo->query('SELECT id, static_netmask, static_cidr, static_dns, partition_mode, partition_custom_json FROM presets')->fetchAll(PDO::FETCH_ASSOC);
+    $migrated = 0;
 
-foreach ($rows as $row) {
-    $updates = [];
-    $params  = [];
+    foreach ($rows as $row) {
+        $updates = [];
+        $params  = [];
 
-    if ($row['static_cidr'] === null && !empty($row['static_netmask'])) {
-        $cidr = netmaskToCidr($row['static_netmask']);
-        if ($cidr !== null) {
-            $updates[] = 'static_cidr = ?';
-            $params[]  = $cidr;
+        if ($row['static_cidr'] === null && !empty($row['static_netmask'])) {
+            $cidr = netmaskToCidr($row['static_netmask']);
+            if ($cidr !== null) {
+                $updates[] = 'static_cidr = ?';
+                $params[]  = $cidr;
+            }
+        }
+
+        $dns = $row['static_dns'];
+        if ($dns !== null && $dns !== '') {
+            $decoded = json_decode((string)$dns, true);
+            if (!is_array($decoded)) {
+                $updates[] = 'static_dns = ?';
+                $params[]  = normalizeDns($dns);
+            }
+        }
+
+        if (!empty($updates)) {
+            $params[] = $row['id'];
+            $sql = 'UPDATE presets SET ' . implode(', ', $updates) . ' WHERE id = ?';
+            $pdo->prepare($sql)->execute($params);
+            $migrated++;
         }
     }
 
-    $dns = $row['static_dns'];
-    if ($dns !== null && $dns !== '') {
-        $decoded = json_decode((string)$dns, true);
-        if (!is_array($decoded)) {
-            $updates[] = 'static_dns = ?';
-            $params[]  = normalizeDns($dns);
-        }
-    }
-
-    if (!empty($updates)) {
-        $params[] = $row['id'];
-        $sql = 'UPDATE presets SET ' . implode(', ', $updates) . ' WHERE id = ?';
-        $pdo->prepare($sql)->execute($params);
-        $migrated++;
-    }
+    echo "migrate-presets: $migrated row(s) updated, " . count($rows) . " total\n";
 }
-
-echo "migrate-presets: $migrated row(s) updated, " . count($rows) . " total\n";
 
 // Les anciennes colonnes et configurations de partition restent intactes.
 
