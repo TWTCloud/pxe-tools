@@ -171,10 +171,12 @@ PHP CLI. Le renderer couvre les recettes de partition
 sur un disque identifié, avec partitions physiques BIOS ou UEFI. Un plan
 LVM sur ce disque peut définir ses groupes de volumes et volumes logiques.
 La vérification compare le rendu à PHP et refuse les volumes qui désignent
-un groupe ou une partition physique absente. Les recettes multi-disques
-sont liées aux chemins et identités vérifiés de chaque disque. Le rendu
-RAID demande GPT et refuse les membres ambigus ou réutilisés. Le banc APT
-amd64 vérifie le scénario RAID1 à deux disques. Le wipe et les tests de
+un groupe ou une partition physique absente. Les plans LVM peuvent
+référencer des PV supplémentaires sur des disques identifiés. Le profil
+RAID utilise deux ou plusieurs disques identifiés avec une recette BIOS
+GPT symétrique et la racine sur RAID1. Rust refuse les plans avec des
+membres ambigus ou réutilisés, les recettes RAID asymétriques et les
+recettes multi-disques en mode régulier. Le wipe et les tests de
 disques restent à porter. Le renderer prend en charge les interfaces
 secondaires DHCP ou statiques, les VLAN secondaires et les bonds. Ces
 profils réseau sont vérifiés par comparaison de leur preseed et de leurs

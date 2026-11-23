@@ -405,11 +405,11 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         instrument=r'''layout=unexpected
 md_source="$(findmnt -n -o SOURCE /)"
 md_name="$(basename "$(readlink -f "$md_source")")"
-if [ "$(findmnt -n -o SOURCE /boot)" = /dev/vda2 ] \
+if [ "$(findmnt -n -o TARGET /boot 2>/dev/null || true)" != /boot ] \
         && [ "$(lsblk -dn -o PTTYPE /dev/vda)" = gpt ] \
         && [ "$(lsblk -dn -o PTTYPE /dev/vdb)" = gpt ] \
         && [ "$(cat "/sys/block/$md_name/md/level" 2>/dev/null)" = raid1 ] \
-        && [ -d "/sys/block/$md_name/slaves/vda4" ] \
+        && [ -d "/sys/block/$md_name/slaves/vda2" ] \
         && [ -d "/sys/block/$md_name/slaves/vdb2" ]; then
     layout=gpt-raid1-two-disks
 fi

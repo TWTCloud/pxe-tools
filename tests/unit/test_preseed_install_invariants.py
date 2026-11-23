@@ -485,7 +485,7 @@ $_GET = ['mac' => '02:00:00:00:00:01', 'code' => 'os_first_boot', 'ack' => $argv
                     'vgs':[{'name':'sys','pvs':['md0']}],
                     'logical_volumes':[{'vg':'sys','name':'root','fs':'ext4','mount':'/','fill':True}]}
                 output = self.render({'distro':'debian','partition_mode':'custom','partition_custom_json':json.dumps(plan)})
-                self.assertIn(expected, output)
+                self.assertIn(expected + " " + chr(92) + "\n", output)
 
     def test_explicit_grub_choice_is_not_replaced_by_default(self):
         output = self.render({'distro':'debian','partition_mode':'default','advanced':{'bootloader':{'with_other_os':True}}})

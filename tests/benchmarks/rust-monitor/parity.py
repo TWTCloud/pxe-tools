@@ -392,7 +392,7 @@ def compare_install(ports, paths):
     second_proof = {**proof, "value": "PXE-TEST-TWO"}
     layouts = [
         {"path": target, "partitions": [
-            first, boot, {"id":"arrayA", "fs":"raid-member", "fill":True},
+            first, {"id":"arrayA", "fs":"raid-member", "fill":True},
         ]},
         {"path": second, "partitions": [
             {"id":"nvme_bios", "fs":"biosgrub", "size_mb":1},
@@ -404,14 +404,12 @@ def compare_install(ports, paths):
              "target_disk_identities":{target:proof,second:second_proof}}
     raid_plan = {**multi, "raid_arrays":[array]}
     multiconfig = {**config, "partition_mode":"custom", "review_boot_mode":"bios"}
-    for layout, method in (
-        (raid_plan, "raid"),
-        ({**raid_plan, "raid_arrays":[{**array,"is_pv":True}],
-          "vgs":[{**group, "pvs":["md0"]}], "logical_volumes":[lv_root]}, "raid"),
-        ({**multi, "disks":[{**layouts[0],"partitions":[first,boot,{**root,"id":"vda3"}]},
-                            {**layouts[1],"partitions":[layouts[1]["partitions"][0],
-                                {"id":"data", "fs":"ext4", "mount":"/srv", "fill":True}]}]}, "regular"),
-    ):
+    multi_lvm = {
+        **multi, "disks":[{"path":target, "partitions":[first,boot,pv]},
+                          {"path":second, "partitions":[{**pv, "id":"nvme_pv"}]}],
+        "vgs":[{**group, "pvs":["vda3","nvme_pv"]}], "logical_volumes":[lv_root],
+    }
+    for layout, method in ((raid_plan, "raid"), (multi_lvm, "lvm")):
         set_config({**multiconfig, "partition_custom_json":json.dumps(layout)})
         seeds = [response(port, PRESEED + query, peer="lan") for port in ports]
         assert [item[0] for item in seeds] == [200,200], seeds[1][3]
@@ -422,8 +420,19 @@ def compare_install(ports, paths):
         assert second + ":" + base64.b64encode(second_proof["value"].encode()).decode() in rendered[1]
         assert f"d-i partman-auto/method string {method}" in rendered[1]
         if method == "raid":
-            assert f"/dev/vda3#{second}p2" in rendered[1]
+            members = f"/dev/vda2#{second}p2"
+            assert re.search(rf"{re.escape(members)} \\$",
+                             rendered[1], re.MULTILINE), rendered[1]
+            assert partman_block(rendered[1]).count("method{ raid }") == 1
+        else:
+            assert f"device{{ {target} }}" in rendered[1] and f"device{{ {second} }}" in rendered[1]
     for invalid in (
+        {**raid_plan, "disks":[{**layouts[0], "partitions":[first,boot,layouts[0]["partitions"][1]]}, layouts[1]]},
+        {**raid_plan, "raid_arrays":[{**array,"is_pv":True}],
+         "vgs":[{**group, "pvs":["md0"]}], "logical_volumes":[lv_root]},
+        {**multi_lvm, "disks":[multi_lvm["disks"][0], {**multi_lvm["disks"][1],
+         "partitions":[{"id":"other", "fs":"ext4", "mount":"/srv", "fill":True}]}]},
+
         {**raid_plan, "target_disk_identities":{target:proof}},
         {**raid_plan, "target_disk_identities":{target:proof,second:proof}},
         {**raid_plan, "raid_arrays":[{**array,"members":["arrayA","arrayA"]}]},

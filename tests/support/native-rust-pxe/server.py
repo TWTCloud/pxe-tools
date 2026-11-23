@@ -197,16 +197,14 @@ def schedule(machine, report):
                 "disks": [
                     {"path": disk, "partitions": [
                         {"id": "vda1", "fs": "biosgrub", "size_mb": 1},
-                        {"id": "vda2", "fs": "ext4", "mount": "/boot", "size_mb": 768},
-                        {"id": "vda3", "fs": "swap", "size_mb": 512},
-                        {"id": "vda4", "fs": "raid-member", "fill": True},
+                        {"id": "vda2", "fs": "raid-member", "fill": True},
                     ]},
                     {"path": "/dev/vdb", "partitions": [
                         {"id": "vdb1", "fs": "biosgrub", "size_mb": 1},
                         {"id": "vdb2", "fs": "raid-member", "fill": True},
                     ]},
                 ],
-                "raid_arrays": [{"name": "md0", "level": 1, "members": ["vda4", "vdb2"]}],
+                "raid_arrays": [{"name": "md0", "level": 1, "members": ["vda2", "vdb2"]}],
             })
         db.execute("UPDATE machines SET status='configured',hostname='pxe-fixture',domain='example.test',"
                    " install_config_json=? WHERE id=?", (json.dumps(config), machine))

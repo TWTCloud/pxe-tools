@@ -61,6 +61,21 @@ impl Layout {
             return None;
         }
         let multi = plan_targets.len() > 1;
+        let raid_layout = !arrays.is_empty();
+        if raid_layout {
+            // Debian applies the entire physical recipe to each RAID disk.
+            // The guided profile supports a symmetric GPT BIOS RAID1 root.
+            if arrays.len() != 1
+                || php_string(&arrays[0]["level"]) != "1"
+                || php_truthy(&arrays[0]["is_pv"])
+                || lvm.first_group.is_some()
+            {
+                return None;
+            }
+        } else if multi && lvm.first_group.is_none() {
+            // D-I regular mode partitions only the first matching device.
+            return None;
+        }
         let constraints = &config["disk_target_constraints"];
         if multi && !empty_collection(constraints) {
             return None;
@@ -94,18 +109,19 @@ impl Layout {
             if !assigned.insert(disk) || !targets.iter().any(|(path, _)| path == disk) {
                 return None;
             }
-            let disk_flag = if multi {
-                format!(" $disk{{ {disk} }}")
-            } else {
-                String::new()
-            };
             let mut fill = false;
+            let mut disk_segments = Vec::new();
             let entries = recipe["partitions"]
                 .as_array()
                 .filter(|entries| !entries.is_empty())?;
             for (position, entry) in entries.iter().enumerate() {
                 let id = entry["id"].as_str().filter(|id| !id.is_empty())?;
                 let fs = entry["fs"].as_str()?;
+                if (raid_layout && !matches!(fs, "biosgrub" | "raid-member"))
+                    || (multi && !raid_layout && disk != targets[0].0 && fs != "lvm-pv")
+                {
+                    return None;
+                }
                 let uses_fill = php_truthy(&entry["fill"]);
                 if !ids.insert(id) || (uses_fill && fill) {
                     return None;
@@ -124,8 +140,8 @@ impl Layout {
                         return None;
                     }
                     bios_partition = true;
-                    segments.push(format!(
-                        "{size} {size} {size} free $bios_boot{{ }}{disk_flag} method{{ biosgrub }} ."
+                    disk_segments.push(format!(
+                        "{size} {size} {size} free $bios_boot{{ }} method{{ biosgrub }} ."
                     ));
                     continue;
                 }
@@ -137,7 +153,7 @@ impl Layout {
                     _ => return None,
                 };
                 let mut segment = sized_segment(uses_fill, size, filesystem);
-                segment.push_str(&format!(" $primary{{ }}{disk_flag}"));
+                segment.push_str(" $primary{ }");
                 match fs {
                     "lvm-pv" => {
                         let group = lvm.physical.get(id)?;
@@ -145,11 +161,20 @@ impl Layout {
                         if !entry["mount"].is_null() || !empty_collection(&entry["mount_options"]) {
                             return None;
                         }
+                        if multi {
+                            segment.push_str(&format!(" device{{ {disk} }}"));
+                        }
                         segment.push_str(&format!(
                             " $defaultignore{{ }} method{{ lvm }} vg_name{{ {group} }}"
                         ));
                     }
                     "raid-member" => {
+                        if !raid_layout
+                            || !entry["mount"].is_null()
+                            || !empty_collection(&entry["mount_options"])
+                        {
+                            return None;
+                        }
                         let separator = if disk.as_bytes().last()?.is_ascii_digit() {
                             "p"
                         } else {
@@ -172,13 +197,25 @@ impl Layout {
                     }
                 }
                 segment.push_str(" .");
-                segments.push(segment);
+                disk_segments.push(segment);
+            }
+            if raid_layout && !segments.is_empty() {
+                if disk_segments != segments {
+                    return None;
+                }
+            } else {
+                segments.extend(disk_segments);
             }
         }
-        if (multi || lvm.first_group.is_some() || !arrays.is_empty()) && !mounts.contains("/boot") {
+        if lvm.first_group.is_some() && !mounts.contains("/boot") {
             return None;
         }
-        let raid = raid_directives(arrays, &raid_members, &lvm, &mut pv_ids, &mut mounts)?;
+        let raid = if let Some(array) = arrays.first() {
+            mounts.insert("/");
+            raid_directives(array, &raid_members)?
+        } else {
+            String::new()
+        };
         if !lvm.physical.keys().all(|id| pv_ids.contains(id)) {
             return None;
         }
@@ -188,7 +225,7 @@ impl Layout {
         }
         // The RAID recipe fixes physical partition numbers. GPT keeps those
         // numbers independent of the number of primary partitions.
-        if !arrays.is_empty() && !bios_partition && !efi_partition {
+        if raid_layout && !bios_partition {
             return None;
         }
         let firmware = if efi_partition { "uefi" } else { "bios" };
@@ -281,79 +318,36 @@ d-i partman-basicfilesystems/no_swap boolean false"
     }
 }
 
-fn raid_directives<'a>(
-    arrays: &'a [Value],
-    members: &HashMap<&'a str, (&str, String)>,
-    lvm: &Lvm<'a>,
-    pv_ids: &mut HashSet<&'a str>,
-    mounts: &mut HashSet<&'a str>,
-) -> Option<String> {
-    let mut names = HashSet::new();
-    let mut used = HashSet::new();
-    let mut segments = Vec::new();
-    for array in arrays {
-        let name = lvm_name(&array["name"])?;
-        if !names.insert(name) {
-            return None;
-        }
-        let level = php_string(&array["level"]).parse::<u8>().ok()?;
-        let active = array["members"].as_array()?;
-        let spares = collection(&array["spares"])?;
-        let minimum = match level {
-            0 | 1 => 2,
-            5 => 3,
-            6 | 10 => 4,
-            _ => return None,
-        };
-        if active.len() < minimum || (level == 0 && !spares.is_empty()) {
-            return None;
-        }
-        let mut disks = HashSet::new();
-        let mut paths = |values: &'a [Value]| -> Option<String> {
-            let paths = values
-                .iter()
-                .map(|value| {
-                    let id = value.as_str()?;
-                    let (disk, path) = members.get(id)?;
-                    (used.insert(id) && disks.insert(*disk)).then_some(path.as_str())
-                })
-                .collect::<Option<Vec<_>>>()?;
-            Some(paths.join("#"))
-        };
-        let devices = paths(active)?;
-        let spare_devices = if spares.is_empty() {
-            "-".to_owned()
-        } else {
-            paths(spares)?
-        };
-        let (filesystem, mount) = if php_truthy(&array["is_pv"]) {
-            // partman uses new_vg_name for MD devices marked as physical volumes.
-            if !pv_ids.insert(name) || lvm.physical.get(name).copied()? != lvm.first_group? {
-                return None;
-            }
-            ("lvm", "-")
-        } else {
-            if !mounts.insert("/") {
-                return None;
-            }
-            ("ext4", "/")
-        };
-        segments.push(format!(
-            "{level} {} {} {filesystem} {mount} {devices} {spare_devices}",
-            active.len(),
-            spares.len()
-        ));
-    }
-    if used.len() != members.len() {
+fn raid_directives(array: &Value, members: &HashMap<&str, (&str, String)>) -> Option<String> {
+    lvm_name(&array["name"])?;
+    let active = array["members"].as_array()?;
+    let spares = collection(&array["spares"])?;
+    if active.len() < 2 {
         return None;
     }
-    if segments.is_empty() {
-        return Some(String::new());
+    let mut disks = HashSet::new();
+    let mut paths = |values: &[Value]| -> Option<String> {
+        let paths = values
+            .iter()
+            .map(|value| {
+                let (disk, path) = members.get(value.as_str()?)?;
+                disks.insert(*disk).then_some(path.as_str())
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(paths.join("#"))
+    };
+    let devices = paths(active)?;
+    // Debian auto-raidcfg passes the optional seventh field directly to mdadm.
+    let spare_field = if spares.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", paths(spares)?)
+    };
+    if disks.len() != members.len() {
+        return None;
     }
     let continued = " \\\n      ";
-    let separator = format!("{continued}.{continued}");
-    let body = segments.join(&separator);
-    Some(format!("d-i partman-auto-raid/recipe string{continued}{body}{continued}.\nd-i partman-md/confirm boolean true\nd-i partman-md/confirm_nooverwrite boolean true\n"))
+    Some(format!("d-i partman-auto-raid/recipe string{continued}1 {} {} ext4 / {devices}{spare_field}{continued}.\nd-i partman-md/confirm boolean true\nd-i partman-md/confirm_nooverwrite boolean true\n", active.len(), spares.len()))
 }
 
 struct Lvm<'a> {
