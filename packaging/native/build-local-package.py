@@ -240,6 +240,9 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             binary.chmod(0o755)
         if rust_guided:
             shutil.copy2(checked(rust_assets/'pxe-tools-pxe-http.service'), units)
+            launcher = root/'usr/lib/pxe-tools/start-rust-guided.sh'
+            shutil.copyfile(checked(rust_assets/'start-guided.sh'), launcher)
+            launcher.chmod(0o755)
             configure_guided_units(units)
             with (native/'default.env').open('a') as environment:
                 environment.write('PXE_RUST_GUIDED=1\nPXE_RUST_DIRECT_HTTP=1\n')
