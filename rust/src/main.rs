@@ -77,6 +77,9 @@ fn configured_database(config: &Path) -> Option<PathBuf> {
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if let [flag, config] = args.as_slice() {
+        if flag == "--migrate-schema" && Path::new(config).is_absolute() {
+            return migrations::schema(Path::new(config));
+        }
         if flag == "--migrate-network-settings" && Path::new(config).is_absolute() {
             return migrations::network_settings(Path::new(config));
         }

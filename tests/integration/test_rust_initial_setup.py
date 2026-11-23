@@ -438,6 +438,48 @@ def verify_worker_commands(binary):
     print('Rust network migration preserves explicit choices and historical DHCP fallback atomically', flush=True)
 
 
+def verify_schema_migration(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-schema-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        config = root/'db.conf'
+        config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
+        schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+        command = [str(binary),'--migrate-schema',str(config)]
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            db.execute('ALTER TABLE presets DROP COLUMN root_login_mode')
+            db.execute('ALTER TABLE machines DROP COLUMN local_boot_source')
+            db.execute('ALTER TABLE init_jobs DROP COLUMN updated_at')
+            db.execute('DROP INDEX idx_installations_action')
+            db.execute('ALTER TABLE installations DROP COLUMN action_id')
+            db.execute('DROP TABLE boot_sessions')
+            db.execute("INSERT INTO presets(name,distro,admin_user_login) VALUES('legacy','debian','fixture')")
+            db.execute("INSERT INTO machines(id,mac,status,root_password_cipher) VALUES(10,'02:00:00:01:00:01','installed','opaque')")
+            db.execute("INSERT INTO machines(id,mac,status) VALUES(11,'02:00:00:01:00:02','installed')")
+            db.execute("INSERT INTO installations(machine_id,install_status) VALUES(10,'success'),(11,'failed')")
+            db.execute("CREATE TRIGGER refusal BEFORE UPDATE OF local_boot_source ON machines BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        refused = subprocess.run(command, capture_output=True, text=True)
+        assert refused.returncode
+        with closing(sqlite3.connect(database)) as db, db:
+            assert db.execute("SELECT name FROM pragma_table_info('installations') WHERE name='action_id'").fetchone() is None
+            assert db.execute("SELECT name FROM sqlite_schema WHERE name='boot_sessions'").fetchone() is None
+            db.execute('DROP TRIGGER refusal')
+        subprocess.run(command, check=True, capture_output=True)
+        with closing(sqlite3.connect(database)) as db, db:
+            assert db.execute('SELECT local_boot_source,root_password_cipher FROM machines ORDER BY id').fetchall()==[
+                ('pxe','opaque'),('none',None),
+            ]
+            assert db.execute("SELECT name FROM sqlite_schema WHERE name='idx_installations_action'").fetchone()
+            assert db.execute("SELECT name FROM sqlite_schema WHERE name='boot_sessions'").fetchone()
+            assert db.execute('SELECT root_login_mode FROM presets').fetchone()==('enabled',)
+            db.execute("UPDATE machines SET local_boot_source='manual' WHERE id=10")
+        subprocess.run(command, check=True, capture_output=True)
+        with closing(sqlite3.connect(database)) as db, db:
+            assert db.execute("SELECT local_boot_source FROM machines WHERE id=10").fetchone()==('manual',)
+    print('Rust schema upgrade preserved historical defaults, encrypted bytes and explicit boot choices', flush=True)
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -488,6 +530,7 @@ def local(binary):
         verify_job_console(updated, database, authorization)
         verify_activity(updated, database, authorization)
     verify_worker_commands(binary)
+    verify_schema_migration(binary)
 
 
 def main():

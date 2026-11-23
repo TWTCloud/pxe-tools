@@ -165,6 +165,22 @@ if ($driver === 'sqlite') {
     $pdo->exec('PRAGMA journal_mode = WAL');
 }
 
+$rustGuided = $driver === 'sqlite' && getenv('PXE_RUST_GUIDED') === '1';
+$runsRustMigration = static function (string $operation): void {
+    $process = proc_open(
+        ['/usr/lib/pxe-tools/pxe-tools-rust', $operation, '/etc/pxe-tools/db.conf'],
+        [0 => ['file', '/dev/null', 'r'], 1 => STDOUT, 2 => STDERR],
+        $pipes
+    );
+    if (!is_resource($process) || proc_close($process) !== 0) {
+        fwrite(STDERR, "Migration SQLite Rust refusée.\n");
+        exit(2);
+    }
+};
+if ($rustGuided) {
+    $runsRustMigration('--migrate-schema');
+}
+
 // ---------------------------------------------------------------------------
 // 1. Presets : netmask / DNS / partition_mode legacy
 // ---------------------------------------------------------------------------
@@ -241,16 +257,8 @@ if (!Db::columnExists('init_jobs', 'updated_at')) {
     echo "migrate-init: added init_jobs.updated_at column (heartbeat watchdog)\n";
 }
 
-if ($driver === 'sqlite' && getenv('PXE_RUST_GUIDED') === '1') {
-    $process = proc_open(
-        ['/usr/lib/pxe-tools/pxe-tools-rust', '--migrate-network-settings', '/etc/pxe-tools/db.conf'],
-        [0 => ['file', '/dev/null', 'r'], 1 => STDOUT, 2 => STDERR],
-        $pipes
-    );
-    if (!is_resource($process) || proc_close($process) !== 0) {
-        fwrite(STDERR, "Migration réseau Rust refusée.\n");
-        exit(2);
-    }
+if ($rustGuided) {
+    $runsRustMigration('--migrate-network-settings');
 } else {
     // Sentinel wizard_completed : ne pose '0' QUE si la row n'existe pas.
     // Bug historique : Db::upsert faisait ON CONFLICT DO UPDATE value=excluded
