@@ -11,6 +11,8 @@ import uuid
 
 PREFIX = 'PXE_TOOLS_WINDOWS '
 WINPE_RAMDISK = {'Remote', 'Ramdisk:SourceIdentified', 'Ramdisk:SourceUnidentified'}
+BOOT_FILES = {'wimboot': 'wimboot_sha256', 'BCD': 'bcd_sha256',
+              'boot.sdi': 'boot_sdi_sha256', 'boot.wim': 'winpe_sha256'}
 
 
 def load_json(path):
@@ -18,16 +20,27 @@ def load_json(path):
         return json.load(stream)
 
 
+def check_fingerprint(expected, media):
+    if not isinstance(expected, str) or re.fullmatch(r'[0-9a-f]{64}', expected) is None:
+        raise ValueError(f'Invalid manifest fingerprint for {media.name}')
+    if not media.is_file() or media.stat().st_size == 0:
+        raise ValueError(f'Missing fixture media: {media.name}')
+    with media.open('rb') as stream:
+        if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
+            raise ValueError(f'Unexpected fingerprint for {media.name}')
+
+
 def check_media(case, iso, winpe):
-    for name, media in [('iso_sha256', iso), ('winpe_sha256', winpe)]:
-        expected = case[name]
-        if not isinstance(expected, str) or re.fullmatch(r'[0-9a-f]{64}', expected) is None:
-            raise ValueError(f'Invalid manifest fingerprint for {name}')
-        if not media.is_file() or media.stat().st_size == 0:
-            raise ValueError(f'Missing fixture media: {media.name}')
-        with media.open('rb') as stream:
-            if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
-                raise ValueError(f'Unexpected fingerprint for {media.name}')
+    check_fingerprint(case['iso_sha256'], iso)
+    check_fingerprint(case['winpe_sha256'], winpe)
+
+
+def check_boot_assets(case, directory):
+    for filename, field in BOOT_FILES.items():
+        asset = directory / filename
+        if asset.is_symlink():
+            raise ValueError(f'Boot asset must be a regular media file: {filename}')
+        check_fingerprint(case[field], asset)
 
 
 def verify(case, network, transcript):
@@ -68,6 +81,7 @@ def main():
     parser.add_argument('--case', type=Path, required=True)
     parser.add_argument('--iso', type=Path, required=True)
     parser.add_argument('--winpe', type=Path, required=True)
+    parser.add_argument('--boot-root', type=Path, help='check the four approved assets served by Rust')
     parser.add_argument('--network-proof', type=Path)
     parser.add_argument('--serial', type=Path)
     args = parser.parse_args()
@@ -76,6 +90,8 @@ def main():
     try:
         case = load_json(args.case)
         check_media(case, args.iso, args.winpe)
+        if args.boot_root is not None:
+            check_boot_assets(case, args.boot_root)
         if args.serial is not None:
             verify(case, load_json(args.network_proof), args.serial)
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:

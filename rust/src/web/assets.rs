@@ -35,7 +35,13 @@ impl Assets {
         })
     }
 
-    pub(super) async fn serve(&self, path: &str, headers: &HeaderMap, head: bool) -> Option<Reply> {
+    pub(super) async fn serve(
+        &self,
+        path: &str,
+        headers: &HeaderMap,
+        head: bool,
+        winpe: bool,
+    ) -> Option<Reply> {
         let segments = path
             .strip_prefix('/')?
             .split('/')
@@ -55,6 +61,11 @@ impl Assets {
         let names: Vec<&str> = segments.iter().map(|value| value.as_ref()).collect();
 
         let (base, path, mime) = match names.as_slice() {
+            ["pxe", "windows", name @ ("wimboot" | "BCD" | "boot.sdi" | "boot.wim")] if winpe => (
+                self.root.join("winpe/amd64"),
+                PathBuf::from(name),
+                "application/octet-stream",
+            ),
             ["netboot", dirs @ .., name] if !dirs.is_empty() => {
                 let mime = match *name {
                     "linux" | "vmlinuz" | "initrd" | "initrd.gz" | "initrd.lz" | "initrd.img"

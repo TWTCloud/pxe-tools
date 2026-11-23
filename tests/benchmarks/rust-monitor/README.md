@@ -351,10 +351,15 @@ empreintes SHA-256 approuvées. [Prérequis Windows 11](https://learn.microsoft.
   uniques au test. Attacher uniquement le disque vierge et une carte sur
   le segment privé avec les services DHCP, TFTP et de diffusion WinPE du
   banc. Le client part sans média de démarrage local.
-- Construire le réseau d’amorçage Windows avec le gestionnaire EFI signé,
-  le BCD et le média WinPE. Préparer la preuve du transfert EFI et du WIM
+- Démarrer un iPXE signé sur le réseau isolé et le chaîner vers
+  `http://<serveur-pxe>/pxe/windows/boot.ipxe`. Cette route Rust est activée
+  pour une adresse réservée avec `PXE_WINPE_CLIENT_IP`. Elle sert le script
+  UEFI x86-64 et les quatre fichiers préparés dans `winpe/amd64` sous la
+  racine HTTP de l’instance, `wimboot`, `BCD`, `boot.sdi` et `boot.wim`.
+  Utiliser un `wimboot` signé et un WinPE personnalisé pour Windows 11.
+  Préparer la preuve du transfert EFI et du WIM
   côté serveur. Exécuter la sonde `collect.ps1` dans WinPE, puis déployer
-  l’édition attendue sur le disque jetable. [Démarrer WinPE par PXE](https://learn.microsoft.com/windows/deployment/configure-a-pxe-server-to-load-windows-pe)
+  l’édition attendue sur le disque jetable. [Secure Boot avec iPXE](https://ipxe.org/secboot) · [Prise en charge de WinPE pour Windows 11](https://learn.microsoft.com/windows/deployment/wds-boot-support)
 - Pour le premier démarrage installé, démarrer depuis le disque et exécuter
   à nouveau la sonde. Elle écrit ses mesures sur le port série. Le
   vérificateur exige les deux phases et contrôle l’identité, le disque
@@ -376,9 +381,12 @@ python3 tests/integration/verify_windows_pxe_deployment.py \
   --network-proof "$network_proof" --serial "$serial_log"
 ```
 
-Le vérificateur et ses cas de refus sont disponibles. Le branchement
-du démarrage WinPE et de l’installation Windows à PXE Tools reste à
-développer et à exécuter avec les médias réels.
+L’option `--boot-root` vérifie aussi les quatre fichiers publiés avec
+`wimboot_sha256`, `bcd_sha256`, `boot_sdi_sha256` et `winpe_sha256` dans le
+manifeste. Le banc des paquets utilise des fichiers synthétiques pour vérifier
+le script, les plages HTTP et le refus d’un autre client. Le démarrage de
+l’iPXE signé, le chargement de WinPE et l’installation attendent le banc
+Windows avec les médias réels.
 
 ### Contrôles des deux distributions
 

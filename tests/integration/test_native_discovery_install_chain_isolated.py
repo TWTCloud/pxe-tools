@@ -360,6 +360,15 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     ):
         mounts.extend(('--mount',f'type=bind,src={source},dst={target}'))
 
+    if amd64:
+        windows=root/'http/winpe/amd64'
+        windows.mkdir(parents=True)
+        for name in ('wimboot','BCD','boot.sdi','boot.wim'):
+            (windows/name).write_text('fixture:'+name)
+        env.append('PXE_WINPE_CLIENT_IP=192.0.2.2')
+        if not native:
+            mounts.extend(('--mount',f'type=bind,src={windows.parent},dst={http_root}/winpe,readonly'))
+
     if custom_partition:
         source=(ROOT/'docker/worker/templates/postboot.sh.j2').read_text()
         original=next(line for line in source.splitlines() if line.startswith('PAYLOAD='))
@@ -487,6 +496,25 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s}' "$IP" "$(
         raise RuntimeError('Expected the label form to redirect to the canonical devices list')
     if '<h1>Serveurs</h1>' not in request(tls_url+'/admin/devices',*login):
         raise RuntimeError('The device label change did not preserve the canonical URL')
+    if amd64:
+        windows=pxe_url+'/pxe/windows/'
+        boot=request(windows+'boot.ipxe')
+        if not boot.startswith('HTTP/1.1 200 ') or '#!ipxe\n' not in boot:
+            raise RuntimeError('Unable to load the reserved WinPE iPXE script')
+        for entry in ('iseq ${platform} efi','iseq ${buildarch} x86_64','kernel ${base}wimboot',
+                      'initrd --name BCD','initrd --name boot.sdi','initrd --name boot.wim'):
+            if entry not in boot:
+                raise RuntimeError('Incomplete WinPE iPXE script')
+        wim=request(windows+'boot.wim','--range','8-11')
+        if not wim.startswith('HTTP/1.1 206 ') or not wim.endswith('boot'):
+            raise RuntimeError('WinPE did not serve the requested WIM bytes')
+        for path in ('/pxe/windows/boot.ipxe','/pxe/windows/boot.wim','/%70xe/windows/boot.wim'):
+            denied=docker('exec',app,'curl','-sS','--max-time','5','-D','-',
+                          '--header','X-Pxe-Client-Ip: 192.0.2.2','http://127.0.0.1'+path).stdout
+            if not denied.startswith('HTTP/1.1 404 '):
+                raise RuntimeError('WinPE is visible to an unreserved client')
+        print('Synthetic WinPE script and HTTP range verified for the reserved client only',flush=True)
+
     kernel_url='/netboot/debian/13.0/amd64/linux'
     kernel = request(pxe_url+kernel_url,'--output','/dev/null')
     if not kernel.startswith('HTTP/1.1 200 '):

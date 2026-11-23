@@ -7,6 +7,7 @@ mod certificates;
 mod images;
 mod onboarding;
 mod setup;
+mod winpe;
 
 use crate::{configured_database, handle_request, monitoring, setting, PxeRequest, Routes};
 use http::uri::Authority;
@@ -51,6 +52,8 @@ struct Site {
     catalog: monitoring::Catalog,
     pxe_ip: Option<Ipv4Addr>,
     https_port: u16,
+    http_port: u16,
+    winpe_client: Option<Ipv4Addr>,
     public_host: Option<String>,
     requests: Semaphore,
     admin: admin::Console,
@@ -99,6 +102,8 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         catalog: serde_json::from_str(include_str!("checkpoints.json"))?,
         pxe_ip,
         https_port,
+        http_port,
+        winpe_client: winpe::configured_client()?,
         public_host,
         requests: Semaphore::new(8),
         admin: admin::Console::new(),
@@ -463,13 +468,17 @@ async fn dispatch(
             .await;
     }
 
-    if site.pxe_ip.is_none() {
+    let Some(server) = site.pxe_ip else {
         return plain(StatusCode::NOT_FOUND, "Not found\n");
+    };
+    let winpe = winpe::allowed(site.winpe_client, peer);
+    if path == winpe::BOOT && winpe && readable {
+        return winpe::script(server, site.http_port);
     }
     if readable {
         if let Some(reply) = site
             .assets
-            .serve(path, &parts.headers, parts.method == Method::HEAD)
+            .serve(path, &parts.headers, parts.method == Method::HEAD, winpe)
             .await
         {
             return reply;

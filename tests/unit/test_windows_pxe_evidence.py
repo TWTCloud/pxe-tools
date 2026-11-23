@@ -28,6 +28,23 @@ class WindowsEvidenceTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'fingerprint'):
                 evidence.check_media(case, iso, winpe)
 
+    def test_approved_boot_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = {}
+            for name, checksum in evidence.BOOT_FILES.items():
+                content = name.encode()
+                (root/name).write_bytes(content)
+                manifest[checksum] = hashlib.sha256(content).hexdigest()
+            evidence.check_boot_assets(manifest, root)
+            (root/'boot.sdi').write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'Unexpected fingerprint'):
+                evidence.check_boot_assets(manifest, root)
+            (root/'boot.sdi').unlink()
+            (root/'boot.sdi').symlink_to('BCD')
+            with self.assertRaisesRegex(ValueError, 'regular media file'):
+                evidence.check_boot_assets(manifest, root)
+
     def test_guest_contract(self):
         guest = 'b9c4c7c8-c599-446b-b540-69915fbb9a39'
         disk = 'PXE-WIN-TEST-01'
