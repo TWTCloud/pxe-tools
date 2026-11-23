@@ -227,3 +227,34 @@ réutilise les fichiers déjà authentifiés d'un précédent essai.
   d'installation. Comparer le `.deb` et l'image Docker complets une fois le
   service intégré. Le socle APT bêta 10 mesure 4,15 Mio et le seuil Cloudflare
   de 25 Mio s'applique par fichier.
+
+## Critères de livraison du portage complet
+
+Le binaire Rust définit les écouteurs HTTP et HTTPS et sert directement la
+console d'administration, l'API et les ressources PXE. Les ressources
+incluent les menus, scripts, noyaux, initramfs, images et le preseed
+dynamique. La configuration expose les écouteurs correspondant à l'instance
+et charge le certificat et sa clé depuis les chemins persistants prévus.
+Les écouteurs conservent les restrictions du réseau PXE et les protections
+de la console et de l'API. Les lectures de fichiers respectent les contrôles
+d'accès des artefacts postboot et des payloads netboot.
+
+1. Remplacer les routes nginx et les appels locaux qui en dépendent par
+   le serveur HTTP/HTTPS Rust. Qualifier la console, les API, les téléchargements
+   et le preseed sur les deux protocoles. Réutiliser les données SQLite, la clé
+   maître, les certificats et les réglages existants après mise à niveau.
+2. Porter les parcours d'installation et d'administration encore pris en charge
+   par PHP, ainsi que les migrations et les opérations du worker qui en
+   dépendent. Préserver les transitions, les refus et les jetons liés à une action.
+3. Installer le paquet APT sur Debian 13 amd64 et arm64 depuis une base sans
+   Nginx ni PHP. Construire l'image Docker sans ces paquets, y compris dans ses
+   couches. Contrôler les dépendances, les services et les processus au démarrage
+   pour les deux distributions, puis tester directement les écouteurs Rust.
+4. Sur les runners GitHub isolés, vérifier un cycle PXE jusqu'à la connexion
+   Debian et à l'accusé `os_first_boot` pour chaque couple distribution et
+   architecture serveur. Exercer le démarrage BIOS et les chemins UEFI pris en
+   charge. Vérifier le chargement des ressources PXE et les refus d'accès
+   en HTTP et HTTPS selon le client.
+5. Mesurer les livrables complets et l'appliance en activité. Comparer la taille
+   du `.deb` et de l'image Docker, ainsi que la PSS, la pression mémoire,
+   les latences et le débit sous Debian 13 amd64 avec environ 1 Gio de RAM.
