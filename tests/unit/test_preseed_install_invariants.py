@@ -212,7 +212,7 @@ $_GET = ['mac' => '02:00:00:00:00:01', 'code' => 'os_first_boot', 'ack' => $argv
         self.assertIn('d-i ', self.render(config, running_action_token=token,
                                          previous_installation=True))
 
-    def test_signed_boot_packages_are_added_only_for_debian_uefi_amd64(self):
+    def test_signed_boot_packages_follow_debian_uefi_architecture(self):
         config = {'distro': 'debian', 'codename': 'trixie',
                   'advanced': {'packages': {'pkgsel_include': ['sudo', 'curl']}}}
         output = self.render(config, template='{{ACCOUNTS_BLOCK}}\n{{PACKAGES_BLOCK}}\n{{EARLY_COMMAND_BLOCK}}\n')
@@ -229,18 +229,18 @@ $_GET = ['mac' => '02:00:00:00:00:01', 'code' => 'os_first_boot', 'ack' => $argv
             for p in bindir.iterdir(): p.chmod(0o755)
             efi = root/'efi'; out = root/'out'
             env = dict(os.environ, PATH=str(bindir)+':'+os.environ['PATH'], PXE_TEST_OUTPUT=str(out))
-            for has_efi, arch, expected in [(True, 'x86_64', True), (False, 'x86_64', False),
-                                            (True, 'aarch64', False)]:
+            for has_efi, arch, expected in [(True, 'x86_64', 'amd64'), (False, 'x86_64', None),
+                                            (True, 'aarch64', 'arm64'), (True, 'riscv64', None)]:
                 with self.subTest(has_efi=has_efi, arch=arch):
                     if efi.exists(): efi.rmdir()
                     if has_efi: efi.mkdir()
                     if out.exists(): out.unlink()
                     env['PXE_TEST_ARCH'] = arch
                     subprocess.run(['sh', '-c', command.replace('/sys/firmware/efi', str(efi))], env=env, check=True)
-                    self.assertEqual(out.exists(), expected)
+                    self.assertEqual(out.exists(), expected is not None)
                     if expected:
                         self.assertEqual(out.read_text().split(), ['pkgsel/include', 'sudo', 'curl',
-                                         'grub-efi-amd64-signed', 'shim-signed'])
+                                         f'grub-efi-{expected}-signed', 'shim-signed'])
             env['PXE_TEST_ARCH'] = 'x86_64'
             if not efi.exists(): efi.mkdir()
             if out.exists(): out.unlink()
@@ -258,7 +258,9 @@ $_GET = ['mac' => '02:00:00:00:00:01', 'code' => 'os_first_boot', 'ack' => $argv
         active = self.render(config, running_action_token='fixture-token',
                              template='{{ACCOUNTS_BLOCK}}\n{{PACKAGES_BLOCK}}\n{{EARLY_COMMAND_BLOCK}}\n')
         self.assertEqual(active.count('d-i preseed/early_command string'), 1)
-        self.assertIn('grub-efi-amd64-signed shim-signed', active)
+        self.assertIn('grub-efi-amd64-signed', active)
+        self.assertIn('grub-efi-arm64-signed', active)
+        self.assertIn('$pxe_signed shim-signed', active)
         self.assertIn('partitioning_started', active)
 
     def test_hostname_and_domain_are_emitted_only_when_configured(self):

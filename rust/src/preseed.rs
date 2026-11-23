@@ -287,7 +287,7 @@ impl Profile {
     ) -> String {
         let mut early = Vec::new();
         if self.distro == "trixie" {
-            early.push("if [ -d /sys/firmware/efi ] && [ \"$(uname -m)\" = x86_64 ]; then pxe_pkgs=\"$(debconf-get pkgsel/include)\" || exit 1; debconf-set pkgsel/include \"$pxe_pkgs grub-efi-amd64-signed shim-signed\" || exit 1; fi".into());
+            early.push(r#"if [ -d /sys/firmware/efi ]; then case "$(uname -m)" in x86_64) pxe_signed=grub-efi-amd64-signed ;; aarch64) pxe_signed=grub-efi-arm64-signed ;; *) pxe_signed= ;; esac; if [ -n "$pxe_signed" ]; then pxe_pkgs="$(debconf-get pkgsel/include)" || exit 1; debconf-set pkgsel/include "$pxe_pkgs $pxe_signed shim-signed" || exit 1; fi; fi"#.into());
         }
         let mut late = Vec::new();
         if !self.hostname.is_empty() {

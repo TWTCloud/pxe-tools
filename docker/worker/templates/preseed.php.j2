@@ -1868,12 +1868,12 @@ $disk_guard_tpl = str_replace('__BOOTMODE__', $planned_boot_mode, $disk_guard_tp
 
 $early_parts = [];
 if ($distro === 'trixie') {
-    // Debian's grub-efi-amd64-signed is a recommendation. When recommends
-    // are disabled, install both signed components explicitly on UEFI amd64;
-    // BIOS installs must retain their existing GRUB package selection.
-    $early_parts[] = 'if [ -d /sys/firmware/efi ] && [ "$(uname -m)" = x86_64 ]; then '
-                   . 'pxe_pkgs="$(debconf-get pkgsel/include)" || exit 1; '
-                   . 'debconf-set pkgsel/include "$pxe_pkgs grub-efi-amd64-signed shim-signed" || exit 1; fi';
+    // Request the architecture's signed UEFI bootloader even with recommends disabled.
+    $early_parts[] = 'if [ -d /sys/firmware/efi ]; then '
+                   . 'case "$(uname -m)" in x86_64) pxe_signed=grub-efi-amd64-signed ;; '
+                   . 'aarch64) pxe_signed=grub-efi-arm64-signed ;; *) pxe_signed= ;; esac; '
+                   . 'if [ -n "$pxe_signed" ]; then pxe_pkgs="$(debconf-get pkgsel/include)" || exit 1; '
+                   . 'debconf-set pkgsel/include "$pxe_pkgs $pxe_signed shim-signed" || exit 1; fi; fi';
 }
 if ($dilog_enabled) {
     $early_parts[] = 'echo ' . base64_encode($dilog_tpl) . " | base64 -d > /tmp/pxe-dilog.sh ; "

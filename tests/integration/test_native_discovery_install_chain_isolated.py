@@ -285,6 +285,24 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
     print('Debian GNU/Linux 13 pxe-fixture login: verified with PHP-FPM stopped',flush=True)
 
 
+def verify_arm64_signed_loaders():
+    # Build with the packaged worker and a disposable key. This container
+    # only downloads signed Debian archives, then exits before starting PXE.
+    result=docker('run','--rm','--network','bridge','--entrypoint','/bin/bash',appliance_image,'-ec',
+                  'export PXE_ARM64_SECURE_BOOT=1 PXE_IP=192.0.2.1 MOK_DIR=/run/fixture-mok '
+                  'HTTP_ROOT=/run/fixture-http TFTP_ROOT=/run/fixture-tftp; '
+                  'install -d "$HTTP_ROOT" "$TFTP_ROOT"; '
+                  'bash /opt/pxe-tools/scripts/bootstrap-generate-mok.sh; '
+                  'bash /opt/pxe-tools/scripts/bootstrap-build-grub.sh; '
+                  'test -s "$TFTP_ROOT"/mmaa64.efi; '
+                  'sbverify --list "$TFTP_ROOT"/grubnetaa64.efi; '
+                  'sbverify --cert "$MOK_DIR"/MOK.pem "$TFTP_ROOT"/grubaa64.efi',check=False)
+    if result.returncode:
+        print((result.stdout+'\n'+result.stderr)[-7500:],flush=True)
+        raise RuntimeError('The packaged worker could not prepare the signed ARM64 chain')
+    print('Packaged worker prepared authenticated ARM64 shim and MokManager and verified its MOK-signed ARM64 GRUB',flush=True)
+
+
 def verify_packaged_rust_setup(name, boot_tree=None):
     script=ROOT/'tests/integration/test_rust_initial_setup.py'
     probe='/fixture-tests/test_rust_initial_setup.py'
@@ -337,6 +355,8 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     verify_packaged_rust_setup(app+'-setup', boot_tree if amd64 else None)
     custom_partition=native and amd64
     secure_boot=not native and amd64
+    if secure_boot:
+        verify_arm64_signed_loaders()
     http_root='/var/lib/pxe-tools-http' if native else '/srv/http'
     tftp_root='/var/lib/pxe-tools-tftp' if native else '/srv/tftp'
     # Keep the same interface naming policy in d-i and the installed kernel.

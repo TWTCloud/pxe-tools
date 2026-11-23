@@ -336,8 +336,12 @@ la clé publique MOK de l’instance d’essai dans une copie privée des
 variables du firmware et demande une preuve d’activation dans
 l’inventaire de découverte puis dans le premier démarrage installé.
 L’architecture du serveur et celle du client sont distinctes. Le démarrage
-d’un client ARM64 avec Secure Boot demande sa propre chaîne signée et
-sa propre qualification. [Firmware OVMF de Debian](https://packages.debian.org/trixie/ovmf)
+d’un client ARM64 avec Secure Boot utilise une chaîne en qualification.
+L’option `PXE_ARM64_SECURE_BOOT=1` du worker prépare le shim et le
+MokManager ARM64 authentifiés depuis Debian, puis publie un GRUB ARM64
+signé par la MOK de l’instance. Le preseed trixie demande les paquets
+signés adaptés à l’architecture du client UEFI. Le premier démarrage
+sur firmware ARM64 reste à exercer. [GRUB signé ARM64 de Debian](https://packages.debian.org/trixie/arm64/grub-efi-arm64-signed/filelist)
 
 Le futur essai Windows commence par Windows 11 Pro amd64. L’instance de
 test doit disposer d’un firmware UEFI, de Secure Boot actif, d’un TPM
