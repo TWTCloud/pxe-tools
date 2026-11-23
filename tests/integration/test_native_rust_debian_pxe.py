@@ -221,7 +221,11 @@ def main():
             assert any(name.startswith(b"lpxelinux.0") for name in switch.tftp_requests), switch.tftp_requests
             assert b"pxelinux.cfg/default" in switch.tftp_requests, switch.tftp_requests
             print("Real DHCP proxy and TFTP boot led to the native discovery and install menu", flush=True)
+            with switch.lock:
+                switch.tftp_requests.clear()
             client(root, server, "install", INSTALLED, 2400)
+            install_menu = ("pxelinux.cfg/01-" + MAC.replace(":", "-")).encode()
+            assert install_menu in switch.tftp_requests, switch.tftp_requests
             print("Native install callback recorded", flush=True)
             client(root, server, "first-boot", BOOTED, 900, local=True)
             for line in check_server(root, server).decode(errors="replace").splitlines():

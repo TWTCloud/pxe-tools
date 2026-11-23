@@ -23,6 +23,7 @@ PXE_IP = "192.0.2.1"
 CLIENT = "192.0.2.100"
 MAC = "02:00:00:00:00:01"
 SERIAL = "PXE-TEST-ONE"
+INSTALL_MENU = TFTP / "pxelinux.cfg" / ("01-" + MAC.replace(":", "-"))
 
 
 def create_db(path, schema, settings):
@@ -171,8 +172,7 @@ def schedule(machine, report):
     if render_postboot_for_action(action, token, MAC, PXE_IP) is None:
         raise RuntimeError("The native worker could not render its postboot artifacts")
     subprocess.run(["bash", "/opt/pxe-tools/scripts/render-per-mac-pxelinux.sh"], check=True)
-    menu = TFTP / "pxelinux.cfg/01-02-00-00-00-01"
-    if "DEFAULT install\n" not in menu.read_text():
+    if "DEFAULT install\n" not in INSTALL_MENU.read_text():
         raise RuntimeError("The native renderer did not publish the install menu")
     with closing(sqlite3.connect(DATABASE)) as db, db:
         db.execute("UPDATE machines SET next_action='reboot' WHERE id=?", (machine,))
@@ -206,6 +206,8 @@ def follow(_root):
 
     original_stale = digest(STALE)
     original_key = digest(CONF / "master.key")
+    if INSTALL_MENU.exists():
+        raise RuntimeError("The new client already has a specific PXE menu")
     assert_php_stopped()
     print("PXE_NATIVE_READY", flush=True)
     machine, report = wait_for(inventory, 1200, "native inventory")

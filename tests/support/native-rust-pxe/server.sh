@@ -100,5 +100,4 @@ if curl -fsS --max-time 1 http://127.0.0.1/healthz >/dev/null 2>&1; then
 fi
 test "$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://192.0.2.1/preseed.php?mac=02:00:00:00:00:ff)" = 404
 grep -qx 'DEFAULT discovery' "$TFTP_ROOT/pxelinux.cfg/default"
-test ! -e "$TFTP_ROOT/pxelinux.cfg/01-02-00-00-00-01"
 python3 "$seed/server.py" follow "$seed"
