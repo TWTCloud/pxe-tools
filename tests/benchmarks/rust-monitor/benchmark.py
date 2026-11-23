@@ -246,6 +246,7 @@ def write_nginx(root, name, upstream, backend, routes=(ROUTE,)):
         http {{
             access_log off;
             keepalive_requests 10000;
+            client_max_body_size 5m;
             client_body_temp_path "{root}/client";
             proxy_temp_path "{root}/proxy";
             fastcgi_temp_path "{root}/fastcgi";
@@ -318,6 +319,7 @@ clear_env = no
                 fastcgi_param CONTENT_TYPE $content_type;
                 fastcgi_param CONTENT_LENGTH $content_length;
                 fastcgi_param REMOTE_ADDR $fixture_peer;
+                fastcgi_param HTTP_AUTHORIZATION $http_authorization;
             """
         sock.unlink(missing_ok=True)
 

@@ -23,6 +23,12 @@ pub struct Checkpoint {
     label: String,
 }
 
+impl Checkpoint {
+    pub fn has_code(&self, code: &str) -> bool {
+        self.code == code
+    }
+}
+
 pub type Catalog = HashMap<String, Vec<Checkpoint>>;
 
 #[derive(Serialize)]

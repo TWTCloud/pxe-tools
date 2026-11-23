@@ -17,18 +17,20 @@ fn menu_label(menu: &str) -> Option<&'static str> {
     }
 }
 
-pub fn client_in_subnet(ip: Ipv4Addr, subnet: &str) -> bool {
-    let Some((network, prefix)) = super::php_trim(subnet).split_once('/') else {
-        return false;
-    };
-    let (Ok(network), Ok(prefix_len)) = (network.parse::<Ipv4Addr>(), prefix.parse::<u32>()) else {
-        return false;
-    };
+pub fn parse_subnet(subnet: &str) -> Option<(u32, u32)> {
+    let (network, prefix) = subnet.split_once('/')?;
+    let network: Ipv4Addr = network.parse().ok()?;
+    let prefix_len: u32 = prefix.parse().ok()?;
     if prefix_len > 32 || prefix != prefix_len.to_string() {
-        return false;
+        return None;
     }
     let mask = u32::MAX.checked_shl(32 - prefix_len).unwrap_or(0);
-    u32::from(ip) & mask == u32::from(network) & mask
+    Some((u32::from(network) & mask, mask))
+}
+
+pub fn client_in_subnet(ip: Ipv4Addr, subnet: &str) -> bool {
+    parse_subnet(super::php_trim(subnet))
+        .is_some_and(|(network, mask)| u32::from(ip) & mask == network)
 }
 
 pub fn record_boot_selection(
@@ -125,7 +127,7 @@ pub fn discovery_phase(db: &mut Connection, phase: &str, mac: &str) -> rusqlite:
     Ok(json!({"status": "phase_ack", "phase": phase}))
 }
 
-fn normalize_mac(raw: &str) -> Option<String> {
+pub fn normalize_mac(raw: &str) -> Option<String> {
     let raw = super::php_trim(raw).to_ascii_lowercase();
     let raw = raw
         .strip_prefix("01-")
@@ -141,7 +143,7 @@ fn normalize_mac(raw: &str) -> Option<String> {
     })
 }
 
-fn machine_for_mac(db: &Connection, mac: &str) -> rusqlite::Result<Option<i64>> {
+pub fn machine_for_mac(db: &Connection, mac: &str) -> rusqlite::Result<Option<i64>> {
     let primary = db
         .query_row("SELECT id FROM machines WHERE mac = ?", [mac], |row| {
             row.get(0)
@@ -159,19 +161,92 @@ fn machine_for_mac(db: &Connection, mac: &str) -> rusqlite::Result<Option<i64>> 
         let Ok(inventory) = serde_json::from_str::<Value>(&raw) else {
             continue;
         };
-        let interfaces = match &inventory["interfaces"] {
-            Value::Array(interfaces) => interfaces.iter().any(|item| match_interface(item, mac)),
-            Value::Object(interfaces) => interfaces.values().any(|item| match_interface(item, mac)),
-            _ => false,
-        };
-        if interfaces {
+        if interface_macs(&inventory["interfaces"]).any(|address| address == mac) {
             return row.get(0).map(Some);
         }
     }
     Ok(None)
 }
 
-fn match_interface(interface: &Value, mac: &str) -> bool {
-    let address = super::php_string(&interface["mac"]);
-    normalize_mac(&address).as_deref() == Some(mac)
+pub fn array_values(value: &Value) -> Box<dyn Iterator<Item = &Value> + '_> {
+    match value {
+        Value::Array(items) => Box::new(items.iter()),
+        Value::Object(items) => Box::new(items.values()),
+        _ => Box::new(std::iter::empty()),
+    }
+}
+
+pub fn interface_macs(value: &Value) -> impl Iterator<Item = String> + '_ {
+    array_values(value).filter_map(|item| normalize_mac(&super::php_string(&item["mac"])))
+}
+
+pub fn is_php_array(value: &Value) -> bool {
+    value.is_array() || value.is_object()
+}
+
+pub fn log_event(
+    db: &Connection,
+    machine: i64,
+    level: &str,
+    message: &str,
+    checkpoint: Option<&str>,
+    action: Option<i64>,
+) -> rusqlite::Result<()> {
+    db.execute(
+        "INSERT INTO machine_events (machine_id, level, message, checkpoint, action_id)
+         VALUES (?, ?, ?, ?, ?)",
+        params![machine, level, message, checkpoint, action],
+    )?;
+    Ok(())
+}
+
+pub fn set_machine_status(
+    db: &Connection,
+    machine: i64,
+    old: &str,
+    new: &str,
+) -> rusqlite::Result<()> {
+    db.execute(
+        "UPDATE machines SET status = ? WHERE id = ?",
+        params![new, machine],
+    )?;
+    let clear = matches!(new, "installing" | "wiping" | "wiped") &&
+        db.execute(
+            "UPDATE machines SET local_boot_source = 'none' WHERE id = ? AND local_boot_source != 'none'",
+            [machine],
+        )? != 0;
+    if clear {
+        log_event(
+            db,
+            machine,
+            "info",
+            "Démarrage local désactivé au début de l’opération",
+            None,
+            None,
+        )?;
+    }
+    if old != new {
+        log_event(
+            db,
+            machine,
+            "info",
+            &format!("Status: {old} → {new}"),
+            None,
+            None,
+        )?;
+    }
+    if old != new || clear {
+        enqueue_menus(db)?;
+    }
+    Ok(())
+}
+
+pub fn enqueue_menus(db: &Connection) -> rusqlite::Result<()> {
+    db.execute(
+        "INSERT INTO init_jobs (job_type, status, message)
+         SELECT 'bootstrap:render_templates', 'pending', 'Régénération des menus PXE par machine'
+         WHERE NOT EXISTS (SELECT 1 FROM init_jobs WHERE job_type = 'bootstrap:render_templates' AND status = 'pending')",
+        [],
+    )?;
+    Ok(())
 }

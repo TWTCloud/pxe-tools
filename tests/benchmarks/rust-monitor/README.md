@@ -25,7 +25,9 @@ Rust et un compilateur C pour SQLite. Selon l'installation, passer
 | `GET /api/monitoring/installs` | Même ordre et mêmes valeurs pour 69 installations, sur les quatre types suivis. Filtre des 24 h, dernier événement, progression disque, checkpoints répétés, libellés sans MAC. Même politique IPv4, refus hors sous-réseau ou avec sous-réseau invalide. |
 | `GET /api/boot-selected` | Mêmes statuts et commentaires GRUB. Vérification du sous-réseau et du couple identifiant-jeton. Rejeu idempotent, refus de changer de menu, journal et checkpoint `install_reboot_done`. |
 | `GET/POST /api/discovery?phase=…` | Mêmes réponses et niveaux de journal, recherche par MAC primaire ou secondaire, fermeture de la fenêtre d'attente après le signal d'arrêt. |
-| Rendu PHP du preseed | Cas de référence sur les accès, le jeton d'action, la fermeture du preseed et les règles de partitionnement. |
+| `GET/POST /api/discovery`, inventaire et poll | JSON ou base64, limites de taille, conflits entre fiches, statuts préservés, séries et WWID, métadonnées de stockage et consommation du redémarrage. |
+| `GET /preseed.php` | Comparaison des directives Debian sur un profil guidé, du garde disque embarqué, des refus réseau et de la fermeture après installation. |
+| Retours Debian | Démarrage local et réessais, journal borné, accès aux artefacts postboot, fin d'installation avec jeton lié à l'action, checkpoint du premier démarrage. |
 
 Les requêtes de mutation utilisent deux copies d'une même fixture. Le test
 compare les écritures SQLite et vérifie que le catalogue compilé dans Rust
@@ -69,36 +71,51 @@ Les 64 objets étaient identiques. Les 1,20 Mio compressés mesuraient le
 binaire du prototype Mac. Le banc versionné utilise désormais le vrai
 schéma et un socket Unix pour Rust.
 
-## Critères du premier démarrage sans PHP-FPM
+## Démarrage Debian sans PHP-FPM
 
-1. Compléter le portage du dépôt d'inventaire et de sa réconciliation
-   multi-interface, du poll `/api/discovery-action` et des configurations
-   de boot qui dépendent de PHP. Vérifier les réponses, les refus et les
-   états SQLite avec les fixtures de découverte actuelles.
-2. Porter le preseed, les retours d'installation et les endpoints de
-   checkpoints, journaux et postboot du parcours Debian. Comparer le rendu
-   et les écritures avec une base de test clonée. Couvrir le disque
-   attendu et un disque d'identité différente, les jetons valides,
-   absents et périmés, ainsi que le refus de rouvrir une installation
-   terminée. Vérifier la lecture des données et secrets de test existants
-   avec la clé maître d'origine. Les routes actuelles restent servies par PHP.
-3. Reprendre le
-   [banc de boot natif](../../integration/test_native_discovery_install_chain_isolated.py)
-   sur une VM Linux jetable avec Docker, `nsenter`, TAP et une image de
-   fixture locale. Le scénario existant passe par l'interface PHP pour
-   programmer l'installation. Utiliser un état préprogrammé à partir du même
-   schéma, ou préparer l'action avant la fenêtre de validation. Sur la
-   fenêtre certifiée, contrôler l'arrêt de PHP-FPM et retrouver les hits
-   PXE dans les journaux, la fin d'installation en SQLite et l'invite de
-   connexion Debian sur le disque qcow2 vierge. Le premier boot est
-   aujourd'hui lancé sans carte réseau dans ce banc. Pour attester aussi
-   `os_first_boot`, rattacher uniquement ce redémarrage au pont isolé et
-   vérifier le checkpoint et son association à l'action.
-4. Sur Debian 13 amd64 avec environ 1 Gio de RAM, comparer le service
-   complet en veille, sous collecte PDM et pendant le boot. Relever la PSS
-   du backend et du worker, la variation des compteurs PSI, les latences,
-   le débit et la durée d'installation. Construire et mesurer le `.deb`
-   et l'image Docker candidats complets. Le socle APT bêta 10 sert de
-   référence à 4,15 Mio. Le contrôle Cloudflare de 25 Mio s'applique
-   par fichier. Mesurer aussi les dépendances sur une Debian vierge avec
-   le module Ansible facultatif hors du socle.
+Le [banc QEMU](../../integration/test_rust_debian_pxe_qemu.py) démarre
+une machine BIOS inconnue en PXE avec un disque qcow2 jetable. Il utilise
+PXELINUX et les fichiers netboot vérifiés contre les index signés Debian.
+Après la collecte par le vrai `discover.sh`, le banc programme directement
+une action SQLite à partir du numéro de série reçu. Le client redémarre
+via le poll de découverte, installe Debian 13 et démarre sur ce disque.
+Le test exige l'invite de connexion série, le garde disque réussi, le statut
+d'installation `success`, le retour de disponibilité et le checkpoint
+`os_first_boot` associé à l'action.
+
+```sh
+cargo build --locked --release --manifest-path rust/Cargo.toml
+PXE_RUST_QEMU_TEST=1 python3.13 tests/integration/test_rust_debian_pxe_qemu.py --fetch-inputs
+```
+
+Le banc demande également `qemu-system-x86_64`, `qemu-img`, `dpkg-deb`,
+`gpgv`, nginx avec `ngx_http_sub_module` et au moins 1,5 Gio d'espace
+disponible au démarrage. Le réseau QEMU est fermé. Son DHCP/TFTP ne publie
+aucun service sur le réseau hôte. Un socket Unix privé relie le client à nginx
+et au miroir de fichiers Debian authentifiés. nginx route l'API vers Rust et
+ajoute les paramètres série et de miroir propres à la fixture. Aucun PHP-FPM
+n'entre dans ce parcours. Le worker et la console sont remplacés par la
+programmation et le dépôt d'artefacts de la fixture.
+
+## Périmètre du renderer et étapes restantes
+
+- Le renderer Rust lit les snapshots SQLite du mode Debian guidé avec une
+  seule interface DHCP ou statique. Il réutilise la base preseed du dépôt
+  et les scripts d'identité disque, de journal et de nom d'hôte du renderer
+  PHP. Les plans de partition personnalisés, les réseaux multi-interface,
+  VLAN et bonds ainsi que les templates personnalisés restent à porter.
+  Le renderer expérimental refuse les plans qu'il ne sait pas interpréter.
+- Le binaire de banc reçoit le chemin SQLite explicitement. Il lit les
+  empreintes stockées pour préparer Debian. Le choix de la base via
+  `db.conf` et la reprise des données chiffrées avec la clé maître devront
+  être éprouvés pour un futur service installé. La console PHP et le
+  worker restent les points d'entrée de l'appliance.
+- Le [banc natif dnsmasq](../../integration/test_native_discovery_install_chain_isolated.py)
+  reste nécessaire pour qualifier le proxy DHCP, les menus générés et les
+  services de l'appliance dans une VM Linux jetable. Le banc QEMU ci-dessus
+  utilise le DHCP/TFTP de QEMU et le chargeur BIOS PXELINUX.
+- Sur Debian 13 amd64 avec environ 1 Gio de RAM, mesurer la PSS du service
+  et du worker, la pression mémoire PSI, les latences, le débit et la durée
+  d'installation. Comparer le `.deb` et l'image Docker complets une fois le
+  service intégré. Le socle APT bêta 10 mesure 4,15 Mio et le seuil Cloudflare
+  de 25 Mio s'applique par fichier.
