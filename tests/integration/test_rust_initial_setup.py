@@ -3,6 +3,7 @@
 """Exercise Rust setup over TLS on a temporary SQLite instance or a disposable appliance."""
 import argparse
 import base64
+from hashlib import sha256
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 from http.client import HTTPConnection, HTTPSConnection
@@ -11,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import socket
 import sqlite3
 import ssl
@@ -121,7 +123,7 @@ class ConfirmationInputs(HTMLParser):
             self.values[values['name']] = values['value']
 
 
-def verify_configuration(client, database, authorization, packaged):
+def verify_configuration(client, database, authorization, packaged, boot_fixture=None):
     def request(path, **kwargs):
         return client.request(path, authorization=authorization, **kwargs)
 
@@ -139,20 +141,23 @@ def verify_configuration(client, database, authorization, packaged):
         assert request('/init/network', form=plan, origin='https://other.example')[0] == 403
         assert request('/init/network', form=plan)[:2] == (303, '/init/images')
         with closing(sqlite3.connect(database)) as db, db:
-            db.execute("""INSERT INTO catalog_entries(id,distro,version_full,arch,extract_method)
-                          VALUES(9001,'debian','13.0-fixture','amd64','direct')""")
-        assert b'13.0-fixture' in request('/init/images')[2]
+            db.execute("""INSERT INTO catalog_entries(id,distro,version_full,codename,major,arch,extract_method)
+                          VALUES(9001,'debian','13.0','trixie',13,'amd64','direct')""")
+        assert b'13.0' in request('/init/images')[2]
         assert request('/init/images', form={'image':'9002'})[0] == 422
         for _ in range(2):
             assert request('/init/images', form={'image':'9001'})[:2] == (303, '/init/done')
         with closing(sqlite3.connect(database)) as db:
             values = dict(db.execute('SELECT key,value FROM settings'))
-            assert db.execute("SELECT COUNT(*) FROM os_images WHERE version_full='13.0-fixture'").fetchone() == (1,)
+            assert db.execute("SELECT COUNT(*) FROM os_images WHERE version_full='13.0'").fetchone() == (1,)
             assert values['pxe_enabled'] == 'off'
         result = request('/init/complete', form={'confirmation':'yes',
                          'plan':values['rust_wizard_network'], 'image':values['rust_wizard_image']})
         assert result[0] == 422 and 'téléchargement' in result[2].decode(), result
         print('Rust wizard validated the interface, queued Debian once, and kept PXE inactive during download', flush=True)
+        if boot_fixture:
+            verify_activation(client, database, request, plan, *boot_fixture)
+            return
 
     assert request('/init/network', form={'role':'console'})[:2] == (303, '/init/done')
     fields = ConfirmationInputs(request('/init/done')[2]).values
@@ -164,6 +169,63 @@ def verify_configuration(client, database, authorization, packaged):
         assert values['wizard_completed']=='1' and values['pxe_enabled']=='off'
         assert 'rust_wizard_network' not in values
     print('Rust wizard finalized the console-only setup and refused a replay', flush=True)
+
+
+def verify_activation(client, database, request, plan, http_root, tftp_root, input_dir, dnsmasq_config):
+    version = http_root/'netboot/debian/13.0/amd64'
+    version.mkdir(parents=True)
+    for name in ('linux', 'initrd.gz', 'firmware.cpio.gz'):
+        shutil.copyfile(input_dir/name, version/name)
+    alias = http_root/'netboot/trixie/amd64'
+    alias.parent.mkdir()
+    alias.symlink_to('../debian/13.0/amd64')
+    # The parent lab has authenticated these Debian netboot bytes. This
+    # fixture begins with the post-download state for the chosen image.
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE os_images SET status='downloaded' WHERE version_full='13.0' AND enabled=1")
+    page = request('/init/done')
+    assert page[0] == 200
+    fields = ConfirmationInputs(page[2]).values
+    assert fields.get('image') and fields.get('plan'), page[2]
+    assert request('/init/complete', form={**fields,'image':'0','confirmation':'yes'})[0] == 422
+    result = request('/init/complete', form={**fields,'confirmation':'yes'})
+    assert result[:2] == (303, '/admin/devices'), result
+
+    deadline = time.monotonic() + 85
+    jobs = {}
+    while time.monotonic() < deadline:
+        with closing(sqlite3.connect(database)) as db:
+            jobs = dict(db.execute("""SELECT job_type,status FROM init_jobs
+                                      WHERE job_type IN ('bootstrap:build_grub','bootstrap:render_templates',
+                                                         'bootstrap:restart_dnsmasq') ORDER BY id"""))
+        if len(jobs)==3 and all(status=='success' for status in jobs.values()):
+            break
+        if 'failed' in jobs.values():
+            raise RuntimeError(f'The wizard activation job failed: {jobs}')
+        time.sleep(.25)
+    else:
+        raise RuntimeError(f'The wizard activation did not finish: {jobs}')
+    client.ready()
+    with closing(sqlite3.connect(database)) as db:
+        values = dict(db.execute('SELECT key,value FROM settings'))
+    assert values['pxe_enabled']=='on' and values['wizard_completed']=='1'
+    assert values['dhcp_proxy_enabled']=='on' and values['dhcp_proxy_network']=='192.0.2.0'
+    assert all(values[key]==plan[key] for key in ('pxe_interface','pxe_ip','pxe_subnet'))
+    config = dnsmasq_config.read_text().splitlines()
+    assert f"interface={plan['pxe_interface']}" in config
+    assert 'dhcp-range=192.0.2.0,proxy,255.255.255.0' in config
+    for asset in ('lpxelinux.0','grubnetx64.efi','grubx64.efi','pxelinux.cfg/default'):
+        assert (tftp_root/asset).stat().st_size > 0, asset
+    assert request('/init/network')[0] == 404
+    conn = HTTPConnection(plan['pxe_ip'], 80, timeout=5)
+    try:
+        conn.request('GET','/netboot/trixie/amd64/linux')
+        answer = conn.getresponse()
+        assert answer.status == 200, answer.status
+        assert sha256(answer.read()).digest() == sha256((input_dir/'linux').read_bytes()).digest()
+    finally:
+        conn.close()
+    print('Rust wizard activated the proxy, published BIOS and signed UEFI loaders and served authenticated Debian', flush=True)
 
 
 def verify_worker_image_delete(database, http_root):
@@ -315,6 +377,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path)
     parser.add_argument('--http-root', type=Path)
+    parser.add_argument('--netboot-fixture', type=Path)
+    parser.add_argument('--tftp-root', type=Path)
+    parser.add_argument('--dnsmasq-config', type=Path)
     parser.add_argument('--installed', action='store_true',
                         help='verify a newly installed test appliance in an isolated namespace')
     args = parser.parse_args()
@@ -333,7 +398,11 @@ def main():
         authorization = setup(client, credentials, Path('/etc/pxe-tools/db.conf'), database)
         if args.http_root:
             verify_worker_image_delete(database, args.http_root)
-        verify_configuration(client, database, authorization, packaged=True)
+        boot_fixture = (args.http_root, args.tftp_root, args.netboot_fixture, args.dnsmasq_config)
+        if args.netboot_fixture and not all(boot_fixture):
+            parser.error('The activation probe requires the HTTP, TFTP and dnsmasq paths.')
+        verify_configuration(client, database, authorization, packaged=True,
+                             boot_fixture=boot_fixture if args.netboot_fixture else None)
         with tempfile.TemporaryDirectory(prefix='pxe-tls-test-') as temporary:
             verify_tls_import(client, credentials, Path(temporary),
                               database.parent/'tls-import', authorization)

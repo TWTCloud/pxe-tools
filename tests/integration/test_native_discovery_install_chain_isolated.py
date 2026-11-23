@@ -285,7 +285,7 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
     print('Debian GNU/Linux 13 pxe-fixture login: verified with PHP-FPM stopped',flush=True)
 
 
-def verify_packaged_rust_setup(name):
+def verify_packaged_rust_setup(name, boot_tree=None):
     script=ROOT/'tests/integration/test_rust_initial_setup.py'
     probe='/fixture-tests/test_rust_initial_setup.py'
     native=backend=='rust-apt'
@@ -293,6 +293,13 @@ def verify_packaged_rust_setup(name):
     mount=('--mount',f'type=bind,src={script},dst={probe},readonly',
            '--mount',f'type=bind,src=/dev/null,dst={legacy_cli},readonly')
     http_root='/var/lib/pxe-tools-http' if native else '/srv/http'
+    activation=()
+    if boot_tree:
+        input_dir='/fixture-images'
+        tftp_root='/var/lib/pxe-tools-tftp' if native else '/srv/tftp'
+        dnsmasq_config='/var/lib/pxe-tools-native/rendered/dnsmasq.conf' if native else '/etc/dnsmasq.d/pxe.conf'
+        mount+=('--mount',f'type=bind,src={boot_tree},dst={input_dir},readonly')
+        activation=('--netboot-fixture',input_dir,'--tftp-root',tftp_root,'--dnsmasq-config',dnsmasq_config)
     try:
         if native:
             docker('run','-d','--name',name,'--network','none','--privileged','--cgroupns','private',
@@ -308,7 +315,7 @@ def verify_packaged_rust_setup(name):
         else:
             docker('run','-d','--name',name,'--network','none','--cap-add','NET_ADMIN',*mount,appliance_image)
         result=docker('exec','-e','PXE_DISPOSABLE_SETUP_TEST=1',name,'python3',probe,'--installed',
-                      '--http-root',http_root,check=False)
+                      '--http-root',http_root,*activation,check=False)
         print(result.stdout, end='', flush=True)
         if result.returncode:
             print(result.stderr, end='', flush=True)
@@ -324,9 +331,10 @@ def verify_packaged_rust_setup(name):
 
 
 def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template):
-    verify_packaged_rust_setup(app+'-setup')
     native=backend=='rust-apt'
     amd64=os.environ.get('PXE_NATIVE_PXE_ARCH')=='amd64'
+    boot_tree=root/'http/netboot/debian/13.0/amd64'
+    verify_packaged_rust_setup(app+'-setup', boot_tree if amd64 else None)
     custom_partition=native and amd64
     secure_boot=not native and amd64
     http_root='/var/lib/pxe-tools-http' if native else '/srv/http'
