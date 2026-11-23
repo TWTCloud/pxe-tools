@@ -152,7 +152,9 @@ def schedule(machine, report):
     observed = json.loads(report)
     if SECURE_BOOT and (observed["inventory"]["boot_mode"] != "UEFI"
                         or observed["inventory"]["secure_boot"] is not True):
-        raise RuntimeError("The discovery guest did not report active UEFI Secure Boot")
+        firmware = observed["inventory"]
+        raise RuntimeError(f"Expected Secure Boot inventory, got {firmware['boot_mode']} "
+                           f"with secure_boot={firmware['secure_boot']!r}")
     target = next((item for item in observed["disks"]
                    if item["identity"]["value"] == SERIAL and item["identity"]["status"] == "valid"), None)
     if target is None:
