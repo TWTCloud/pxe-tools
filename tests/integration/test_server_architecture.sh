@@ -61,7 +61,7 @@ if [ "$mode" = apt ]; then
     # No published ports or host networking. Run systemd so APT exercises postinst.
     docker build --platform "linux/$architecture" -t "$name" - <<'DOCKERFILE'
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates systemd systemd-sysv && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
     docker run -d --name "$name" --privileged --cgroupns private \
         --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
