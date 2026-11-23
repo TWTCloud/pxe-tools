@@ -353,6 +353,37 @@ def verify_job_console(client, database, authorization):
     print('Rust job console preserves authenticated job status and escapes rendered logs', flush=True)
 
 
+def verify_activity(client, database, authorization):
+    with closing(sqlite3.connect(database)) as db, db:
+        device = db.execute("INSERT INTO machines(mac,hostname) VALUES(?,?)",
+                            ('02:00:00:00:20:01','activity_%')).lastrowid
+        action = db.execute(
+            "INSERT INTO actions(machine_id,type,status,token,created_by) VALUES(?,'install_only','running',?,?)",
+            (device, secrets.token_hex(32), '<fixture-author>'),
+        ).lastrowid
+        db.execute("INSERT INTO machine_events(machine_id,action_id,message) VALUES(?,?,?)",
+                   (device, action, '<fixture-event>'))
+        db.execute("INSERT INTO installations(machine_id,install_status,action_id) VALUES(?,'success',?)",
+                   (device, action))
+        legacy = db.execute(
+            "INSERT INTO installations(machine_id,install_status,install_log) VALUES(?,'in_progress','<legacy-log>')",
+            (device,),
+        ).lastrowid
+    path = '/activity?' + urlencode({'type':'install', 'q':'_%', 'machine':device})
+    assert client.request(path)[0] == 401
+    assert client.request(path, secure=False)[0] == 404
+    status, _, body = client.request(path, authorization=authorization)
+    assert status == 200 and f'href="/tasks/{action}"'.encode() in body and b'&lt;fixture-author&gt;' in body
+    assert body.count(b'href="/installations/') == 1 and f'href="/installations/{legacy}"'.encode() in body
+    assert b'&lt;fixture-event&gt;' in body and b'<fixture-event>' not in body
+    signature = body.split(b'data-sig="',1)[1].split(b'"',1)[0].decode()
+    assert client.request(path.replace('/activity?', '/activity/list?')+'&sig='+signature,
+                          authorization=authorization)[0] == 204
+    assert b'&lt;fixture-event&gt;' in client.request(f'/tasks/{action}', authorization=authorization)[2]
+    assert b'&lt;legacy-log&gt;' in client.request(f'/installations/{legacy}', authorization=authorization)[2]
+    print('Rust activity preserves action and legacy install links, authenticated filtering, and progress fragments', flush=True)
+
+
 def verify_worker_commands(binary):
     templates = Path(__file__).resolve().parents[2]/'docker/worker/templates'
     parameters = {'pxe_ip':'192.0.2.9','mac':'02:00:00:00:00:01','token':'synthetic-token'}
@@ -455,6 +486,7 @@ def local(binary):
         print('The imported TLS pair survived a restart', flush=True)
         verify_image_console(updated, database, authorization)
         verify_job_console(updated, database, authorization)
+        verify_activity(updated, database, authorization)
     verify_worker_commands(binary)
 
 

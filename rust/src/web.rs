@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 mod acme;
+mod activity;
 mod admin;
 mod assets;
 mod certificates;
@@ -416,6 +417,15 @@ async fn dispatch(
         return site
             .admin
             .serve(&parts, peer, &site.database, admin::Action::Jobs(view))
+            .await;
+    }
+    if let Some(view) = activity::View::for_route(path) {
+        if !secure || !readable {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        return site
+            .admin
+            .serve(&parts, peer, &site.database, admin::Action::Activity(view))
             .await;
     }
     if onboarding::is_route(path) {
