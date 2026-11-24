@@ -111,6 +111,7 @@ impl Console {
             .max(1);
         let config = config.to_owned();
         let path = request.uri.path().to_owned();
+        let method = request.method.clone();
         let query = request.uri.query().unwrap_or_default().to_owned();
         let reply = task::spawn_blocking(move || {
             let db_path = configured_database(&config)?;
@@ -130,7 +131,9 @@ impl Console {
                 return Some(unauthorized());
             }
             if let Action::Device(route, form) = &action {
-                return route.serve(&db, &db_path, form.as_deref(), &username).ok();
+                return route
+                    .serve(&db, &db_path, &method, form.as_deref(), &username)
+                    .ok();
             }
             if let Action::Activity(view) = &action {
                 return view.serve(&db, &path, &query, page).ok();

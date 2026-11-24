@@ -5,6 +5,7 @@ mod activity;
 mod admin;
 mod assets;
 mod certificates;
+mod device_settings;
 mod devices;
 mod images;
 mod jobs;
@@ -429,11 +430,11 @@ async fn dispatch(
         }
         let form = if readable {
             None
-        } else if parts.method == Method::POST && route.accepts_post() {
+        } else if let Some(limit) = route.form_limit(&parts.method) {
             if !admin_origin(&parts.headers, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
-            match read_form(&parts.headers, body, 2048).await {
+            match read_form(&parts.headers, body, limit).await {
                 Ok(form) => Some(form),
                 Err(reply) => return reply,
             }

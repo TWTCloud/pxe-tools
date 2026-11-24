@@ -15,42 +15,64 @@ use std::{fmt::Write, io::Read, path::Path};
 
 pub(super) struct DeviceRoute {
     id: i64,
-    install: bool,
+    section: Section,
+}
+
+enum Section {
+    Detail,
+    Install,
+    Status,
 }
 
 pub(super) fn route(path: &str) -> Option<DeviceRoute> {
     let rest = path.strip_prefix("/machines/")?;
     let (id, section) = rest.split_once('/').unwrap_or((rest, ""));
     let id = id.parse().ok().filter(|id| *id > 0)?;
-    match section {
-        "" => Some(DeviceRoute { id, install: false }),
-        "install" => Some(DeviceRoute { id, install: true }),
-        _ => None,
-    }
+    let section = match section {
+        "" => Section::Detail,
+        "install" => Section::Install,
+        "status" => Section::Status,
+        _ => return None,
+    };
+    Some(DeviceRoute { id, section })
 }
 
 impl DeviceRoute {
-    pub(super) fn accepts_post(&self) -> bool {
-        self.install
+    pub(super) fn form_limit(&self, method: &hyper::Method) -> Option<usize> {
+        match (&self.section, method) {
+            (Section::Install | Section::Status, &hyper::Method::POST) => Some(2048),
+            (Section::Detail, &hyper::Method::PUT | &hyper::Method::POST) => Some(64 * 1024),
+            _ => None,
+        }
     }
 
     pub(super) fn serve(
         &self,
         db: &Connection,
         path: &Path,
+        method: &hyper::Method,
         form: Option<&[u8]>,
         username: &str,
     ) -> Result<Reply, ErrorBox> {
         if let Some(form) = form {
-            return schedule(path, self.id, form, username);
+            return match self.section {
+                Section::Install => schedule(path, self.id, form, username),
+                Section::Detail | Section::Status => super::device_settings::update(
+                    path,
+                    self.id,
+                    method,
+                    form,
+                    matches!(self.section, Section::Status),
+                ),
+            };
         }
         let Some(device) = Device::get(db, self.id)? else {
             return Ok(plain(StatusCode::NOT_FOUND, "Appareil introuvable\n"));
         };
-        if self.install {
-            install_form(db, self.id, &device)
-        } else {
-            detail(db, self.id, &device)
+        match self.section {
+            Section::Install => install_form(db, self.id, &device),
+            Section::Detail => detail(db, self.id, &device),
+            Section::Status => super::device_settings::badge(db, self.id, &device.status),
         }
     }
 }
@@ -111,7 +133,9 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
         escape(&mut output, &serial);
         output.push_str("</li>");
     }
-    write!(output, "</ul><nav><a href=\"/machines/{id}/install\">Programmer une installation Debian</a> · <a href=\"/activity?machine={id}\">Activité</a> · <a href=\"/admin/devices\">Appareils</a></nav><h2>Derniers événements</h2><ul>")?;
+    write!(output, "</ul><nav><a href=\"/machines/{id}/install\">Programmer une installation Debian</a> · <a href=\"/activity?machine={id}\">Activité</a> · <a href=\"/admin/devices\">Appareils</a></nav>")?;
+    super::device_settings::form(db, id, &mut output)?;
+    output.push_str("<h2>Derniers événements</h2><ul>");
     let mut events = db.prepare(
         "SELECT message FROM machine_events WHERE machine_id=? ORDER BY id DESC LIMIT 25",
     )?;

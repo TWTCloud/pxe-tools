@@ -384,6 +384,44 @@ def verify_activity(client, database, authorization):
     print('Rust activity preserves action and legacy install links, authenticated filtering, and progress fragments', flush=True)
 
 
+def verify_device_settings(client, database, authorization):
+    with closing(sqlite3.connect(database)) as db, db:
+        device = db.execute(
+            """INSERT INTO machines(mac,hostname,status,local_boot_source,next_action,awaiting_action_until)
+               VALUES('02:00:00:00:09:03','fixture-edit','installing','manual','reboot',datetime('now','+1 hour'))"""
+        ).lastrowid
+        action = db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES(?,'install_only','running',?)",
+                            (device,secrets.token_hex(32))).lastrowid
+        db.execute("""INSERT INTO installations(machine_id,action_id,install_status,ansible_status)
+                      VALUES(?,?,'installing','pending')""",(device,action))
+        db.execute("INSERT INTO init_jobs(job_type,status) VALUES(?,'pending')",(f'action:render_postboot:{action}',))
+    path = f'/machines/{device}'
+    settings = {'_method':'PUT','notes':'<fixture & notes>','boot_mode':'tftp','hostname':'ignored'}
+    assert client.request(path,form=settings)[0]==401
+    assert client.request(path,form=settings,authorization=authorization,origin='https://other.example')[0]==403
+    assert client.request(path,form={**settings,'local_boot_source':'pxe'},authorization=authorization)[0]==422
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute('SELECT notes,boot_mode FROM machines WHERE id=?',(device,)).fetchone()==(None,'http')
+    assert client.request(path,form=settings,authorization=authorization)[:2]==(303,path)
+    detail = client.request(path,authorization=authorization)
+    assert detail[0]==200 and b'&lt;fixture &amp; notes&gt;' in detail[2], detail
+    assert b'<strong>Installation en cours</strong>' in client.request(path+'/status',authorization=authorization)[2]
+    status = client.request(path+'/status',form={'status':'wiped'},authorization=authorization)
+    assert status[:2]==(303,path+'#settings')
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute("""SELECT hostname,notes,boot_mode,local_boot_source,status,next_action,awaiting_action_until
+                             FROM machines WHERE id=?""",(device,)).fetchone()==(
+            'fixture-edit','<fixture & notes>','tftp','none','wiped',None,None,
+        )
+        assert db.execute('SELECT status FROM actions WHERE id=?',(action,)).fetchone()==('cancelled',)
+        assert db.execute('SELECT install_status,ansible_status FROM installations WHERE action_id=?',(action,)).fetchone()==(
+            'aborted','aborted',
+        )
+        assert db.execute('SELECT status FROM init_jobs WHERE job_type=?',(f'action:render_postboot:{action}',)).fetchone()==('failed',)
+        assert db.execute("SELECT COUNT(*) FROM init_jobs WHERE job_type='bootstrap:render_templates' AND status='pending'").fetchone()==(1,)
+    print('Rust device settings preserve fields and close administrative tracking without a remote command', flush=True)
+
+
 def verify_guided_install(client, database, authorization):
     inventory = {'disks':[{'name':'vda','serial':'FIXTURE-SERIAL',
                            'identity':{'kind':'serial','source':'sysfs','value':'FIXTURE-SERIAL','status':'valid'}}]}
@@ -916,6 +954,7 @@ def local(binary):
         schedule_server = stack.enter_context(subprocess.Popen([str(binary), '--serve-guided', str(config)], env=env))
         stack.callback(schedule_server.terminate)
         updated.ready(schedule_server)
+        verify_device_settings(updated, database, authorization)
         verify_guided_install(updated, database, authorization)
     verify_worker_commands(binary)
     verify_worker_recovery(binary)
