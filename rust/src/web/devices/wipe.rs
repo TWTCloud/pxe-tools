@@ -5,8 +5,8 @@ use super::{
 };
 use crate::pxe::{log_event, set_machine_status};
 use hyper::StatusCode;
-use rusqlite::{params, OpenFlags, TransactionBehavior};
-use serde_json::json;
+use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
+use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
@@ -84,7 +84,6 @@ pub(super) fn submit(path: &Path, id: i64, data: &[u8], username: &str) -> Resul
     }
     let mut chosen = Vec::new();
     let mut used = HashSet::new();
-    let mut kinds = HashSet::new();
     for selected in targets {
         let Some((name, proof)) = device
             .serial_target(&selected)
@@ -107,21 +106,13 @@ pub(super) fn submit(path: &Path, id: i64, data: &[u8], username: &str) -> Resul
         else {
             return Ok(invalid());
         };
-        kinds.insert(mode);
         chosen.push(json!({"name":name,"mode":mode,"identity":proof}));
     }
-    let aggregate = if kinds.len() == 1 {
-        kinds.into_iter().next().expect("one mode")
-    } else {
-        "mixed"
-    };
     let token = crate::random_hex::<32>()?;
     tx.execute("INSERT INTO actions(machine_id,type,status,token,created_by) VALUES(?1,'wipe_only','pending',?2,?3)",
                params![id,token,username])?;
     let action = tx.last_insert_rowid();
-    tx.execute("INSERT INTO wipes(machine_id,disks_json,wipe_mode,wipe_status,post_action,action_id,started_at)
-                VALUES(?1,?2,?3,'pending',?4,?5,CURRENT_TIMESTAMP)",
-               params![id,json!(chosen).to_string(),aggregate,after,action])?;
+    track(&tx, id, action, &chosen, after, None)?;
     set_machine_status(&tx, id, &device.status, "wiping")?;
     let queued = tx.execute(
         "UPDATE machines SET next_action='reboot' WHERE id=?1
@@ -135,6 +126,29 @@ pub(super) fn submit(path: &Path, id: i64, data: &[u8], username: &str) -> Resul
     log_event(&tx, id, "action", "Effacement demandé", None, Some(action))?;
     tx.commit()?;
     Ok(redirect(StatusCode::SEE_OTHER, format!("/tasks/{action}")))
+}
+
+pub(super) fn track(
+    db: &Connection,
+    id: i64,
+    action: i64,
+    disks: &[Value],
+    after: &str,
+    chain: Option<&Value>,
+) -> rusqlite::Result<()> {
+    let mut kinds = disks
+        .iter()
+        .map(|disk| disk["mode"].as_str().unwrap_or_default());
+    let first = kinds.next().unwrap_or_default();
+    let aggregate = if kinds.any(|mode| mode != first) {
+        "mixed"
+    } else {
+        first
+    };
+    db.execute("INSERT INTO wipes(machine_id,disks_json,wipe_mode,wipe_status,post_action,action_id,started_at,chain_install_config_json)
+                VALUES(?1,?2,?3,'pending',?4,?5,CURRENT_TIMESTAMP,?6)",
+               params![id,json!(disks).to_string(),aggregate,after,action,chain.map(Value::to_string)])?;
+    Ok(())
 }
 
 fn invalid() -> Reply {

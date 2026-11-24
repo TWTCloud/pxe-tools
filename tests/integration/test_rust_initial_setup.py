@@ -947,8 +947,44 @@ def verify_custom_partition_review(client, database, authorization):
         assert bound['target_disk_identities']['/dev/vdb']['value'] == 'REPLACED'
         assert config['review_boot_mode'] == 'BIOS' and config['version_full'] == '13.7.0'
         assert config['admin_user_pwhash'] == password
+        wipe_device = db.execute("""INSERT INTO machines(mac,hostname,status,boot_arch,inventory_json)
+                                   VALUES('02:00:00:00:09:70','fixture-wipe','discovered','amd64',?)""",
+                                 [json.dumps(inventory)]).lastrowid
+        db.execute('UPDATE presets SET pre_wipe_mode=? WHERE id=?',
+                   [json.dumps({'/dev/vdc':'partial'}),preset])
+    wipe_preview = f'/machines/{wipe_device}/install-preview'
+    wipe_target = f'/machines/{wipe_device}/install/advanced'
+    wipe_form = {**form,'hostname':'fixture-wipe'}
+    assert request(wipe_preview,form=wipe_form)[0] == 409
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute('UPDATE presets SET pre_wipe_mode_json=? WHERE id=?',
+                   [json.dumps({'/dev/vda':'partial','/dev/vdb':'aucun'}),preset])
+    review = request(wipe_preview,form=wipe_form)
+    assert review[0] == 200 and b'name="erase"' in review[2], review
+    confirmation = {**ConfirmationInputs(review[2]).values,'confirm':'yes'}
+    assert request(wipe_target,form=confirmation)[0] == 422
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute('SELECT COUNT(*) FROM wipes WHERE machine_id=?',[wipe_device]).fetchone() == (0,)
+    saved = request(wipe_target,form={**confirmation,'erase':'EFFACER'})
+    assert saved[0] == 303 and saved[1].startswith('/tasks/'), saved
+    with closing(sqlite3.connect(database)) as db, db:
+        action = int(saved[1].rsplit('/',1)[1])
+        assert db.execute('SELECT type,status FROM actions WHERE machine_id=? AND id=?',
+                          [wipe_device,action]).fetchone() == ('reinstall','pending')
+        assert db.execute('SELECT status,preset_id,next_action FROM machines WHERE id=?',
+                          [wipe_device]).fetchone() == ('wiping',preset,None)
+        raw, after, chain = db.execute('SELECT disks_json,post_action,chain_install_config_json '
+                                      'FROM wipes WHERE action_id=?',[action]).fetchone()
+        target_disk, = json.loads(raw)
+        assert (target_disk['name'],target_disk['mode'],target_disk['identity']['value']) == (
+            'vda','partial','FIXTURE-RAID-0',
+        )
+        config = json.loads(chain)['install_config']
+        assert after == 'reboot' and config['_pending_action_id'] == action
+        assert json.loads(config['partition_custom_json'])['target_disks'] == disks
         db.execute("UPDATE settings SET value='off' WHERE key='pxe_enabled'")
-    print('Rust reviewed both RAID targets, refused a stale confirmation and armed the validated plan', flush=True)
+    print('Rust reviewed RAID and pre-wipe targets, refused stale or incomplete confirmations and armed the plan',
+          flush=True)
 
 
 def verify_worker_commands(binary):

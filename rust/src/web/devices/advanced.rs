@@ -6,7 +6,7 @@ use hyper::StatusCode;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::{fmt::Write, path::Path};
+use std::{collections::HashMap, fmt::Write, path::Path};
 
 pub(super) enum Route {
     Form,
@@ -14,8 +14,7 @@ pub(super) enum Route {
 }
 
 const MODELS: &str = "distro='debian' AND variant='debian' AND partition_mode='custom'
-    AND root_login_mode='disabled' AND COALESCE(pre_wipe_mode,'aucun') IN ('aucun','none')
-    AND COALESCE(pre_wipe_mode_json,'')='' AND COALESCE(admin_user_pwhash,'')<>''
+    AND root_login_mode='disabled' AND COALESCE(admin_user_pwhash,'')<>''
     AND COALESCE(NULLIF(codename,''),'trixie')='trixie'";
 
 #[derive(serde::Deserialize)]
@@ -27,6 +26,8 @@ struct Selection {
     review: String,
     #[serde(default)]
     confirm: String,
+    #[serde(default)]
+    erase: String,
 }
 
 pub(super) fn form(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> {
@@ -89,7 +90,9 @@ pub(super) fn submit(
         || matches!(route, Route::Form)
             && (selection.confirm != "yes" || selection.review.len() != 64)
         || matches!(route, Route::Review)
-            && (!selection.confirm.is_empty() || !selection.review.is_empty())
+            && (!selection.confirm.is_empty()
+                || !selection.review.is_empty()
+                || !selection.erase.is_empty())
     {
         return Ok(rejected(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -158,6 +161,12 @@ pub(super) fn submit(
             "Compte d’installation du modèle invalide",
         ));
     }
+    let Some(wipe) = wipe_targets(&device, &snapshot) else {
+        return Ok(rejected(
+            StatusCode::CONFLICT,
+            "Les disques à effacer ou leurs identités ne correspondent pas au modèle",
+        ));
+    };
     let candidate = install::machine(&tx, &device.mac, false)?.ok_or("Missing device for plan")?;
     snapshot["hostname"] = json!(hostname);
     snapshot["codename"] = json!("trixie");
@@ -169,7 +178,7 @@ pub(super) fn submit(
     }
     let fingerprint: String = Sha256::digest(serde_json::to_vec(&json!({
         "machine":id,"model":selection.preset,"image":selection.image,"snapshot":snapshot,
-        "targets":review,
+        "targets":review,"erase":wipe,
     }))?)
     .iter()
     .map(|byte| format!("{byte:02x}"))
@@ -186,16 +195,38 @@ pub(super) fn submit(
                 escape(&mut html, &serial);
                 write!(html, " · {capacity} Mo</li>")?;
             }
+            html.push_str("</ul>");
+            if !wipe.is_empty() {
+                html.push_str("<h2>Disques à effacer avant l’installation</h2><ul>");
+                for target in &wipe {
+                    html.push_str("<li>");
+                    escape(&mut html, target["name"].as_str().unwrap_or_default());
+                    html.push_str(" · ");
+                    escape(
+                        &mut html,
+                        target["identity"]["value"].as_str().unwrap_or_default(),
+                    );
+                    html.push_str(if target["mode"] == "full" {
+                        " · effacement complet</li>"
+                    } else {
+                        " · effacement partiel</li>"
+                    });
+                }
+                html.push_str("</ul>");
+            }
             let preset = selection.preset;
             let image = selection.image;
             write!(
                 html,
-                r#"</ul><form method="post" action="/machines/{id}/install/advanced">
+                r#"<form method="post" action="/machines/{id}/install/advanced">
 <input type="hidden" name="preset" value="{preset}"><input type="hidden" name="image" value="{image}">
 <input type="hidden" name="review" value="{fingerprint}"><input type="hidden" name="hostname" value="{hostname}">
-<p><label><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement de tous les disques affichés</label></p>
-<button>Programmer l’installation</button></form>"#
+<p><label><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement des disques indiqués</label></p>"#
             )?;
+            if !wipe.is_empty() {
+                html.push_str(r#"<p><label>Saisissez EFFACER pour confirmer le pré-effacement <input name="erase" autocomplete="off" required></label></p>"#);
+            }
+            html.push_str("<button>Programmer l’installation</button></form>");
             Ok(page("Vérifier la partition Debian", &html))
         }
         Route::Form => {
@@ -205,7 +236,44 @@ pub(super) fn submit(
                     "Le modèle, l’image ou l’inventaire a changé depuis la vérification",
                 ));
             }
-            let action = record_plan(&tx, id, username, selection.preset, snapshot)?;
+            let action = if wipe.is_empty() {
+                record_plan(&tx, id, username, selection.preset, snapshot)?
+            } else {
+                if selection.erase != "EFFACER" {
+                    return Ok(rejected(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "Confirmez l’effacement des disques affichés",
+                    ));
+                }
+                let token = crate::random_hex::<32>()?;
+                tx.execute(
+                    "INSERT INTO actions(machine_id,type,status,token,created_by)
+                            VALUES(?1,'reinstall','pending',?2,?3)",
+                    params![id, token, username],
+                )?;
+                let action = tx.last_insert_rowid();
+                snapshot["_pending_action_id"] = json!(action);
+                let chain = json!({"hostname":hostname,"domain":snapshot["domain"],"install_config":snapshot});
+                super::wipe::track(&tx, id, action, &wipe, "reboot", Some(&chain))?;
+                pxe::set_machine_status(&tx, id, &device.status, "wiping")?;
+                tx.execute(
+                    "UPDATE machines SET preset_id=?2,next_action=NULL WHERE id=?1",
+                    params![id, selection.preset],
+                )?;
+                tx.execute(
+                    "INSERT INTO init_jobs(job_type,status) VALUES(?1,'pending')",
+                    [format!("action:render_postboot:{action}")],
+                )?;
+                pxe::log_event(
+                    &tx,
+                    id,
+                    "action",
+                    "Effacement et installation programmés au prochain démarrage PXE.",
+                    None,
+                    Some(action),
+                )?;
+                action
+            };
             tx.commit()?;
             Ok(redirect(StatusCode::SEE_OTHER, format!("/tasks/{action}")))
         }
@@ -217,7 +285,7 @@ fn selection(data: &[u8]) -> Option<Selection> {
     for (name, value) in form_urlencoded::parse(data) {
         let value = match name.as_ref() {
             "preset" | "image" => json!(value.parse::<i64>().ok().filter(|id| *id > 0)?),
-            "hostname" | "review" | "confirm" => json!(value),
+            "hostname" | "review" | "confirm" | "erase" => json!(value),
             _ => return None,
         };
         if fields.insert(name.into_owned(), value).is_some() {
@@ -288,6 +356,71 @@ fn bind(device: &Device, snapshot: &Value) -> Result<(Value, VerifiedDisks), Err
     }
     plan["target_disk_identities"] = Value::Object(identities);
     Ok((plan, review))
+}
+
+fn wipe_targets(device: &Device, snapshot: &Value) -> Option<Vec<Value>> {
+    let legacy = snapshot["pre_wipe_mode"]
+        .as_str()
+        .unwrap_or_default()
+        .trim();
+    let modern = snapshot["pre_wipe_mode_json"]
+        .as_str()
+        .unwrap_or_default()
+        .trim();
+    let spec = if modern.is_empty() { legacy } else { modern };
+    let configured: HashMap<String, String> = match spec {
+        "" | "none" | "aucun" | "[]" | "{}" => return Some(Vec::new()),
+        "full" | "partial" => HashMap::from([("*".to_owned(), spec.to_owned())]),
+        raw => serde_json::from_str(raw).ok()?,
+    };
+    let choices: Vec<_> = device.disks().collect();
+    let mut modes = HashMap::new();
+    for (name, mode) in configured {
+        if !matches!(mode.as_str(), "full" | "partial" | "none" | "aucun") {
+            return None;
+        }
+        let path = if name == "*" || name.starts_with("/dev/") {
+            name
+        } else {
+            format!("/dev/{name}")
+        };
+        if !matches!(mode.as_str(), "none" | "aucun")
+            && path != "*"
+            && !choices.iter().any(|(present, _, _)| present == &path)
+        {
+            return None;
+        }
+        if modes.insert(path, mode).is_some() {
+            return None;
+        }
+    }
+    let fallback = modes.get("*").map(String::as_str).unwrap_or("aucun");
+    let constraints = &snapshot["disk_target_constraints"];
+    let required = pxe::array_values(constraints).next();
+    let mut targets = Vec::new();
+    for inventory in pxe::array_values(&device.inventory["disks"]) {
+        let name = inventory["name"].as_str()?;
+        let path = if name.starts_with("/dev/") {
+            name.to_owned()
+        } else {
+            format!("/dev/{name}")
+        };
+        let mode = modes.get(&path).map(String::as_str).unwrap_or(fallback);
+        if !matches!(mode, "partial" | "full") {
+            continue;
+        }
+        let (_, value, _) = choices
+            .iter()
+            .find(|(candidate, _, _)| candidate == &path)?;
+        let (name, proof) = device.serial_target(&format!("{path}:{value}"))?;
+        if required.is_some_and(|entry| {
+            crate::disk_identity::serial(entry).as_deref() != Some(value.as_str())
+        }) {
+            return None;
+        }
+        targets.push(json!({"name":name,"mode":mode,"identity":proof}));
+    }
+    Some(targets)
 }
 
 fn bind_network(device: &Device, plan: &mut Value) -> bool {
