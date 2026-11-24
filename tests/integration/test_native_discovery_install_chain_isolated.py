@@ -329,16 +329,27 @@ def verify_arm64_signed_loaders(root=None, *, native=False):
     # Build with the packaged worker and a disposable key. This container
     # only downloads signed Debian archives, then exits before starting PXE.
     mounts=[]
+    mok_path='/run/fixture-mok'
+    http_path='/run/fixture-http'
     if root:
-        mok_dir='native-mok' if native else 'conf/mok'
-        (root/mok_dir).mkdir(mode=0o700)
-        for source,target in (('tftp','/run/fixture-tftp'),(mok_dir,'/run/fixture-mok')):
+        if native:
+            # The native publisher atomically moves the public certificate
+            # within the same filesystem as the private certificate directory.
+            (root/'native-certs/mok').mkdir(mode=0o700,parents=True)
+            (root/'native-certs/http').mkdir()
+            mounts.extend(('--mount',f'type=bind,src={root/"native-certs"},dst=/run/fixture-certs'))
+            mok_path='/run/fixture-certs/mok'
+            http_path='/run/fixture-certs/http'
+        else:
+            (root/'conf/mok').mkdir(mode=0o700)
+            mounts.extend(('--mount',f'type=bind,src={root/"conf/mok"},dst={mok_path}'))
+        for source,target in (('tftp','/run/fixture-tftp'),):
             mounts.extend(('--mount',f'type=bind,src={root/source},dst={target}'))
     source_image=image if native else appliance_image
     defaults=('set -a; source /usr/lib/pxe-tools/native/default.env; set +a; ' if native else '')
     result=docker('run','--rm','--network','bridge',*mounts,'--entrypoint','/bin/bash',source_image,'-ec',
-                  defaults+'export PXE_ARM64_SECURE_BOOT=1 PXE_IP=192.0.2.1 MOK_DIR=/run/fixture-mok '
-                  'HTTP_ROOT=/run/fixture-http TFTP_ROOT=/run/fixture-tftp; '
+                  defaults+f'export PXE_ARM64_SECURE_BOOT=1 PXE_IP=192.0.2.1 MOK_DIR={mok_path} '
+                  f'HTTP_ROOT={http_path} TFTP_ROOT=/run/fixture-tftp; '
                   'install -d "$HTTP_ROOT" "$TFTP_ROOT"; '
                   'bash /opt/pxe-tools/scripts/bootstrap-generate-mok.sh; '
                   'bash /opt/pxe-tools/scripts/bootstrap-install-pxe-bins.sh; '
@@ -349,6 +360,8 @@ def verify_arm64_signed_loaders(root=None, *, native=False):
     if result.returncode:
         print((result.stdout+'\n'+result.stderr)[-7500:],flush=True)
         raise RuntimeError('The packaged worker could not prepare the signed ARM64 chain')
+    if native:
+        (root/'http/MOK.der').write_bytes((root/'native-certs/http/MOK.der').read_bytes())
     print('Packaged worker prepared authenticated ARM64 shim and MokManager and verified its MOK-signed ARM64 GRUB',flush=True)
 
 
@@ -438,7 +451,7 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     if client_arch=='arm64':
         env.append('PXE_ARM64_SECURE_BOOT=1')
         if native:
-            mounts.extend(('--mount',f'type=bind,src={root/"native-mok"},dst={mok_root}'))
+            mounts.extend(('--mount',f'type=bind,src={root/"native-certs/mok"},dst={mok_root}'))
     if amd64:
         windows=root/'http/winpe/amd64'
         windows.mkdir(parents=True)
@@ -726,7 +739,8 @@ def main():
             if client_arch=='arm64':
                 # The isolated worker receives its already prepared bootloaders
                 # from a build-only container with access to the Debian archive.
-                db.execute("INSERT INTO init_jobs(job_type,status) VALUES('bootstrap:build_grub','success')")
+                db.execute("""INSERT INTO init_jobs(job_type,status)
+                              VALUES('bootstrap:generate_mok','success'),('bootstrap:build_grub','success')""")
         # A stale but valid DB must never drive the appliance, even when its
         # path is present in the inherited environment.
         with sqlite3.connect(data/'stale.sqlite') as db:
