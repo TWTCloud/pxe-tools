@@ -3,7 +3,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][guid]$GuestId,
-    [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]{1,20}$')][string]$DiskSerial,
+    [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]{1,40}$')][string]$DiskSerial,
+    [switch]$UseUniqueId,
     [Parameter(Mandatory)][ValidateRange(1, 128)][int]$ImageIndex
 )
 
@@ -23,9 +24,10 @@ if (-not $tpm -or (([string]$tpm.SpecVersion -split ',')[0].Trim() -ne '2.0')) {
     throw 'The disposable Windows fixture requires TPM 2.0.'
 }
 $disks = @(Get-Disk | Where-Object { -not $_.IsReadOnly })
-if ($disks.Count -ne 1 -or ([string]$disks[0].SerialNumber).Trim() -cne $DiskSerial -or
+$diskProperty = if ($UseUniqueId) { 'UniqueId' } else { 'SerialNumber' }
+if ($disks.Count -ne 1 -or ([string]$disks[0].$diskProperty).Trim() -cne $DiskSerial -or
     $disks[0].PartitionStyle -ne 'RAW' -or $disks[0].Size -lt 64GB) {
-    throw 'Expected exactly one writable, blank disposable disk with the configured serial.'
+    throw 'Expected exactly one writable, blank disposable disk with the configured identifier.'
 }
 $disk = $disks[0]
 if ((Test-Path -LiteralPath 'S:\') -or (Test-Path -LiteralPath 'W:\') -or
@@ -43,7 +45,7 @@ if ($images.Count -ne 1) {
 }
 $probe = Join-Path $PSScriptRoot 'pxe-collect.ps1'
 $receipt = Join-Path $env:TEMP 'pxe-winpe-receipt.log'
-& $probe -GuestId $GuestId -DiskSerial $DiskSerial -ReceiptPath $receipt
+& $probe -GuestId $GuestId -DiskSerial $DiskSerial -UseUniqueId:$UseUniqueId -ReceiptPath $receipt
 
 function Invoke-Checked {
     param([string]$Program, [string[]]$Arguments)
@@ -93,6 +95,12 @@ Copy-Item -LiteralPath $probe -Destination 'W:\Windows\System32\pxe-collect.ps1'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'pxe-first-boot.ps1') -Destination 'W:\Windows\System32'
 $panther = 'W:\Windows\Panther'
 $null = New-Item -ItemType Directory -Path $panther -Force
+$identityFlag = if ($UseUniqueId) { ' -UseUniqueId' } else { '' }
+@"
+@echo off
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "%SystemRoot%\System32\pxe-first-boot.ps1" -GuestId $GuestId -DiskSerial $DiskSerial$identityFlag
+exit /b %errorlevel%
+"@ | Set-Content -LiteralPath 'W:\Windows\System32\pxe-first-boot.cmd' -Encoding Ascii
 @"
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
@@ -102,7 +110,7 @@ $null = New-Item -ItemType Directory -Path $panther -Force
         <RunSynchronousCommand xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add">
           <Order>1</Order>
           <Description>Collect the first Windows boot evidence</Description>
-          <Path>%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File %SystemRoot%\System32\pxe-first-boot.ps1 -GuestId $GuestId -DiskSerial $DiskSerial</Path>
+          <Path>%SystemRoot%\System32\cmd.exe /d /c %SystemRoot%\System32\pxe-first-boot.cmd</Path>
         </RunSynchronousCommand>
       </RunSynchronous>
     </component>

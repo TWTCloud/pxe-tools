@@ -3,7 +3,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][guid]$GuestId,
-    [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]{1,20}$')][string]$DiskSerial
+    [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]{1,40}$')][string]$DiskSerial,
+    [switch]$UseUniqueId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,13 +23,13 @@ try {
     if (-not $previous.StartsWith($prefix)) { throw 'Missing WinPE receipt.' }
     $winpe = $previous.Substring($prefix.Length) | ConvertFrom-Json
     if ($winpe.phase -ne 'winpe' -or [guid]$winpe.guest_id -ne $GuestId -or
-        $winpe.disk_serial -cne $DiskSerial) {
+        $winpe.disk_serial -cne $DiskSerial -or ($UseUniqueId -and $winpe.disk_identity -ne 'unique_id')) {
         throw 'The EFI partition does not have the verified WinPE fixture identity.'
     }
     $stage = 'S:\PXE-LAB\STAGE.LOG'
     Set-Content -LiteralPath $stage -Value 'windows-specialize' -Encoding Ascii
     $receipt = Join-Path $env:TEMP 'pxe-windows-receipt.log'
-    & (Join-Path $PSScriptRoot 'pxe-collect.ps1') -GuestId $GuestId -DiskSerial $DiskSerial -ReceiptPath $receipt
+    & (Join-Path $PSScriptRoot 'pxe-collect.ps1') -GuestId $GuestId -DiskSerial $DiskSerial -UseUniqueId:$UseUniqueId -ReceiptPath $receipt
     $started = Get-Content -LiteralPath $receipt -Raw
     if (-not $started.StartsWith($prefix)) {
         throw 'Missing first-boot receipt.'

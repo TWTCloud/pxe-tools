@@ -78,6 +78,15 @@ class WindowsEvidenceTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'followed'):
                 evidence.verify(case, network, path)
 
+            identifier = {'disk_serial': '60022480' + 'A' * 24, 'disk_identity': 'unique_id'}
+            hyperv = {**case, **identifier}
+            transcript({**winpe, **identifier}, {**windows, **identifier})
+            evidence.verify(hyperv, network, path)
+            transcript({**winpe, **identifier},
+                       {**windows, 'disk_serial': identifier['disk_serial']})
+            with self.assertRaisesRegex(ValueError, 'identifier'):
+                evidence.verify(hyperv, network, path)
+
 
 if __name__ == '__main__':
     unittest.main()

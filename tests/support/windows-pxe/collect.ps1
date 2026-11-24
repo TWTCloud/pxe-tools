@@ -4,6 +4,7 @@
 param(
     [Parameter(Mandatory)][guid]$GuestId,
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]{1,40}$')][string]$DiskSerial,
+    [switch]$UseUniqueId,
     [ValidatePattern('^COM[1-9][0-9]?$')][string]$SerialPort = 'COM1',
     [string]$ReceiptPath = ''
 )
@@ -13,8 +14,9 @@ $actualId = [guid](Get-CimInstance -ClassName Win32_ComputerSystemProduct).UUID
 if ($actualId -ne $GuestId) { throw 'Unexpected SMBIOS identity for the deployment fixture.' }
 
 $isWinPE = Test-Path -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\MiniNT'
-$disks = @(Get-Disk | Where-Object { ([string]$_.SerialNumber).Trim() -ceq $DiskSerial })
-if ($disks.Count -ne 1) { throw 'The disposable disk serial did not identify exactly one disk.' }
+$diskProperty = if ($UseUniqueId) { 'UniqueId' } else { 'SerialNumber' }
+$disks = @(Get-Disk | Where-Object { ([string]$_.$diskProperty).Trim() -ceq $DiskSerial })
+if ($disks.Count -ne 1) { throw 'The disposable disk identifier did not identify exactly one disk.' }
 $selected = $disks[0]
 $secureBoot = Confirm-SecureBootUEFI
 $tpm = Get-CimInstance -Namespace 'root\CIMV2\Security\MicrosoftTpm' -ClassName Win32_Tpm
@@ -22,11 +24,12 @@ $tpmSpec = if ($tpm) { ([string]$tpm.SpecVersion -split ',')[0].Trim() } else { 
 
 $receipt = [ordered]@{
     guest_id = $actualId.ToString()
-    disk_serial = ([string]$selected.SerialNumber).Trim()
+    disk_serial = ([string]$selected.$diskProperty).Trim()
     secure_boot = [bool]$secureBoot
     tpm_spec = $tpmSpec
     partition_style = [string]$selected.PartitionStyle
 }
+if ($UseUniqueId) { $receipt.Add('disk_identity', 'unique_id') }
 
 if ($isWinPE) {
     $receipt.phase = 'winpe'

@@ -8,14 +8,19 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$WimbootSha256,
     [Parameter(Mandatory)][string]$OutputDirectory,
     [Parameter(Mandatory)][guid]$GuestId,
-    [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]{1,20}$')][string]$DiskSerial,
+    [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]{1,40}$')][string]$DiskSerial,
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{1,40}$')][string]$Edition,
     [ValidateRange(0, 128)][int]$InstallImageIndex = 0,
+    [switch]$UseUniqueId,
     [string]$AdkDirectory = "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit"
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if (($UseUniqueId -and $DiskSerial -cnotmatch '^[A-F0-9]{32}$') -or
+    (-not $UseUniqueId -and $DiskSerial.Length -gt 20)) {
+    throw 'Provide the VHDX storage identifier or an AHCI serial, according to the test platform.'
+}
 if ($env:OS -ne 'Windows_NT' -or -not [Environment]::Is64BitProcess) {
     throw 'Run from a 64-bit PowerShell session on the isolated Windows media builder.'
 }
@@ -106,6 +111,7 @@ try {
         $script = "install-fixture.ps1"
         $parameters += " -ImageIndex $InstallImageIndex"
     }
+    if ($UseUniqueId) { $parameters += ' -UseUniqueId' }
     @"
 @echo off
 wpeinit
@@ -129,7 +135,7 @@ Copy-Item -LiteralPath $approvedWimboot.FullName -Destination (Join-Path $boot '
 function Get-BootHash([string]$Name) {
     (Get-FileHash -LiteralPath (Join-Path $boot $Name) -Algorithm SHA256).Hash.ToLowerInvariant()
 }
-[ordered]@{
+$case = [ordered]@{
     guest_id = $GuestId.ToString()
     disk_serial = $DiskSerial
     edition = $Edition
@@ -138,4 +144,6 @@ function Get-BootHash([string]$Name) {
     winpe_sha256 = Get-BootHash 'boot.wim'
     bcd_sha256 = Get-BootHash 'BCD'
     boot_sdi_sha256 = Get-BootHash 'boot.sdi'
-} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'case.json') -Encoding Ascii
+}
+if ($UseUniqueId) { $case.Add('disk_identity', 'unique_id') }
+$case | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'case.json') -Encoding Ascii
