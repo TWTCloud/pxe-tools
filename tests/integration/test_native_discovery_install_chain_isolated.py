@@ -533,7 +533,7 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s,"fixture_ar
             raise RuntimeError('The packaged appliance stopped during startup')
         return docker('exec',dhcp,'curl','-fsS','--max-time','2',pxe_url+'/healthz',check=False).returncode==0
     wait_for(http_ready,90,'packaged PXE listener')
-    for package_name in ('nginx','nginx-common','php8.4-fpm'):
+    for package_name in ('nginx','nginx-common','php8.4-fpm','php8.4-curl'):
         state=docker('exec',app,'dpkg-query','-W','-f=${Status}',package_name,check=False).stdout
         if state.strip()=='install ok installed':
             raise RuntimeError(f'Unexpected package in the guided appliance: {package_name}')
