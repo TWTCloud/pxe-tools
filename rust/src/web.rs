@@ -30,7 +30,8 @@ use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, Limited};
 use hyper::{
     body::{Bytes, Incoming},
     header::{
-        HeaderMap, HeaderName, CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION, ORIGIN, USER_AGENT,
+        HeaderMap, HeaderName, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HOST, LOCATION, ORIGIN,
+        USER_AGENT,
     },
     server::conn::http1,
     service::service_fn,
@@ -320,11 +321,34 @@ where
             } else {
                 None
             };
+            let winpe_path = if request.method() == Method::GET
+                && winpe::allowed(site.winpe_client, peer.ip())
+            {
+                match request.uri().path() {
+                    "/boot.ipxe" => Some("/boot.ipxe"),
+                    winpe::BOOT => Some(winpe::BOOT),
+                    "/pxe/windows/wimboot" => Some("/pxe/windows/wimboot"),
+                    "/pxe/windows/BCD" => Some("/pxe/windows/BCD"),
+                    "/pxe/windows/boot.sdi" => Some("/pxe/windows/boot.sdi"),
+                    "/pxe/windows/boot.wim" => Some("/pxe/windows/boot.wim"),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let reply = dispatch(request, peer.ip(), secure, &site).await;
             if let Some(asset) = asset {
                 let length = single(reply.headers(), CONTENT_LENGTH.as_str()).unwrap_or("-");
                 println!(
                     "PXE GRUB asset={asset} status={} bytes={length}",
+                    reply.status().as_u16()
+                );
+            }
+            if let Some(path) = winpe_path {
+                let length = single(reply.headers(), CONTENT_LENGTH.as_str()).unwrap_or("-");
+                let range = single(reply.headers(), CONTENT_RANGE.as_str()).unwrap_or("-");
+                println!(
+                    "PXE WinPE asset={path} status={} bytes={length} range={range}",
                     reply.status().as_u16()
                 );
             }

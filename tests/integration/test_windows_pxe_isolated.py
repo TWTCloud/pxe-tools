@@ -151,6 +151,26 @@ def count_receipts(transcript):
         return sum(line.startswith(PREFIX) and line.endswith('\n') for line in stream)
 
 
+def boot_asset_served(log, name, size):
+    prefix = f'PXE WinPE asset=/pxe/windows/{name} '
+    responses = [line.removeprefix(prefix) for line in log.splitlines() if line.startswith(prefix)]
+    if f'status=200 bytes={size} range=-' in responses:
+        return True
+    ranges = []
+    for response in responses:
+        partial = re.fullmatch(r'status=206 bytes=(\d+) range=bytes (\d+)-(\d+)/(\d+)', response)
+        if partial:
+            count, start, end, total = map(int, partial.groups())
+            if total == size and 0 <= start <= end < size and count == end-start+1:
+                ranges.append((start,end))
+    covered = 0
+    for start,end in sorted(ranges):
+        if start > covered:
+            return False
+        covered = max(covered,end+1)
+    return covered == size
+
+
 def run_guest(client, lan, helper, root, media, case, *, discovery):
     mount = ('--mount', f'type=bind,src={root},dst=/fixture-data')
     iso = ()
@@ -251,11 +271,18 @@ def main():
                    '--dhcp-option=3','--dhcp-option=6',
                    '--dhcp-match=set:uefi,option:client-arch,7',
                    '--dhcp-match=set:uefi,option:client-arch,9',
-                   f'--dhcp-boot=tag:uefi,ipxe-shim.efi,,{DHCP}',
+                   '--dhcp-userclass=set:ipxe,iPXE',
+                   f'--dhcp-boot=tag:uefi,tag:!ipxe,ipxe-shim.efi,,{DHCP}',
+                   f'--dhcp-boot=tag:ipxe,http://{SERVER}/boot.ipxe',
                    '--enable-tftp','--tftp-root=/pxe','--log-dhcp','--log-facility=/tmp/windows-dhcp.log')
             start_appliance(app,lan,dhcp,root,boot_assets)
             wait_for(lambda:(root/'tpm.sock').is_socket(), 30, 'disposable TPM socket')
             run_guest(client,lan,helper,root,media,case,discovery=True)
+            boot_log = docker('logs',app).stdout
+            for name in ('wimboot','BCD','boot.sdi','boot.wim'):
+                size = (boot_assets/name).stat().st_size
+                if not boot_asset_served(boot_log,name,size):
+                    raise RuntimeError(f'The Rust server did not serve the verified {name} to the PXE guest.')
             print('The WinPE guest sent its receipt and requested a reboot.',flush=True)
             run_guest(client,lan,helper,root,media,case,discovery=False)
             log = docker('exec',dhcp,'cat','/tmp/windows-dhcp.log').stdout
@@ -273,6 +300,10 @@ def main():
                 print(error.stderr[-2000:],end='',flush=True)
             raise
         finally:
+            responses = docker('logs',app,check=False).stdout
+            for line in responses.splitlines():
+                if line.startswith('PXE WinPE asset='):
+                    print(line,flush=True)
             summary = docker('exec',dhcp,'tail','-n','25','/tmp/windows-dhcp.log',check=False).stdout
             if summary:
                 print(summary,end='',flush=True)
