@@ -92,13 +92,13 @@ impl Console {
         let Ok(_permit) = self.jobs.try_acquire() else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
         };
-        if !self.allow_attempt(peer) {
+        let Some(window) = self.reserve_attempt(peer) else {
             return Response::builder()
                 .status(StatusCode::TOO_MANY_REQUESTS)
                 .header("Retry-After", "60")
                 .body(bytes("Try again later\n"))
                 .expect("valid rate limit response");
-        }
+        };
         let page = request
             .uri
             .query()
@@ -197,24 +197,46 @@ impl Console {
             )
         })
         .await;
+        if reply.as_ref().is_ok_and(|result| {
+            result
+                .as_ref()
+                .is_some_and(|response| response.status() != StatusCode::UNAUTHORIZED)
+        }) {
+            self.refund_attempt(peer, window);
+        }
         reply
             .ok()
             .flatten()
             .unwrap_or_else(|| plain(StatusCode::SERVICE_UNAVAILABLE, "Console unavailable\n"))
     }
 
-    fn allow_attempt(&self, ip: IpAddr) -> bool {
-        let Ok(mut attempts) = self.attempts.lock() else {
-            return false;
-        };
+    fn reserve_attempt(&self, ip: IpAddr) -> Option<Instant> {
+        let mut attempts = self.attempts.lock().ok()?;
         let now = Instant::now();
         attempts.retain(|_, (started, _)| now.duration_since(*started) < Duration::from_secs(60));
         if attempts.len() >= 512 && !attempts.contains_key(&ip) {
-            return false;
+            return None;
         }
-        let count = &mut attempts.entry(ip).or_insert((now, 0)).1;
-        *count = count.saturating_add(1);
-        *count <= 20
+        let (started, count) = attempts.entry(ip).or_insert((now, 0));
+        if *count >= 20 {
+            return None;
+        }
+        *count += 1;
+        Some(*started)
+    }
+
+    fn refund_attempt(&self, ip: IpAddr, window: Instant) {
+        let Ok(mut attempts) = self.attempts.lock() else {
+            return;
+        };
+        if let Some((started, count)) = attempts.get_mut(&ip) {
+            if *started == window {
+                *count -= 1;
+                if *count == 0 {
+                    attempts.remove(&ip);
+                }
+            }
+        }
     }
 }
 

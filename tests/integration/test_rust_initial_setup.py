@@ -422,6 +422,16 @@ def verify_device_settings(client, database, authorization):
     print('Rust device settings preserve fields and close administrative tracking without a remote command', flush=True)
 
 
+def verify_admin_attempt_limit(client, authorization):
+    path = '/admin/devices'
+    for _ in range(21):
+        assert client.request(path,authorization=authorization)[0]==200
+    for _ in range(20):
+        assert client.request(path,authorization='fixture-unknown:invalid')[0]==401
+    assert client.request(path,authorization='fixture-unknown:invalid')[0]==429
+    print('Rust kept failed admin attempts rate-limited while serving a signed-in operator', flush=True)
+
+
 def verify_guided_install(client, database, authorization):
     inventory = {'disks':[{'name':'vda','serial':'FIXTURE-SERIAL',
                            'identity':{'kind':'serial','source':'sysfs','value':'FIXTURE-SERIAL','status':'valid'}}]}
@@ -956,6 +966,7 @@ def local(binary):
         updated.ready(schedule_server)
         verify_device_settings(updated, database, authorization)
         verify_guided_install(updated, database, authorization)
+        verify_admin_attempt_limit(updated, authorization)
     verify_worker_commands(binary)
     verify_worker_recovery(binary)
     verify_schema_migration(binary)
