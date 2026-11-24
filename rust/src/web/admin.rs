@@ -46,6 +46,7 @@ pub(super) enum Action {
     Register(Option<Bytes>),
     Images(super::images::Route, Option<Bytes>),
     Presets(Option<Bytes>),
+    Preset(super::presets::Route, Option<Bytes>),
     PullPresets,
     Jobs(super::jobs::View),
     Activity(super::activity::View),
@@ -312,6 +313,10 @@ impl Console {
                 }
                 if let Action::Presets(form) = &action {
                     return super::presets::serve(&db, &db_path, form.as_deref(), page).ok();
+                }
+                if let Action::Preset(route, form) = &action {
+                    return super::presets::item(*route, &method, &db, &db_path, form.as_deref())
+                        .ok();
                 }
                 if let Action::PullPresets = &action {
                     return super::presets::pull(&db_path).ok();

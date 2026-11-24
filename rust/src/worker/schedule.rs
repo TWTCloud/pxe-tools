@@ -109,7 +109,7 @@ fn presets(db: &Connection) -> rusqlite::Result<Option<(String, &'static str)>> 
             let mut names = query.query([])?;
             let mut still_present = false;
             while let Some(row) = names.next()? {
-                if slug(&row.get::<_, String>(0)?) == deleted {
+                if preset_slug(&row.get::<_, String>(0)?) == deleted {
                     still_present = true;
                     break;
                 }
@@ -128,7 +128,7 @@ fn presets(db: &Connection) -> rusqlite::Result<Option<(String, &'static str)>> 
     )))
 }
 
-fn slug(name: &str) -> String {
+pub(crate) fn preset_slug(name: &str) -> String {
     name.to_lowercase()
         .split(|letter: char| {
             !letter.is_ascii_lowercase() && !letter.is_ascii_digit() && letter != '-'

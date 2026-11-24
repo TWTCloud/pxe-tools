@@ -473,6 +473,55 @@ def verify_job_console(client, database, authorization):
     print('Rust job console preserves authenticated job status and escapes rendered logs', flush=True)
 
 
+def verify_preset_editor(client, database, authorization):
+    def request(path, **kwargs):
+        return client.request(path,authorization=authorization,**kwargs)
+    assert request('/presets/new')[0] == 200
+    create = {'name':'Fixture Profile','login':'fixture','password':'fixture-test-password',
+              'confirm':'fixture-test-password'}
+    assert request('/presets',form=create)[0] == 303
+    with closing(sqlite3.connect(database)) as db, db:
+        preset, password = db.execute("SELECT id,admin_user_pwhash FROM presets WHERE name='Fixture Profile'").fetchone()
+        db.execute("INSERT INTO settings(key,value) VALUES('ansible_enabled','on') "
+                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        db.execute("INSERT INTO settings(key,value) VALUES('ansible_repo_url','https://example.test/fixture.git') "
+                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+    endpoint = f'/presets/{preset}'
+    assert endpoint.encode() in request('/presets')[2]
+    assert client.request(endpoint+'.json')[0] == 401
+    initial = request(endpoint+'.json')
+    assert initial[0] == 200 and json.loads(initial[2])['admin_user_pwhash'] == password
+    assert password.encode() not in request(endpoint)[2]
+    update = {'_method':'PUT','name':'Fixture Nouveau','login':'fixture_ops',
+              'description':'<description>','password':'','confirm':''}
+    assert request(endpoint,form=update,origin='https://outside.example')[0] == 403
+    assert request(endpoint,form=update)[0] == 303
+    assert b'&lt;description&gt;' in request(endpoint)[2]
+    snapshot = json.loads(request(endpoint+'.json')[2])
+    assert snapshot['admin_user_pwhash'] == password and snapshot['admin_user_login'] == 'fixture_ops'
+    job = request(endpoint+'/push-github',form={})
+    assert job[0] == 303 and job[1].startswith('/jobs/'), job
+    assert request(endpoint+'/push-github',form={})[:2] == job[:2]
+    with closing(sqlite3.connect(database)) as db, db:
+        reference = db.execute("INSERT INTO machines(mac,preset_id) VALUES ('02:00:00:00:09:94',?)",
+                               [preset]).lastrowid
+    assert request(endpoint,form={'_method':'DELETE'})[0] == 409
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE machines SET install_config_json=? WHERE id=?",[json.dumps(snapshot),reference])
+    assert request(endpoint,form={'_method':'DELETE'})[:2] == (303,'/presets')
+    assert request(endpoint+'.json')[0] == 404
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute('SELECT preset_id,install_config_json FROM machines WHERE id=?',[reference]).fetchone() == (
+            None,json.dumps(snapshot),
+        )
+        assert db.execute('SELECT status FROM init_jobs WHERE job_type=?',
+                          [f'preset:push_github:{preset}']).fetchone() == ('failed',)
+        db.execute("UPDATE settings SET value='off' WHERE key='ansible_enabled'")
+        db.execute("DELETE FROM settings WHERE key='ansible_repo_url'")
+    print('Rust preset edits preserve password hashes and installed snapshots and queue each publication once',
+          flush=True)
+
+
 def verify_activity(client, database, authorization):
     with closing(sqlite3.connect(database)) as db, db:
         device = db.execute("INSERT INTO machines(mac,hostname) VALUES(?,?)",
@@ -2042,6 +2091,7 @@ def local(binary):
         print('The imported TLS pair survived a restart', flush=True)
         verify_image_console(updated, database, authorization, public)
         verify_job_console(updated, database, authorization)
+        verify_preset_editor(updated, database, authorization)
         verify_activity(updated, database, authorization)
         replacement.terminate()
         replacement.wait(timeout=5)

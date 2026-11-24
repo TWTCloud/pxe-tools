@@ -490,6 +490,38 @@ async fn dispatch(
             .serve(&parts, peer, &site.database, admin::Action::PullPresets)
             .await;
     }
+    if let Some(route) = presets::Route::for_path(path) {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        if !route.allows(&parts.method) {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        }
+        let form = if readable {
+            None
+        } else {
+            if !admin_origin(&parts.headers, peer, site) {
+                return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+            }
+            if parts.method == Method::DELETE {
+                Some(Bytes::new())
+            } else {
+                match read_form(&parts.headers, body, 16384).await {
+                    Ok(form) => Some(form),
+                    Err(reply) => return reply,
+                }
+            }
+        };
+        return site
+            .admin
+            .serve(
+                &parts,
+                peer,
+                &site.database,
+                admin::Action::Preset(route, form),
+            )
+            .await;
+    }
     if (path == "/machines/new" && readable)
         || (path == "/machines" && parts.method == Method::POST)
     {
