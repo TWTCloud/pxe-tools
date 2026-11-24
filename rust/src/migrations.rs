@@ -5,7 +5,7 @@ mod snapshots;
 
 pub(super) use netboot::legacy_image_files;
 pub(super) use snapshots::assigned_presets;
-pub(crate) use snapshots::{dns_list, integer, partition_plan};
+pub(crate) use snapshots::{dns_list, integer, partition_plan, snapshot_for_preset};
 
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use serde_json::Value;

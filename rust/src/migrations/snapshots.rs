@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use crate::{configured_database, connect, php_string, php_trim, php_truthy};
-use rusqlite::{params, types::ValueRef, OpenFlags, TransactionBehavior};
+use rusqlite::{params, types::ValueRef, Connection, OpenFlags, Row, TransactionBehavior};
 use serde_json::{json, Map, Value};
 use std::{collections::HashSet, error::Error, path::Path};
 
@@ -27,20 +27,7 @@ pub(crate) fn assigned_presets(config: &Path) -> Result<(), ErrorBox> {
             .collect();
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
-            let mut preset = Map::new();
-            for (offset, name) in fields.iter().enumerate() {
-                let field = row.get_ref(offset + 1)?;
-                let value = match field {
-                    ValueRef::Null => Value::Null,
-                    ValueRef::Integer(value) => json!(value),
-                    ValueRef::Real(value) => json!(value),
-                    ValueRef::Text(value) | ValueRef::Blob(value) => {
-                        json!(std::str::from_utf8(value)?)
-                    }
-                };
-                preset.insert(name.clone(), value);
-            }
-            let snapshot = snapshot(&Value::Object(preset))?;
+            let snapshot = snapshot(&read_preset(row, &fields, 1)?)?;
             snapshots.push((row.get::<_, i64>(0)?, serde_json::to_string(&snapshot)?));
         }
     }
@@ -56,6 +43,33 @@ pub(crate) fn assigned_presets(config: &Path) -> Result<(), ErrorBox> {
         snapshots.len()
     );
     Ok(())
+}
+
+pub(crate) fn snapshot_for_preset(db: &Connection, id: i64) -> Result<Option<Value>, ErrorBox> {
+    let mut query = db.prepare("SELECT * FROM presets WHERE id=?1")?;
+    let fields = query
+        .column_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut rows = query.query([id])?;
+    rows.next()?
+        .map(|row| snapshot(&read_preset(row, &fields, 0)?))
+        .transpose()
+}
+
+fn read_preset(row: &Row<'_>, fields: &[String], offset: usize) -> Result<Value, ErrorBox> {
+    let mut preset = Map::new();
+    for (index, name) in fields.iter().enumerate() {
+        let value = match row.get_ref(index + offset)? {
+            ValueRef::Null => Value::Null,
+            ValueRef::Integer(value) => json!(value),
+            ValueRef::Real(value) => json!(value),
+            ValueRef::Text(value) | ValueRef::Blob(value) => json!(std::str::from_utf8(value)?),
+        };
+        preset.insert(name.clone(), value);
+    }
+    Ok(Value::Object(preset))
 }
 
 fn snapshot(preset: &Value) -> Result<Value, ErrorBox> {

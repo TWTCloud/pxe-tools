@@ -126,6 +126,18 @@ impl From<rusqlite::Error> for ProfileError {
     }
 }
 
+pub(crate) fn validate_plan(
+    db: &Connection,
+    machine: &Machine,
+    config: &Value,
+) -> rusqlite::Result<Result<(), &'static str>> {
+    match Profile::new(db, machine, config) {
+        Ok(_) => Ok(Ok(())),
+        Err(ProfileError::Invalid(message)) => Ok(Err(message)),
+        Err(ProfileError::Db(error)) => Err(error),
+    }
+}
+
 struct Profile {
     hostname: String,
     domain: String,

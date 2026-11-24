@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod advanced;
+
 use super::{
     admin::escape,
     device_ansible,
@@ -11,7 +13,9 @@ use super::{
 };
 use crate::{connect, disk_identity, preseed, setting};
 use hyper::StatusCode;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde_json::{json, Value};
 use std::{fmt::Write, io::Read, net::Ipv4Addr, path::Path};
 
@@ -77,6 +81,7 @@ enum Section {
     HardwareContext,
     Command(Operation),
     Ansible(device_ansible::Action),
+    Advanced(advanced::Route),
 }
 
 pub(super) fn route(path: &str) -> Option<DeviceRoute> {
@@ -86,6 +91,8 @@ pub(super) fn route(path: &str) -> Option<DeviceRoute> {
     let section = match section {
         "" => Section::Detail,
         "install" => Section::Install,
+        "install/advanced" => Section::Advanced(advanced::Route::Form),
+        "install-preview" => Section::Advanced(advanced::Route::Review),
         "status" => Section::Status,
         "hardware-context.json" => Section::HardwareContext,
         "rediscover" => Section::Command(Operation::Rediscover),
@@ -106,7 +113,11 @@ impl DeviceRoute {
     pub(super) fn form_limit(&self, method: &hyper::Method) -> Option<usize> {
         match (&self.section, method) {
             (
-                Section::Install | Section::Status | Section::Command(_) | Section::Ansible(_),
+                Section::Install
+                | Section::Status
+                | Section::Command(_)
+                | Section::Ansible(_)
+                | Section::Advanced(_),
                 &hyper::Method::POST,
             ) => Some(2048),
             (Section::Detail, &hyper::Method::PUT | &hyper::Method::POST) => Some(64 * 1024),
@@ -125,6 +136,7 @@ impl DeviceRoute {
         if let Some(form) = form {
             return match &self.section {
                 Section::Install => schedule(path, self.id, form, username),
+                Section::Advanced(route) => advanced::submit(route, path, self.id, form, username),
                 Section::Command(operation) => operation.run(path, self.id, form),
                 Section::Ansible(action) => action.run(path, self.id, form),
                 Section::HardwareContext => Ok(plain(
@@ -153,9 +165,13 @@ impl DeviceRoute {
         };
         match self.section {
             Section::Install => install_form(db, self.id, &device),
+            Section::Advanced(advanced::Route::Form) => advanced::form(db, self.id, &device),
             Section::Detail => detail(db, self.id, &device),
             Section::Status => super::device_settings::badge(db, self.id, &device.status),
-            Section::HardwareContext | Section::Command(_) | Section::Ansible(_) => Ok(plain(
+            Section::HardwareContext
+            | Section::Command(_)
+            | Section::Ansible(_)
+            | Section::Advanced(advanced::Route::Review) => Ok(plain(
                 StatusCode::METHOD_NOT_ALLOWED,
                 "Method not allowed\n",
             )),
@@ -305,6 +321,10 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
     escape(&mut output, &defaults.join(" "));
     output.push_str(r#""></label></p></details>
 <p><label><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE</label></p><button>Programmer</button></form>"#);
+    write!(
+        output,
+        r#"<p><a href="/machines/{id}/install/advanced">Utiliser un modèle de partition personnalisée</a></p>"#
+    )?;
     Ok(page("Installation Debian guidée", &output))
 }
 
@@ -410,15 +430,7 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
         ));
     };
     let hostname = selection.hostname.trim().to_ascii_lowercase();
-    if selection.confirm != "yes"
-        || hostname.is_empty()
-        || hostname.len() > 63
-        || hostname.starts_with('-')
-        || hostname.ends_with('-')
-        || !hostname
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    {
+    if selection.confirm != "yes" || !valid_hostname(&hostname) {
         return Ok(plain(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Nom ou confirmation invalide\n",
@@ -433,19 +445,7 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
     let Some(arch @ ("amd64" | "arm64")) = device.arch.as_deref() else {
         return Ok(plain(StatusCode::CONFLICT, "Inventaire PXE requis\n"));
     };
-    let refreshing: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM init_jobs WHERE job_type='bootstrap:auto_refresh_catalog_v2' AND status='running')",
-        [], |row| row.get(0),
-    )?;
-    if setting(&tx, "pxe_enabled")? != "on"
-        || refreshing
-        || device.rescue
-        || device_operations::busy(&tx, id, false)?
-        || !matches!(
-            device.status.as_str(),
-            "discovered" | "tested" | "wiped" | "installed" | "provisioned"
-        )
-    {
+    if !schedule_allowed(&tx, id, &device)? {
         return Ok(plain(
             StatusCode::CONFLICT,
             "L’appareil ou le serveur PXE est occupé ou indisponible\n",
@@ -460,16 +460,7 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
             "Le disque sélectionné ne correspond plus à l’inventaire\n",
         ));
     };
-    let Some(version) = tx
-        .query_row(
-            "SELECT version_full FROM os_images WHERE id=? AND arch=? AND distro='debian'
-         AND codename='trixie' AND extract_method='direct' AND enabled=1 AND status='downloaded'
-         AND version_full IS NOT NULL",
-            params![selection.image, arch],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-    else {
+    let Some(version) = image_version(&tx, selection.image, arch)? else {
         return Ok(plain(
             StatusCode::CONFLICT,
             "Image Debian indisponible pour cet appareil\n",
@@ -500,6 +491,65 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
             "Adresse, préfixe ou DNS IPv4 invalides pour le réseau PXE\n",
         ));
     };
+    let mut snapshot = json!({
+        "distro":"debian", "codename":"trixie", "version_full":version, "variant":"debian",
+        "hostname":hostname, "domain":device.domain, "partition_mode":"default",
+        "system_disk_path":disk, "system_disk_identity":proof, "root_login_mode":"disabled",
+        "admin_user_login":login,"admin_user_pwhash":password,"admin_user_fullname":fullname,
+        "admin_user_pubkeys":keys,"admin_user_groups":"sudo",
+    });
+    snapshot
+        .as_object_mut()
+        .expect("installation object")
+        .extend(network);
+    let action = record_plan(&tx, id, username, selection.preset, snapshot)?;
+    tx.commit()?;
+    Ok(redirect(StatusCode::SEE_OTHER, format!("/tasks/{action}")))
+}
+
+fn valid_hostname(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn image_version(db: &Connection, id: i64, arch: &str) -> rusqlite::Result<Option<String>> {
+    db.query_row(
+        "SELECT version_full FROM os_images WHERE id=? AND arch=? AND distro='debian'
+         AND codename='trixie' AND extract_method='direct' AND enabled=1 AND status='downloaded'
+         AND version_full IS NOT NULL",
+        params![id, arch],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn schedule_allowed(db: &Connection, id: i64, device: &Device) -> rusqlite::Result<bool> {
+    let refreshing: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM init_jobs WHERE job_type='bootstrap:auto_refresh_catalog_v2' AND status='running')",
+        [], |row| row.get(0),
+    )?;
+    Ok(setting(db, "pxe_enabled")? == "on"
+        && !refreshing
+        && !device.rescue
+        && !device_operations::busy(db, id, false)?
+        && matches!(
+            device.status.as_str(),
+            "discovered" | "tested" | "wiped" | "installed" | "provisioned"
+        ))
+}
+
+fn record_plan(
+    tx: &Transaction<'_>,
+    id: i64,
+    username: &str,
+    preset: i64,
+    mut snapshot: Value,
+) -> Result<i64, ErrorBox> {
     let mut random = [0; 32];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
     let token = random
@@ -509,19 +559,12 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
     tx.execute("INSERT INTO actions(machine_id,type,status,token,created_by) VALUES(?,'install_only','pending',?,?)",
                params![id, token, username])?;
     let action = tx.last_insert_rowid();
-    let mut snapshot = json!({
-        "distro":"debian", "codename":"trixie", "version_full":version, "variant":"debian",
-        "hostname":hostname, "domain":device.domain, "partition_mode":"default",
-        "system_disk_path":disk, "system_disk_identity":proof, "root_login_mode":"disabled",
-        "admin_user_login":login,"admin_user_pwhash":password,"admin_user_fullname":fullname,
-        "admin_user_pubkeys":keys,"admin_user_groups":"sudo","_pending_action_id":action,
-    });
-    snapshot
-        .as_object_mut()
-        .expect("installation object")
-        .extend(network);
-    tx.execute("UPDATE machines SET status='configured',hostname=?,install_config_json=?,next_action=NULL WHERE id=?",
-               params![hostname, snapshot.to_string(), id])?;
+    snapshot["_pending_action_id"] = json!(action);
+    let hostname = snapshot["hostname"]
+        .as_str()
+        .ok_or("A validated hostname is required")?;
+    tx.execute("UPDATE machines SET status='configured',hostname=?,install_config_json=?,preset_id=?,next_action=NULL WHERE id=?",
+               params![hostname, snapshot.to_string(), preset, id])?;
     tx.execute(
         "INSERT INTO init_jobs(job_type,status) VALUES(?,'pending'),('bootstrap:render_templates','pending')",
         [format!("action:render_postboot:{action}")],
@@ -531,6 +574,5 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
                 VALUES(?,'action','Installation programmée au prochain démarrage PXE.',?)",
         params![id, action],
     )?;
-    tx.commit()?;
-    Ok(redirect(StatusCode::SEE_OTHER, format!("/tasks/{action}")))
+    Ok(action)
 }

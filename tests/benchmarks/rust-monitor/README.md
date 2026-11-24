@@ -220,6 +220,12 @@ Rust actualise les six catalogues d’images et planifie le téléchargement
 des remplacements Debian. Le worker vérifie leur intégrité avant de les
 publier. L’import des modèles du dépôt Ansible utilise le même binaire
 pour valider le rôle, la recette de disque et les interfaces de référence.
+Pour un modèle Debian 13 à partition personnalisée et réseau DHCP, la
+console vérifie le firmware, la capacité et l’identité des disques, puis
+affiche les cibles à confirmer. La confirmation devient caduque si le modèle,
+l’image ou le matériel vérifié change. Le rendu est vérifié avant
+d’enregistrer l’action et le garde-fou recontrôle les disques au démarrage.
+
 Le renderer couvre les recettes de partition
 sur un disque identifié, avec partitions physiques BIOS ou UEFI. Un plan
 LVM sur ce disque peut définir ses groupes de volumes et volumes logiques.

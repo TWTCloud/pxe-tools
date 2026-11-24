@@ -816,6 +816,69 @@ def verify_guided_install(client, database, authorization):
     print('Rust guided scheduling rejected stale identity and replay, and atomically queued the selected install', flush=True)
 
 
+def verify_custom_partition_review(client, database, authorization):
+    def request(path, **kwargs):
+        return client.request(path, authorization=authorization, **kwargs)
+
+    disks = ['/dev/vda','/dev/vdb']
+    inventory = {'inventory':{'boot_mode':'BIOS'}, 'disks':[
+        {'name':path.removeprefix('/dev/'), 'serial':f'FIXTURE-RAID-{index}', 'size_bytes':12_000_000_000}
+        for index,path in enumerate(disks)
+    ]}
+    plan = {'target_disks':disks,'disks':[
+        {'path':path,'partitions':[
+            {'id':f'bios{index}','fs':'biosgrub','size_mb':2},
+            {'id':f'raid{index}','fs':'raid-member','fill':True},
+        ]}
+        for index,path in enumerate(disks)
+    ],'raid_arrays':[{'name':'md0','level':1,'members':['raid0','raid1']}]}
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE settings SET value='on' WHERE key='pxe_enabled'")
+        image = db.execute("""INSERT INTO os_images(distro,version,arch,codename,version_full,enabled,status)
+                             VALUES('debian','fixture-raid','amd64','trixie','13.7.0',1,'downloaded')""").lastrowid
+        password, = db.execute("SELECT admin_user_pwhash FROM presets WHERE name='Debian <test>'").fetchone()
+        device = db.execute("""INSERT INTO machines(mac,hostname,status,boot_arch,inventory_json)
+                            VALUES('02:00:00:00:09:24','fixture-raid','discovered','amd64',?)""",
+                            [json.dumps(inventory)]).lastrowid
+        preset = db.execute("""INSERT INTO presets(name,distro,variant,codename,partition_mode,partition_custom_json,
+                            network_mode,root_login_mode,admin_user_login,admin_user_pwhash)
+                            VALUES('RAID1 <fixture>','debian','debian','trixie','custom',?,
+                                   'dhcp','disabled','fixture',?)""", [json.dumps(plan),password]).lastrowid
+    preview = f'/machines/{device}/install-preview'
+    target = f'/machines/{device}/install/advanced'
+    form = {'hostname':'fixture-raid','image':image,'preset':preset}
+    assert b'RAID1 &lt;fixture&gt;' in request(target)[2]
+    assert client.request(preview,form=form)[0] == 401
+    assert request(preview,form=form,origin='https://outside.example')[0] == 403
+    assert request(target,form={**form,'confirm':'yes'})[0] == 422
+    first = request(preview,form=form)
+    assert first[0] == 200 and all(d.encode() in first[2] for d in disks), first
+    assert b'FIXTURE-RAID-0' in first[2] and b'FIXTURE-RAID-1' in first[2]
+    assert password.encode() not in first[2]
+    commit = {**ConfirmationInputs(first[2]).values,'confirm':'yes'}
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute('SELECT COUNT(*) FROM actions WHERE machine_id=?', [device]).fetchone() == (0,)
+        inventory['disks'][1]['serial']='REPLACED'
+        db.execute('UPDATE machines SET inventory_json=? WHERE id=?',[json.dumps(inventory),device])
+    assert request(target,form=commit)[0] == 409
+    second = request(preview,form=form)
+    assert second[0] == 200 and b'REPLACED' in second[2]
+    saved = request(target,form={**ConfirmationInputs(second[2]).values,'confirm':'yes'})
+    assert saved[0] == 303 and saved[1].startswith('/tasks/'), saved
+    with closing(sqlite3.connect(database)) as db, db:
+        status, raw, assigned = db.execute(
+            'SELECT status,install_config_json,preset_id FROM machines WHERE id=?',[device],
+        ).fetchone()
+        assert (status,assigned) == ('configured',preset)
+        config = json.loads(raw)
+        bound = json.loads(config['partition_custom_json'])
+        assert bound['target_disk_identities']['/dev/vdb']['value'] == 'REPLACED'
+        assert config['review_boot_mode'] == 'BIOS' and config['version_full'] == '13.7.0'
+        assert config['admin_user_pwhash'] == password
+        db.execute("UPDATE settings SET value='off' WHERE key='pxe_enabled'")
+    print('Rust reviewed both RAID targets, refused a stale confirmation and armed the validated plan', flush=True)
+
+
 def verify_worker_commands(binary):
     templates = Path(__file__).resolve().parents[2]/'docker/worker/templates'
     parameters = {'pxe_ip':'192.0.2.9','mac':'02:00:00:00:00:01','token':'synthetic-token'}
@@ -1366,6 +1429,7 @@ def local(binary):
         updated.ready(schedule_server)
         verify_device_settings(updated, database, authorization)
         verify_guided_install(updated, database, authorization)
+        verify_custom_partition_review(updated, database, authorization)
         verify_device_operations(updated, database, authorization)
         verify_device_ansible(updated, database, authorization)
         verify_hardware_context(updated, database, authorization)
