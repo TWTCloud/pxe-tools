@@ -133,7 +133,9 @@ La page `/presets` permet de créer ce modèle. L’opérateur confirme le disqu
 identifié avant le repartitionnement. Rust vérifie de nouveau l’identité,
 l’état de l’appareil et les travaux concurrents avant de programmer le
 prochain boot PXE. Le mot de passe du compte installé est stocké sous forme
-de hash SHA-512 crypt.
+de hash SHA-512 crypt. Pour une adresse IPv4 statique, la console propose
+les DNS configurés dans `/settings` et vérifie que l’adresse du client
+appartient au sous-réseau PXE autorisé.
 
 En mode local, la console ouvre `/login` dans le navigateur et conserve la
 session HTTPS pendant huit heures. La déconnexion révoque la session.

@@ -637,6 +637,9 @@ def verify_guided_install(client, database, authorization):
     assert b'Debian &lt;test&gt;' in rendered[2] and b'fixture-password' not in rendered[2]
     with closing(sqlite3.connect(database)) as db, db:
         db.execute("UPDATE settings SET value='on' WHERE key='pxe_enabled'")
+        db.executemany("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                       [('pxe_subnet','192.0.2.0/24'), ('pxe_ip','192.0.2.1'),
+                        ('default_dns','["192.0.2.53","192.0.2.54"]')])
         device = db.execute(
             "INSERT INTO machines(mac,hostname,status,boot_arch,inventory_json) VALUES(?,?,'discovered','arm64',?)",
             ('02:00:00:00:20:02', 'fixture-device', json.dumps(inventory)),
@@ -655,7 +658,26 @@ def verify_guided_install(client, database, authorization):
     assert client.request(end, form=form, origin='https://outside.example', authorization=authorization)[0] == 403
     result = client.request(end, authorization=authorization)
     assert result[0] == 200 and b'FIXTURE-SERIAL' in result[2], result[:2]
+    assert b'name="static_dns" value="192.0.2.53 192.0.2.54"' in result[2]
     assert client.request(end, form={**form,'disk':'/dev/vda:STALE'}, authorization=authorization)[0] == 409
+    static = {**form,'network_mode':'static','static_ip':'192.0.2.80','static_cidr':'24',
+              'static_gateway':'192.0.2.1','static_dns':'192.0.2.53 192.0.2.54'}
+    for invalid in ({'static_ip':'203.0.113.80'}, {'static_ip':'192.0.2.1'},
+                    {'static_cidr':'31'}, {'static_gateway':'198.51.100.1'}, {'static_dns':'invalid'}):
+        assert client.request(end,form={**static,**invalid},authorization=authorization)[0] == 422
+    with closing(sqlite3.connect(database)) as db, db:
+        other = db.execute("""INSERT INTO machines(mac,hostname,status,boot_arch,inventory_json)
+                            VALUES('02:00:00:00:20:03','fixture-static','discovered','arm64',?)""",
+                           [json.dumps(inventory)]).lastrowid
+    static_result = client.request(f'/machines/{other}/install',form=static,authorization=authorization)
+    assert static_result[0] == 303, static_result
+    with closing(sqlite3.connect(database)) as db:
+        raw, = db.execute('SELECT install_config_json FROM machines WHERE id=?',[other]).fetchone()
+        network = json.loads(raw)
+        assert (network['network_mode'], network['static_ip'], network['static_cidr'],
+                network['static_gateway'], network['static_dns']) == (
+                    'static','192.0.2.80',24,'192.0.2.1',['192.0.2.53','192.0.2.54'],
+                )
     assert client.request(end, form={**form,'confirm':'no'}, authorization=authorization)[0] == 422
     status, location, _ = client.request(end, form=form, authorization=authorization)
     assert status == 303, status

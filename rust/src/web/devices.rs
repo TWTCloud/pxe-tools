@@ -12,7 +12,7 @@ use crate::{connect, disk_identity, preseed, setting};
 use hyper::StatusCode;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
-use std::{fmt::Write, io::Read, path::Path};
+use std::{fmt::Write, io::Read, net::Ipv4Addr, path::Path};
 
 pub(super) fn register(path: &Path, form: Option<&[u8]>) -> Result<Reply, ErrorBox> {
     let Some(form) = form else {
@@ -264,7 +264,17 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
         escape(&mut output, &row.get::<_, String>(1)?);
         output.push_str("</option>");
     }
-    output.push_str("</select></label> <a href=\"/presets\">Gérer les modèles</a></p><p><label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE</label></p><button>Programmer</button></form>");
+    output.push_str(r#"</select></label> <a href="/presets">Gérer les modèles</a></p>
+<p><label>Réseau de l’appareil <select name="network_mode"><option value="dhcp">DHCP</option><option value="static">IPv4 statique</option></select></label></p>
+<details><summary>Paramètres IPv4 statiques</summary>
+<p><label>Adresse IPv4 <input name="static_ip"></label></p>
+<p><label>Préfixe réseau <input name="static_cidr" type="number" min="1" max="32" value="24"></label></p>
+<p><label>Passerelle IPv4 <input name="static_gateway"></label></p>
+<p><label>DNS IPv4 <input name="static_dns" value=""#);
+    let defaults = crate::migrations::dns_list(&Value::String(setting(db, "default_dns")?));
+    escape(&mut output, &defaults.join(" "));
+    output.push_str(r#""></label></p></details>
+<p><label><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE</label></p><button>Programmer</button></form>"#);
     Ok(page("Installation Debian guidée", &output))
 }
 
@@ -275,6 +285,75 @@ struct Selection {
     image: i64,
     preset: i64,
     confirm: String,
+    #[serde(default)]
+    network_mode: String,
+    #[serde(default)]
+    static_ip: String,
+    #[serde(default)]
+    static_cidr: String,
+    #[serde(default)]
+    static_gateway: String,
+    #[serde(default)]
+    static_dns: String,
+}
+
+impl Selection {
+    fn network(&self, db: &Connection) -> rusqlite::Result<Option<Value>> {
+        if matches!(self.network_mode.as_str(), "" | "dhcp") {
+            return Ok(Some(json!({"network_mode":"dhcp"})));
+        }
+        if self.network_mode != "static" {
+            return Ok(None);
+        }
+        let Ok(address) = self.static_ip.trim().parse::<Ipv4Addr>() else {
+            return Ok(None);
+        };
+        let Ok(cidr @ 1..=32) = self.static_cidr.trim().parse::<u8>() else {
+            return Ok(None);
+        };
+        let gateway = match self.static_gateway.trim() {
+            "" => None,
+            raw => {
+                let Ok(gateway) = raw.parse::<Ipv4Addr>() else {
+                    return Ok(None);
+                };
+                Some(gateway)
+            }
+        };
+        let dns = crate::migrations::dns_list(&Value::String(self.static_dns.clone()));
+        if dns.iter().any(|value| value.parse::<Ipv4Addr>().is_err()) {
+            return Ok(None);
+        }
+        let Some((pxe_network, mask)) = crate::pxe::parse_subnet(&setting(db, "pxe_subnet")?)
+        else {
+            return Ok(None);
+        };
+        let Ok(server) = setting(db, "pxe_ip")?.parse::<Ipv4Addr>() else {
+            return Ok(None);
+        };
+        let ip = u32::from(address);
+        let static_mask = u32::MAX << (32 - cidr);
+        let static_network = ip & static_mask;
+        let is_host = |ip: u32| {
+            ip & static_mask == static_network
+                && (cidr > 30 || (ip != static_network && ip != (static_network | !static_mask)))
+        };
+        if ip & mask != pxe_network
+            || (mask.count_ones() < 31 && (ip == pxe_network || ip == (pxe_network | !mask)))
+            || address == server
+            || !is_host(ip)
+            || match gateway {
+                Some(gateway) => gateway == address || !is_host(u32::from(gateway)),
+                None => !is_host(u32::from(server)),
+            }
+        {
+            return Ok(None);
+        }
+        Ok(Some(
+            json!({"network_mode":"static", "static_ip":address, "static_cidr":cidr,
+            "static_gateway":gateway,"static_dns":dns}),
+        ))
+    }
 }
 
 fn selection(form: &[u8]) -> Option<Selection> {
@@ -282,7 +361,8 @@ fn selection(form: &[u8]) -> Option<Selection> {
     for (key, value) in form_urlencoded::parse(form) {
         let value = match key.as_ref() {
             "image" | "preset" => json!(value.parse::<i64>().ok().filter(|id| *id > 0)?),
-            "hostname" | "disk" | "confirm" => json!(value),
+            "hostname" | "disk" | "confirm" | "network_mode" | "static_ip" | "static_cidr"
+            | "static_dns" | "static_gateway" => json!(value),
             _ => return None,
         };
         if fields.insert(key.into_owned(), value).is_some() {
@@ -384,6 +464,12 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
         ));
     }
 
+    let Some(Value::Object(network)) = selection.network(&tx)? else {
+        return Ok(plain(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Adresse, préfixe ou DNS IPv4 invalides pour le réseau PXE\n",
+        ));
+    };
     let mut random = [0; 32];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
     let token = random
@@ -393,13 +479,17 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
     tx.execute("INSERT INTO actions(machine_id,type,status,token,created_by) VALUES(?,'install_only','pending',?,?)",
                params![id, token, username])?;
     let action = tx.last_insert_rowid();
-    let snapshot = json!({
+    let mut snapshot = json!({
         "distro":"debian", "codename":"trixie", "version_full":version, "variant":"debian",
-        "hostname":hostname, "domain":device.domain, "network_mode":"dhcp", "partition_mode":"default",
+        "hostname":hostname, "domain":device.domain, "partition_mode":"default",
         "system_disk_path":disk, "system_disk_identity":proof, "root_login_mode":"disabled",
         "admin_user_login":login,"admin_user_pwhash":password,"admin_user_fullname":fullname,
         "admin_user_pubkeys":keys,"admin_user_groups":"sudo","_pending_action_id":action,
     });
+    snapshot
+        .as_object_mut()
+        .expect("installation object")
+        .extend(network);
     tx.execute("UPDATE machines SET status='configured',hostname=?,install_config_json=?,next_action=NULL WHERE id=?",
                params![hostname, snapshot.to_string(), id])?;
     tx.execute(
