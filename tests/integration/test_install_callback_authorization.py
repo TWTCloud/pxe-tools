@@ -6,17 +6,21 @@ import os
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'app'))
+import worker
 TOKEN = 'a' * 64
 OTHER_TOKEN = 'b' * 64
 FOREIGN_TOKEN = 'c' * 64
 STALE_TOKEN = 'd' * 64
 MAC = '02:00:00:00:00:01'
+FINGERPRINT = 'SHA256:' + 'A' * 43
 
 
-def request(database, directory, operation, address, token=''):
+def request(database, directory, operation, address, token='', fingerprint='', first_boot=''):
     status = Path(directory) / 'status'
     bootstrap = r'''spl_autoload_register(function($c) {
         if (str_starts_with($c, 'Admin\\')) {
@@ -28,20 +32,30 @@ def request(database, directory, operation, address, token=''):
     $_GET['mac'] = $argv[3];
     $_GET['status'] = 'success';
     $status_path = $argv[4];
+    $_POST['ssh_host_fingerprint'] = $argv[5];
+    $_POST['first_boot'] = $argv[6];
+    $_GET['code'] = 'os_first_boot';
+    $_GET['ack'] = '1';
     register_shutdown_function(static function() use ($status_path) {
         file_put_contents($status_path, (string)http_response_code());
     });
-    (new Admin\Controllers\PxeController())->{$OPERATION}([]);'''.replace('{$OPERATION}', operation)
+    if ($argv[7] === 'checkpoint') {
+        (new Admin\Controllers\InternalApiController())->checkpoint([]);
+    } else {
+        (new Admin\Controllers\PxeController())->{$OPERATION}([]);
+    }'''.replace('{$OPERATION}', operation)
     env = dict(os.environ, PXE_APP_DIR=str(ROOT / 'app'), PXE_DB_DRIVER='sqlite', PXE_DB_PATH=str(database))
-    result = subprocess.run(['php', '-r', bootstrap, address, token, MAC, str(status)],
+    result = subprocess.run(['php', '-r', bootstrap, address, token, MAC, str(status), fingerprint, first_boot, operation],
                             env=env, capture_output=True, text=True)
     if result.returncode != 0:
         raise AssertionError(result.stderr[:500])
-    return int(status.read_text()), json.loads(result.stdout)
+    body = result.stdout if operation == 'checkpoint' else json.loads(result.stdout)
+    return int(status.read_text()), body
 
 
 with tempfile.TemporaryDirectory(prefix='pxe-callback-auth-') as tmp:
     database = Path(tmp) / 'test.sqlite'
+    worker.DB_PATH = str(database)
     with sqlite3.connect(database) as db:
         db.executescript((ROOT / 'app/db/schema.sqlite.sql').read_text())
         db.execute("INSERT INTO settings(key,value) VALUES ('pxe_subnet','192.0.2.0/24')")
@@ -67,18 +81,37 @@ with tempfile.TemporaryDirectory(prefix='pxe-callback-auth-') as tmp:
 
     for address, token in [('192.0.2.2', ''), ('192.0.2.2', OTHER_TOKEN),
                            ('192.0.2.2', FOREIGN_TOKEN), ('198.51.100.2', TOKEN)]:
-        assert request(database, tmp, 'installEnd', address, token)[0] == 404
+        assert request(database, tmp, 'installEnd', address, token, FINGERPRINT)[0] == 404
     assert request(database, tmp, 'installEnd', '192.0.2.2', STALE_TOKEN)[0] == 409
     with sqlite3.connect(database) as db:
         assert db.execute('SELECT install_status FROM installations WHERE id=?', (start['installation_id'],)).fetchone()[0] == 'in_progress'
         assert db.execute('SELECT local_boot_source FROM machines WHERE id=1').fetchone()[0] == 'none'
 
-    finish_status, finish = request(database, tmp, 'installEnd', '192.0.2.2', TOKEN)
+    finish_status, finish = request(database, tmp, 'installEnd', '192.0.2.2', TOKEN, FINGERPRINT, first_boot='1')
     assert finish_status == 200 and finish['machine_status'] == 'installed'
-    assert request(database, tmp, 'installEnd', '192.0.2.2', TOKEN)[0] == 200
+    assert request(database, tmp, 'installEnd', '192.0.2.2', TOKEN, FINGERPRINT, first_boot='1')[0] == 200
+    assert worker.fetch_pending_ansible() is None
+    assert request(database, tmp, 'checkpoint', '192.0.2.2', FOREIGN_TOKEN) == (200, '')
+    assert worker.fetch_pending_ansible() is None
+    with sqlite3.connect(database) as db:
+        db.execute("INSERT INTO installations(machine_id, action_id, install_status, ansible_status) VALUES (2,3,'success','pending')")
+    # An installation served by an earlier version does not wait for the new receipt.
+    assert worker.fetch_pending_ansible()['machine_id'] == 2
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE installations SET ansible_status='no_role' WHERE machine_id=2")
+    assert worker.fetch_pending_ansible() is None
+    assert request(database, tmp, 'checkpoint', '192.0.2.2', TOKEN) == (200, 'accepted\n')
+    assert request(database, tmp, 'checkpoint', '192.0.2.2', TOKEN) == (200, 'accepted\n')
+    assert worker.fetch_pending_ansible()['install_id'] == start['installation_id']
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT checkpoint FROM machine_events WHERE action_id=1 AND checkpoint LIKE 'os_first_boot%' ORDER BY id").fetchall() == [
+            ('os_first_boot_expected',), ('os_first_boot',),
+        ]
     with sqlite3.connect(database) as db:
         assert db.execute('SELECT install_status FROM installations WHERE id=?', (start['installation_id'],)).fetchone()[0] == 'success'
         assert db.execute('SELECT local_boot_source FROM machines WHERE id=1').fetchone()[0] == 'pxe'
+        assert db.execute('SELECT action_id FROM machine_events WHERE message LIKE ?',
+                          ('%' + FINGERPRINT,)).fetchall() == [(1,)]
     assert request(database, tmp, 'installStart', '127.0.0.1')[0] == 409
     with sqlite3.connect(database) as db:
         assert db.execute('SELECT count(*) FROM installations WHERE machine_id=1').fetchone()[0] == 1

@@ -19,10 +19,11 @@ trap cleanup EXIT
 
 make_package() {
     local name="$1" destination="$2" dir="$fixture/pkg-$1"
+    local version="${3:-1.0~fixture1}"
     mkdir -p "$dir/DEBIAN"
     cat > "$dir/DEBIAN/control" <<CONTROL
 Package: $name
-Version: 1.0~fixture1
+Version: $version
 Architecture: amd64
 Maintainer: Fixture <fixture@example.invalid>
 Description: synthetic fixture, no PXE Tools application
@@ -48,6 +49,20 @@ apt-cache "${opts[@]}" policy pxe-tools > "$fixture/policy-first.log"
 grep -q 'Candidate: 1.0~fixture1' "$fixture/policy-first.log"
 apt-get -s "${opts[@]}" install pxe-tools > "$fixture/simulate.log" 2>&1
 grep -q '^Inst pxe-tools ' "$fixture/simulate.log"
+
+# Verify that APT discovers the URL from InRelease without client overrides.
+version=$(<"$root/packaging/ci/release-version.txt")
+make_package pxe-tools "$fixture/changelog.deb" "$version"
+python3 "$builder" "$fixture/changelog.deb" "$fixture/changelog-repository" --gnupg-home "$gnupg" --fingerprint "$fingerprint" >/dev/null
+printf 'deb [signed-by=%s/key.gpg] file:%s/changelog-repository stable main\n' "$fixture" "$fixture" > "$fixture/source.list"
+apt-get "${opts[@]}" update > "$fixture/changelog-update.log" 2>&1
+changelog="main/p/pxe-tools/pxe-tools_${version}_changelog"
+apt-get "${opts[@]}" --print-uris changelog "pxe-tools=$version" | sed 's/%7[eE]/~/g' > "$fixture/changelog-uri"
+grep -F "'https://packages.pxetools.com/apt/changelogs/$changelog'" "$fixture/changelog-uri"
+cmp "$root/packaging/changelogs/${changelog##*/}" "$fixture/changelog-repository/changelogs/$changelog"
+grep -F "pxe-tools-ansible ($version)" "$fixture/changelog-repository/changelogs/main/p/pxe-tools-ansible/pxe-tools-ansible_${version}_changelog"
+printf 'deb [signed-by=%s/key.gpg] file:%s/repository stable main\n' "$fixture" "$fixture" > "$fixture/source.list"
+sed -i 's/^Version: .*/Version: 1.0~fixture1/' "$fixture/pkg-pxe-tools/DEBIAN/control"
 
 # A client may keep an old signed Release while a new version is deployed.
 # Its content-addressed index and package must remain available in the new tree.

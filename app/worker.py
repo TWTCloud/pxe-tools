@@ -1902,6 +1902,14 @@ def fetch_pending_ansible(installation_id: int | None = None) -> dict | None:
         JOIN machines m ON i.machine_id = m.id
         LEFT JOIN actions a ON i.action_id = a.id
         WHERE i.ansible_status = 'pending' AND (:install_id IS NULL OR i.id = :install_id)
+          AND NOT EXISTS (
+              SELECT 1 FROM machine_events e
+              WHERE e.action_id = i.action_id AND e.checkpoint = 'os_first_boot_expected'
+                AND NOT EXISTS (
+                    SELECT 1 FROM machine_events b
+                    WHERE b.action_id = e.action_id AND b.checkpoint = 'os_first_boot'
+                )
+          )
           AND (
             :wait_for_boot = 0
             OR a.id IS NULL
@@ -1921,7 +1929,7 @@ def fetch_pending_ansible(installation_id: int | None = None) -> dict | None:
                 ELSE 0 END
             )
           )
-        ORDER BY i.created_at LIMIT 1
+        ORDER BY i.created_at, i.id LIMIT 1
     """
     # In guided Rust mode, the no-role path must keep the action token
     # valid through first boot. Real playbooks already wait for that

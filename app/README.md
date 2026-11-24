@@ -100,6 +100,10 @@ installed ──(worker exec ansible)──▶ provisioned   /   ──(KO)─�
 
 `pxe-tools-worker.service` (systemd, user `ansible`) poll `installations.ansible_status='pending'`, lance `ansible-playbook playbooks/<role>.yml --limit <hostname>`, stream le stdout dans la table.
 
+Le `late_command` de Debian Installer transmet `install-end` avant le redémarrage. Le reçu autorise le démarrage sur disque local et peut inclure l’empreinte publique de la clé d’hôte SSH pour le journal de l’installation. La vérification de la clé d’hôte par Ansible garde ses propres règles.
+
+Pour toute installation Debian suivie, le preseed dépose un lanceur temporaire. Au premier démarrage, systemd génère son unité `oneshot` sous `/run` et la lance après le réseau et SSH. Le lanceur confirme le démarrage avec `os_first_boot` et se retire après l’accusé, la clôture de l’action ou l’épuisement des tentatives. Le worker attend cette confirmation avant de clore une installation Debian seule ou de prendre en charge le rôle si le module Ansible est actif. Les installations déjà lancées avec un ancien preseed conservent leur parcours.
+
 `/home/ansible/ansible/` doit contenir un repo Ansible (avec `playbooks/`, `inventory/`, `ansible.cfg`). Cloner ou monter selon besoin.
 
 ## Proxy inverse et origine des formulaires

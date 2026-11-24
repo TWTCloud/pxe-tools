@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import socket
 import sqlite3
 import subprocess
@@ -782,7 +783,64 @@ else:
     print('TLS bootstrap preserved the generated certificate and key',flush=True)
 
 
+def module_image(root, base, version):
+    context = root/'module'
+    context.mkdir()
+    run('python3',str(ROOT/'packaging/native/build-local-ansible-package.py'),
+        str(context/'module.deb'),'--release','--version',version)
+    tag = base.replace(':local','-ansible:local')
+    docker('build','--tag',tag,'--file','-',str(context),input=f"""FROM {base}
+COPY module.deb /tmp/pxe-tools-ansible.deb
+RUN apt-get update && apt-get install -y --no-install-recommends /tmp/pxe-tools-ansible.deb
+""")
+    return tag
+
+
+def write_ansible_ssh_file(app, name, content):
+    docker('exec','-i',app,'runuser','-u','pxe-tools-ansible','--','/bin/sh','-ec',
+           'umask 077; cat > "/var/lib/pxe-tools-ansible/home/.ssh/$1"', 'fixture', name, input=content)
+
+
+def prepare_playbook(app, fixture):
+    setup = r"""set -eu
+work=/var/lib/pxe-tools-ansible/workspace
+ssh=/var/lib/pxe-tools-ansible/home/.ssh
+install -d -o pxe-tools-ansible -g pxe-tools-ansible -m 0700 "$work/playbooks" "$ssh"
+printf '%s\n' '[defaults]' 'inventory = inventory.ini' 'host_key_checking = True' \
+    '[ssh_connection]' 'ssh_args = -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519' > "$work/ansible.cfg"
+printf '%s\n' 'pxe-fixture ansible_host=192.0.2.100 ansible_python_interpreter=/usr/bin/python3' > "$work/inventory.ini"
+cat > "$work/playbooks/base.yml" <<'PLAYBOOK'
+- hosts: pxe-fixture
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Count executions from the installed guest
+      ansible.builtin.shell: "echo one >> /var/tmp/pxe-fixture-playbook"
+      changed_when: true
+PLAYBOOK
+chown pxe-tools-ansible:pxe-tools-ansible "$work/ansible.cfg" "$work/inventory.ini" "$work/playbooks/base.yml"
+"""
+    docker('exec',app,'/bin/sh','-ec',setup)
+    write_ansible_ssh_file(app,'ansible_automation',(fixture/'client-key').read_text())
+
+
+def guest_command(app, identity, fixture, user, command):
+    if endpoint(app)!=identity:
+        raise RuntimeError('fixture namespace changed during the SSH check')
+    # Once connected, sudo and the disk checks still run under TCG.
+    return run('nsenter','-t',str(identity[0]),'-n',
+               'ssh','-F','/dev/null','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes',
+               '-o','HostKeyAlgorithms=ssh-ed25519',
+               '-o','IdentitiesOnly=yes','-o','ConnectTimeout=3','-o','GlobalKnownHostsFile=/dev/null',
+               '-o',f'UserKnownHostsFile={fixture/"known_hosts"}','-i',str(fixture/'client-key'),
+               user+'@192.0.2.100',command,check=False,timeout=90)
+
+
 def main():
+    scenario = os.environ.get('PXE_NATIVE_PXE_SCENARIO','plain')
+    if scenario not in ('plain','ansible'):
+        raise SystemExit('Choose the plain or ansible disposable fixture.')
+    provision = scenario == 'ansible'
     suffix=secrets.token_hex(5)
     app='pxe-l2-app-'+suffix; dhcp='pxe-l2-dhcp-'+suffix; client='pxe-l2-client-'+suffix
     mirror='pxe-l2-mirror-'+suffix
@@ -792,6 +850,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix='pxe-l2-fixture-',dir=fixture_parent) as temporary:
         root=Path(temporary); root.chmod(0o755)
         fixture=root/'fixture'; fixture.mkdir(mode=0o755)
+        ssh_fixture=root/'ssh'; ssh_fixture.mkdir(mode=0o700)
+        run('ssh-keygen','-q','-t','ed25519','-N','','-f',str(ssh_fixture/'client-key'))
+        client_pubkey=(ssh_fixture/'client-key.pub').read_text().strip()
         data,conf,http,tftp=(root/x for x in ('data','conf','http','tftp'))
         for directory in (data,conf,http,tftp):directory.mkdir(mode=0o755)
         (conf/'master.key').write_bytes(os.urandom(32));(conf/'master.key').chmod(0o600)
@@ -806,7 +867,8 @@ def main():
                 ('dhcp_proxy_enabled','on'),('dhcp_proxy_network','192.0.2.0'),
                 ('dhcp_proxy_netmask','255.255.255.0'),('https_enabled','off'),
                 ('wizard_completed','1'),('db_init_done','1'),('admin_created','1'),('init_completed','1'),
-                ('ansible_enabled','off'),('catalog_auto_refresh_enabled','off'),('ui_device_term','ordinateur')])
+                ('ansible_enabled','on' if provision else 'off'),('ansible_ssh_pubkey',client_pubkey),
+                ('catalog_auto_refresh_enabled','off'),('ui_device_term','ordinateur')])
             if not rust_lab or packaged:
                 db.execute('INSERT INTO users(username,password_hash) VALUES(?,?)',('fixture-admin',login_hash))
             db.execute("INSERT INTO os_images(distro,version,arch,codename,version_full,enabled,status) "
@@ -816,6 +878,8 @@ def main():
                 # from a build-only container with access to the Debian archive.
                 db.execute("""INSERT INTO init_jobs(job_type,status)
                               VALUES('bootstrap:generate_mok','success'),('bootstrap:build_grub','success')""")
+        if provision:
+            (data/'chosen.sqlite').chmod(0o600)
         # A stale but valid DB must never drive the appliance, even when its
         # path is present in the inherited environment.
         with sqlite3.connect(data/'stale.sqlite') as db:
@@ -828,8 +892,11 @@ def main():
         instrument=(ROOT/'docker/worker/templates/preseed-base.cfg.j2').read_text()
         needle="{{ '{{ADMIN_USER_BLOCK}}' }}"
         if instrument.count(needle)!=1: raise RuntimeError('unexpected preseed template')
-        serial=(" ; in-target /bin/sh -c 'printf \"\\nGRUB_CMDLINE_LINUX=\\\"console=tty0 console=ttyS0,115200n8\\\"\\n\" >> /etc/default/grub; update-grub' ; printf 'PXE_FULL_LATE_DONE\\n' >/dev/ttyS0")
-        instrument=instrument.replace(needle,needle+serial)
+        # Keep the same interface names as the installer in this fixture.
+        names_option = '' if rust_lab else ' net.ifnames=0'
+        serial=(f" ; in-target /bin/sh -c 'printf \"\\nGRUB_CMDLINE_LINUX=\\\"console=tty0 console=ttyS0,115200n8{names_option}\\\"\\n\" >> /etc/default/grub; update-grub' ; printf 'PXE_FULL_LATE_DONE\\n' >/dev/ttyS0")
+        serial+=r""" ; printf 'PXE_HOST_PUBLIC ' >/dev/ttyS0 ; cat /target/etc/ssh/ssh_host_ed25519_key.pub >/dev/ttyS0 ; if [ -e /target/etc/systemd/system-generators/pxe-first-boot ]; then fixture_mode=$(in-target --pass-stdout /usr/bin/stat -c '%a' /etc/systemd/system-generators/pxe-first-boot); printf 'PXE_LAUNCHER %s\n' "$fixture_mode" >/dev/ttyS0; fi"""
+        instrument=instrument.replace(needle,needle+serial)+"\nd-i mirror/udeb/suite string trixie\n"
         template=root/'preseed-base.cfg.j2';template.write_text(instrument)
         discovery=(ROOT/'docker/worker/templates/discovery-preseed.cfg.j2').read_text()
         discovery_needle='d-i mirror/http/hostname string deb.debian.org'
@@ -897,13 +964,16 @@ done
             # The image already contains the locally built .deb installed with
             # dpkg. Only test-specific mirror and console instrumentation are
             # copied into this disposable container, before starting services.
-            docker('run','-d','--name',app,'--network','none','--privileged','--cgroupns','private',
-                   '--device','/dev/net/tun','--tmpfs','/run','--tmpfs','/run/lock','--tmpfs','/tmp',
-                   '--entrypoint','/lib/systemd/systemd',*mounts,image,'--unit=basic.target')
-            wait_for(lambda:docker('exec',app,'systemctl','list-units','--no-legend',check=False).returncode==0,
-                     60,'native systemd')
             package_name=os.environ.get('PXE_NATIVE_PXE_PACKAGE', 'pxe-tools-local-test')
             package_version=os.environ.get('PXE_NATIVE_PXE_VERSION', '0.0.1~local1')
+            if provision and package_name!='pxe-tools':
+                raise RuntimeError('The native module test requires the production-layout base candidate')
+            app_image=module_image(root,image,package_version) if provision else image
+            docker('run','-d','--name',app,'--network','none','--privileged','--cgroupns','private',
+                   '--device','/dev/net/tun','--tmpfs','/run','--tmpfs','/run/lock','--tmpfs','/tmp',
+                   '--entrypoint','/lib/systemd/systemd',*mounts,app_image,'--unit=basic.target')
+            wait_for(lambda:docker('exec',app,'systemctl','list-units','--no-legend',check=False).returncode==0,
+                     60,'native systemd')
             package=docker('exec',app,'dpkg-query','-W','-f=${Status}|${Version}',package_name).stdout
             if package.strip()!=f'install ok installed|{package_version}':
                 raise RuntimeError('Expected native test package version was not installed')
@@ -938,19 +1008,35 @@ done
             docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
                    '--entrypoint','/bin/sh',image,'-c','exec sleep 4200')
             connect_fixture_lan(app,dhcp)
+            app_ns=endpoint(app)
             lease_opts=(
                 ('--no-resolv','--no-hosts','--address=/pxe-native-lab.example.test/192.0.2.1',
                  '--dhcp-authoritative','--dhcp-range=192.0.2.0,static,255.255.255.0,1h',
                  '--dhcp-host=02:00:00:00:00:01,id:*,192.0.2.100','--dhcp-option=3','--dhcp-option-force=6,192.0.2.2')
                 if rust_lab else
-                ('--port=0','--dhcp-range=192.0.2.100,192.0.2.120,255.255.255.0,1h','--dhcp-option=6,192.0.2.1')
+                ('--port=0','--dhcp-range=192.0.2.100,192.0.2.120,255.255.255.0,1h',
+                 '--dhcp-host=02:00:00:00:00:01,192.0.2.100','--dhcp-option=6,192.0.2.1')
             )
             docker('exec','-d',dhcp,'dnsmasq','-k','--interface=veth-dhcp','--bind-interfaces',
                    *lease_opts,'--log-dhcp','--log-facility=/tmp/fixture-dhcp.log')
             if rust_lab:
                 rust_first_boot(app,dhcp,client,root,fixture)
                 return
+            if provision:
+                prepare_playbook(app,ssh_fixture)
             docker('exec',app,'systemctl','start','pxe-tools.target')
+            if provision:
+                def module_ready():
+                    with sqlite3.connect(data/'chosen.sqlite') as db:
+                        row=db.execute("SELECT value FROM settings WHERE key='ansible_runtime_status'").fetchone()
+                    return row is not None and json.loads(row[0]).get('state')=='ready'
+                runtime=docker('exec',app,'env','PXE_ANSIBLE_MODE=system',
+                               'PXE_DB_PATH=/var/lib/pxe-tools/chosen.sqlite',
+                               'PYTHONPATH=/usr/lib/pxe-tools/app',
+                               'python3','-c','import worker; worker.resolve_ansible_runtime()',check=False)
+                if runtime.returncode:
+                    raise RuntimeError('Native Ansible runtime rejected the fixture: '+runtime.stderr)
+                wait_for(module_ready,90,'packaged Ansible runtime ready')
             def ready():
                 if not inspect(app)['State']['Running']:raise RuntimeError('appliance stopped during startup')
                 result=docker('exec',app,'systemctl','is-active','--quiet','pxe-tools-dnsmasq.service',check=False)
@@ -1002,7 +1088,7 @@ done
                 return True
             wait_for(discovered,1500,'Discovery inventory with verified fixture disk')
             print('Real Discovery reported the disposable disk identity',flush=True)
-            ui='''import http.cookiejar,json,re,time,urllib.parse,urllib.request
+            ui='''import http.cookiejar,json,re,sys,time,urllib.parse,urllib.request
 from pathlib import Path
 opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 base='http://127.0.0.1:8080'
@@ -1011,6 +1097,12 @@ token=re.search(r'name="csrf_token" value="([^"]+)"',page).group(1)
 def post(path,values):
     return opener.open(base+path,urllib.parse.urlencode(values).encode(),timeout=20)
 post('/login',{'username':'fixture-admin','password':'fixture-login-password','csrf_token':token}).read()
+if sys.argv[1]=='checklist':
+    page=opener.open(base+'/tasks/'+str(int(sys.argv[2])),timeout=10).read().decode()
+    if 'Démarrage du système installé' not in page:
+        raise RuntimeError('The completed action did not show the confirmed first boot')
+    print('The task page shows the confirmed first boot')
+    sys.exit(0)
 page=opener.open(base+'/machines/1/install',timeout=10).read().decode()
 token=re.search(r'name="csrf_token" value="([^"]+)"',page).group(1)
 values={'csrf_token':token,'hostname':'pxe-fixture','domain':'example.test','distro':'debian',
@@ -1022,6 +1114,10 @@ values={'csrf_token':token,'hostname':'pxe-fixture','domain':'example.test','dis
  'adv[timezone][utc]':'1','adv[timezone][zone]':'UTC','adv[packages][tasksel]':'ssh-server',
  'adv[packages][pkgsel_include]':'sudo,openssh-server,curl','adv[packages][upgrade]':'none',
  'adv[apt][disable_services]':'1','adv[bootloader][only_debian]':'1','adv[finish][reboot]':'quiet'}
+if sys.argv[1]=='ansible':
+    values['ansible_role']='base'
+else:
+    values['admin_user_pubkeys']=sys.argv[2]
 preview=json.load(post('/machines/1/install-preview',values))
 if preview.get('errors'): raise RuntimeError('Preflight refused fixture: '+str(preview['errors']))
 response=post('/machines/1/install',values)
@@ -1039,7 +1135,7 @@ token=re.search(r'name="csrf_token" value="([^"]+)"',page).group(1)
 post('/machines/1/reboot',{'csrf_token':token}).read()
 print('Authenticated UI scheduled installation and requested reboot after menu generation')
 '''
-            docker('exec',app,'python3','-c',ui)
+            docker('exec',app,'python3','-c',ui,scenario,client_pubkey)
             with sqlite3.connect(data/'chosen.sqlite') as db:
                 config=json.loads(db.execute('SELECT install_config_json FROM machines WHERE id=1').fetchone()[0])
                 if (config.get('system_disk_identity',{}).get('value')!='PXE-TEST-ONE'
@@ -1097,38 +1193,110 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                 time.sleep(5)
             else: raise RuntimeError('installer timed out')
             with sqlite3.connect(data/'chosen.sqlite') as db:
-                result=db.execute('SELECT install_status FROM installations ORDER BY id DESC LIMIT 1').fetchone()
+                installation=db.execute('SELECT action_id,install_status,ansible_status FROM installations ORDER BY id DESC LIMIT 1').fetchone()
                 machine=db.execute('SELECT status,local_boot_source FROM machines WHERE id=1').fetchone()
-            if result!=('success',) or machine!=('installed','pxe'):
-                raise RuntimeError('application did not record successful installation and local boot policy')
+                receipt=db.execute("SELECT message FROM machine_events WHERE action_id=? AND message LIKE 'Empreinte SSH%'",
+                                   (installation[0],)).fetchone()
+                premature=db.execute("SELECT checkpoint FROM machine_events WHERE checkpoint IN ('os_first_boot','ansible_started')").fetchall()
+            if installation[1:]!=('success','pending') or machine!=('installed','pxe') or premature:
+                raise RuntimeError('Unexpected installation or provisioning state before first boot')
+            output=docker('logs',client).stdout
+            public=re.search(r'PXE_HOST_PUBLIC (ssh-ed25519 [A-Za-z0-9+/=]+)',output)
+            if public is None or 'PXE_LAUNCHER 700' not in output:
+                raise RuntimeError('Installer SSH key or launcher mode missing or unexpected')
+            (ssh_fixture/'host.pub').write_text(public[1]+'\n')
+            fingerprint=run('ssh-keygen','-E','sha256','-lf',str(ssh_fixture/'host.pub')).stdout.split()[1]
+            if receipt is None or not receipt[0].endswith(fingerprint):
+                raise RuntimeError('Installer receipt does not match the public key from the guest console')
+            (ssh_fixture/'known_hosts').write_text('192.0.2.100 '+public[1]+'\n')
+            if provision:
+                write_ansible_ssh_file(app,'known_hosts',(ssh_fixture/'known_hosts').read_text())
+                docker('exec',app,'/bin/sh','-ec',
+                       'install -d -m 0700 /dev/shm/pxe-vault; umask 077; printf "%s" fixture-vault-password > /dev/shm/pxe-vault/unlock')
+            # Keep the guest powered off while the worker polls, with the Vault already open.
+            time.sleep(3)
+            with sqlite3.connect(data/'chosen.sqlite') as db:
+                if db.execute('SELECT ansible_status FROM installations WHERE action_id=?',
+                              (installation[0],)).fetchone()!=('pending',):
+                    raise RuntimeError('The worker handled the installation before the installed OS reported boot')
+            wait_for(lambda:menu.is_file() and 'DEFAULT localboot' in menu.read_text(),120,'worker switched the per-MAC menu to local boot')
+            print('Verified action-bound install-end and public SSH fingerprint before first boot',flush=True)
             with sqlite3.connect(data/'stale.sqlite') as db:
                 if (db.execute("SELECT value FROM settings WHERE key='fixture_marker'").fetchone()!=('preserved',)
                         or db.execute('SELECT status FROM machines WHERE id=1').fetchone()!=('wiping',)):
                     raise RuntimeError('stale fixture database was modified')
-            docker('rm','-f',client)
-            docker('run','-di','--name',client,'--network','none',
-                   '--mount',f'type=bind,src={root},dst=/fixture-data','--entrypoint','qemu-system-x86_64',image,
-                   '-machine','pc,accel=tcg','-smp','1','-m','1024','-display','none',
-                   '-serial','stdio','-monitor','none','-no-reboot','-net','none',
-                   '-drive','file=/fixture-data/fixture.qcow2,if=none,id=disk,format=qcow2',
-                   '-device','virtio-blk-pci,drive=disk,serial=PXE-TEST-ONE')
-            serial_wakeup_sent=False
-            def login():
-                nonlocal serial_wakeup_sent
-                state=inspect(client)['State']
-                if not state['Running']: raise RuntimeError('installed guest stopped before login')
-                output=docker('logs',client,check=False).stdout
-                if not serial_wakeup_sent and 'Debian GNU/Linux 13 pxe-fixture ttyS0' in output:
-                    serial_wakeup_sent=True
-                    try:
-                        subprocess.run(['docker','attach','--sig-proxy=false',client], input='\n',
-                                       text=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
-                                       timeout=5,check=False)
-                    except subprocess.TimeoutExpired:
-                        pass
-                return 'pxe-fixture login:' in output
-            wait_for(login,600,'installed Debian login')
-            print('OK Discovery, authenticated scheduling, PXE install callback and Debian first boot',flush=True)
+            user='ansible' if provision else 'fixture'
+            for boot in (1,2):
+                docker('rm','-f',client)
+                docker('run','-di','--name',client,'--network','container:'+app,'--cap-add','NET_ADMIN',
+                       '--device','/dev/net/tun','--mount',f'type=bind,src={root},dst=/fixture-data',
+                       '--entrypoint','qemu-system-x86_64',image,
+                       '-machine','pc,accel=tcg','-smp','1','-m','1024','-display','none','-boot','n',
+                       '-serial','stdio','-monitor','none','-no-reboot',
+                       '-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
+                       '-device','e1000,netdev=lan,mac=02:00:00:00:00:01',
+                       '-drive','file=/fixture-data/fixture.qcow2,if=none,id=disk,format=qcow2',
+                       '-device','virtio-blk-pci,drive=disk,serial=PXE-TEST-ONE')
+                ssh_error=''
+                def ssh_ready():
+                    nonlocal ssh_error
+                    if not inspect(client)['State']['Running']:
+                        raise RuntimeError('The installed guest stopped before reaching SSH')
+                    attempt=guest_command(app,app_ns,ssh_fixture,user,'true')
+                    if 'Host key verification failed' in attempt.stderr:
+                        raise RuntimeError('The pinned installed guest key was refused')
+                    ssh_error=attempt.stderr.strip()
+                    return attempt.returncode==0
+                try:
+                    wait_for(ssh_ready,600,'installed Debian reached strict SSH after network boot')
+                except RuntimeError:
+                    print(f'Last isolated SSH error: {ssh_error}',flush=True)
+                    raise
+                if boot==1:
+                    def completed():
+                        with sqlite3.connect(data/'chosen.sqlite') as db:
+                            state=db.execute('SELECT ansible_status FROM installations WHERE action_id=?',
+                                             (installation[0],)).fetchone()[0]
+                        if state=='failed':
+                            raise RuntimeError('Fixture Ansible provisioning failed')
+                        return state==('success' if provision else 'no_role')
+                    wait_for(completed,240,'worker finalized the installation')
+                command=r"""
+set -eu
+root=$(findmnt -n -o SOURCE /)
+lsblk -sno NAME "$root" | grep -qw vda
+test "$(systemctl is-active ssh.service)" = active
+test ! -e /etc/systemd/system-generators/pxe-first-boot
+test ! -e /usr/local/sbin/pxe-machine-ready
+test ! -e /usr/local/bin/postboot.sh
+test -z "$(find /etc/systemd/system -iname '*pxe*' -print)"
+if [ -f /var/tmp/pxe-fixture-playbook ]; then wc -l </var/tmp/pxe-fixture-playbook; else echo 0; fi
+systemctl show pxe-first-boot.service -p LoadState -p FragmentPath -p Result
+uname -r
+"""
+                sudo='sudo -n /bin/sh -c ' if provision else "printf '%s\\n' fixture-password | sudo -S /bin/sh -c "
+                checked=guest_command(app,app_ns,ssh_fixture,user,sudo+shlex.quote(command))
+                expected_fragment='FragmentPath=/run/systemd/generator/pxe-first-boot.service' if boot==1 else 'LoadState=not-found'
+                if boot==1 and 'Result=success' not in checked.stdout:
+                    raise RuntimeError('The first-boot unit did not report success')
+                if checked.returncode or checked.stdout.splitlines()[:1] != ['1' if provision else '0'] or expected_fragment not in checked.stdout:
+                    raise RuntimeError('Unexpected installed guest state: '+checked.stdout+checked.stderr)
+                with sqlite3.connect(data/'chosen.sqlite') as db:
+                    events=db.execute("SELECT checkpoint FROM machine_events WHERE action_id=? AND checkpoint IN "
+                                      "('os_first_boot','os_first_boot_assumed','ansible_started','ansible_finished') ORDER BY id",
+                                      (installation[0],)).fetchall()
+                expected=[('os_first_boot',)]
+                if provision:
+                    expected.extend([('ansible_started',),('ansible_finished',)])
+                if events!=expected:
+                    raise RuntimeError('Unexpected provisioning checkpoints: '+str(events))
+                print(f'{scenario} boot {boot}: {checked.stdout.strip()}',flush=True)
+                if boot==1:
+                    reboot='sudo -n systemctl reboot' if provision else "printf '%s\\n' fixture-password | sudo -S systemctl reboot"
+                    guest_command(app,app_ns,ssh_fixture,user,reboot)
+                    wait_for(lambda:not inspect(client)['State']['Running'],120,'isolated Debian reboot')
+            print(docker('exec',app,'python3','-c',ui,'checklist',str(installation[0])).stdout.strip(),flush=True)
+            print(f'OK {scenario}: PXE local boot, strict SSH, cleanup and one-time provisioning policy',flush=True)
             print('Only the disposable qcow2 disk and isolated bridge were used.',flush=True)
         except Exception:
             diagnostic_screen(root)

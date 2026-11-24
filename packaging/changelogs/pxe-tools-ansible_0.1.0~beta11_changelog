@@ -1,0 +1,6 @@
+pxe-tools-ansible (0.1.0~beta11) stable; urgency=medium
+
+  * Lancer Ansible après confirmation du premier démarrage du système installé.
+  * Utiliser le compte technique configuré pour les nouvelles installations Debian.
+
+ -- PXE Tools <security@pxetools.com>  Mon, 23 Nov 2026 05:54:08 +0000

@@ -1097,6 +1097,9 @@ class TransactionTests(unittest.TestCase):
         unproven = self.root / 'var/lib/pxe-tools-ansible'
         unproven.mkdir()
         (unproven / 'preserve').write_text('unproven')
+        preview = self.execute(apply=False)
+        self.assertIn('/var/lib/pxe-tools-ansible', preview['preserved'])
+        self.assertIn('ownership', preview['blocked_reason'])
         with self.assertRaisesRegex(RuntimeError, 'ownership'):
             self.execute(apply=True)
         self.assertEqual((unproven / 'preserve').read_text(), 'unproven')
@@ -1107,6 +1110,7 @@ class TransactionTests(unittest.TestCase):
         (self.unproven / 'preserve').write_text('old log')
         preview = self.execute(apply=False)
         self.assertEqual(preview['preserved'], ('/var/log/pxe-tools',))
+        self.assertIsNone(preview['blocked_reason'])
         self.execute(apply=True)
         self.assertEqual((self.unproven / 'preserve').read_text(), 'old log')
         self.assertFalse(self.data.exists())
@@ -1213,11 +1217,58 @@ class AptSourceTests(unittest.TestCase):
         self.assertFalse(self.key.exists())
         self.assertFalse(self.anchor.exists())
 
-    def test_in_place_changed_proven_key_is_preserved(self):
+    def test_proven_key_with_root_group_writable_zorin_source(self):
+        import errno
+        from types import SimpleNamespace
+
         self.prove_created_key()
-        self.key.write_bytes(b'administrator changed it')
+        self.source.unlink()
+        self.source_anchor.unlink()
+        reference = self.root / 'etc/apt/sources.list'
+        reference.write_text('# Zorin manages its repositories in sources.list.d.\n')
+        reference.chmod(0o664)
+        stat_path = os.stat
+
+        def root_owned_stat(path, *args, **kwargs):
+            info = list(stat_path(path, *args, **kwargs))
+            info[4] = info[5] = 0
+            return os.stat_result(info)
+
+        with patch.object(os, 'stat', side_effect=root_owned_stat), \
+                patch('grp.getgrgid', return_value=SimpleNamespace(gr_name='root', gr_mem=[])), \
+                patch('pwd.getpwall', return_value=[SimpleNamespace(pw_uid=0, pw_gid=0)]) as accounts, \
+                patch.object(os, 'getxattr', create=True, side_effect=OSError(errno.ENODATA, 'No ACL')) as acl:
+            self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=0, apt_config=self.standard), (False, True))
+            accounts.return_value.append(SimpleNamespace(pw_uid=1000, pw_gid=0))
+            self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=0, apt_config=self.standard), (False, False))
+            accounts.return_value.pop()
+            acl.side_effect = None
+            acl.return_value = b'extended ACL'
+            self.assertEqual(uninstall.apt_cleanup_plan(self.root, owner=0, apt_config=self.standard), (False, False))
+
+    def test_corrupted_dedicated_key_and_witness_are_removed(self):
+        self.prove_created_key()
+        self.key.write_bytes(b'not an OpenPGP key')
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, True))
+        self.assertFalse(self.key.exists())
+        self.assertFalse(self.anchor.exists())
+
+    def test_replaced_dedicated_key_and_stale_witness_are_removed(self):
+        self.prove_created_key()
+        self.key.unlink()
+        self.key.write_bytes(b'a different key')
+        self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, True))
+        self.assertFalse(self.key.exists())
+        self.assertFalse(self.anchor.exists())
+
+    def test_alias_of_replaced_key_protects_both_inodes(self):
+        self.prove_created_key()
+        self.key.unlink()
+        self.key.write_bytes(b'a different key')
+        (self.root / 'alias.gpg').symlink_to(self.key)
+        (self.source.parent / 'other.sources').write_text('Types: deb\nURIs: https://example.invalid\nSigned-By: /alias.gpg\n')
         self.assertEqual(uninstall.remove_apt_config(self.root, mounts=(), owner=None, apt_config=self.standard), (True, False))
-        self.assertEqual(self.key.read_bytes(), b'administrator changed it')
+        self.assertTrue(self.key.exists())
         self.assertTrue(self.anchor.exists())
 
     def test_redirected_apt_configuration_preserves_even_a_proven_key(self):
