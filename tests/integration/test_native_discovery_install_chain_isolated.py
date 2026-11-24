@@ -194,7 +194,7 @@ def main():
         if instrument.count(needle)!=1: raise RuntimeError('unexpected preseed template')
         # Keep the same interface names as the installer in this fixture.
         serial=(" ; in-target /bin/sh -c 'printf \"\\nGRUB_CMDLINE_LINUX=\\\"console=tty0 console=ttyS0,115200n8 net.ifnames=0\\\"\\n\" >> /etc/default/grub; update-grub' ; printf 'PXE_FULL_LATE_DONE\\n' >/dev/ttyS0")
-        serial+=r""" ; printf 'PXE_HOST_PUBLIC ' >/dev/ttyS0 ; cat /target/etc/ssh/ssh_host_ed25519_key.pub >/dev/ttyS0 ; if [ -e /target/etc/systemd/system-generators/pxe-first-boot ]; then printf 'PXE_LAUNCHER ' >/dev/ttyS0; stat -c '%a' /target/etc/systemd/system-generators/pxe-first-boot >/dev/ttyS0; fi"""
+        serial+=r""" ; printf 'PXE_HOST_PUBLIC ' >/dev/ttyS0 ; cat /target/etc/ssh/ssh_host_ed25519_key.pub >/dev/ttyS0 ; if [ -e /target/etc/systemd/system-generators/pxe-first-boot ]; then fixture_mode=$(in-target --pass-stdout /usr/bin/stat -c '%a' /etc/systemd/system-generators/pxe-first-boot); printf 'PXE_LAUNCHER %s\n' "$fixture_mode" >/dev/ttyS0; fi"""
         instrument=instrument.replace(needle,needle+serial)+"\nd-i mirror/udeb/suite string trixie\n"
         template=root/'preseed-base.cfg.j2';template.write_text(instrument)
         discovery=(ROOT/'docker/worker/templates/discovery-preseed.cfg.j2').read_text()
