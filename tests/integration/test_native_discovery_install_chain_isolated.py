@@ -105,6 +105,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends /tmp/pxe-tools-
     return tag
 
 
+def write_ansible_ssh_file(app, name, content):
+    docker('exec','-i',app,'runuser','-u','pxe-tools-ansible','--','/bin/sh','-ec',
+           'umask 077; cat > "/var/lib/pxe-tools-ansible/home/.ssh/$1"', 'fixture', name, input=content)
+
+
 def prepare_playbook(app, fixture):
     setup = r"""set -eu
 work=/var/lib/pxe-tools-ansible/workspace
@@ -125,10 +130,7 @@ PLAYBOOK
 chown pxe-tools-ansible:pxe-tools-ansible "$work/ansible.cfg" "$work/inventory.ini" "$work/playbooks/base.yml"
 """
     docker('exec',app,'/bin/sh','-ec',setup)
-    docker('cp',str(fixture/'client-key'),app+':/tmp/pxe-fixture-client-key')
-    docker('exec',app,'install','-m','0600','-o','pxe-tools-ansible','-g','pxe-tools-ansible',
-           '/tmp/pxe-fixture-client-key','/var/lib/pxe-tools-ansible/home/.ssh/ansible_automation')
-    docker('exec',app,'unlink','/tmp/pxe-fixture-client-key')
+    write_ansible_ssh_file(app,'ansible_automation',(fixture/'client-key').read_text())
 
 
 def guest_command(app, identity, fixture, user, command):
@@ -470,9 +472,7 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                 raise RuntimeError('Installer receipt does not match the public key from the guest console')
             (ssh_fixture/'known_hosts').write_text('192.0.2.100 '+public[1]+'\n')
             if provision:
-                docker('cp',str(ssh_fixture/'known_hosts'),app+':/tmp/pxe-fixture-known-hosts')
-                docker('exec',app,'install','-m','0600','-o','pxe-tools-ansible','-g','pxe-tools-ansible',
-                       '/tmp/pxe-fixture-known-hosts','/var/lib/pxe-tools-ansible/home/.ssh/known_hosts')
+                write_ansible_ssh_file(app,'known_hosts',(ssh_fixture/'known_hosts').read_text())
                 docker('exec',app,'/bin/sh','-ec',
                        'install -d -m 0700 /dev/shm/pxe-vault; umask 077; printf "%s" fixture-vault-password > /dev/shm/pxe-vault/unlock')
             wait_for(lambda:menu.is_file() and 'DEFAULT localboot' in menu.read_text(),120,'worker switched the per-MAC menu to local boot')
