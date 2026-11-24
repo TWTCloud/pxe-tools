@@ -117,7 +117,7 @@ def start_appliance(app, lan, probe, root, boot_assets):
     print('Rust boot server is reachable from the isolated PXE network.',flush=True)
 
 
-def preflight(accelerator):
+def probe_accelerator(accelerator):
     # Probe the VM ioctl through QEMU. A visible /dev/kvm alone does not prove
     # the Windows runner can run a nested KVM guest under WSL.
     qmp = '\n'.join(json.dumps({'execute':command}) for command in ('qmp_capabilities','quit'))+'\n'
@@ -129,6 +129,12 @@ def preflight(accelerator):
     if result.returncode or '"QMP"' not in result.stdout or '"return"' not in result.stdout:
         raise RuntimeError(f'The isolated runner could not start a {accelerator} guest: {result.stderr.strip()}')
     print(f'QEMU opened a disposable guest with {accelerator}.',flush=True)
+
+
+def preflight(accelerator, installed_accelerator):
+    probe_accelerator(accelerator)
+    if installed_accelerator != accelerator:
+        probe_accelerator(installed_accelerator)
     suffix = secrets.token_hex(5)
     app, lan, probe = (f'pxe-win-preflight-{name}-{suffix}' for name in ('app','lan','probe'))
     with tempfile.TemporaryDirectory(prefix='pxe-windows-preflight-',dir='/var/tmp') as temporary:
@@ -314,13 +320,15 @@ def main():
     parser.add_argument('media', type=Path, nargs='?')
     parser.add_argument('--server-only', action='store_true')
     parser.add_argument('--accelerator', default='kvm', choices=('kvm','tcg'))
+    parser.add_argument('--installed-accelerator', default='same', choices=('same','kvm','tcg'))
     args = parser.parse_args()
+    installed = args.accelerator if args.installed_accelerator=='same' else args.installed_accelerator
     if backend != 'rust-docker' or os.uname().machine != 'x86_64':
         parser.error('A disposable amd64 Linux runner with the Rust Docker image is required.')
-    if args.accelerator=='kvm' and not Path('/dev/kvm').is_char_device():
+    if 'kvm' in (args.accelerator,installed) and not Path('/dev/kvm').is_char_device():
         parser.error('KVM acceleration requires a disposable runner with /dev/kvm.')
     if args.server_only and args.media is None:
-        preflight(args.accelerator)
+        preflight(args.accelerator,installed)
         return
     if args.media is None or args.server_only:
         parser.error('Select the server preflight or provide the Windows test media.')
@@ -367,7 +375,7 @@ def main():
             winpe = read_receipt(root, helper, 'WINPE.LOG')
             print('The WinPE guest wrote its receipt and powered off after installing the selected Windows image.',flush=True)
             start_tpm(tpm,helper,root)
-            run_guest(client,lan,helper,root,media,case,args.accelerator,discovery=False)
+            run_guest(client,lan,helper,root,media,case,installed,discovery=False)
             windows = read_receipt(root, helper, 'WINDOWS.LOG')
             log = docker('exec',dhcp,'cat','/tmp/windows-dhcp.log').stdout
             observed = all(re.search(rf'sent .*{re.escape(name)} to {re.escape(CLIENT)}(?:\s|$)', log)

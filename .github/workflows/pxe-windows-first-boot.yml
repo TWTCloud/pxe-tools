@@ -13,6 +13,11 @@ on:
         options:
           - tcg
           - kvm
+      installed_accelerator:
+        description: Accelerator for the first boot from disk
+        type: choice
+        default: same
+        options: [same, tcg, kvm]
 permissions:
   contents: read
 jobs:
@@ -20,12 +25,13 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.label.name == 'ci:pxe-windows')
+       (github.event.label.name == 'ci:pxe-windows' || github.event.label.name == 'ci:pxe-windows-kvm-disk'))
     runs-on: windows-2025
     timeout-minutes: 180
     env:
       PXE_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
       PXE_ACCELERATOR: ${{ inputs.accelerator || 'tcg' }}
+      PXE_INSTALLED_ACCELERATOR: ${{ github.event.label.name == 'ci:pxe-windows-kvm-disk' && 'kvm' || inputs.installed_accelerator || 'same' }}
     steps:
       - name: Validate revision
         shell: pwsh
@@ -79,7 +85,7 @@ jobs:
         shell: pwsh
         run: |
           $imageRevision = $env:PXE_SOURCE.Substring(0,10)
-          wsl.exe -d Ubuntu-24.04 --user root --cd "/var/tmp/pxe-windows-source-$env:PXE_SOURCE" --exec env PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1 "PXE_RUST_GUIDED_DOCKER_IMAGE=pxe-guided-${imageRevision}:local" "PXE_NATIVE_PXE_IMAGE=pxe-native-e2e-${imageRevision}:local" python3 tests/integration/test_windows_pxe_isolated.py --server-only --accelerator $env:PXE_ACCELERATOR
+          wsl.exe -d Ubuntu-24.04 --user root --cd "/var/tmp/pxe-windows-source-$env:PXE_SOURCE" --exec env PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1 "PXE_RUST_GUIDED_DOCKER_IMAGE=pxe-guided-${imageRevision}:local" "PXE_NATIVE_PXE_IMAGE=pxe-native-e2e-${imageRevision}:local" python3 tests/integration/test_windows_pxe_isolated.py --server-only --accelerator $env:PXE_ACCELERATOR --installed-accelerator $env:PXE_INSTALLED_ACCELERATOR
           if ($LASTEXITCODE -ne 0) { throw 'The isolated Rust PXE listener did not become reachable.' }
       - name: Verify and prepare the real media in the runner temporary directory
         shell: pwsh
@@ -168,7 +174,7 @@ jobs:
           $media = (wsl.exe -d Ubuntu-24.04 --exec wslpath -a -u "$output").Trim()
           if ($LASTEXITCODE -ne 0 -or $media -notmatch '^/mnt/[a-z]/') { throw 'The isolated media path could not be shared with WSL.' }
           $imageRevision = $env:PXE_SOURCE.Substring(0,10)
-          wsl.exe -d Ubuntu-24.04 --user root --cd "/var/tmp/pxe-windows-source-$env:PXE_SOURCE" --exec env DOCKER_BUILDKIT=1 PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1 "PXE_RUST_GUIDED_DOCKER_IMAGE=pxe-guided-${imageRevision}:local" "PXE_NATIVE_PXE_IMAGE=pxe-native-e2e-${imageRevision}:local" python3 tests/integration/test_windows_pxe_isolated.py "$media" --accelerator $env:PXE_ACCELERATOR
+          wsl.exe -d Ubuntu-24.04 --user root --cd "/var/tmp/pxe-windows-source-$env:PXE_SOURCE" --exec env DOCKER_BUILDKIT=1 PXE_NATIVE_PXE_TEST=1 PXE_NATIVE_PXE_BACKEND=rust-docker PXE_NATIVE_PXE_ARCH=amd64 PYTHONUNBUFFERED=1 "PXE_RUST_GUIDED_DOCKER_IMAGE=pxe-guided-${imageRevision}:local" "PXE_NATIVE_PXE_IMAGE=pxe-native-e2e-${imageRevision}:local" python3 tests/integration/test_windows_pxe_isolated.py "$media" --accelerator $env:PXE_ACCELERATOR --installed-accelerator $env:PXE_INSTALLED_ACCELERATOR
           if ($LASTEXITCODE -ne 0) { throw 'The isolated Windows PXE deployment did not pass.' }
       - name: Remove the temporary media
         if: always() && env.PXE_MEDIA_TEMP != ''
