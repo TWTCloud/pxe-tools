@@ -90,6 +90,7 @@ def run_guest(client, lan, helper, root, media, case, *, discovery):
         mount += ('--mount', f'type=bind,src={media/"windows.iso"},dst=/approved.iso,readonly')
     serial = 'winpe.log' if discovery else 'windows.log'
     network_order, disk_order = (1, 2) if discovery else (2, 1)
+    restart = ('-no-reboot',) if discovery else ()
     docker('run','-di','--name',client,'--network','container:'+lan,'--cap-add','NET_ADMIN',
            '--device','/dev/net/tun','--device','/dev/kvm',*mount,
            '--entrypoint','qemu-system-x86_64',helper,
@@ -99,11 +100,12 @@ def run_guest(client, lan, helper, root, media, case, *, discovery):
            '-drive','if=pflash,unit=1,format=raw,file=/fixture-data/vars.fd',
            '-chardev','socket,id=chrtpm,path=/fixture-data/tpm.sock',
            '-tpmdev','emulator,id=tpm0,chardev=chrtpm','-device','tpm-tis,tpmdev=tpm0',
-           '-uuid',case['guest_id'],'-no-reboot','-monitor','none','-serial','file:/fixture-data/'+serial,
+           '-uuid',case['guest_id'],*restart,'-monitor','none','-serial','file:/fixture-data/'+serial,
+           '-fw_cfg','name=opt/org.tianocore/IPv6Support,string=no',
            '-drive','file=/fixture-data/client.qcow2,format=qcow2,if=none,id=disk',
            '-device',f'ide-hd,drive=disk,bus=ide.0,serial={case["disk_serial"]},bootindex={disk_order}',
            *iso,'-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
-           '-device',f'e1000e,netdev=lan,mac={MAC},bootindex={network_order}')
+           '-device',f'virtio-net-pci,disable-legacy=on,romfile=,netdev=lan,mac={MAC},bootindex={network_order}')
     phase = 'WinPE deployment' if discovery else 'first Windows boot'
     print(f'{phase} started on the isolated guest network.', flush=True)
 
