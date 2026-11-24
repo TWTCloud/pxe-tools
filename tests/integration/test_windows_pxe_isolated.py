@@ -12,6 +12,7 @@ import socket
 import sqlite3
 import subprocess
 import tempfile
+import time
 import uuid
 
 from test_native_discovery_install_chain_isolated import (
@@ -145,7 +146,7 @@ def preflight(accelerator):
                 docker('rm','-fv',name,check=False)
 
 
-def read_receipt(root, helper, name):
+def read_efi_file(root, helper, name):
     disk = '/fixture-data/client.qcow2'
     image = '/fixture-data/proof-esp.img'
     mount = ('--mount', f'type=bind,src={root},dst=/fixture-data')
@@ -154,13 +155,17 @@ def read_receipt(root, helper, name):
     try:
         docker('run','--rm','--network','none',*mount,'--entrypoint','qemu-img',helper,
                'dd','-f','qcow2','-O','raw','bs=1048576','count=261',f'if={disk}',f'of={image}')
-        receipt = docker('run','--rm','--network','none',*mount,'--entrypoint','mcopy',helper,
-                         '-i',f'{image}@@1048576',f'::/PXE-LAB/{name}','-').stdout
-        if len(receipt) > 4096 or len(receipt.splitlines()) != 1 or not receipt.startswith(PREFIX):
-            raise RuntimeError(f'Invalid {name} receipt on the disposable EFI partition.')
-        return receipt.rstrip('\r\n')
+        return docker('run','--rm','--network','none',*mount,'--entrypoint','mcopy',helper,
+                      '-i',f'{image}@@1048576',f'::/PXE-LAB/{name}','-').stdout
     finally:
         (root/'proof-esp.img').unlink(missing_ok=True)
+
+
+def read_receipt(root, helper, name):
+    receipt = read_efi_file(root, helper, name)
+    if len(receipt) > 4096 or len(receipt.splitlines()) != 1 or not receipt.startswith(PREFIX):
+        raise RuntimeError(f'Invalid {name} receipt on the disposable EFI partition.')
+    return receipt.rstrip('\r\n')
 
 
 def boot_asset_served(log, name, size):
@@ -189,14 +194,14 @@ def guest_acceleration(accelerator):
     return (), ('-accel','tcg,thread=multi','-cpu','max')
 
 
-def qemu_state(root):
+def qemu_query(root, query):
     try:
         with socket.socket(socket.AF_UNIX) as connection:
             connection.settimeout(2)
             connection.connect(str(root/'qmp.sock'))
             with connection.makefile('rwb') as qmp:
                 qmp.readline()
-                for command in ('qmp_capabilities','query-status'):
+                for command in ('qmp_capabilities',query):
                     qmp.write(json.dumps({'execute':command}).encode()+b'\n')
                     qmp.flush()
                     while response := qmp.readline():
@@ -205,7 +210,7 @@ def qemu_state(root):
                             break
                     else:
                         return None
-                return received.get('return',{}).get('status')
+                return received.get('return')
     except (OSError, ValueError, TypeError):
         return None
 
@@ -244,25 +249,43 @@ def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery)
            '-device',f'virtio-net-pci,disable-legacy=on,romfile=,netdev=lan,mac={MAC},bootindex={network_order}')
     phase = 'WinPE deployment' if discovery else 'first Windows boot'
     print(f'{phase} started on the isolated guest network with {accelerator}.', flush=True)
+    started = time.monotonic()
+    next_sample = started+180
 
     def completed():
+        nonlocal next_sample
         state = inspect(client)['State']
         if state['ExitCode'] != 0:
             errors = docker('logs','--tail','12',client,check=False).stderr.strip()
             raise RuntimeError(f'{phase} QEMU process failed: {errors}')
         if state['Running']:
-            virtual_state = qemu_state(root)
+            virtual_state = (qemu_query(root,'query-status') or {}).get('status')
             if virtual_state in {'internal-error','io-error','guest-panicked'}:
                 raise RuntimeError(f'{phase} paused with QEMU status {virtual_state}.')
+            now = time.monotonic()
+            if now >= next_sample:
+                counters = qemu_query(root,'query-blockstats') or []
+                total = {key:sum(device['stats'].get(key,0) for device in counters)
+                         for key in ('rd_bytes','wr_bytes')}
+                print(f'{phase} at {int(now-started)}s: {virtual_state}, {total}',flush=True)
+                next_sample = now+180
         return not state['Running']
 
     try:
-        wait_for(completed, 1500 if accelerator=='tcg' else 900, phase)
+        timeout = (2400 if discovery else 1800) if accelerator=='tcg' else 900
+        wait_for(completed, timeout, phase)
     except RuntimeError:
         diagnostic_screen(root)
         console = docker('logs','--tail','80',client,check=False)
         if console.stderr:
             print(console.stderr[:4000],end='',flush=True)
+        docker('stop','-t','5',client,check=False)
+        try:
+            stage = read_efi_file(root,helper,'STAGE.LOG').strip()
+            if stage in {'apply-windows','prepare-first-boot','winpe-finished'}:
+                print(f'Last completed WinPE stage marker: {stage}',flush=True)
+        except subprocess.CalledProcessError:
+            print('No WinPE stage marker was recoverable from the fixture disk.',flush=True)
         raise
     docker('rm','-f',client)
 

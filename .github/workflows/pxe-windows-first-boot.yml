@@ -22,7 +22,7 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.label.name == 'ci:pxe-windows')
     runs-on: windows-2025
-    timeout-minutes: 95
+    timeout-minutes: 120
     env:
       PXE_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
       PXE_ACCELERATOR: ${{ inputs.accelerator || 'tcg' }}

@@ -84,7 +84,11 @@ if ($esp.Count -ne 1 -or $system.Count -ne 1 -or
     throw 'The assigned partitions do not match the disposable disk.'
 }
 Write-Host 'The disposable GPT layout and the WinPE drive mappings are ready.'
+$null = New-Item -ItemType Directory -Path 'S:\PXE-LAB'
+$stage = 'S:\PXE-LAB\STAGE.LOG'
+Set-Content -LiteralPath $stage -Value 'apply-windows' -Encoding Ascii
 Invoke-Checked -Program 'dism.exe' -Arguments @('/Apply-Image',"/ImageFile:$($images[0])","/Index:$ImageIndex",'/ApplyDir:W:\')
+Set-Content -LiteralPath $stage -Value 'prepare-first-boot' -Encoding Ascii
 Copy-Item -LiteralPath $probe -Destination 'W:\Windows\System32\pxe-collect.ps1'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'pxe-first-boot.ps1') -Destination 'W:\Windows\System32'
 $panther = 'W:\Windows\Panther'
@@ -106,6 +110,6 @@ $null = New-Item -ItemType Directory -Path $panther -Force
 </unattend>
 "@ | Set-Content -LiteralPath (Join-Path $panther 'Unattend.xml') -Encoding Ascii
 Invoke-Checked -Program 'bcdboot.exe' -Arguments @('W:\Windows','/s','S:','/f','UEFI')
-$null = New-Item -ItemType Directory -Path 'S:\PXE-LAB'
 Copy-Item -LiteralPath $receipt -Destination 'S:\PXE-LAB\WINPE.LOG'
+Set-Content -LiteralPath $stage -Value 'winpe-finished' -Encoding Ascii
 Invoke-Checked -Program 'wpeutil.exe' -Arguments @('Shutdown')
