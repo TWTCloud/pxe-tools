@@ -152,7 +152,7 @@ def inventory():
         return db.execute("SELECT id,inventory_json FROM machines WHERE mac=? AND status='discovered'", (MAC,)).fetchone()
 
 
-def schedule(machine, report):
+def schedule(machine, report, root):
     observed = json.loads(report)
     if SECURE_BOOT and (observed["inventory"]["boot_mode"] != "UEFI"
                         or observed["inventory"]["secure_boot"] is not True):
@@ -185,6 +185,9 @@ def schedule(machine, report):
                          "apt": {"services_select": [], "contrib": False, "non_free_firmware": False,
                                  "hw_detect_load_firmware": False}, "finish": {"reboot": "quiet"}},
         }
+        public_key = root / "guest-fixture.pub"
+        if public_key.is_file():
+            config["admin_user_pubkeys"] = public_key.read_text().strip()
         if RAID_DISKS:
             if config["system_disk_path"] != "/dev/vda":
                 raise RuntimeError("Unexpected disk for the disposable partition recipe")
@@ -224,25 +227,16 @@ def schedule(machine, report):
         db.execute("UPDATE machines SET status='configured',hostname='pxe-fixture',domain='example.test',"
                    " install_config_json=? WHERE id=?", (json.dumps(config), machine))
         if USE_WORKER_QUEUE:
-            jobs = [
-                db.execute("INSERT INTO init_jobs(job_type,status) VALUES(?,'pending')", (kind,)).lastrowid
-                for kind in (f"action:render_postboot:{action}", "bootstrap:render_templates")
-            ]
+            job = db.execute("INSERT INTO init_jobs(job_type,status) VALUES('bootstrap:render_templates','pending')").lastrowid
     if USE_WORKER_QUEUE:
         def rendered():
             with closing(sqlite3.connect(DATABASE)) as db:
-                statuses = [status for status, in db.execute(
-                    "SELECT status FROM init_jobs WHERE id IN (?,?) ORDER BY id", jobs,
-                )]
-            if "failed" in statuses:
-                raise RuntimeError("The packaged worker failed to render its boot artifacts")
-            return statuses == ["success", "success"]
-        wait_for(rendered, 120, "packaged worker rendered menu and postboot artifacts")
+                status, = db.execute("SELECT status FROM init_jobs WHERE id=?", (job,)).fetchone()
+            if status == "failed":
+                raise RuntimeError("The packaged worker failed to render the PXE menu")
+            return status == "success"
+        wait_for(rendered, 120, "packaged worker rendered the install menu")
     else:
-        sys.path.insert(0, str(APP))
-        from worker import render_postboot_for_action
-        if render_postboot_for_action(action, token, MAC, PXE_IP) is None:
-            raise RuntimeError("The native worker could not render its postboot artifacts")
         subprocess.run(["bash", "/opt/pxe-tools/scripts/render-per-mac-pxelinux.sh"], check=True)
     if "DEFAULT install\n" not in INSTALL_MENU.read_text():
         raise RuntimeError("The native renderer did not publish the install menu")
@@ -258,31 +252,18 @@ def successful_install(action):
                              WHERE i.action_id=?""", (action,)).fetchone() == ("success", "installed", "pxe")
 
 
-def first_boot(action):
+def install_fingerprint(action):
     with closing(sqlite3.connect(DATABASE)) as db:
-        receipt = db.execute("SELECT message FROM machine_events WHERE action_id=? AND checkpoint='os_first_boot'",
+        receipt = db.execute("SELECT message FROM machine_events WHERE action_id=? "
+                             "AND message LIKE 'Empreinte SSH déclarée par Debian Installer : SHA256:%'",
                              (action,)).fetchone()
-        ready = db.execute("SELECT 1 FROM machine_events WHERE message LIKE 'Machine signalée online%'").fetchone()
         guard = db.execute("SELECT 1 FROM task_phases WHERE phase_key='disk-guard' AND status='success'").fetchone()
-    if not (receipt and ready and guard):
-        return None
-    payload = json.loads(receipt[0].removeprefix("checkpoint:os_first_boot "))
-    if payload["ip"] != CLIENT or payload["_observed_remote_ip"] != CLIENT or not payload["kernel"]:
-        raise RuntimeError("The first-boot receipt lacks the original native client address or kernel")
-    if SECURE_BOOT and payload.get("fixture_secure_boot") != 1:
-        raise RuntimeError("The installed guest did not boot with Secure Boot enabled")
-    if SECURE_BOOT and payload.get("fixture_arch") != EXPECTED_ARCH:
-        raise RuntimeError("The installed guest reported an unexpected CPU architecture")
-    if RAID_DISKS and payload.get("fixture_layout") != RAID_LAYOUT:
-        raise RuntimeError(f"The installed system did not boot from the requested GPT/RAID{RAID_LEVEL} recipe")
-    # The postboot client asked for an acknowledgement. "accepted\n" is nine bytes.
-    if not DIRECT_HTTP and not any(line.startswith(f"{CLIENT} ") and "code=os_first_boot&ack=1" in line and '" 200 9 ' in line
-               for line in NGINX_LOG.read_text().splitlines()):
-        return None
-    return payload["kernel"]
+    if not (receipt and guard):
+        raise RuntimeError("The installer did not verify the disk or report its public SSH fingerprint")
+    return receipt[0].rsplit(" ", 1)[1]
 
 
-def follow(_root):
+def follow(root):
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -293,26 +274,12 @@ def follow(_root):
     assert_php_stopped()
     print("PXE_NATIVE_READY", flush=True)
     machine, report = wait_for(inventory, 1200, "native inventory")
-    action = schedule(machine, report)
+    action = schedule(machine, report, root)
     print("PXE_NATIVE_DISCOVERY_OK", flush=True)
     # A same-architecture runner without KVM uses TCG for the guest.
     install_timeout = 3600 if EXPECTED_ARCH == "aarch64" else 2400
     wait_for(lambda: successful_install(action), install_timeout, "native install callback")
-    print("PXE_NATIVE_INSTALL_OK", flush=True)
-    try:
-        kernel = wait_for(lambda: first_boot(action), 900, "native first-boot checkpoint and HTTP acknowledgement")
-    except RuntimeError:
-        with closing(sqlite3.connect(DATABASE)) as db:
-            action_state = db.execute(
-                "SELECT a.status,i.install_status,i.ansible_status FROM actions a "
-                "JOIN installations i ON i.action_id=a.id WHERE a.id=?", (action,),
-            ).fetchone()
-        print(f"First-boot fixture action and installation states: {action_state}", flush=True)
-        if not DIRECT_HTTP:
-            for entry in NGINX_LOG.read_text().splitlines():
-                if "code=os_first_boot&ack=1" in entry:
-                    print("First-boot HTTP status and bytes:", entry.split('"')[2].strip(), flush=True)
-        raise
+    fingerprint = install_fingerprint(action)
     if USE_WORKER_QUEUE:
         def worker_finalized():
             with closing(sqlite3.connect(DATABASE)) as db:
@@ -320,21 +287,16 @@ def follow(_root):
                     "SELECT a.status,i.ansible_status FROM actions a "
                     "JOIN installations i ON i.action_id=a.id WHERE a.id=?", (action,),
                 ).fetchone() == ("success", "no_role")
-        wait_for(worker_finalized, 30, "packaged worker finalized the action after first boot")
+        wait_for(worker_finalized, 30, "packaged worker finalized a Debian-only installation")
     if digest(STALE) != original_stale or digest(CONF / "master.key") != original_key:
         raise RuntimeError("The stale database or existing fixture master key was modified")
     assert_php_stopped()
     if not DIRECT_HTTP:
         log = NGINX_LOG.read_text().splitlines()
-        for path in ("/api/discovery", "/preseed.php?mac=", "/pxe/postboot/", "/api/install-end?",
-                     "/api/machine-ready?", "code=os_first_boot"):
+        for path in ("/api/discovery", "/preseed.php?mac=", "/api/install-end?"):
             if not any(line.startswith(f"{CLIENT} ") and path in line and '" 200 ' in line for line in log):
                 raise RuntimeError("Missing native HTTP evidence for " + path)
-    if RAID_DISKS:
-        print(f"Custom GPT/RAID{RAID_LEVEL}{'/LVM' if RAID_LVM else ''} partition recipe verified from the installed guest", flush=True)
-    if SECURE_BOOT:
-        print("UEFI Secure Boot verified in discovery and the installed guest", flush=True)
-    print(f"PXE_NATIVE_FIRST_BOOT_OK kernel={kernel} peer={CLIENT} action={action} ack=accepted", flush=True)
+    print(f"PXE_NATIVE_INSTALL_OK action={action} fingerprint={fingerprint}", flush=True)
     while True:
         assert_php_stopped()
         time.sleep(1)

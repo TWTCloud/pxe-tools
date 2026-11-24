@@ -31,7 +31,6 @@ SERVER = "192.0.2.1"
 READY = b"PXE_NATIVE_READY"
 DISCOVERED = b"PXE_NATIVE_DISCOVERY_OK"
 INSTALLED = b"PXE_NATIVE_INSTALL_OK"
-BOOTED = b"PXE_NATIVE_FIRST_BOOT_OK"
 MAC = "02:00:00:00:00:01"
 SERIAL = "PXE-TEST-ONE"
 KEYRING = ROOT / "packaging/native/keyrings/debian-archive-2025.1.gpg"
@@ -39,7 +38,7 @@ KEYRING = ROOT / "packaging/native/keyrings/debian-archive-2025.1.gpg"
 
 def native_vhost(mirror_upstream="http://10.0.2.100"):
     serial = base64.b64encode(b'GRUB_CMDLINE_LINUX="console=ttyS0,115200n8 net.ifnames=0"\n').decode()
-    hook = "in-target /bin/systemctl enable pxe-machine-ready.service"
+    hook = "&phase=finished&status=success' || true"
     instrument = f"{hook} ; in-target /bin/sh -c 'echo {serial} | base64 -d >> /etc/default/grub; update-grub'"
     return f"""server {{
     listen @@PXE_IPV4@@:80 default_server;
@@ -226,12 +225,12 @@ def main():
             install_menu = ("pxelinux.cfg/01-" + MAC.replace(":", "-")).encode()
             assert install_menu in switch.tftp_requests, switch.tftp_requests
             print("Native install callback recorded", flush=True)
-            client(root, server, "first-boot", BOOTED, 900, local=True)
+            client(root, server, "first-boot", INSTALLED, 900, local=True)
             for line in check_server(root, server).decode(errors="replace").splitlines():
                 if line.startswith(("PXE_NATIVE_PLATFORM ", "PXE_NATIVE_PACKAGE ", "PXE_NATIVE_BINARY ",
                                     "PXE_NATIVE_DNSMASQ ", "PXE_NATIVE_FIRST_BOOT_OK ")):
                     print(line, flush=True)
-            print("PASS: Debian 13 native dnsmasq/PXE to installed Debian login and authenticated first-boot receipt", flush=True)
+            print("PASS: Debian 13 native dnsmasq/PXE to installed Debian login and authenticated install-end receipt", flush=True)
     finally:
         if not args.keep_fixture:
             shutil.rmtree(root)

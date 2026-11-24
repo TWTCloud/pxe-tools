@@ -2184,8 +2184,8 @@ def _wait_for_checkpoint(
     """
     if not action_id or action_id <= 0:
         return False
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout_s
+    while True:
         try:
             with db_connect() as db:
                 row = db.execute(
@@ -2197,8 +2197,10 @@ def _wait_for_checkpoint(
                 return True
         except Exception as e:
             logging.warning("_wait_for_checkpoint(%s) DB poll failed: %s", checkpoint_code, e)
-        time.sleep(interval_s)
-    return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(interval_s, remaining))
 
 
 def wait_for_os_first_boot(
@@ -2909,7 +2911,7 @@ def render_postboot_for_action(action_id: int, token: str, mac: str, pxe_ip: str
         return None
 
 
-def run_playbook(job: dict) -> None:
+def run_playbook(job: dict, *, first_boot_timeout: int = _OS_FIRST_BOOT_TIMEOUT_S) -> None:
     install_id = job["install_id"]
     role = (job.get("ansible_role") or "").strip()
     hostname = (job.get("hostname") or "").strip()
@@ -2976,14 +2978,15 @@ def run_playbook(job: dict) -> None:
         return
 
     if action_id and action_token and mac:
-        append_install_log(
-            install_id,
-            f"[worker] Attente signal os_first_boot (postboot.sh) — timeout {_OS_FIRST_BOOT_TIMEOUT_S}s...\n",
-        )
-        if wait_for_os_first_boot(int(action_id), timeout_s=_OS_FIRST_BOOT_TIMEOUT_S):
+        if first_boot_timeout:
             append_install_log(
                 install_id,
-                "[worker] Signal os_first_boot reçu — OS bootée et postboot.sh a contacté l'orchestrateur, lancement ansible-playbook.\n",
+                f"[worker] Attente du signal os_first_boot — timeout {first_boot_timeout}s...\n",
+            )
+        if wait_for_os_first_boot(int(action_id), timeout_s=first_boot_timeout):
+            append_install_log(
+                install_id,
+                "[worker] Signal os_first_boot reçu — lancement ansible-playbook.\n",
             )
         else:
             # Fallback : postboot.sh peut être cassé/désactivé/network ko.
@@ -3526,7 +3529,8 @@ def rust_worker_step(step: str, config: str, database: str = "", identifier: str
     elif step == "playbook":
         job = fetch_pending_ansible(int(identifier))
         if job is not None and unlock_pending():
-            run_playbook(job)
+            # The Rust queue already waited for the signal or its timeout.
+            run_playbook(job, first_boot_timeout=0)
     else:
         raise RuntimeError("Sous-commande du worker inconnue")
 

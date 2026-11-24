@@ -17,9 +17,9 @@ fn pending_installation(db: &Connection, enabled: bool) -> rusqlite::Result<Opti
                 OR a.type NOT IN ('install_only','reinstall') OR COALESCE(i.install_status,'')<>'success'
                 OR COALESCE(unixepoch(i.ended_at),0)+?1<=unixepoch()
                 OR EXISTS(SELECT 1 FROM machine_events WHERE action_id=a.id AND checkpoint='os_first_boot')
-                OR (?2 AND CASE WHEN json_valid(m.install_config_json) THEN
-                    json_type(m.install_config_json,'$.ansible_role')='text'
-                    AND trim(json_extract(m.install_config_json,'$.ansible_role'))<>''
+                OR NOT (?2 AND CASE WHEN json_valid(m.install_config_json) THEN
+                    COALESCE(json_type(m.install_config_json,'$.ansible_role')='text'
+                    AND trim(json_extract(m.install_config_json,'$.ansible_role'))<>'',0)
                     ELSE 0 END)
              ) ORDER BY i.created_at,i.id LIMIT 1",
             params![FIRST_BOOT_TIMEOUT, enabled],
@@ -215,4 +215,54 @@ fn requeue(db: &Connection, action: i64) -> rusqlite::Result<Result<i64, String>
         Some(action),
     )?;
     Ok(Ok(installation))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_requested_provisioning_waits_for_first_boot() -> rusqlite::Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(include_str!("../../../app/db/schema.sqlite.sql"))?;
+        db.execute_batch(
+            "INSERT INTO machines(id,mac,status,install_config_json) VALUES
+                (1,'02:00:00:00:00:01','installed','{}'),
+                (2,'02:00:00:00:00:02','installed','{\"ansible_role\":\"base\"}');
+             INSERT INTO actions(id,machine_id,type,status,token) VALUES
+                (1,1,'install_only','running','plain'),
+                (2,2,'install_only','running','ansible');
+             INSERT INTO installations(id,action_id,machine_id,install_status,ansible_status,ended_at)
+             VALUES (1,1,1,'success','pending',CURRENT_TIMESTAMP),
+                    (2,2,2,'success','pending',CURRENT_TIMESTAMP);",
+        )?;
+
+        assert_eq!(pending_installation(&db, true)?, Some(1));
+        db.execute(
+            "UPDATE installations SET ansible_status='no_role' WHERE id=1",
+            [],
+        )?;
+        assert_eq!(pending_installation(&db, true)?, None);
+        assert_eq!(pending_installation(&db, false)?, Some(2));
+
+        db.execute(
+            "UPDATE installations SET ended_at=datetime('now','-601 seconds') WHERE id=2",
+            [],
+        )?;
+        assert_eq!(pending_installation(&db, true)?, Some(2));
+        db.execute(
+            "UPDATE installations SET ended_at=CURRENT_TIMESTAMP WHERE id=2",
+            [],
+        )?;
+        log_event(
+            &db,
+            2,
+            "info",
+            "checkpoint:os_first_boot",
+            Some("os_first_boot"),
+            Some(2),
+        )?;
+        assert_eq!(pending_installation(&db, true)?, Some(2));
+        Ok(())
+    }
 }

@@ -500,13 +500,10 @@ def compare_install(ports, paths):
     guard = r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /tmp/pxe-disk-guard.sh"
     assert re.search(guard, decoded[0]).group(1) == re.search(guard, decoded[1]).group(1)
     for seed in decoded:
-        assert "d-i pkgsel/include string openssh-server curl iproute2" in seed
-        assert "in-target /usr/bin/curl -fsS --connect-timeout 5 --max-time 20 --retry 3" in seed
-        assert "systemctl enable pxe-postboot.service || exit 1" in seed
-    dependency = re.search(r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /etc/systemd/system/pxe-postboot.service.d/ready.conf", decoded[1])
-    assert base64.b64decode(dependency.group(1)) == (
-        b"[Unit]\nRequires=pxe-machine-ready.service\nAfter=pxe-machine-ready.service\n"
-    )
+        assert "d-i pkgsel/include string openssh-server curl\n" in seed
+        assert "system-generators/pxe-first-boot" not in seed
+        assert "pxe-machine-ready" not in seed and "pxe-postboot" not in seed
+        assert "--data-urlencode" in seed and "ssh_host_fingerprint=$ssh_fingerprint" in seed
     for seed in decoded:
         assert "Bearer " + token in seed and "$6$hidden" not in seed
         assert "services-select multiselect" in seed
@@ -515,6 +512,32 @@ def compare_install(ports, paths):
         for database in paths:
             with closing(sqlite3.connect(database)) as db, db:
                 db.execute("UPDATE machines SET install_config_json=? WHERE id=81", (json.dumps(snapshot),))
+
+    def set_ansible(enabled):
+        for database in paths:
+            with closing(sqlite3.connect(database)) as db, db:
+                db.execute("INSERT INTO settings(key,value) VALUES('ansible_enabled',?) "
+                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (enabled,))
+                db.execute("INSERT OR IGNORE INTO settings(key,value) "
+                           "VALUES('ansible_ssh_pubkey','ssh-ed25519 AAAA fixture')")
+
+    set_config({**config, "ansible_role": "base"})
+    set_ansible("off")
+    for port in ports:
+        seed = response(port, PRESEED + query, peer="lan")[3].decode()
+        assert "system-generators/pxe-first-boot" not in seed and "NOPASSWD" not in seed
+    set_ansible("on")
+    launchers = []
+    for port in ports:
+        seed = response(port, PRESEED + query, peer="lan")[3].decode()
+        assert "d-i pkgsel/include string openssh-server curl iproute2 sudo python3\n" in seed
+        assert "pxe-machine-ready" not in seed and "pxe-postboot" not in seed
+        command = re.search(r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /target/etc/systemd/system-generators/pxe-first-boot; chmod 0700", seed)
+        assert command is not None
+        launchers.append(base64.b64decode(command[1]))
+    assert launchers[0] == launchers[1]
+    assert b"Type=oneshot" in launchers[0] and b"code=os_first_boot&ack=1" in launchers[0]
+    set_ansible("off")
 
     vlan = {"mode": "static", "match_by": "mac", "match": {"mac": "02:00:00:00:51:02"},
             "vlan": {"id": 77}, "static": {"ip": "198.51.100.4", "cidr": 24,
@@ -530,7 +553,7 @@ def compare_install(ports, paths):
     assert directives(decoded[0]) == directives(decoded[1]), (directives(decoded[0]), directives(decoded[1]))
     for seed in decoded:
         assert f"d-i netcfg/choose_interface select {mac}" in seed
-        assert "d-i pkgsel/include string openssh-server vlan curl iproute2" in seed
+        assert "d-i pkgsel/include string openssh-server vlan curl" in seed
         assert "/etc/network/interfaces.d/pxe-nic-03" not in seed
     stanza = r"echo ([A-Za-z0-9+/=]+) \| base64 -d \| sed .*?/etc/network/interfaces.d/pxe-nic-(\d{2})"
     generated = [{index: base64.b64decode(data).decode() for data, index in re.findall(stanza, seed)} for seed in decoded]
@@ -551,7 +574,7 @@ def compare_install(ports, paths):
     for seed in decoded:
         assert f"d-i netcfg/choose_interface select {mac}" in seed
         assert "d-i netcfg/get_ipaddress string 198.51.100.4" in seed
-        assert "d-i pkgsel/include string openssh-server ifenslave curl iproute2" in seed
+        assert "d-i pkgsel/include string openssh-server ifenslave curl" in seed
     shell = [base64.b64decode(re.search(pattern, seed).group(1)) for pattern, seed in zip((
         r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /tmp/pxe-bond.sh",
         r"echo ([A-Za-z0-9+/=]+) \| base64 -d \| /bin/bash'",
@@ -750,8 +773,13 @@ def compare_install(ports, paths):
     assert result == {"status": "ok", "bytes": len(chunk), "appended": len(chunk), "seq": 42}
     assert compare(ports, CHECKPOINT + query + "&code=late_command_started&ack=1", 200,
                    method="POST", peer="lan", token=token) == b""
+    fingerprint = "SHA256:" + "AB+/" * 10 + "abc"
     assert compare(ports, END, 200, method="POST", peer="lan", token=token,
-                   content_type="application/x-www-form-urlencoded", body=urlencode({"mac": mac}))["machine_status"] == "installed"
+                   content_type="application/x-www-form-urlencoded",
+                   body=urlencode({"mac": mac, "ssh_host_fingerprint": fingerprint}))["machine_status"] == "installed"
+    assert compare_states(paths, [
+        "SELECT action_id,message FROM machine_events WHERE message LIKE 'Empreinte SSH%'",
+    ]) == [[(162, "Empreinte SSH déclarée par Debian Installer : " + fingerprint)]]
     compare(ports, END + query, 200, peer="lan", token=token)  # Replay is idempotent.
     compare(ports, PRESEED + query, 404, peer="lan")
     compare(ports, START + query, 409)

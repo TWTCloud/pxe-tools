@@ -231,6 +231,7 @@ pub fn end(
     raw_mac: &str,
     token: &str,
     status: &str,
+    fingerprint: &str,
 ) -> ApiResult {
     if normalize_mac(raw_mac).is_none() {
         return failure(400, "mac required");
@@ -288,6 +289,23 @@ pub fn end(
     )? != 0 {
         log_event(&tx, machine.id, "action", "Démarrage local : activé après installation PXE réussie", None, None)?;
         enqueue_menus(&tx)?;
+    }
+    if status == "success"
+        && fingerprint.strip_prefix("SHA256:").is_some_and(|hash| {
+            hash.len() == 43
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
+        })
+    {
+        log_event(
+            &tx,
+            machine.id,
+            "info",
+            &format!("Empreinte SSH déclarée par Debian Installer : {fingerprint}"),
+            None,
+            Some(action.id),
+        )?;
     }
     tx.commit()?;
     Ok((

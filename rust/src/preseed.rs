@@ -15,6 +15,7 @@ use std::net::Ipv4Addr;
 
 const BASE: &str = include_str!("../../docker/worker/templates/preseed-base.cfg.j2");
 const DISK_GUARD: &str = include_str!(concat!(env!("OUT_DIR"), "/disk-guard.sh"));
+const FIRST_BOOT: &str = include_str!(concat!(env!("OUT_DIR"), "/first-boot.sh"));
 const INSTALL_LOG: &str = include_str!(concat!(env!("OUT_DIR"), "/install-log.sh"));
 const TARGET_HOSTNAME: &str = include_str!(concat!(env!("OUT_DIR"), "/target-hostname.sh"));
 pub fn serve(
@@ -152,6 +153,7 @@ struct Profile {
     root_hash: String,
     user_keys: Vec<String>,
     remote_keys: Vec<String>,
+    ansible_requested: bool,
     ansible: Option<(String, String)>,
     advanced: Value,
 }
@@ -250,7 +252,11 @@ impl Profile {
                 .then(|| url.to_owned())
             })
             .collect();
-        let ansible = if setting(db, "ansible_enabled")? == "on" {
+        let ansible_requested = config["ansible_role"]
+            .as_str()
+            .is_some_and(|role| !php_trim(role).is_empty())
+            && setting(db, "ansible_enabled")? == "on";
+        let ansible = if ansible_requested {
             let key = setting(db, "ansible_ssh_pubkey")?;
             let key = php_trim(&key);
             if !key.is_empty() && !public_key(key) {
@@ -286,6 +292,7 @@ impl Profile {
             root_hash,
             user_keys,
             remote_keys,
+            ansible_requested,
             ansible,
             advanced,
         })
@@ -349,35 +356,19 @@ impl Profile {
         };
         late.push(format!("in-target /bin/sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication {password_auth}/' /etc/ssh/sshd_config"));
         late.push("in-target /bin/sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config".into());
-        let ready = MACHINE_READY.replace(
-            "__URL__",
-            &format!("{base_url}/api/machine-ready?mac={mac}"),
-        );
-        late.push(write_target("/usr/local/sbin/pxe-machine-ready", ready));
-        late.push("in-target /bin/chmod 0755 /usr/local/sbin/pxe-machine-ready".into());
-        late.push(write_target(
-            "/etc/systemd/system/pxe-machine-ready.service",
-            READY_UNIT,
-        ));
-        late.push("in-target /bin/systemctl enable pxe-machine-ready.service".into());
         if let Some(command) = self.partitions.reserve_blocks() {
             late.push(command);
         }
-        if let Some((id, _)) = action {
-            let postboot = format!("{base_url}/pxe/postboot/{id}");
-            let download =
-                "in-target /usr/bin/curl -fsS --connect-timeout 5 --max-time 20 --retry 3";
-            // network-online.target can be reached before DHCP grants the lease.
-            let ordering = write_target(
-                "/etc/systemd/system/pxe-postboot.service.d/ready.conf",
-                "[Unit]\nRequires=pxe-machine-ready.service\nAfter=pxe-machine-ready.service\n",
-            );
+        let first_boot = action.is_some() && self.ansible_requested;
+        if let Some((_, token)) = action.filter(|_| first_boot) {
+            let script = FIRST_BOOT
+                .replace("__PXE_IP__", &format!("'{pxe}'"))
+                .replace("__MAC__", &format!("'{mac}'"))
+                .replace("__TOKEN__", &format!("'{token}'"));
+            let generator = "/target/etc/systemd/system-generators/pxe-first-boot";
             late.push(format!(
-                "{download} '{postboot}/postboot.sh' -o /usr/local/bin/postboot.sh \
-                 && {download} '{postboot}/pxe-postboot.service' -o /etc/systemd/system/pxe-postboot.service \
-                 && in-target /bin/chmod 0700 /usr/local/bin/postboot.sh \
-                 && /bin/mkdir -p /target/etc/systemd/system/pxe-postboot.service.d \
-                 && {ordering} && in-target /bin/systemctl enable pxe-postboot.service || exit 1"
+                "/bin/sh -ec 'umask 077; mkdir -p /target/etc/systemd/system-generators; echo {} | base64 -d > {generator}; chmod 0700 {generator}' || exit 1",
+                STANDARD.encode(format!("{script}\n"))
             ));
         }
         if !self.network.secondary.is_empty() {
@@ -391,7 +382,10 @@ impl Profile {
                 "/bin/sh /tmp/pxe-dilog.sh flush '{log_url}' '{token}' || true"
             ));
             late.push("kill $(cat /tmp/pxe-dilog.pid 2>/dev/null) 2>/dev/null || true".into());
-            late.push(format!("in-target /usr/bin/curl -fsS -X POST -H 'Authorization: Bearer {token}' '{base_url}/api/install-end?mac={mac}&status=success' || true"));
+            late.push("ssh_fingerprint=''".into());
+            late.push(r#"if [ -r /target/etc/ssh/ssh_host_ed25519_key.pub ]; then ssh_fingerprint=$(in-target /usr/bin/ssh-keygen -E sha256 -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}'); fi"#.into());
+            late.push(format!(r#"http_status=$(in-target /usr/bin/curl -fsS --connect-timeout 5 --max-time 15 --retry 3 --retry-connrefused --output /dev/null --write-out '%{{http_code}}' --data-urlencode "ssh_host_fingerprint=$ssh_fingerprint" -H 'Authorization: Bearer {token}' '{base_url}/api/install-end?mac={mac}&status=success') || exit 1"#));
+            late.push(r#"[ "$http_status" = 200 ] || exit 1"#.into());
         }
         let mut early = commands("preseed/early_command", &early);
         if !early.is_empty() {
@@ -409,7 +403,10 @@ impl Profile {
             ("LOCALIZATION_BLOCK", self.localization_block()),
             ("CLOCK_BLOCK", self.clock_block()),
             ("ACCOUNTS_BLOCK", self.accounts_block()),
-            ("PACKAGES_BLOCK", self.packages_block(action.is_some())),
+            (
+                "PACKAGES_BLOCK",
+                self.packages_block(action.is_some(), first_boot),
+            ),
             ("APT_BLOCK", self.apt_block()),
             ("BOOTLOADER_BLOCK", self.bootloader_block()),
             ("PARTITION_BLOCK", self.partitions.directives.clone()),
@@ -565,7 +562,7 @@ impl Profile {
         block.join("\n")
     }
 
-    fn packages_block(&self, install_postboot: bool) -> String {
+    fn packages_block(&self, tracked: bool, first_boot: bool) -> String {
         let pkg = &self.advanced["packages"];
         let mut lines = vec![format!(
             "d-i base-installer/install-recommends boolean {}",
@@ -590,9 +587,10 @@ impl Profile {
             ],
         );
         include.extend(self.network.packages.iter().copied().map(String::from));
-        if install_postboot {
-            include.extend(["curl", "iproute2"].map(String::from));
-        } else if !self.network.secondary.is_empty() {
+        if tracked {
+            include.push("curl".into());
+        }
+        if first_boot {
             include.push("iproute2".into());
         }
         if self.ansible.is_some() {
@@ -849,26 +847,3 @@ fn substitute(template: &str, blocks: HashMap<&str, String>) -> String {
     result.push_str(rest);
     result
 }
-
-const MACHINE_READY: &str = "#!/usr/bin/env bash
-for attempt in {1..24}; do
-    /usr/bin/curl -fsS --connect-timeout 5 --max-time 10 '__URL__' && exit 0
-    status=$?
-    if [ \"$status\" -ne 7 ] || [ \"$attempt\" -eq 24 ]; then exit \"$status\"; fi
-    /bin/sleep 5
-done
-";
-const READY_UNIT: &str = "[Unit]
-Description=PXE Tools — signal machine ready post-reboot
-After=network-online.target sshd.service
-Wants=network-online.target sshd.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/pxe-machine-ready
-TimeoutStartSec=250
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-";

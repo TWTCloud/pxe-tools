@@ -404,7 +404,14 @@ fn handle(
                 ),
                 "/api/install-end" => {
                     let allowed = in_subnet(ip, &setting(&db, "pxe_subnet")?);
-                    install::end(&mut db, allowed, mac, bearer(request), value("status"))
+                    install::end(
+                        &mut db,
+                        allowed,
+                        mac,
+                        bearer(request),
+                        value("status"),
+                        param(&form, "ssh_host_fingerprint"),
+                    )
                 }
                 "/api/machine-ready" => install::machine_ready(&mut db, mac),
                 _ => unreachable!(),

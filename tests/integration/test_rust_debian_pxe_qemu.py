@@ -46,7 +46,7 @@ FIXTURE_HASH = '$6$pxe-rust-fixture$3qZUDjjE3OJvYO8pbsw4RHkkfm57OLObfMO6T70WK4.i
 
 def write_nginx(root):
     conf = root / "nginx.conf"
-    source = "in-target /bin/systemctl enable pxe-machine-ready.service"
+    source = "&phase=finished&status=success' || true"
     serial = base64.b64encode(
         b'GRUB_CMDLINE_LINUX="console=ttyS0,115200n8 net.ifnames=0"\n'
     ).decode("ascii")
@@ -175,10 +175,6 @@ def schedule(root):
                                "finish": {"reboot": "quiet"}}}
         db.execute("UPDATE machines SET status='configured',hostname='pxe-fixture',domain='example.test',"
                    "install_config_json=?,next_action='reboot' WHERE id=?", (json.dumps(config), machine))
-        artifact = root / "postboot" / str(action)
-        artifact.mkdir(parents=True)
-        (artifact / "postboot.sh").write_text(render_fixture("postboot.sh.j2", pxe_ip=PXE_IP, mac=MAC, token=token))
-        (artifact / "pxe-postboot.service").write_text(render_fixture("pxe-postboot.service.j2"))
     return True
 
 
@@ -249,14 +245,13 @@ def installed(root):
 
 def first_boot_recorded(root):
     with closing(sqlite3.connect(root / "fixture.sqlite")) as db:
-        event = db.execute("""SELECT e.message FROM machine_events e JOIN installations i ON i.action_id=e.action_id
-            WHERE e.checkpoint='os_first_boot' AND i.install_status='success'""").fetchone()
-        ready = db.execute("SELECT 1 FROM machine_events WHERE message LIKE 'Machine signalée online%'").fetchone()
+        receipt = db.execute("""SELECT 1 FROM machine_events e JOIN installations i ON i.action_id=e.action_id
+            WHERE e.message LIKE 'Empreinte SSH déclarée par Debian Installer : SHA256:%'
+            AND i.install_status='success'""").fetchone()
+        old_callback = db.execute("""SELECT 1 FROM machine_events WHERE checkpoint='os_first_boot'
+                                  OR message LIKE 'Machine signalée online%'""").fetchone()
         guard = db.execute("SELECT 1 FROM task_phases WHERE phase_key='disk-guard' AND status='success'").fetchone()
-    if not (event and ready and guard):
-        return False
-    payload = json.loads(event[0].removeprefix("checkpoint:os_first_boot "))
-    return payload["ip"] == CLIENT and payload["_observed_remote_ip"] == CLIENT and bool(payload["kernel"])
+    return receipt is not None and guard is not None and old_callback is None
 
 
 def main():
@@ -319,7 +314,7 @@ def main():
             run_guest(root, "install", args.timeout, ready=lambda: installed(root))
             print("Debian installer finished and Rust recorded its callback", flush=True)
             run_guest(root, "first-boot", args.timeout, ready=lambda: first_boot_recorded(root), first_boot=True)
-            print("Debian 13 login, ready callback and action-bound first-boot checkpoint verified with Rust and nginx", flush=True)
+            print("Debian 13 login and action-bound installer receipt verified with Rust and nginx", flush=True)
     finally:
         if not args.keep_fixture:
             shutil.rmtree(root)
