@@ -54,6 +54,15 @@ jobs:
           cd "$fixture"
           sha256sum pxe-tools-rust > SHA256SUMS
           printf '%s\n' "$PXE_SOURCE" > source-commit.txt
+      - name: Verify Windows edition selection in an isolated network namespace
+        run: |
+          sudo unshare --net /bin/bash -ec '
+            ip link set lo up
+            for address in 192.0.2.1 192.0.2.10 192.0.2.11; do
+              ip addr add "$address/32" dev lo
+            done
+            python3 tests/integration/test_rust_windows_editions.py rust/target/release/pxe-tools-rust
+          '
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pxe-hyperv-rust-amd64

@@ -72,6 +72,7 @@ struct Site {
     https_port: u16,
     http_port: u16,
     winpe_client: Option<Ipv4Addr>,
+    windows_editions: Arc<winpe::Editions>,
     public_host: Option<String>,
     requests: Semaphore,
     admin: admin::Console,
@@ -110,18 +111,24 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         public_host.clone(),
     )?);
     let acme_challenge = Arc::new(acme::ChallengeResponse::default());
+    let assets = assets::Assets::new(
+        env::var_os("HTTP_ROOT")
+            .map(PathBuf::from)
+            .ok_or("HTTP_ROOT is required")?,
+    )?;
+    let windows_editions = winpe::Editions::load(&assets.winpe_root()).unwrap_or_else(|error| {
+        eprintln!("Unable to load the Windows editions manifest: {error}");
+        winpe::Editions::Invalid
+    });
     let site = Arc::new(Site {
         database: config.to_owned(),
-        assets: assets::Assets::new(
-            env::var_os("HTTP_ROOT")
-                .map(PathBuf::from)
-                .ok_or("HTTP_ROOT is required")?,
-        )?,
+        assets,
         catalog: Arc::new(serde_json::from_str(include_str!("checkpoints.json"))?),
         pxe_ip,
         https_port,
         http_port,
         winpe_client: winpe::configured_client()?,
+        windows_editions: Arc::new(windows_editions),
         public_host,
         requests: Semaphore::new(8),
         admin: admin::Console::new(),
@@ -321,21 +328,11 @@ where
             } else {
                 None
             };
-            let winpe_path = if request.method() == Method::GET
+            let path = request.uri().path();
+            let winpe_path = (request.method() == Method::GET
                 && winpe::allowed(site.winpe_client, peer.ip())
-            {
-                match request.uri().path() {
-                    "/boot.ipxe" => Some("/boot.ipxe"),
-                    winpe::BOOT => Some(winpe::BOOT),
-                    "/pxe/windows/wimboot" => Some("/pxe/windows/wimboot"),
-                    "/pxe/windows/BCD" => Some("/pxe/windows/BCD"),
-                    "/pxe/windows/boot.sdi" => Some("/pxe/windows/boot.sdi"),
-                    "/pxe/windows/boot.wim" => Some("/pxe/windows/boot.wim"),
-                    _ => None,
-                }
-            } else {
-                None
-            };
+                && site.windows_editions.logs_request(path))
+            .then(|| path.to_owned());
             let reply = dispatch(request, peer.ip(), secure, &site).await;
             if let Some(asset) = asset {
                 let length = single(reply.headers(), CONTENT_LENGTH.as_str()).unwrap_or("-");
@@ -700,7 +697,7 @@ async fn dispatch(
     }
     if matches!(
         path,
-        certificates::ROUTE | certificates::ACME_ROUTE | presets::ROUTE
+        certificates::ROUTE | certificates::ACME_ROUTE | presets::ROUTE | winpe::SETTINGS
     ) {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
@@ -732,6 +729,7 @@ async fn dispatch(
                 return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n")
             }
             (presets::ROUTE, form) => admin::Action::Presets(form),
+            (winpe::SETTINGS, form) => admin::Action::Windows(site.windows_editions.clone(), form),
             _ => unreachable!("matched settings path"),
         };
         return site.admin.serve(&parts, peer, &site.database, action).await;
@@ -848,7 +846,22 @@ async fn dispatch(
     let winpe = winpe::allowed(site.winpe_client, peer);
     if winpe && readable {
         if path == winpe::BOOT {
-            return winpe::script(server, site.http_port);
+            if matches!(site.windows_editions.as_ref(), winpe::Editions::Legacy) {
+                return winpe::script(server, site.http_port, None);
+            }
+            let config = site.database.clone();
+            let editions = site.windows_editions.clone();
+            let selected = task::spawn_blocking(move || editions.selected(&config))
+                .await
+                .ok()
+                .flatten();
+            return match selected {
+                Some(edition) => winpe::script(server, site.http_port, Some(&edition)),
+                None => plain(
+                    StatusCode::CONFLICT,
+                    "Choisissez une édition Windows dans la console\n",
+                ),
+            };
         }
         if path == "/boot.ipxe" && parts.uri.query() != Some("menu=debian") {
             return winpe::menu(server, site.http_port);
@@ -857,7 +870,12 @@ async fn dispatch(
     if readable {
         if let Some(reply) = site
             .assets
-            .serve(path, &parts.headers, parts.method == Method::HEAD, winpe)
+            .serve(
+                path,
+                &parts.headers,
+                parts.method == Method::HEAD,
+                winpe.then_some(site.windows_editions.as_ref()),
+            )
             .await
         {
             return reply;
