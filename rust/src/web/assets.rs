@@ -55,6 +55,8 @@ impl Assets {
         if !crate::media::digest(digest) {
             return None;
         }
+        let path = percent_decode_str(path).decode_utf8().ok()?;
+        let path = path.as_ref();
         let allowed = matches!(
             path,
             ".treeinfo"
@@ -73,7 +75,7 @@ impl Assets {
                     && !part.starts_with('.')
                     && part
                         .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b"._+~-".contains(&byte))
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._+~^-".contains(&byte))
             }));
         if !allowed {
             return None;

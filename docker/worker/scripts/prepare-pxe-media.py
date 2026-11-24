@@ -139,7 +139,7 @@ def rhel_members(iso):
         name = fields.get("Path", "")
         if name not in RHEL_FILES and not name.startswith(RHEL_PREFIXES):
             continue
-        if (not all(re.fullmatch(r"[A-Za-z0-9_.+~-]{1,255}", part)
+        if (not all(re.fullmatch(r"[A-Za-z0-9_.+~^-]{1,255}", part)
                     and part not in (".", "..") for part in name.split("/"))
                 or fields.get("Symbolic Link") or fields.get("Hard Link")
                 or fields.get("Mode", "").startswith("l")):

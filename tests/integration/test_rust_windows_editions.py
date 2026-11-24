@@ -229,7 +229,7 @@ def check_media(binary, root, public, database, tls, auth, headers, env):
     treeinfo = f'[general]\narch = x86_64\nfamily = Red Hat Enterprise Linux\nversion = 9.9\n[checksums]\n{checksums}'.encode()
     rhel_sha = create_iso(inbox/'rhel9.iso', root/'rhel-tree', {
         **boot, '.treeinfo': treeinfo, 'BaseOS/repodata/repomd.xml': b'baseos',
-        'AppStream/repodata/repomd.xml': b'appstream', 'BaseOS/Packages/example.rpm': b'fixture-rpm',
+        'AppStream/repodata/repomd.xml': b'appstream', 'BaseOS/Packages/example-0^20260728.rpm': b'fixture-rpm',
     })
     assert 'SHA-256' in submit('rhel9', 'rhel9.iso', 'a'*64, expected='failed')
     submit('rhel9', 'rhel9.iso', rhel_sha)
@@ -239,7 +239,7 @@ def check_media(binary, root, public, database, tls, auth, headers, env):
     assert prefix.encode() not in request('/pxe/linux/arm64/grub.cfg', source=WINDOWS_CLIENT)[2]
     assert request(prefix+'.treeinfo', source=WINDOWS_CLIENT)[2] == treeinfo
     assert request(prefix+'.treeinfo', source=OUTSIDE_CLIENT)[0] == 403
-    assert request(prefix+'BaseOS/Packages/example.rpm', source=WINDOWS_CLIENT,
+    assert request(prefix+'BaseOS/Packages/example-0%5E20260728.rpm', source=WINDOWS_CLIENT,
                    headers={'Range':'bytes=0-6'}) == (206, None, b'fixture')
     assert request(prefix+'.pxe-media.json', source=WINDOWS_CLIENT)[0] == 404
     assert request(prefix+'BaseOS/../../inbox/rhel9.iso', source=WINDOWS_CLIENT)[0] == 404
