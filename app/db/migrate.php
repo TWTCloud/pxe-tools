@@ -475,38 +475,40 @@ foreach ($rows as $row) {
 // ---------------------------------------------------------------------------
 // 8. Spec F — Ansible optionnel + sentinel par défaut
 // ---------------------------------------------------------------------------
-$repoUrl = trim((string)(getenv('ANSIBLE_REPO_URL') ?: ''));
-if ($repoUrl !== '') {
-    $existingRepo = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_repo_url'")->fetchColumn();
-    if ($existingRepo === false) {
-        $pdo->prepare("INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_repo_url', ?)")
-            ->execute([$repoUrl]);
-        echo "migrate-ansible: ansible_repo_url initialisé depuis l'environnement\n";
-    } elseif (trim((string)$existingRepo) === '') {
-        $pdo->prepare("UPDATE settings SET value=? WHERE " . Db::quoteIdent('key') . "='ansible_repo_url'")
-            ->execute([$repoUrl]);
+if (!$rustGuided) {
+    $repoUrl = trim((string)(getenv('ANSIBLE_REPO_URL') ?: ''));
+    if ($repoUrl !== '') {
+        $existingRepo = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_repo_url'")->fetchColumn();
+        if ($existingRepo === false) {
+            $pdo->prepare("INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_repo_url', ?)")
+                ->execute([$repoUrl]);
+            echo "migrate-ansible: ansible_repo_url initialisé depuis l'environnement\n";
+        } elseif (trim((string)$existingRepo) === '') {
+            $pdo->prepare("UPDATE settings SET value=? WHERE " . Db::quoteIdent('key') . "='ansible_repo_url'")
+                ->execute([$repoUrl]);
+        }
     }
-}
-$envPubkey = trim((string)(getenv('ANSIBLE_SSH_PUBKEY') ?: ''));
-if ($envPubkey !== '') {
-    $existingPubkey = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")->fetchColumn();
-    if ($existingPubkey === false) {
-        $pdo->prepare("INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_ssh_pubkey', ?)")
-            ->execute([$envPubkey]);
-        echo "migrate-ansible: clé publique initialisée depuis l'environnement\n";
-    } elseif (trim((string)$existingPubkey) === '') {
-        $pdo->prepare("UPDATE settings SET value=? WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")
-            ->execute([$envPubkey]);
+    $envPubkey = trim((string)(getenv('ANSIBLE_SSH_PUBKEY') ?: ''));
+    if ($envPubkey !== '') {
+        $existingPubkey = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")->fetchColumn();
+        if ($existingPubkey === false) {
+            $pdo->prepare("INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_ssh_pubkey', ?)")
+                ->execute([$envPubkey]);
+            echo "migrate-ansible: clé publique initialisée depuis l'environnement\n";
+        } elseif (trim((string)$existingPubkey) === '') {
+            $pdo->prepare("UPDATE settings SET value=? WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")
+                ->execute([$envPubkey]);
+        }
     }
-}
-$ansibleEnabled = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_enabled'")->fetchColumn();
-if ($ansibleEnabled === false) {
-    $dbPubkey  = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")->fetchColumn() ?: '';
-    $shouldEnable = ($envPubkey !== '' || $dbPubkey !== '');
-    $pdo->prepare(
-        "INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_enabled', ?)"
-    )->execute([$shouldEnable ? 'on' : 'off']);
-    echo "migrate-ansible: ansible_enabled=" . ($shouldEnable ? 'on' : 'off') . " (auto-detected from existing config)\n";
+    $ansibleEnabled = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_enabled'")->fetchColumn();
+    if ($ansibleEnabled === false) {
+        $dbPubkey  = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")->fetchColumn() ?: '';
+        $shouldEnable = ($envPubkey !== '' || $dbPubkey !== '');
+        $pdo->prepare(
+            "INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_enabled', ?)"
+        )->execute([$shouldEnable ? 'on' : 'off']);
+        echo "migrate-ansible: ansible_enabled=" . ($shouldEnable ? 'on' : 'off') . " (auto-detected from existing config)\n";
+    }
 }
 
 // ---------------------------------------------------------------------------

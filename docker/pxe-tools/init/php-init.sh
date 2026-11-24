@@ -304,10 +304,16 @@ done
 if [ ! -e "$DB_CONF" ] && [ ! -L "$DB_CONF" ] && [ -n "$DETECTED_DB" ] && \
    [ "$ENV_DB_DRIVER" != mysql ] && [ "$ENV_DB_DRIVER" != mariadb ]; then
     echo "[php-init] db.conf absent + DB SQLite legacy détectée ($DETECTED_DB) → auto-gen db.conf"
-    php -r 'require $argv[1]; \Admin\Db::writeInitialConfig(["driver" => "sqlite", "path" => $argv[2]]);' "$PXE_APP_DIR/src/Db.php" "$DETECTED_DB" || {
+    if ! (
+        if [ "${PXE_RUST_GUIDED:-0}" = 1 ]; then
+            /usr/lib/pxe-tools/pxe-tools-rust --adopt-existing-sqlite "$DB_CONF" "$DETECTED_DB"
+        else
+            php -r 'require $argv[1]; \Admin\Db::writeInitialConfig(["driver" => "sqlite", "path" => $argv[2]]);' "$PXE_APP_DIR/src/Db.php" "$DETECTED_DB"
+        fi
+    ); then
         echo '[php-init] ERREUR : impossible de créer db.conf sans écraser un fichier.' >&2
         exit 1
-    }
+    fi
     chown www-data:www-data "$DB_CONF" 2>/dev/null || true
 fi
 

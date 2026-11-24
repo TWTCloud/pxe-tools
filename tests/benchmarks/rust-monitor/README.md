@@ -174,9 +174,11 @@ de confirmation et de reprise. Rust rend aussi le script et l’unité postboot
 par action à partir des variables du worker. Ce rendu accepte les variables
 `pxe_ip`, `mac` et `token` des templates livrés. Rust reprend les anciens
 réglages réseau SQLite en gardant les choix explicites et le mode PXE
-existant. La variante guidée applique aussi en Rust les évolutions de
-colonnes et d’index SQLite après les contrôles de compatibilité de
-l’installateur. La reprise du worker remet en file les téléchargements
+existant. La variante guidée peut recréer la configuration d’accès à une
+base existante détectée par l’installateur. Elle applique les évolutions
+de colonnes et d’index SQLite après les contrôles de compatibilité en Rust,
+et reprend les réglages des anciens modèles et du module Ansible facultatif.
+La reprise du worker remet en file les téléchargements
 et suppressions interrompus et conserve le journal de suppression.
 Les transformations historiques restantes et l’import des modèles
 utilisent encore PHP CLI. Le renderer couvre les recettes de partition
@@ -298,7 +300,7 @@ Le banc requiert QEMU x86-64, `qemu-img`, `xorriso`, `gpgv` et assez
 d'espace pour deux disques QCOW2 jetables. L'option `--mirror-cache`
 réutilise les fichiers déjà authentifiés d'un précédent essai.
 
-## Périmètre du renderer et étapes restantes
+## Périmètre du renderer et étapes restantes lors du premier banc
 
 - Le renderer Rust lit les snapshots SQLite du mode Debian guidé et
   leurs configurations réseau. Il réutilise la base preseed du dépôt et
@@ -370,10 +372,12 @@ d’un client ARM64 avec Secure Boot utilise une chaîne en qualification.
 L’option `PXE_ARM64_SECURE_BOOT=1` du worker prépare le shim et le
 MokManager ARM64 authentifiés depuis Debian, puis publie un GRUB ARM64
 signé par la MOK de l’instance. Le preseed trixie demande les paquets
-signés adaptés à l’architecture du client UEFI. Le premier démarrage
-sur firmware ARM64 reste à exercer. [GRUB signé ARM64 de Debian](https://packages.debian.org/trixie/arm64/grub-efi-arm64-signed/filelist)
+signés adaptés à l’architecture du client UEFI. Le banc Docker ARM64
+lance un invité AArch64 avec AAVMF sur le runner ARM64. Il exige la preuve
+de Secure Boot dans l’inventaire et au premier démarrage du disque.
+[GRUB signé ARM64 de Debian](https://packages.debian.org/trixie/arm64/grub-efi-arm64-signed/filelist)
 
-Le futur essai Windows commence par Windows 11 Pro amd64. L’instance de
+Le banc Windows utilise Windows 11 Enterprise Evaluation amd64. L’instance de
 test doit disposer d’un firmware UEFI, de Secure Boot actif, d’un TPM
 virtuel 2.0 et d’un disque vierge jetable. Préparer WinPE avec le module
 complémentaire de l’ADK et les composants WMI, PowerShell, StorageWMI,
@@ -382,9 +386,9 @@ et le WIM WinPE sont fournis au banc sous forme de fichiers de test avec
 empreintes SHA-256 approuvées. [Prérequis Windows 11](https://learn.microsoft.com/windows/whats-new/windows-11-requirements) · [Composants optionnels de WinPE](https://learn.microsoft.com/windows-hardware/manufacture/desktop/winpe-add-packages--optional-components-reference)
 
 - Créer une VM isolée avec un UUID SMBIOS et un numéro de série de disque
-  uniques au test. Attacher uniquement le disque vierge et une carte sur
-  le segment privé avec les services DHCP, TFTP et de diffusion WinPE du
-  banc. Le client part sans média de démarrage local.
+  uniques au test. Connecter la carte au segment privé des services DHCP,
+  TFTP et WinPE du banc. Donner la priorité au démarrage réseau. Le disque
+  est vierge et l’ISO d’installation est présent en lecture seule.
 - Démarrer un iPXE signé sur le réseau isolé et le chaîner vers
   `http://<serveur-pxe>/pxe/windows/boot.ipxe`. Cette route Rust est activée
   pour une adresse réservée avec `PXE_WINPE_CLIENT_IP`. Le client réservé
@@ -402,8 +406,10 @@ empreintes SHA-256 approuvées. [Prérequis Windows 11](https://learn.microsoft.
   vérificateur exige les deux phases et contrôle l’identité, le disque
   initialement vierge, la partition système GPT, Secure Boot et le TPM 2.0.
 - Exécuter le banc sur un runner jetable disposant des médias autorisés.
-  Publier les résultats et journaux de test. Conserver les ISO, WIM et
-  secrets de laboratoire en dehors du dépôt et des artefacts publics.
+  Le runner Windows prépare les médias avec l’ADK et utilise WSL 2 avec
+  Docker et KVM pour exécuter le banc Linux sur place. Les médias restent
+  dans le stockage temporaire du runner. Seuls les journaux de test
+  sont visibles dans GitHub Actions.
 
 Sur le poste de préparation Windows isolé, le script
 `tests/support/windows-pxe/prepare-winpe.ps1` utilise l’ADK et son

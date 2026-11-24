@@ -97,6 +97,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             return web::serve(Path::new(config));
         }
     }
+    if let [flag, config, database] = args.as_slice() {
+        if flag == "--adopt-existing-sqlite" && Path::new(config).is_absolute() {
+            return web::adopt_existing_database(Path::new(config), Path::new(database));
+        }
+    }
     if let [flag, id, job, db] = args.as_slice() {
         if flag == "--reserve-image-deletion" {
             let id = id.to_str().ok_or("Invalid image ID")?.parse()?;

@@ -278,6 +278,24 @@ fn write_config(config: &Path, sqlite_path: &Path) -> Result<(), ErrorBox> {
     result
 }
 
+pub(crate) fn adopt_existing_database(config: &Path, path: &Path) -> Result<(), ErrorBox> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !path.is_absolute()
+        || path.to_str().is_none()
+        || path
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .any(u8::is_ascii_control)
+        || !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.len() == 0
+    {
+        return Err("Existing SQLite path must be an absolute, private regular file".into());
+    }
+    write_config(config, path)
+}
+
 fn create_admin(config: &Path, username: &str, password: &str) -> Result<Reply, ErrorBox> {
     match stage(config)? {
         Stage::Database => return Ok(redirect(StatusCode::SEE_OTHER, "/init/db")),

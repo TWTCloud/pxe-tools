@@ -458,6 +458,12 @@ def verify_worker_commands(binary):
         config = root/'db.conf'
         config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
         command = [str(binary),'--migrate-network-settings',str(config)]
+        empty_env = {**os.environ,'ANSIBLE_REPO_URL':'','ANSIBLE_SSH_PUBKEY':''}
+        ansible_env = {
+            **empty_env,
+            'ANSIBLE_REPO_URL':' https://example.test/models ',
+            'ANSIBLE_SSH_PUBKEY':' synthetic-public-key ',
+        }
         with closing(sqlite3.connect(database)) as db, db:
             db.execute('CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)')
             db.executemany('INSERT INTO settings VALUES(?,?)',[
@@ -466,27 +472,36 @@ def verify_worker_commands(binary):
             ])
             db.execute("""CREATE TRIGGER fixture_rollback BEFORE INSERT ON settings
                           WHEN NEW.key='dhcp_proxy_enabled' BEGIN SELECT RAISE(ABORT,'fixture'); END""")
-        refused = subprocess.run(command, capture_output=True, text=True)
+        refused = subprocess.run(command, env=empty_env, capture_output=True, text=True)
         assert refused.returncode
         with closing(sqlite3.connect(database)) as db, db:
             assert db.execute('SELECT COUNT(*) FROM settings').fetchone()==(4,)
             db.execute('DROP TRIGGER fixture_rollback')
-        subprocess.run(command, check=True, capture_output=True)
+        subprocess.run(command, env=empty_env, check=True, capture_output=True)
         with closing(sqlite3.connect(database)) as db, db:
             assert dict(db.execute('SELECT key,value FROM settings'))=={
                 'orchestrator_ip':'192.0.2.9','dhcp_mode':'historical','wizard_completed':'1',
                 'pxe_enabled':'off','pxe_ip':'192.0.2.9','dhcp_proxy_enabled':'off',
+                'ansible_enabled':'off',
             }
             db.execute("UPDATE settings SET value='proxy' WHERE key='dhcp_mode'")
-        subprocess.run(command, check=True, capture_output=True)
+            db.execute("INSERT INTO settings VALUES('ansible_repo_url','https://example.test/existing')")
+        subprocess.run(command, env=ansible_env, check=True, capture_output=True)
         with closing(sqlite3.connect(database)) as db, db:
             assert db.execute("SELECT value FROM settings WHERE key='dhcp_proxy_enabled'").fetchone()==('off',)
+            assert dict(db.execute("SELECT key,value FROM settings WHERE key LIKE 'ansible_%'"))=={
+                'ansible_repo_url':'https://example.test/existing',
+                'ansible_ssh_pubkey':'synthetic-public-key',
+                'ansible_enabled':'off',
+            }
             db.execute("DELETE FROM settings WHERE key='dhcp_proxy_enabled'")
+            db.execute("DELETE FROM settings WHERE key='ansible_enabled'")
         for _ in range(2):
-            subprocess.run(command, check=True, capture_output=True)
+            subprocess.run(command, env=empty_env, check=True, capture_output=True)
         with closing(sqlite3.connect(database)) as db:
             assert db.execute("SELECT value FROM settings WHERE key='dhcp_proxy_enabled'").fetchone()==('on',)
-    print('Rust network migration preserves explicit choices and historical DHCP fallback atomically', flush=True)
+            assert db.execute("SELECT value FROM settings WHERE key='ansible_enabled'").fetchone()==('on',)
+    print('Rust settings migration preserves explicit choices, DHCP fallback and optional Ansible bootstrap', flush=True)
 
 
 def verify_worker_recovery(binary):
@@ -521,7 +536,6 @@ def verify_schema_migration(binary):
         root = Path(temporary).resolve()
         database = root/'fixture.sqlite'
         config = root/'db.conf'
-        config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
         schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
         command = [str(binary),'--migrate-schema',str(config)]
         with closing(sqlite3.connect(database)) as db, db:
@@ -537,6 +551,17 @@ def verify_schema_migration(binary):
             db.execute("INSERT INTO machines(id,mac,status) VALUES(11,'02:00:00:01:00:02','installed')")
             db.execute("INSERT INTO installations(machine_id,install_status) VALUES(10,'success'),(11,'failed')")
             db.execute("CREATE TRIGGER refusal BEFORE UPDATE OF local_boot_source ON machines BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        alias = root/'alias.sqlite'
+        alias.symlink_to(database)
+        adoption = [str(binary),'--adopt-existing-sqlite',str(config)]
+        assert subprocess.run([*adoption,str(alias)], capture_output=True).returncode
+        assert not config.exists()
+        original = database.read_bytes()
+        subprocess.run([*adoption,str(database)], check=True, capture_output=True)
+        assert json.loads(config.read_text())=={'driver':'sqlite','path':str(database)}
+        assert config.stat().st_mode & 0o777==0o600 and database.read_bytes()==original
+        assert subprocess.run([*adoption,str(database)], capture_output=True).returncode
+        assert json.loads(config.read_text())=={'driver':'sqlite','path':str(database)}
         refused = subprocess.run(command, capture_output=True, text=True)
         assert refused.returncode
         with closing(sqlite3.connect(database)) as db, db:

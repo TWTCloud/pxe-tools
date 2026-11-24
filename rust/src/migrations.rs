@@ -19,8 +19,36 @@ pub fn network_settings(config: &Path) -> Result<(), Box<dyn Error + Send + Sync
              FROM settings WHERE key='dhcp_mode'
              ON CONFLICT(key) DO NOTHING;",
     )?;
+    for (key, variable) in [
+        ("ansible_repo_url", "ANSIBLE_REPO_URL"),
+        ("ansible_ssh_pubkey", "ANSIBLE_SSH_PUBKEY"),
+    ] {
+        let raw = std::env::var(variable).unwrap_or_default();
+        let value = crate::php_trim(&raw);
+        if value.is_empty() || raw == "0" {
+            continue;
+        }
+        if crate::php_trim(&crate::setting(&tx, key)?).is_empty() {
+            tx.execute(
+                "INSERT INTO settings(key,value) VALUES(?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                rusqlite::params![key, value],
+            )?;
+        }
+    }
+    let public_key = crate::setting(&tx, "ansible_ssh_pubkey")?;
+    let ansible = if public_key.is_empty() || public_key == "0" {
+        "off"
+    } else {
+        "on"
+    };
+    tx.execute(
+        "INSERT INTO settings(key,value) VALUES('ansible_enabled',?)
+         ON CONFLICT(key) DO NOTHING",
+        [ansible],
+    )?;
     tx.commit()?;
-    println!("Rust migrated network settings, preserving explicit choices");
+    println!("Rust migrated network and optional Ansible settings, preserving explicit choices");
     Ok(())
 }
 

@@ -13,6 +13,8 @@ mod presets;
 mod setup;
 mod winpe;
 
+pub(crate) use setup::adopt_existing_database;
+
 use crate::{configured_database, handle_request, monitoring, setting, PxeRequest, Routes};
 use http::uri::Authority;
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, Limited};
