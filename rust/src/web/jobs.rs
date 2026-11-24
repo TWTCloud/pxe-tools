@@ -110,7 +110,7 @@ fn status(job: Option<Job>, absent: StatusCode) -> Result<Reply, ErrorBox> {
     json_reply(StatusCode::OK, Found { found: true, job })
 }
 
-fn json_reply(code: StatusCode, value: impl Serialize) -> Result<Reply, ErrorBox> {
+pub(super) fn json_reply(code: StatusCode, value: impl Serialize) -> Result<Reply, ErrorBox> {
     Ok(Response::builder()
         .status(code)
         .header("Content-Type", "application/json; charset=utf-8")

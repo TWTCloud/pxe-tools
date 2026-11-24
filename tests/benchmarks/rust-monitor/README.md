@@ -192,6 +192,12 @@ appareil en attente, le prochain appel de découverte reçoit la commande.
 Le worker traite les demandes destinées au système installé. La fiche
 permet également de demander la synchronisation Ansible, un redéploiement
 ou le réessai d’une phase en échec quand le module est activé.
+La console permet de sélectionner un modèle Debian 13 et de contrôler
+un lot d’appareils. Elle choisit une image disponible pour chaque
+architecture, affiche les disques associés et exige une nouvelle
+vérification après tout changement du plan avant la programmation.
+Un modèle à adresse statique partagée doit être adapté individuellement.
+Les pré-effacements affichés demandent une confirmation explicite.
 
 La page `/settings` enregistre le protocole de découverte et les DNS IPv4
 proposés aux prochains déploiements. Elle permet de demander au worker

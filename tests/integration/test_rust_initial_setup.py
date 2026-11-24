@@ -1267,6 +1267,86 @@ def verify_custom_partition_review(client, database, authorization):
           flush=True)
 
 
+def verify_bulk_deployment(client, database, authorization):
+    def post(path, form, **options):
+        return client.request('/machines/bulk-'+path, form=form, authorization=authorization, **options)
+
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE settings SET value='on' WHERE key='pxe_enabled'")
+        password, = db.execute("SELECT admin_user_pwhash FROM presets WHERE name='Debian <test>'").fetchone()
+        preset = db.execute(
+            "INSERT INTO presets(name,distro,codename,root_login_mode,admin_user_login,admin_user_pwhash,version_full) "
+            "VALUES('Data <bulk>','debian','trixie','disabled','fixture',?,'13.91.0')", (password,),
+        ).lastrowid
+        db.executemany(
+            "INSERT INTO os_images(distro,version,arch,codename,version_full,enabled,status) "
+            "VALUES('debian','fixture-bulk',?,'trixie','13.91.0',1,'downloaded')", [('amd64',),('arm64',)],
+        )
+        devices = []
+        inventories = []
+        for index, arch in enumerate(('amd64','arm64'), 1):
+            mac = f'02:00:00:00:47:{index:02x}'
+            inventory = {
+                'boot_mac':mac, 'inventory':{'boot_mode':'UEFI'}, 'interfaces':[{'mac':mac}],
+                'disks':[{'name':'vda','serial':f'BULK-TEST-{index}','size_bytes':30_000_000_000}],
+            }
+            devices.append(db.execute(
+                "INSERT INTO machines(mac,hostname,status,boot_arch,inventory_json) VALUES(?,?,'discovered',?,?)",
+                (mac, f'fixture-bulk-{index}', arch, json.dumps(inventory)),
+            ).lastrowid)
+            inventories.append(inventory)
+    assert client.request('/machines/bulk')[0] == 401
+    assert b'Data &lt;bulk&gt;' in client.request('/machines/bulk', authorization=authorization)[2]
+    selection = [('preset_id',preset), *[('machine_ids[]',device) for device in devices]]
+    assert post('preflight', selection, secure=False)[0] == 404
+    assert post('preflight', selection, origin='https://outside.example')[0] == 403
+    assert post('preflight', [('preset_id',preset)])[0] == 422
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE presets SET network_mode='static',static_ip='192.0.2.83' WHERE id=?", (preset,))
+    shared = json.loads(post('preflight', selection)[2])
+    assert shared['ready_count'] == 0 and all(target['state'] == 'adapt' for target in shared['targets'])
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE presets SET network_mode='dhcp',static_ip=NULL WHERE id=?", (preset,))
+    status, _, raw = post('preflight', selection)
+    assert status == 200 and password.encode() not in raw
+    report = json.loads(raw)
+    assert report['ready_count'] == report['total'] == 2, report
+    assert [target['disks'][0]['serial'] for target in report['targets']] == ['BULK-TEST-1','BULK-TEST-2']
+    assert all(target['state'] == 'ready' for target in report['targets'])
+    assert b'Data &lt;bulk&gt;' in client.request('/machines/bulk', authorization=authorization)[2]
+    page = post('preflight', [*selection,('format','html')])[2]
+    assert all(target['fingerprint'].encode() in page for target in report['targets'])
+    fingerprints = [(f"fingerprints[{target['id']}]", target['fingerprint']) for target in report['targets']]
+    assert json.loads(post('install', selection)[2])['started_count'] == 0
+    with closing(sqlite3.connect(database)) as db, db:
+        inventories[1]['disks'][0]['serial'] = 'BULK-REPLACED'
+        db.execute('UPDATE machines SET inventory_json=? WHERE id=?', (json.dumps(inventories[1]),devices[1]))
+    result = json.loads(post('install', [*selection,*fingerprints])[2])
+    assert result['started_count'] == 1 and [target['ok'] for target in result['results']] == [True, False]
+    assert json.loads(post('install', [*selection,*fingerprints])[2])['started_count'] == 0
+    action = result['results'][0]['action_id']
+    with closing(sqlite3.connect(database)) as db, db:
+        config, power = db.execute("SELECT install_config_json,next_action FROM machines WHERE id=?",
+                                   (devices[0],)).fetchone()
+        assert json.loads(config)['system_disk_identity']['value'] == 'BULK-TEST-1' and power is None
+        assert db.execute("SELECT COUNT(*) FROM init_jobs WHERE job_type=?", (f'action:reboot:{action}',)).fetchone() == (0,)
+        db.execute("UPDATE presets SET pre_wipe_mode='partial' WHERE id=?", (preset,))
+    second = [('preset_id',preset),('machine_ids[]',devices[1]),('wake_now','1')]
+    plan, = json.loads(post('preflight', second)[2])['targets']
+    assert plan['state'] == 'ready' and plan['pre_wipe'][0]['identity']['value'] == 'BULK-REPLACED', plan
+    second.append((f'fingerprints[{devices[1]}]',plan['fingerprint']))
+    assert json.loads(post('install',second)[2])['started_count'] == 0
+    result = json.loads(post('install',[*second,('erase','EFFACER')])[2])
+    assert result['started_count'] == 1
+    action = result['results'][0]['action_id']
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute("SELECT type FROM actions WHERE id=?", (action,)).fetchone() == ('reinstall',)
+        assert db.execute("SELECT job_type FROM init_jobs WHERE job_type=?", (f'action:reboot:{action}',)).fetchone()
+        assert db.execute("SELECT status,next_action FROM machines WHERE id=?", (devices[1],)).fetchone() == ('wiping','reboot')
+    print('Rust bulk deployment reviews amd64 and arm64, refuses shared static IPs and stale plans, and requires erase confirmation',
+          flush=True)
+
+
 def verify_worker_commands(binary):
     templates = Path(__file__).resolve().parents[2]/'docker/worker/templates'
     parameters = {'pxe_ip':'192.0.2.9','mac':'02:00:00:00:00:01','token':'synthetic-token'}
@@ -2360,6 +2440,7 @@ def local(binary):
         verify_device_settings(updated, database, authorization)
         verify_guided_install(updated, database, authorization)
         verify_custom_partition_review(updated, database, authorization)
+        verify_bulk_deployment(updated, database, authorization)
         verify_disk_diagnostics(updated, database, authorization)
         verify_disk_wipe(updated, database, authorization)
         verify_device_operations(updated, database, authorization)

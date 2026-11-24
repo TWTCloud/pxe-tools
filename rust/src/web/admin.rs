@@ -44,6 +44,7 @@ pub(super) enum Action {
     Devices,
     Device(super::devices::DeviceRoute, Option<Bytes>),
     Register(Option<Bytes>),
+    Bulk(super::devices::bulk::Route, Option<Bytes>),
     Images(super::images::Route, Option<Bytes>),
     Presets(Option<Bytes>),
     Preset(super::presets::Route, Option<Bytes>),
@@ -305,6 +306,11 @@ impl Console {
                 if let Action::Register(form) = &action {
                     return super::devices::register(&db_path, form.as_deref()).ok();
                 }
+                if let Action::Bulk(route, form) = &action {
+                    return route
+                        .serve(&db, &db_path, form.as_deref(), &username, page)
+                        .ok();
+                }
                 if let Action::Activity(view, catalog) = &action {
                     return view.serve(&db, &db_path, &path, &query, page, catalog).ok();
                 }
@@ -513,7 +519,7 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
 <main><h1>{label}</h1>"#
     );
     terminology_form(&mut html, DEVICE_SETTINGS, term);
-    html.push_str(r#"<nav><a href="/machines/new">Ajouter un appareil</a> · <a href="/activity">Activité</a> · <a href="/jobs">Tâches</a> · <a href="/presets">Modèles</a> · <a href="/settings/images">Images PXE</a> · <a href="/settings">Paramètres</a> · <a href="/admin/certificates">Certificats TLS</a></nav>"#);
+    html.push_str(r#"<nav><a href="/machines/new">Ajouter un appareil</a> · <a href="/machines/bulk">Déployer par lots</a> · <a href="/activity">Activité</a> · <a href="/jobs">Tâches</a> · <a href="/presets">Modèles</a> · <a href="/settings/images">Images PXE</a> · <a href="/settings">Paramètres</a> · <a href="/admin/certificates">Certificats TLS</a></nav>"#);
     if matches!(
         std::env::var("AUTH_MODE").unwrap_or_default().as_str(),
         "" | "local"

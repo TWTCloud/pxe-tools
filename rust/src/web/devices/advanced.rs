@@ -5,7 +5,6 @@ use crate::{connect, install, migrations, preseed, pxe};
 use hyper::StatusCode;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
@@ -181,13 +180,10 @@ pub(super) fn submit(
     if let Err(reason) = preseed::validate_plan(&tx, &candidate, &snapshot)? {
         return Ok(rejected(StatusCode::UNPROCESSABLE_ENTITY, reason));
     }
-    let fingerprint: String = Sha256::digest(serde_json::to_vec(&json!({
+    let fingerprint = super::review_fingerprint(json!({
         "machine":id,"model":selection.preset,"image":selection.image,"snapshot":snapshot,
         "targets":review,"erase":wipe,
-    }))?)
-    .iter()
-    .map(|byte| format!("{byte:02x}"))
-    .collect();
+    }))?;
     match route {
         Route::Review => {
             let mut html = String::from(
@@ -251,34 +247,15 @@ pub(super) fn submit(
                         "Confirmez l’effacement des disques affichés",
                     ));
                 }
-                let token = crate::random_hex::<32>()?;
-                tx.execute(
-                    "INSERT INTO actions(machine_id,type,status,token,created_by)
-                            VALUES(?1,'reinstall','pending',?2,?3)",
-                    params![id, token, username],
-                )?;
-                let action = tx.last_insert_rowid();
-                snapshot["_pending_action_id"] = json!(action);
-                let chain = json!({"hostname":hostname,"domain":snapshot["domain"],"install_config":snapshot});
-                super::wipe::track(&tx, id, action, &wipe, "reboot", Some(&chain))?;
-                pxe::set_machine_status(&tx, id, &device.status, "wiping")?;
-                tx.execute(
-                    "UPDATE machines SET preset_id=?2,next_action=NULL WHERE id=?1",
-                    params![id, selection.preset],
-                )?;
-                tx.execute(
-                    "INSERT INTO init_jobs(job_type,status) VALUES(?1,'pending')",
-                    [format!("action:render_postboot:{action}")],
-                )?;
-                pxe::log_event(
+                super::record_reinstall(
                     &tx,
                     id,
-                    "action",
-                    "Effacement et installation programmés au prochain démarrage PXE.",
-                    None,
-                    Some(action),
-                )?;
-                action
+                    username,
+                    selection.preset,
+                    snapshot,
+                    &device.status,
+                    &wipe,
+                )?
             };
             tx.commit()?;
             Ok(redirect(StatusCode::SEE_OTHER, format!("/tasks/{action}")))
@@ -301,9 +278,9 @@ fn selection(data: &[u8]) -> Option<Selection> {
     serde_json::from_value(Value::Object(fields)).ok()
 }
 
-type VerifiedDisks = Vec<(String, String, i64)>;
+pub(super) type VerifiedDisks = Vec<(String, String, i64)>;
 
-fn bind(device: &Device, snapshot: &Value) -> Result<(Value, VerifiedDisks), ErrorBox> {
+pub(super) fn bind(device: &Device, snapshot: &Value) -> Result<(Value, VerifiedDisks), ErrorBox> {
     if !matches!(
         device.inventory["inventory"]["boot_mode"].as_str(),
         Some("BIOS" | "UEFI")
@@ -364,7 +341,7 @@ fn bind(device: &Device, snapshot: &Value) -> Result<(Value, VerifiedDisks), Err
     Ok((plan, review))
 }
 
-fn wipe_targets(device: &Device, snapshot: &Value) -> Option<Vec<Value>> {
+pub(super) fn wipe_targets(device: &Device, snapshot: &Value) -> Option<Vec<Value>> {
     let legacy = snapshot["pre_wipe_mode"]
         .as_str()
         .unwrap_or_default()
@@ -429,7 +406,11 @@ fn wipe_targets(device: &Device, snapshot: &Value) -> Option<Vec<Value>> {
     Some(targets)
 }
 
-fn bind_network(db: &Connection, device: &Device, plan: &mut Value) -> rusqlite::Result<bool> {
+pub(super) fn bind_network(
+    db: &Connection,
+    device: &Device,
+    plan: &mut Value,
+) -> rusqlite::Result<bool> {
     let Some(primary) = plan["primary"]
         .as_u64()
         .and_then(|index| usize::try_from(index).ok())
@@ -539,7 +520,7 @@ fn static_network(settings: &Value) -> Option<(Ipv4Addr, u8, Ipv4Addr)> {
     Some((address, prefix, gateway))
 }
 
-fn network_review(plan: &Value, html: &mut String) {
+pub(super) fn network_review(plan: &Value, html: &mut String) {
     html.push_str("<h2>Réseau de l’appareil</h2><ul>");
     for interface in pxe::array_values(&plan["interfaces"]) {
         html.push_str("<li>");

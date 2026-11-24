@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 mod advanced;
+pub(super) mod bulk;
 mod diagnostics;
 mod wipe;
 
@@ -19,6 +20,7 @@ use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{fmt::Write, net::Ipv4Addr, path::Path};
 
 pub(super) fn register(path: &Path, form: Option<&[u8]>) -> Result<Reply, ErrorBox> {
@@ -704,6 +706,52 @@ fn record_plan(
         } else {
             "Installation programmée au prochain démarrage PXE."
         }, action],
+    )?;
+    Ok(action)
+}
+
+fn review_fingerprint(plan: Value) -> Result<String, ErrorBox> {
+    Ok(Sha256::digest(serde_json::to_vec(&plan)?)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn record_reinstall(
+    tx: &Transaction<'_>,
+    id: i64,
+    username: &str,
+    preset: i64,
+    mut snapshot: Value,
+    current_status: &str,
+    wipe: &[Value],
+) -> Result<i64, ErrorBox> {
+    let token = crate::random_hex::<32>()?;
+    tx.execute(
+        "INSERT INTO actions(machine_id,type,status,token,created_by)
+                VALUES(?1,'reinstall','pending',?2,?3)",
+        params![id, token, username],
+    )?;
+    let action = tx.last_insert_rowid();
+    snapshot["_pending_action_id"] = json!(action);
+    let chain = json!({"hostname":snapshot["hostname"],"domain":snapshot["domain"],"install_config":snapshot});
+    wipe::track(tx, id, action, wipe, "reboot", Some(&chain))?;
+    pxe::set_machine_status(tx, id, current_status, "wiping")?;
+    tx.execute(
+        "UPDATE machines SET preset_id=?2,next_action=NULL WHERE id=?1",
+        params![id, preset],
+    )?;
+    tx.execute(
+        "INSERT INTO init_jobs(job_type,status) VALUES(?1,'pending')",
+        [format!("action:render_postboot:{action}")],
+    )?;
+    pxe::log_event(
+        tx,
+        id,
+        "action",
+        "Effacement et installation programmés au prochain démarrage PXE.",
+        None,
+        Some(action),
     )?;
     Ok(action)
 }
