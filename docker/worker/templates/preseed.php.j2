@@ -1592,10 +1592,11 @@ if ($dilog_enabled) {
 
 // L'accusé clôt l'installation et autorise le démarrage local. L'empreinte
 // de la clé publique d'hôte est une information de diagnostic, si disponible.
+// Sans --pass-stdout, in-target envoie ces deux résultats au journal de d-i.
 if ($trackedInstall) {
     $late_command .= "    ssh_fingerprint='' ; \\\n"
-                  .  "    if [ -r /target/etc/ssh/ssh_host_ed25519_key.pub ]; then ssh_fingerprint=\$(in-target /usr/bin/ssh-keygen -E sha256 -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print \$2}'); fi ; \\\n"
-                  .  "    http_status=\$(in-target /usr/bin/curl -fsS --connect-timeout 5 --max-time 15 --retry 3 --retry-connrefused "
+                  .  "    if [ -r /target/etc/ssh/ssh_host_ed25519_key.pub ]; then ssh_fingerprint=\$(in-target --pass-stdout /usr/bin/ssh-keygen -E sha256 -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print \$2}'); fi ; \\\n"
+                  .  "    http_status=\$(in-target --pass-stdout /usr/bin/curl -fsS --connect-timeout 5 --max-time 15 --retry 3 --retry-connrefused "
                   .  "--output /dev/null --write-out '%{http_code}' "
                   .  "--data-urlencode \"ssh_host_fingerprint=\$ssh_fingerprint\" -H 'Authorization: Bearer " . $action_token
                   .  "' 'http://" . $pxe_ip_local . "/api/install-end?mac=$mac&status=success') || exit 1 ; \\\n"

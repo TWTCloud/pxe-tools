@@ -92,7 +92,9 @@ class PreseedInvariants(unittest.TestCase):
                                      module_enabled=enabled, module_key='ssh-ed25519 AAAA test')
                 self.assertIn('d-i pkgsel/include string curl\n', output)
                 self.assertIn('/api/install-end?mac=', output)
-                self.assertIn('ssh_host_ed25519_key.pub', output)
+                self.assertIn('ssh_fingerprint=$(in-target --pass-stdout /usr/bin/ssh-keygen -E sha256 -lf '
+                              '/etc/ssh/ssh_host_ed25519_key.pub', output)
+                self.assertIn('http_status=$(in-target --pass-stdout /usr/bin/curl', output)
                 self.assertIn('--data-urlencode "ssh_host_fingerprint=$ssh_fingerprint"', output)
                 self.assertNotIn('system-generators', output)
                 self.assertNotIn('pxe-machine-ready', output)
