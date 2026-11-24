@@ -45,7 +45,14 @@ fn serial_disks(device: &Device) -> impl Iterator<Item = (String, String)> {
 fn selector(entry: &Entry) -> String {
     match &entry.source {
         Source::Ubuntu(version) => format!("ubuntu-{version}"),
-        Source::Rhel9(_) => "rhel9".into(),
+        Source::Rhel9(url) => match url.trim_end_matches('/').rsplit_once('/') {
+            Some((base, digest))
+                if base.ends_with("/pxe/rhel9") && crate::media::digest(digest) =>
+            {
+                format!("rhel9-{digest}")
+            }
+            _ => "rhel9".into(),
+        },
     }
 }
 

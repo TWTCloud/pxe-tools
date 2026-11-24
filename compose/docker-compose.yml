@@ -52,6 +52,8 @@ services:
       DEBIAN_MIRROR: ${DEBIAN_MIRROR:-http://deb.debian.org/debian}
       PXE_RHEL9_AMD64_REPO: ${PXE_RHEL9_AMD64_REPO:-}
       PXE_RHEL9_ARM64_REPO: ${PXE_RHEL9_ARM64_REPO:-}
+      PXE_MEDIA_DOWNLOAD_HOSTS: ${PXE_MEDIA_DOWNLOAD_HOSTS:-}
+      PXE_WINPE_CLIENT_IP: ${PXE_WINPE_CLIENT_IP:-}
       KERNEL_OPTS: ${KERNEL_OPTS:-language=fr country=FR locale=fr_FR.UTF-8 keymap=fr ipv6.disable=1}
       BIOS_BOOTLOADER: ${BIOS_BOOTLOADER:-lpxelinux.0}
       UEFI_BOOTLOADER: ${UEFI_BOOTLOADER:-grubnetx64.efi}

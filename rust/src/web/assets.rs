@@ -43,6 +43,59 @@ impl Assets {
         &self.root
     }
 
+    pub(super) async fn serve_rhel(
+        &self,
+        route: &str,
+        headers: &HeaderMap,
+        head: bool,
+    ) -> Option<Reply> {
+        let (digest, path) = route
+            .strip_prefix(crate::media::RHEL_PREFIX)?
+            .split_once('/')?;
+        if !crate::media::digest(digest) {
+            return None;
+        }
+        let allowed = matches!(
+            path,
+            ".treeinfo"
+                | ".discinfo"
+                | "media.repo"
+                | "RPM-GPG-KEY-redhat-release"
+                | "RPM-GPG-KEY-redhat-beta"
+                | "images/install.img"
+                | "images/efiboot.img"
+                | "images/pxeboot/vmlinuz"
+                | "images/pxeboot/initrd.img"
+        ) || (matches!(path.split('/').next(), Some("BaseOS" | "AppStream"))
+            && path.contains('/')
+            && path.split('/').all(|part| {
+                !part.is_empty()
+                    && !part.starts_with('.')
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._+~-".contains(&byte))
+            }));
+        if !allowed {
+            return None;
+        }
+        let base = self.root.join("media/rhel9").join(digest);
+        if !fs::symlink_metadata(base.join(".pxe-media.json"))
+            .await
+            .ok()?
+            .is_file()
+        {
+            return None;
+        }
+        self.serve_file(
+            &base,
+            Path::new(path),
+            "application/octet-stream",
+            headers,
+            head,
+        )
+        .await
+    }
+
     pub(super) async fn serve(
         &self,
         path: &str,
@@ -126,7 +179,18 @@ impl Assets {
             ),
             _ => return None,
         };
-        let result = open(&self.root, &base, &path).await;
+        self.serve_file(&base, &path, mime, headers, head).await
+    }
+
+    async fn serve_file(
+        &self,
+        base: &Path,
+        path: &Path,
+        mime: &str,
+        headers: &HeaderMap,
+        head: bool,
+    ) -> Option<Reply> {
+        let result = open(&self.root, base, path).await;
         let Some((mut file, size)) = result else {
             return Some(plain(StatusCode::NOT_FOUND, "Not found\n"));
         };

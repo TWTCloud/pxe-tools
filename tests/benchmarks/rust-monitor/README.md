@@ -506,12 +506,17 @@ une ancienne version peuvent nécessiter une relance du téléchargement
 pour remplir le cache ISO. Casper charge ce fichier auprès de PXE Tools.
 [Netboot Ubuntu Server](https://ubuntu.com/server/docs/how-to/installation/how-to-netboot-the-server-installer-on-amd64/)
 
-Pour **RHEL 9**, préparer un arbre d’installation HTTP privé à partir du
-DVD Red Hat de l’architecture voulue. Sa racine contient `.treeinfo`,
-`images/pxeboot/vmlinuz` et `images/pxeboot/initrd.img`, ainsi que les
-dépôts du DVD. L’URL est celle de cette racine. Fournir
-`PXE_RHEL9_AMD64_REPO` ou `PXE_RHEL9_ARM64_REPO` au service HTTP Rust,
-puis relancer le service. Pour APT, utiliser l’environnement de l’unité
+Pour **RHEL 9**, importer le DVD officiel de l’architecture voulue depuis
+**Images PXE → Préparer un média RHEL ou Windows**. Après vérification de
+l’empreinte et extraction des fichiers de démarrage et des dépôts BaseOS
+et AppStream, la version apparaît dans le menu de son architecture et
+dans la programmation d’une installation.
+
+Un arbre HTTP privé déjà préparé reste utilisable. Sa racine contient
+`.treeinfo`, `images/pxeboot/vmlinuz`, `images/pxeboot/initrd.img` et les
+dépôts du DVD. Fournir l’URL de cette racine avec `PXE_RHEL9_AMD64_REPO`
+ou `PXE_RHEL9_ARM64_REPO`, puis relancer le service HTTP Rust.
+Pour APT, utiliser l’environnement de l’unité
 `pxe-tools-pxe-http.service`. Pour Docker, fournir la variable au conteneur.
 L’arbre doit rester accessible aux clients du subnet PXE. Le chargeur
 et Anaconda utilisent la même source. Aucun compte Red Hat n’est
@@ -534,6 +539,39 @@ série du disque avant le partitionnement. Le profil utilise DHCP et LVM
 sur le disque confirmé. L’action attend le retour du système installé.
 [Configuration Ubuntu](https://canonical-subiquity.readthedocs-hosted.com/en/latest/reference/autoinstall-reference.html) ·
 [Référence Kickstart RHEL](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/automatically_installing_rhel/kickstart-commands-and-options-reference_rhel-installer)
+
+### Sources et cache des médias RHEL et Windows
+
+Dans **Images PXE → Préparer un média RHEL ou Windows**, choisir le type
+de média et indiquer l’empreinte SHA-256 approuvée. Le travail est suivi
+dans la console et son résultat est conservé sur le serveur.
+
+- **Fichier local**. Déposer le média dans `$HTTP_ROOT/media/inbox` puis
+  saisir son nom dans la console. Le dossier privé peut être créé avec
+  `install -d -m 0700 "$HTTP_ROOT/media/inbox"` en tant que root.
+  Le fichier appartient à root et seul root peut le modifier.
+- **URL HTTPS**. Fournir une URL de téléchargement directe autorisée.
+  Définir `PXE_MEDIA_DOWNLOAD_HOSTS` à la liste d’hôtes séparés par des
+  virgules, y compris ceux des redirections. En APT, utiliser des
+  surcharges systemd pour `pxe-tools-pxe-http.service` et
+  `pxe-tools-worker.service`. En Docker, définir la variable pour le
+  service PXE Tools. L’URL signée est chiffrée pour le worker et ne
+  figure pas dans le journal du travail.
+- **Windows 10 ou 11**. Importer directement `install.wim` ou
+  `install.esd` lorsqu’il est disponible. L’import de l’ISO permet
+  aussi d’extraire ce fichier et affiche son empreinte pour la suite.
+  Plusieurs éditions du même média partagent une seule copie.
+
+Préparer le kit WinPE avec l’ADK Microsoft et le script
+`tests/support/windows-pxe/prepare-winpe.ps1`. Choisir l’index de
+l’édition voulue et fournir `-InstallImageUri` avec l’adresse du serveur
+et le chemin `/pxe/windows/<identifiant>/install.wim` ou `install.esd`.
+Regrouper `case.json`, `boot/wimboot`, `boot/BCD`, `boot/boot.sdi` et
+`boot/boot.wim` dans un ZIP. L’import **Kit WinPE** utilise le même
+identifiant et associe automatiquement le kit à l’image déjà en cache
+d’après son empreinte. L’édition devient disponible sous
+**Paramètres → Windows PXE**. Le client autorisé reste défini par
+`PXE_WINPE_CLIENT_IP`.
 
 ### UEFI, Secure Boot et premier déploiement Windows
 

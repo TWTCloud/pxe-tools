@@ -73,7 +73,6 @@ struct Site {
     https_port: u16,
     http_port: u16,
     winpe_client: Option<Ipv4Addr>,
-    windows_editions: Arc<winpe::Editions>,
     rhel_repositories: linux_boot::RhelRepositories,
     public_host: Option<String>,
     requests: Semaphore,
@@ -118,10 +117,6 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
             .map(PathBuf::from)
             .ok_or("HTTP_ROOT is required")?,
     )?;
-    let windows_editions = winpe::Editions::load(&assets.winpe_root()).unwrap_or_else(|error| {
-        eprintln!("Unable to load the Windows editions manifest: {error}");
-        winpe::Editions::Invalid
-    });
     let site = Arc::new(Site {
         database: config.to_owned(),
         assets,
@@ -130,7 +125,6 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         https_port,
         http_port,
         winpe_client: winpe::configured_client()?,
-        windows_editions: Arc::new(windows_editions),
         rhel_repositories: linux_boot::RhelRepositories::from_environment(),
         public_host,
         requests: Semaphore::new(8),
@@ -334,7 +328,7 @@ where
             let path = request.uri().path();
             let winpe_path = (request.method() == Method::GET
                 && winpe::allowed(site.winpe_client, peer.ip())
-                && site.windows_editions.logs_request(path))
+                && winpe::logs_request(path))
             .then(|| path.to_owned());
             let reply = dispatch(request, peer.ip(), secure, &site).await;
             if let Some(asset) = asset {
@@ -365,6 +359,20 @@ where
         .serve_connection(TokioIo::new(stream), service);
     // A stalled receiver can keep at most one connection slot for this period.
     let _ = timeout(Duration::from_secs(300), connection).await;
+}
+
+async fn windows_editions(site: &Site) -> Arc<winpe::Editions> {
+    let root = site.assets.winpe_root();
+    Arc::new(
+        task::spawn_blocking(move || {
+            winpe::Editions::load(&root).unwrap_or_else(|error| {
+                eprintln!("Unable to load the Windows editions manifest: {error}");
+                winpe::Editions::Invalid
+            })
+        })
+        .await
+        .unwrap_or(winpe::Editions::Invalid),
+    )
 }
 
 async fn dispatch(
@@ -764,7 +772,7 @@ async fn dispatch(
                 return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n")
             }
             (presets::ROUTE, form) => admin::Action::Presets(form),
-            (winpe::SETTINGS, form) => admin::Action::Windows(site.windows_editions.clone(), form),
+            (winpe::SETTINGS, form) => admin::Action::Windows(windows_editions(site).await, form),
             _ => unreachable!("matched settings path"),
         };
         return site.admin.serve(&parts, peer, &site.database, action).await;
@@ -878,6 +886,36 @@ async fn dispatch(
     let Some(server) = site.pxe_ip else {
         return plain(StatusCode::NOT_FOUND, "Not found\n");
     };
+    if readable && path.starts_with(crate::media::RHEL_PREFIX) {
+        let Ok(permit) = site.requests.try_acquire() else {
+            return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
+        };
+        let config = site.database.clone();
+        let allowed = task::spawn_blocking(move || -> Option<bool> {
+            let IpAddr::V4(peer) = peer else {
+                return Some(false);
+            };
+            let path = configured_database(&config)?;
+            let db = crate::connect(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+            Some(crate::pxe::client_in_subnet(
+                peer,
+                &setting(&db, "pxe_subnet").ok()?,
+            ))
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+        drop(permit);
+        if !allowed {
+            return plain(StatusCode::FORBIDDEN, "Client hors du sous-réseau PXE\n");
+        }
+        return site
+            .assets
+            .serve_rhel(path, &parts.headers, parts.method == Method::HEAD)
+            .await
+            .unwrap_or_else(|| plain(StatusCode::NOT_FOUND, "Not found\n"));
+    }
     if readable && path.starts_with(linux_boot::PREFIX) {
         let Ok(permit) = site.requests.try_acquire() else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
@@ -904,11 +942,11 @@ async fn dispatch(
     let winpe = winpe::allowed(site.winpe_client, peer);
     if winpe && readable {
         if path == winpe::BOOT {
-            if matches!(site.windows_editions.as_ref(), winpe::Editions::Legacy) {
+            let editions = windows_editions(site).await;
+            if matches!(editions.as_ref(), winpe::Editions::Legacy) {
                 return winpe::script(server, site.http_port, None);
             }
             let config = site.database.clone();
-            let editions = site.windows_editions.clone();
             let selected = task::spawn_blocking(move || editions.selected(&config))
                 .await
                 .ok()
@@ -926,13 +964,18 @@ async fn dispatch(
         }
     }
     if readable {
+        let editions = if winpe && path.starts_with(winpe::PREFIX) {
+            Some(windows_editions(site).await)
+        } else {
+            None
+        };
         if let Some(reply) = site
             .assets
             .serve(
                 path,
                 &parts.headers,
                 parts.method == Method::HEAD,
-                winpe.then_some(site.windows_editions.as_ref()),
+                editions.as_deref(),
             )
             .await
         {

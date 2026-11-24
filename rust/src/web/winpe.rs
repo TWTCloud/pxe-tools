@@ -135,17 +135,6 @@ impl Editions {
         }))
     }
 
-    pub(super) fn logs_request(&self, path: &str) -> bool {
-        if matches!(path, "/boot.ipxe" | BOOT) {
-            return true;
-        }
-        match path.strip_prefix(PREFIX).map(|path| path.split_once('/')) {
-            Some(Some((id, asset))) => self.allows_asset(id, asset),
-            Some(None) => FILES.contains(&path.trim_start_matches(PREFIX)),
-            None => false,
-        }
-    }
-
     pub(super) fn selected(&self, config: &Path) -> Option<String> {
         let database = configured_database(config)?;
         let db = connect(&database, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
@@ -206,6 +195,20 @@ impl Editions {
         }
         html.push_str(r#"</select></label><button>Enregistrer</button></form><p><a href="/settings/images">Images PXE</a></p>"#);
         Ok(page("Installation Windows", &html))
+    }
+}
+
+pub(super) fn logs_request(path: &str) -> bool {
+    if matches!(path, "/boot.ipxe" | BOOT) {
+        return true;
+    }
+    match path.strip_prefix(PREFIX).map(|path| path.split_once('/')) {
+        Some(Some((id, asset))) => {
+            valid_id(id)
+                && (FILES.contains(&asset) || matches!(asset, "install.wim" | "install.esd"))
+        }
+        Some(None) => FILES.contains(&path.trim_start_matches(PREFIX)),
+        None => false,
     }
 }
 

@@ -3,7 +3,9 @@
 """Exercise the Windows and Linux installer menus in an isolated network namespace."""
 import base64
 from ctypes import CDLL, c_char_p
+from hashlib import sha256
 from http.client import HTTPConnection, HTTPSConnection
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -13,8 +15,10 @@ import ssl
 import subprocess
 import sys
 import tempfile
+from threading import Thread
 import time
 from urllib.parse import urlencode
+from zipfile import ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,6 +30,8 @@ HTTP = 8088
 HTTPS = 8448
 SETTINGS = '/settings/windows'
 BOOT = '/pxe/windows/boot.ipxe'
+MEDIA = '/settings/images/media'
+CDN = '93.184.216.34'
 
 
 def media(root, profile, edition, label, index):
@@ -96,11 +102,13 @@ def check_linux(tls, auth, form_headers):
     print('Ubuntu media selection, architecture-specific menus, ISO streaming and RHEL repository verified.')
 
 
-def check_automatic_linux(database, tls, auth, form_headers):
+def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
     crypt = CDLL('libcrypt.so.1').crypt
     crypt.argtypes = (c_char_p, c_char_p)
     crypt.restype = c_char_p
-    for offset, image, file in ((1, 'ubuntu-24.04.5', 'user-data'), (2, 'rhel9', 'kickstart.cfg')):
+    for offset, image, file in ((1, 'ubuntu-24.04.5', 'user-data'),
+                                (2, 'rhel9', 'kickstart.cfg'),
+                                (3, f'rhel9-{rhel_sha}', 'kickstart.cfg')):
         mac = f'02:00:00:00:50:{offset:02x}'
         serial = f'PXE-TEST-{offset}'
         inventory = {
@@ -153,6 +161,8 @@ def check_automatic_linux(database, tls, auth, form_headers):
             assert '/api/install-end' in settings['late-commands'][0][2]
         else:
             assert b'inst.ks=' in chain and b'inst.nosave=all_ks' in chain
+            if offset == 3:
+                assert f'url --url=http://{SERVER}:{HTTP}/pxe/rhel9/{rhel_sha}/'.encode() in config
             assert b'ignoredisk --only-use=vda\nclearpart --all --initlabel --drives=vda' in config
             assert b'%pre --erroronfail' in config and serial.encode() in config
             assert b'%packages\n@^minimal-environment\ncurl\n%end' in config
@@ -178,8 +188,135 @@ def check_automatic_linux(database, tls, auth, form_headers):
     print('Ubuntu Autoinstall and RHEL Kickstart console actions, private seeds and first-boot callbacks verified.')
 
 
+def create_iso(path, tree, files):
+    tree.mkdir()
+    for name, data in files.items():
+        target = tree / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    subprocess.run(['genisoimage', '-R', '-o', path, tree], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return sha256(path.read_bytes()).hexdigest()
+
+
+def check_media(binary, root, public, database, tls, auth, headers, env):
+    inbox = public / 'media/inbox'
+    inbox.mkdir(mode=0o700, parents=True)
+    def submit(kind, source, digest, profile='', expected='success'):
+        form = {'kind': kind, 'source': source, 'sha256': digest, 'profile': profile}
+        status, location, _ = request(MEDIA, tls=tls, form=form, headers=headers)
+        assert status == 303 and location.startswith('/jobs/')
+        job = location.rsplit('/', 1)[1]
+        if source.startswith('https://'):
+            with sqlite3.connect(database) as db:
+                saved = db.execute('SELECT value FROM settings WHERE key=?', (f'media_import_request_{job}',)).fetchone()[0]
+                assert source not in saved and 'opaque-proof' not in saved
+        subprocess.run([binary, '--run-media-import', database, job, ROOT/'docker/worker/scripts'],
+                       check=True, env=env)
+        with sqlite3.connect(database) as db:
+            state, message = db.execute('SELECT status,message FROM init_jobs WHERE id=?', (job,)).fetchone()
+            assert state == expected, (state, message)
+            assert 'opaque-proof' not in message
+        return message
+
+    assert request(MEDIA, tls=tls)[0] == 401
+    assert request(MEDIA, tls=tls, headers=auth)[0] == 200
+    bad = {'kind':'rhel9', 'source':'../private.iso', 'sha256':'a'*64, 'profile':''}
+    assert request(MEDIA, tls=tls, form=bad, headers=headers)[0] == 422
+    assert request(MEDIA, tls=tls, form={**bad, 'source':'https://unauthorized.invalid/DVD.iso'}, headers=headers)[0] == 422
+    boot = {name: name.encode() for name in ('images/install.img', 'images/pxeboot/vmlinuz', 'images/pxeboot/initrd.img')}
+    checksums = ''.join(f'{name} = sha256:{sha256(data).hexdigest()}\n' for name, data in boot.items())
+    treeinfo = f'[general]\narch = x86_64\nfamily = Red Hat Enterprise Linux\nversion = 9.9\n[checksums]\n{checksums}'.encode()
+    rhel_sha = create_iso(inbox/'rhel9.iso', root/'rhel-tree', {
+        **boot, '.treeinfo': treeinfo, 'BaseOS/repodata/repomd.xml': b'baseos',
+        'AppStream/repodata/repomd.xml': b'appstream', 'BaseOS/Packages/example.rpm': b'fixture-rpm',
+    })
+    assert 'SHA-256' in submit('rhel9', 'rhel9.iso', 'a'*64, expected='failed')
+    submit('rhel9', 'rhel9.iso', rhel_sha)
+    submit('rhel9', 'absent.iso', rhel_sha)
+    prefix = f'/pxe/rhel9/{rhel_sha}/'
+    assert prefix.encode() in request('/pxe/linux/amd64/grub.cfg', source=WINDOWS_CLIENT)[2]
+    assert prefix.encode() not in request('/pxe/linux/arm64/grub.cfg', source=WINDOWS_CLIENT)[2]
+    assert request(prefix+'.treeinfo', source=WINDOWS_CLIENT)[2] == treeinfo
+    assert request(prefix+'.treeinfo', source=OUTSIDE_CLIENT)[0] == 403
+    assert request(prefix+'BaseOS/Packages/example.rpm', source=WINDOWS_CLIENT,
+                   headers={'Range':'bytes=0-6'}) == (206, None, b'fixture')
+    assert request(prefix+'.pxe-media.json', source=WINDOWS_CLIENT)[0] == 404
+    assert request(prefix+'BaseOS/../../inbox/rhel9.iso', source=WINDOWS_CLIENT)[0] == 404
+
+    image = b'MSWIM\0\0\0fixture Windows image'
+    digest = sha256(image).hexdigest()
+    class Download(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            if self.path == '/redirect':
+                self.send_response(302)
+                self.send_header('Location', '/install.wim?signature=opaque-proof')
+                self.end_headers()
+            elif self.path == '/install.wim?signature=opaque-proof':
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(image)))
+                self.end_headers()
+                self.wfile.write(image)
+            else:
+                self.send_error(404)
+
+    source_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    source_tls.load_cert_chain(root/'cert.pem', root/'key.pem')
+    with ThreadingHTTPServer((CDN, 443), Download) as cdn:
+        cdn.socket = source_tls.wrap_socket(cdn.socket, server_side=True)
+        thread = Thread(target=cdn.serve_forever, daemon=True)
+        thread.start()
+        try:
+            assert digest in submit('windows-wim', f'https://{CDN}/redirect', digest)
+            message = submit('windows-esd', 'https://localhost/private?signature=opaque-proof',
+                             'b'*64, expected='failed')
+            assert 'adresse publique' in message
+        finally:
+            cdn.shutdown()
+            thread.join()
+    iso = create_iso(inbox/'windows.iso', root/'windows-tree', {'sources/install.wim': image})
+    assert digest in submit('windows-iso', 'windows.iso', iso)
+    assert digest in submit('windows-iso', 'missing.iso', iso)
+    binaries = {name: name.encode() for name in ('wimboot','BCD','boot.sdi','boot.wim')}
+    metadata = {'edition':'Professional', 'edition_label':'Importée Pro', 'image_index':6,
+                'install_image':'install.wim', 'install_sha256':digest}
+    for name, key in zip(binaries, ('wimboot_sha256','bcd_sha256','boot_sdi_sha256','winpe_sha256')):
+        metadata[key] = sha256(binaries[name]).hexdigest()
+    def winpe_archive(profile, edition):
+        name = f'{profile}.zip'
+        archive = inbox / name
+        manifest = {**metadata, **edition,
+                    'install_image_uri': f'http://192.0.2.1/pxe/windows/{profile}/install.wim'}
+        with ZipFile(archive, 'w') as output:
+            output.writestr('case.json', json.dumps(manifest))
+            for asset, data in binaries.items():
+                output.writestr('boot/' + asset, data)
+        return name, sha256(archive.read_bytes()).hexdigest()
+
+    professional, pro_sha = winpe_archive('kit-local', {})
+    home, home_sha = winpe_archive('kit-home', {'edition': 'Core', 'edition_label': 'Importée Famille', 'image_index': 1})
+    assert 'correspondre' in submit('winpe', professional, pro_sha, 'id-incorrect', expected='failed')
+    submit('winpe', professional, pro_sha, 'kit-local')
+    submit('winpe', home, home_sha, 'kit-home')
+    submit('winpe', 'missing.zip', pro_sha, 'kit-local')
+    cache = public/'media/windows-cache'/digest/'install.wim'
+    assert all((public/'winpe/amd64'/profile/'install.wim').stat().st_ino == cache.stat().st_ino
+               for profile in ('kit-local', 'kit-home'))
+    assert 'Importée Pro'.encode() in request(SETTINGS, tls=tls, headers=auth)[2]
+    assert request(SETTINGS, tls=tls, form={'edition':'kit-local'}, headers=headers)[0] == 303
+    assert b'/pxe/windows/kit-local/' in request(BOOT, source=WINDOWS_CLIENT)[2]
+    assert request('/pxe/windows/kit-local/install.wim', source=WINDOWS_CLIENT)[2] == image
+    assert request('/pxe/windows/kit-local/install.wim', source=OTHER_CLIENT)[0] == 404
+    assert request('/media/inbox/windows.iso', source=WINDOWS_CLIENT)[0] == 404
+    print('Verified media preparation, approved HTTPS redirection, RHEL PXE tree, Windows deduplication and live WinPE selection.')
+    return rhel_sha
+
+
 def main(binary):
-    with tempfile.TemporaryDirectory(prefix='pxe-editions-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='pxe-editions-', dir='/run') as temporary:
         root = Path(temporary)
         public = root/'http'
         media(public, 'windows10-core', 'Core', 'Windows 10 Famille', 1)
@@ -199,7 +336,7 @@ def main(binary):
         config.write_text(json.dumps({'driver': 'sqlite', 'path': str(database)}))
         subprocess.run([
             'openssl', 'req', '-new', '-x509', '-newkey', 'rsa:2048', '-nodes',
-            '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1',
+            '-subj', '/CN=127.0.0.1', '-addext', f'subjectAltName=IP:127.0.0.1,IP:{CDN}',
             '-days', '1', '-keyout', str(root/'key.pem'), '-out', str(root/'cert.pem'),
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         tls = ssl.create_default_context(cafile=str(root/'cert.pem'))
@@ -207,7 +344,12 @@ def main(binary):
         auth = {'Authorization': 'Basic ' + encoded}
         form_headers = {**auth, 'Origin': f'https://127.0.0.1:{HTTPS}',
                         'Content-Type': 'application/x-www-form-urlencoded'}
+        master = root/'master.key'
+        master.write_bytes(b'x'*32)
+        master.chmod(0o600)
         env = {**os.environ, 'HTTP_ROOT': str(public), 'TLS_DIR': str(root),
+               'PXE_MASTER_KEY_PATH': str(master), 'SSL_CERT_FILE': str(root/'cert.pem'),
+               'PXE_MEDIA_DOWNLOAD_HOSTS': f'{CDN},localhost',
                'PXE_HTTP_PORT': str(HTTP), 'PXE_HTTPS_PORT': str(HTTPS),
                'PXE_WINPE_CLIENT_IP': WINDOWS_CLIENT,
                'PXE_RHEL9_AMD64_REPO': 'http://192.0.2.99:8090/rhel/9/',
@@ -243,7 +385,8 @@ def main(binary):
                     assert request(f'/pxe/windows/{profile}/case.json', source=WINDOWS_CLIENT)[0] == 404
                 assert request('/pxe/windows/boot.wim', source=WINDOWS_CLIENT)[0] == 404
                 check_linux(tls, auth, form_headers)
-                check_automatic_linux(database, tls, auth, form_headers)
+                rhel_sha = check_media(binary, root, public, database, tls, auth, form_headers, env)
+                check_automatic_linux(database, tls, auth, form_headers, rhel_sha)
             finally:
                 service.terminate()
         print('Authenticated edition selection, distinct WinPE paths and private installation media verified.')

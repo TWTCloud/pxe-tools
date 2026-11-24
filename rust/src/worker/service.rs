@@ -311,6 +311,8 @@ impl Worker<'_> {
             return cleanup_per_mac(database, id, &self.tftp);
         } else if kind == factory_reset::JOB {
             return self.factory_reset(database, id);
+        } else if kind == crate::media::JOB {
+            return crate::media::run(database, id, &self.scripts);
         } else if kind.starts_with("image:delete:") {
             let http = directory("HTTP_ROOT", "/srv/http");
             if let Err(error) = image_delete::run(database, id, kind, &http) {

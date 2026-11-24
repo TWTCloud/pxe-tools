@@ -22,6 +22,7 @@ const PAGE_SIZE: u64 = 100;
 pub(super) enum Route {
     List,
     Add,
+    Media,
     Refresh,
     RefreshStatus,
     AutoRefresh,
@@ -36,6 +37,7 @@ impl Route {
         Some(match path {
             ROUTE => Self::List,
             "/settings/images/add" => Self::Add,
+            "/settings/images/media" => Self::Media,
             "/settings/images/refresh" => Self::Refresh,
             "/settings/images/refresh-button" => Self::RefreshStatus,
             "/settings/images/auto-refresh" => Self::AutoRefresh,
@@ -58,7 +60,7 @@ impl Route {
         match *method {
             Method::GET | Method::HEAD => matches!(
                 self,
-                Self::List | Self::Add | Self::RefreshStatus | Self::Status
+                Self::List | Self::Add | Self::Media | Self::RefreshStatus | Self::Status
             ),
             Method::POST => !matches!(self, Self::RefreshStatus | Self::Status),
             Method::DELETE => matches!(self, Self::Delete(_)),
@@ -77,6 +79,8 @@ pub(super) fn serve(
 ) -> Reply {
     let result = match (route, form) {
         (Route::List, None) => list(db, number),
+        (Route::Media, None) => media_form(db),
+        (Route::Media, Some(form)) => queue_media(path, form),
         (Route::Add, None) => catalog_form(db, ROUTE)
             .map(|form| {
                 page(
@@ -97,6 +101,87 @@ pub(super) fn serve(
         eprintln!("Rust images: {error}");
         plain(StatusCode::SERVICE_UNAVAILABLE, "Images indisponibles\n")
     })
+}
+
+fn media_form(db: &Connection) -> Result<Reply, ErrorBox> {
+    let mut html = String::from(
+        r#"<nav><a href="/settings/images">Catalogue des images</a> · <a href="/settings/windows">Éditions Windows</a></nav>
+<form method="post" action="/settings/images/media">
+<label>Type de média <select name="kind" required>
+<option value="rhel9">DVD RHEL 9</option>
+<option value="windows-iso">ISO Windows</option>
+<option value="windows-wim">Fichier install.wim</option>
+<option value="windows-esd">Fichier install.esd</option>
+<option value="winpe">Archive WinPE préparée</option>
+</select></label>
+<label>Nom du fichier sur le serveur ou URL HTTPS autorisée <input name="source" maxlength="4096" required></label>
+<label>Empreinte SHA-256 de la source <input name="sha256" pattern="[A-Fa-f0-9]{64}" required></label>
+<label>Identifiant de l’édition pour une archive WinPE <input name="profile" pattern="[a-z0-9-]{1,40}"></label>
+<button>Préparer le média</button>
+</form>
+<p>Les fichiers locaux se placent dans le dossier privé <code>media/inbox</code> du stockage HTTP PXE. Importez le fichier Windows avant l’archive WinPE de l’édition.</p>"#,
+    );
+    let hosts = crate::media::download_hosts();
+    if !hosts.is_empty() {
+        html.push_str("<p>Hôtes de téléchargement autorisés&nbsp;: ");
+        escape(&mut html, &hosts.join(", "));
+        html.push_str("</p>");
+    }
+    let mut jobs = db.prepare(
+        "SELECT id,status,message FROM init_jobs WHERE job_type=?1 ORDER BY id DESC LIMIT 10",
+    )?;
+    let mut rows = jobs.query([crate::media::JOB])?;
+    html.push_str("<h2>Préparations récentes</h2><ul>");
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        write!(html, "<li><a href=\"/jobs/{id}\">Tâche {id}</a> · ")?;
+        escape(&mut html, &row.get::<_, String>(1)?);
+        html.push_str(" · ");
+        escape(
+            &mut html,
+            &row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        );
+        html.push_str("</li>");
+    }
+    html.push_str("</ul>");
+    Ok(page("Préparer un média PXE", &html))
+}
+
+fn queue_media(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
+    let mut fields = std::collections::HashMap::new();
+    for (name, value) in form_urlencoded::parse(form) {
+        if !matches!(name.as_ref(), "kind" | "source" | "sha256" | "profile")
+            || fields.insert(name, value).is_some()
+        {
+            return Ok(invalid());
+        }
+    }
+    let value = |name: &str| {
+        fields
+            .get(name)
+            .map(|value| value.trim())
+            .unwrap_or_default()
+    };
+    let source = value("source");
+    let request = crate::media::Import {
+        kind: value("kind").into(),
+        source: source.into(),
+        sha256: value("sha256").to_ascii_lowercase(),
+        profile: value("profile").into(),
+        remote: source.starts_with("https://"),
+    };
+    if !request.valid() {
+        return Ok(plain(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Type de média, source ou empreinte invalide\n",
+        ));
+    }
+    let mut db = connect(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let id = crate::media::enqueue(&mut db, request)?;
+    Ok(redirect(StatusCode::SEE_OTHER, format!("/jobs/{id}")))
 }
 
 fn update(route: Route, method: &Method, path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
@@ -275,7 +360,7 @@ pub(super) fn refresh_catalog(db: &Connection) -> rusqlite::Result<()> {
 
 fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
-        r#"<nav><a href="/admin/devices">Console</a> · <a href="/settings/windows">Éditions Windows</a></nav>"#,
+        r#"<nav><a href="/admin/devices">Console</a> · <a href="/settings/images/media">Préparer un média RHEL ou Windows</a> · <a href="/settings/windows">Éditions Windows</a></nav>"#,
     );
     html.push_str(&catalog_form(db, ROUTE)?);
     let enabled = if setting(db, "catalog_auto_refresh_enabled")? == "on" {

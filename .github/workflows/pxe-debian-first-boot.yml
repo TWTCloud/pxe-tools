@@ -54,11 +54,13 @@ jobs:
           cd "$fixture"
           sha256sum pxe-tools-rust > SHA256SUMS
           printf '%s\n' "$PXE_SOURCE" > source-commit.txt
-      - name: Verify Linux and Windows installer menus in an isolated network namespace
+      - name: Verify media preparation and installer menus in an isolated network namespace
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends p7zip-full genisoimage
           sudo unshare --net /bin/bash -ec '
             ip link set lo up
-            for address in 192.0.2.1 192.0.2.10 192.0.2.11 198.51.100.10; do
+            for address in 192.0.2.1 192.0.2.10 192.0.2.11 198.51.100.10 93.184.216.34; do
               ip addr add "$address/32" dev lo
             done
             python3 tests/integration/test_rust_windows_editions.py rust/target/release/pxe-tools-rust

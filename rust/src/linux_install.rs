@@ -105,6 +105,11 @@ impl Plan {
             }
             Source::Rhel9(repo) => {
                 let disk = self.disk.strip_prefix("/dev/")?;
+                let repo = if repo.starts_with(crate::media::RHEL_PREFIX) {
+                    format!("http://{authority}{repo}")
+                } else {
+                    repo.to_owned()
+                };
                 Some(format!(
                     "#version=RHEL9\nlang en_US.UTF-8\nkeyboard us\ntimezone Etc/UTC --utc\n\
                      network --bootproto=dhcp --device={boot_mac} --activate --hostname={}\n\

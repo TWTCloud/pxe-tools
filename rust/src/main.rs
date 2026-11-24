@@ -8,6 +8,7 @@ mod images;
 mod install;
 mod instance_secrets;
 mod linux_install;
+mod media;
 mod menu_store;
 mod migrations;
 mod monitoring;
@@ -160,6 +161,10 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         if flag == "--run-image-download" {
             let id = id.to_str().ok_or("Invalid image ID")?.parse()?;
             return worker::download::run(Path::new(database), id, Path::new(scripts));
+        }
+        if flag == "--run-media-import" {
+            let id = id.to_str().ok_or("Invalid media import job ID")?.parse()?;
+            return media::run(Path::new(database), id, Path::new(scripts));
         }
     }
     if let [flag, id, job, db] = args.as_slice() {

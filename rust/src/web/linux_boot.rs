@@ -9,6 +9,7 @@ use crate::{
 };
 use hyper::{header, Response, StatusCode, Uri};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use serde::Deserialize;
 use std::{
     fmt::Write,
     fs,
@@ -205,15 +206,72 @@ pub(super) fn available(
         let base = repo.path().trim_end_matches('/');
         let host = repo.authority().expect("validated HTTP repository");
         let url = format!("http://{host}{base}/");
-        entries.push(Entry {
-            title: "Red Hat Enterprise Linux 9".into(),
-            source: Source::Rhel9(url.clone()),
-            authority: host.to_string(),
-            kernel: format!("{base}/images/pxeboot/vmlinuz"),
-            initrd: format!("{base}/images/pxeboot/initrd.img"),
-            arguments: format!("ip=dhcp inst.repo={url}"),
-        });
+        entries.push(rhel_entry("9", host.as_str(), base, url));
     }
+    entries.extend(imported_rhel(root, arch, authority)?);
+    Ok(entries)
+}
+
+fn rhel_entry(version: &str, authority: &str, base: &str, url: String) -> Entry {
+    Entry {
+        title: format!("Red Hat Enterprise Linux {version}"),
+        arguments: format!("ip=dhcp inst.repo={url}"),
+        source: Source::Rhel9(url),
+        authority: authority.to_owned(),
+        kernel: format!("{base}/images/pxeboot/vmlinuz"),
+        initrd: format!("{base}/images/pxeboot/initrd.img"),
+    }
+}
+
+#[derive(Deserialize)]
+struct RhelMedia {
+    arch: String,
+    version: String,
+}
+
+fn imported_rhel(root: &Path, arch: &str, authority: &str) -> Result<Vec<Entry>, ErrorBox> {
+    let path = root.join("media/rhel9");
+    let files = match fs::read_dir(&path) {
+        Ok(files) if path.canonicalize()?.starts_with(root) => files,
+        Ok(_) => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut entries = Vec::new();
+    for item in files {
+        let item = item?;
+        let name = item.file_name();
+        let Some(digest) = name.to_str().filter(|value| crate::media::digest(value)) else {
+            continue;
+        };
+        let marker = item.path().join(".pxe-media.json");
+        if !item.file_type()?.is_dir()
+            || !fs::symlink_metadata(&marker).is_ok_and(|info| info.is_file() && info.len() <= 512)
+        {
+            continue;
+        }
+        let Ok(media) = serde_json::from_slice::<RhelMedia>(&fs::read(marker)?) else {
+            continue;
+        };
+        if media.arch != arch
+            || !media.version.starts_with("9.")
+            || !media.version.split('.').all(|part| {
+                !part.is_empty() && part.len() <= 3 && part.bytes().all(|b| b.is_ascii_digit())
+            })
+        {
+            continue;
+        }
+        let base = format!("{}{digest}", crate::media::RHEL_PREFIX);
+        let mut entry = rhel_entry(
+            &media.version,
+            authority,
+            &base,
+            format!("http://{authority}{base}/"),
+        );
+        entry.source = Source::Rhel9(format!("{base}/"));
+        entries.push(entry);
+    }
+    entries.sort_by(|a, b| a.title.cmp(&b.title).then(a.kernel.cmp(&b.kernel)));
     Ok(entries)
 }
 

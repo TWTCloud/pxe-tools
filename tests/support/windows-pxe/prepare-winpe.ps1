@@ -216,5 +216,6 @@ if ($selectedImage) {
 if ($installHash) {
     $case.Add('install_image', $installName)
     $case.Add('install_sha256', $installHash)
+    $case.Add('install_image_uri', $InstallImageUri)
 }
 [IO.File]::WriteAllText((Join-Path $output 'case.json'), ($case | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
