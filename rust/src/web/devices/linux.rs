@@ -17,7 +17,6 @@ use hyper::StatusCode;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha_crypt::{PasswordHasher, ShaCrypt};
 use std::{fmt::Write, net::Ipv4Addr, path::Path};
 
 pub(in crate::web) fn route(path: &str) -> Option<i64> {
@@ -166,9 +165,7 @@ pub(in crate::web) fn serve(
     {
         return Ok(invalid());
     }
-    let hash = ShaCrypt::default()
-        .hash_password(input.password.as_bytes())
-        .map_err(|_| "Unable to hash the installation password")?;
+    let hash = preseed::hash_installation_password(&input.password)?;
     let mut db = connect(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let Some(device) = Device::get(&tx, id)? else {
@@ -219,7 +216,7 @@ pub(in crate::web) fn serve(
         serial,
         hostname,
         login: input.login,
-        password_hash: hash.as_str().into(),
+        password_hash: hash,
     };
     if !plan.valid() {
         return Ok(invalid());

@@ -10,7 +10,6 @@ use crate::{connect, preseed, setting};
 use hyper::{Method, Response, StatusCode};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
-use sha_crypt::{PasswordHasher, ShaCrypt};
 use std::{fmt::Write, path::Path};
 
 pub(super) const ROUTE: &str = "/presets";
@@ -398,11 +397,7 @@ fn change(
             let generated = if password.is_empty() {
                 None
             } else {
-                Some(
-                    ShaCrypt::default()
-                        .hash_password(password.as_bytes())
-                        .map_err(|_| "Unable to generate the installation password hash")?,
-                )
+                Some(preseed::hash_installation_password(&password)?)
             };
             let cipher =
                 if generated.is_some() && cipher.as_deref().is_some_and(|raw| !raw.is_empty()) {
@@ -566,9 +561,7 @@ fn create(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
         return Ok(invalid());
     }
 
-    let hash = ShaCrypt::default()
-        .hash_password(password.as_bytes())
-        .map_err(|_| "Unable to generate the installation password hash")?;
+    let hash = preseed::hash_installation_password(&password)?;
     let mut db = connect(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,

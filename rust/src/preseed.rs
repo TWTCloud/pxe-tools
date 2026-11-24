@@ -10,6 +10,7 @@ use crate::{header, php_string, php_trim, php_truthy, response, setting, HttpRes
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{Connection, TransactionBehavior};
 use serde_json::Value;
+use sha_crypt::{PasswordHasher, ShaCrypt};
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
@@ -779,9 +780,37 @@ pub(crate) fn technical_account(user: &str) -> bool {
 }
 
 pub(crate) fn sanitized_hash(hash: &str) -> Option<String> {
+    if let Some(parameters) = hash
+        .strip_prefix("$6$")
+        .or_else(|| hash.strip_prefix("$5$"))
+    {
+        let mut fields = parameters.split('$');
+        let salt = match fields.next()? {
+            rounds if rounds.starts_with("rounds=") => fields.next()?,
+            salt => salt,
+        };
+        if salt.is_empty() || salt.len() > 16 {
+            return None;
+        }
+    }
     hash.bytes()
         .all(|b| b.is_ascii_alphanumeric() || b"$./,!_*+=-".contains(&b))
         .then(|| hash.to_owned())
+}
+
+pub(crate) fn hash_installation_password(password: &str) -> std::io::Result<String> {
+    use ring::rand::{SecureRandom, SystemRandom};
+
+    // Twelve random bytes encode as sixteen characters, the SHA-crypt salt
+    // limit used by libcrypt on the installed Linux systems.
+    let mut salt = [0; 12];
+    SystemRandom::new()
+        .fill(&mut salt)
+        .map_err(|_| std::io::Error::other("Unable to generate the installation password salt"))?;
+    ShaCrypt::SHA512
+        .hash_password_with_salt(password.as_bytes(), &salt)
+        .map(|hash| hash.as_str().to_owned())
+        .map_err(|_| std::io::Error::other("Unable to hash the installation password"))
 }
 
 fn valid_disk(path: &str) -> bool {

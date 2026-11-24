@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 """Exercise the Windows and Linux installer menus in an isolated network namespace."""
 import base64
+from ctypes import CDLL, c_char_p
 from http.client import HTTPConnection, HTTPSConnection
 import json
 import os
@@ -96,6 +97,9 @@ def check_linux(tls, auth, form_headers):
 
 
 def check_automatic_linux(database, tls, auth, form_headers):
+    crypt = CDLL('libcrypt.so.1').crypt
+    crypt.argtypes = (c_char_p, c_char_p)
+    crypt.restype = c_char_p
     for offset, image, file in ((1, 'ubuntu-24.04.5', 'user-data'), (2, 'rhel9', 'kickstart.cfg')):
         mac = f'02:00:00:00:50:{offset:02x}'
         serial = f'PXE-TEST-{offset}'
@@ -156,6 +160,9 @@ def check_automatic_linux(database, tls, auth, form_headers):
             assert db.execute('SELECT install_status FROM installations WHERE action_id=?', (action,)).fetchall() == [('in_progress',)]
             assert db.execute('SELECT status FROM actions WHERE id=?', (action,)).fetchone() == ('running',)
             token = db.execute('SELECT token FROM actions WHERE id=?', (action,)).fetchone()[0]
+            snapshot = json.loads(db.execute('SELECT install_config_json FROM machines WHERE id=?', (device,)).fetchone()[0])
+        password_hash = snapshot['linux_deployment']['password_hash'].encode()
+        assert crypt(selection['password'].encode(), password_hash) == password_hash
         bearer = {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/x-www-form-urlencoded'}
         complete = '/api/install-end?' + urlencode({'mac': mac, 'status': 'success'})
         assert request(complete, form={'first_boot': '1'}, source=WINDOWS_CLIENT, headers=bearer)[0] == 200
