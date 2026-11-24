@@ -1877,7 +1877,7 @@ def is_ansible_enabled() -> bool:
         return False  # DB neuve / setting absente → pas d'ansible
 
 
-def fetch_pending_ansible() -> dict | None:
+def fetch_pending_ansible(installation_id: int | None = None) -> dict | None:
     # Même si Ansible est désactivé, les installations terminées doivent être
     # consommées pour sortir de ansible_status='pending' et clôturer l'action.
     # run_playbook les marque alors 'no_role' sans lancer de playbook.
@@ -1901,7 +1901,7 @@ def fetch_pending_ansible() -> dict | None:
         FROM installations i
         JOIN machines m ON i.machine_id = m.id
         LEFT JOIN actions a ON i.action_id = a.id
-        WHERE i.ansible_status = 'pending'
+        WHERE i.ansible_status = 'pending' AND (:install_id IS NULL OR i.id = :install_id)
           AND (
             :wait_for_boot = 0
             OR a.id IS NULL
@@ -1929,6 +1929,7 @@ def fetch_pending_ansible() -> dict | None:
     arguments = {
         "wait_for_boot": os.environ.get("PXE_RUST_GUIDED") == "1",
         "boot_timeout": _OS_FIRST_BOOT_TIMEOUT_S,
+        "install_id": installation_id,
     }
     with db_connect() as db:
         row = db.execute(sql, arguments).fetchone()
@@ -3501,5 +3502,37 @@ def main() -> None:
             time.sleep(POLL_INTERVAL)
 
 
+def rust_worker_step(step: str, config: str, database: str = "", identifier: str = "") -> None:
+    """Execute one operation delegated by the Rust worker."""
+    global DB_PATH
+    if os.environ.get("PXE_RUST_GUIDED") != "1":
+        raise RuntimeError("Sous-commande réservée au worker Rust")
+    if step == "clean-vault" and not database and not identifier:
+        purge_unlock_dir()
+        return
+    selected, source = select_database(config, DB_FALLBACK_PATH, DB_LEGACY_PATH)
+    if source != "config" or selected != database:
+        raise RuntimeError("Configuration SQLite modifiée ; tâche suspendue")
+    DB_PATH = selected
+    if step == "startup" and not identifier:
+        bootstrap_ansible_workspace()
+    elif step == "runtime" and not identifier:
+        publish_ansible_runtime_status()
+    elif step == "job":
+        with db_connect() as db:
+            job = db.execute("SELECT * FROM init_jobs WHERE id=? AND status='pending'", (int(identifier),)).fetchone()
+        if job is not None:
+            run_bootstrap_job(dict(job))
+    elif step == "playbook":
+        job = fetch_pending_ansible(int(identifier))
+        if job is not None and unlock_pending():
+            run_playbook(job)
+    else:
+        raise RuntimeError("Sous-commande du worker inconnue")
+
+
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:2] == ["--rust-worker-step"]:
+        rust_worker_step(*sys.argv[2:])
+    else:
+        main()

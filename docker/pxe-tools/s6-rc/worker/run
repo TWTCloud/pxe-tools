@@ -1,6 +1,5 @@
 #!/command/with-contenv sh
-# worker.py poll la DB sqlite et exécute les init_jobs (bootstrap-mok,
-# bootstrap-download-debian, bootstrap-build-grub, etc.) ainsi que les
-# ansible-playbook jobs de provisioning.
-# Les clés des hôtes doivent être vérifiées avant toute connexion SSH.
+if [ "${PXE_RUST_GUIDED:-0}" = 1 ]; then
+    exec /usr/lib/pxe-tools/pxe-tools-rust --work-guided /etc/pxe-tools/db.conf /app/worker.py
+fi
 exec python3 /app/worker.py

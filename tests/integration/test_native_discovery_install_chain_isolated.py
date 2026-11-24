@@ -667,6 +667,20 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s,"fixture_ar
     tftp=root/'tftp'
     wait_for(lambda:(tftp/'lpxelinux.0').is_file() and (tftp/'pxelinux.cfg/default').is_file(),
              120,'worker rendering and bootloaders')
+    worker_probe = '''
+from pathlib import Path
+for proc in Path('/proc').glob('[0-9]*/cmdline'):
+    try:
+        command = proc.read_bytes().split(b'\\0')
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        continue
+    if command[:2] == [b'/usr/lib/pxe-tools/pxe-tools-rust', b'--work-guided']:
+        break
+else:
+    raise SystemExit('The appliance worker is not running in Rust.')
+'''
+    docker('exec',app,'python3','-c',worker_probe)
+    print('Packaged worker is running in Rust',flush=True)
     for name in ('preseed.php','grub.php'):
         if docker('exec',app,'test','-e',f'{http_root}/{name}',check=False).returncode == 0:
             raise RuntimeError(f'The guided worker rendered the legacy PHP file {name}')

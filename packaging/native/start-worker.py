@@ -7,6 +7,7 @@ import subprocess
 
 FALLBACK = '/usr/lib/pxe-tools/native/keyrings/debian-archive-2025.1.gpg'
 WORKER = '/usr/lib/pxe-tools/app/worker.py'
+RUST_WORKER = '/usr/lib/pxe-tools/pxe-tools-rust'
 BASE_HELPER = Path('/opt/pxe-tools/scripts/host-base.sh')
 if not BASE_HELPER.exists():
     BASE_HELPER = Path(__file__).resolve().parents[2] / 'docker/worker/scripts/host-base.sh'
@@ -35,8 +36,10 @@ def main():
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                            text=True, check=False)
     version = query.stdout.strip() if query.returncode == 0 else ''
-    os.execve('/usr/bin/python3', ['/usr/bin/python3', WORKER],
-              worker_environment(os.environ, {}, version, detected=detected))
+    environment = worker_environment(os.environ, {}, version, detected=detected)
+    if environment.get('PXE_RUST_GUIDED') == '1':
+        os.execve(RUST_WORKER, [RUST_WORKER, '--work-guided', '/etc/pxe-tools/db.conf', WORKER], environment)
+    os.execve('/usr/bin/python3', ['/usr/bin/python3', WORKER], environment)
 
 
 if __name__ == '__main__':

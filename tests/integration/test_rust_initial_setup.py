@@ -1476,6 +1476,90 @@ def verify_worker_ansible_retry(binary):
     print('Rust worker queues a single Ansible retry, preserves other installs and refuses closed actions', flush=True)
 
 
+def verify_worker_service(binary):
+    project = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-worker-') as directory:
+        root = Path(directory).resolve()
+        database = root/'fixture.sqlite'
+        config = root/'db.conf'
+        helper_calls = root/'helper.calls'
+        helper = root/'helper.py'
+        helper.write_text(
+            'import os, sys\n'
+            'with open(os.environ["PXE_FIXTURE_HELPER_CALLS"], "a") as calls:\n'
+            '    calls.write(sys.argv[2] + "\\n")\n'
+            'assert sys.argv[1:3] == ["--rust-worker-step", "clean-vault"]\n'
+        )
+        scripts = root/'scripts'
+        scripts.mkdir()
+        for name in ('generate-mok','build-grub'):
+            (scripts/f'bootstrap-{name}.sh').write_text(
+                f'#!/usr/bin/env bash\nprintf "%s\\n" "{name}" >> "$PXE_FIXTURE_BOOT_CALLS"\n'
+            )
+        tftp = root/'tftp'
+        tftp.mkdir()
+        for name in ('grubx64.efi','lpxelinux.0'):
+            (tftp/name).touch()
+        schema = project/'app/db/schema.sqlite.sql'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            machine = db.execute("INSERT INTO machines(mac,status) VALUES('02:00:00:00:03:03','installing')").lastrowid
+            action = db.execute("INSERT INTO actions(machine_id,type,status,token) "
+                                "VALUES(?,'install_only','running',?)",(machine, secrets.token_hex(32))).lastrowid
+            install = db.execute("INSERT INTO installations(machine_id,install_status,ansible_status,action_id,ended_at) "
+                                 "VALUES(?,'success','pending',?,CURRENT_TIMESTAMP)",(machine,action)).lastrowid
+            db.executemany("INSERT INTO init_jobs(job_type,status) VALUES(?,'pending')", [
+                ('bootstrap:build_grub',),('bootstrap:generate_mok',),('system:nginx_reload',),
+            ])
+        calls = root/'boot.calls'
+        environment = dict(os.environ, PXE_RUST_GUIDED='1', WORKER_POLL_S='1',
+                           BOOTSTRAP_SCRIPTS_DIR=str(scripts), TFTP_ROOT=str(tftp),
+                           ANSIBLE_WORKDIR=str(root), PXE_ANSIBLE_MODE='volume', PXE_ANSIBLE_RUNTIME='',
+                           PXE_FIXTURE_BOOT_CALLS=str(calls), PXE_FIXTURE_HELPER_CALLS=str(helper_calls))
+        command = [str(binary),'--work-guided',str(config),str(helper)]
+        with (root/'worker.log').open('w+') as log, subprocess.Popen(
+                command, env=environment, stdout=log, stderr=subprocess.STDOUT) as worker:
+            def wait_for(query, expected):
+                until = time.monotonic() + 12
+                while time.monotonic() < until and worker.poll() is None:
+                    with closing(sqlite3.connect(database)) as db:
+                        if db.execute(query).fetchall() == expected:
+                            return
+                    time.sleep(.1)
+                log.seek(0)
+                raise AssertionError(log.read())
+
+            try:
+                deadline = time.monotonic() + 10
+                while not helper_calls.is_file() and time.monotonic() < deadline:
+                    time.sleep(.1)
+                assert helper_calls.read_text() == 'clean-vault\n'
+                assert not calls.exists()
+                temporary = root/'db.conf.new'
+                temporary.write_text(json.dumps({'driver':'sqlite','path': str(database)}))
+                temporary.replace(config)
+                wait_for('SELECT status FROM init_jobs ORDER BY id', [('success',),('success',),('failed',)])
+                assert calls.read_text().splitlines() == ['generate-mok','build-grub']
+                with closing(sqlite3.connect(database)) as db, db:
+                    assert db.execute('SELECT status FROM actions').fetchone() == ('running',)
+                    assert db.execute('SELECT id,ansible_status FROM installations').fetchone() == (install,'pending')
+                    db.execute("INSERT INTO machine_events(machine_id,action_id,checkpoint,message) "
+                               "VALUES(?,?,'os_first_boot','boot verified')",(machine,action))
+                wait_for('SELECT status FROM actions',[('success',)])
+                with closing(sqlite3.connect(database)) as db:
+                    assert db.execute('SELECT status FROM machines').fetchone() == ('installed',)
+                    assert db.execute('SELECT ansible_status FROM installations').fetchone() == ('no_role',)
+                assert helper_calls.read_text() == 'clean-vault\n'
+            finally:
+                worker.terminate()
+                try:
+                    worker.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    worker.kill()
+    print('Rust worker waits for configuration, respects bootstrap dependencies and finishes Debian tracking after first boot',
+          flush=True)
+
+
 def verify_worker_postboot(binary):
     project = Path(__file__).resolve().parents[2]
     templates = project/'docker/worker/templates'
@@ -2263,6 +2347,7 @@ def local(binary):
     verify_worker_bootstrap(binary)
     verify_worker_schedule(binary)
     verify_worker_ansible_retry(binary)
+    verify_worker_service(binary)
     verify_worker_postboot(binary)
     verify_worker_power(binary)
     verify_worker_download(binary)

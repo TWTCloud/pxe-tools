@@ -216,6 +216,12 @@ modèles, leurs snapshots d’installation, le netboot et les réglages du modul
 Ansible facultatif.
 Pour les tâches de préparation PXE, Rust réserve chaque tâche SQLite,
 lance l’outil système correspondant et enregistre la sortie et le résultat.
+Le socle APT et Docker lance la boucle du worker en Rust. Elle attend la
+configuration SQLite, respecte l’ordre des tâches de préparation MOK et
+GRUB et clôture la phase post-installation sans rôle après le retour de
+premier démarrage ou son délai. Les opérations qui utilisent encore du
+code Python, dont l’exécution des playbooks et la synchronisation des
+dépôts Ansible, le démarrent à la demande.
 Rust réserve aussi chaque téléchargement une seule fois et vérifie
 son état à l’issue du script. L’actualisation automatique attend la fin des
 opérations PXE et enregistre la date du dernier succès dans la même
@@ -467,6 +473,11 @@ l’installateur liés au chargeur dans le segment isolé.
 [APT](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45306396700/job/138151182095) ·
 [Échec Docker](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45306396700/job/138151181785) ·
 [Journal distant dans l’installateur Debian](https://www.debian.org/releases/trixie/arm64/ch05s03.en.html)
+
+Sur `4634f8d`, la matrice ARM64 a repassé les deux parcours Secure Boot,
+jusqu’à l’écran de connexion et au checkpoint accepté sans PHP-FPM.
+[APT ARM64](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45315004920/job/138179622076) ·
+[Docker ARM64](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45315004920/job/138179621919)
 
 Le banc Windows utilise Windows 11 Enterprise Evaluation amd64. L’instance de
 test doit disposer d’un firmware UEFI, de Secure Boot actif, d’un TPM

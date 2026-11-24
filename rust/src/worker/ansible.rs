@@ -2,9 +2,116 @@
 
 use crate::{connect, pxe::log_event, setting};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use serde_json::Value;
 use std::{error::Error, path::Path};
 
 const RETRY_PREFIX: &str = "action:ansible_retry:";
+const FIRST_BOOT_TIMEOUT: u64 = 600;
+
+fn pending_installation(db: &Connection, enabled: bool) -> rusqlite::Result<Option<i64>> {
+    db.query_row(
+            "SELECT i.id FROM installations i JOIN machines m ON i.machine_id=m.id
+             LEFT JOIN actions a ON i.action_id=a.id
+             WHERE i.ansible_status='pending' AND (
+                a.id IS NULL OR a.status NOT IN ('pending','running')
+                OR a.type NOT IN ('install_only','reinstall') OR COALESCE(i.install_status,'')<>'success'
+                OR COALESCE(unixepoch(i.ended_at),0)+?1<=unixepoch()
+                OR EXISTS(SELECT 1 FROM machine_events WHERE action_id=a.id AND checkpoint='os_first_boot')
+                OR (?2 AND CASE WHEN json_valid(m.install_config_json) THEN
+                    json_type(m.install_config_json,'$.ansible_role')='text'
+                    AND trim(json_extract(m.install_config_json,'$.ansible_role'))<>''
+                    ELSE 0 END)
+             ) ORDER BY i.created_at,i.id LIMIT 1",
+            params![FIRST_BOOT_TIMEOUT, enabled],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+}
+
+pub(super) fn dispatch_installation(
+    db: &Connection,
+    path: &Path,
+    enabled: bool,
+    unlocked: bool,
+    playbook: impl FnOnce(i64) -> Result<(), Box<dyn Error + Send + Sync>>,
+) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    let Some(id) = pending_installation(db, enabled)? else {
+        return Ok(false);
+    };
+    let mut db = connect(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let still_enabled = setting(&tx, "ansible_enabled")? == "on";
+    if still_enabled != enabled && pending_installation(&tx, still_enabled)? != Some(id) {
+        return Ok(true);
+    }
+    let entry = tx.query_row(
+        "SELECT i.machine_id,i.action_id,a.status,COALESCE(m.hostname,''),COALESCE(m.install_config_json,'')
+         FROM installations i JOIN machines m ON i.machine_id=m.id LEFT JOIN actions a ON a.id=i.action_id
+         WHERE i.id=?1 AND i.ansible_status='pending'",
+        [id],
+        |row| Ok((
+            row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<String>>(2)?,
+            row.get::<_, String>(3)?, row.get::<_, String>(4)?,
+        )),
+    ).optional()?;
+    let Some((machine, action, state, hostname, config)) = entry else {
+        return Ok(true);
+    };
+    if matches!(state.as_deref(), Some("success" | "cancelled")) {
+        tx.execute(
+            "UPDATE installations SET ansible_status='aborted' WHERE id=?1",
+            [id],
+        )?;
+        tx.commit()?;
+        return Ok(true);
+    }
+    let config: Value = serde_json::from_str(&config).unwrap_or_default();
+    let role = config["ansible_role"].as_str().unwrap_or_default().trim();
+    let (machine_status, status, message) =
+        if role == "proxmox_ve" || config["variant"] == "proxmox-ve" {
+            (
+                "failed",
+                "failed",
+                "[worker] Cette configuration n’est pas disponible dans cette édition.\n",
+            )
+        } else if !still_enabled {
+            (
+                "installed",
+                "no_role",
+                "[worker] Ansible désactivé. OS installé, machine non provisionnée.\n",
+            )
+        } else if role.is_empty() {
+            (
+                "installed",
+                "no_role",
+                "[worker] Aucun rôle Ansible défini. OS installé, machine non provisionnée.\n",
+            )
+        } else if hostname.trim().is_empty() {
+            ("failed", "failed", "[worker] Nom d’hôte manquant.\n")
+        } else {
+            tx.commit()?;
+            if unlocked {
+                playbook(id)?;
+            }
+            return Ok(unlocked);
+        };
+    tx.execute(
+        "UPDATE machines SET status=?2 WHERE id=?1",
+        params![machine, machine_status],
+    )?;
+    tx.execute(
+        "UPDATE installations SET ansible_status=?2,ansible_log=COALESCE(ansible_log,'')||?3 WHERE id=?1",
+        params![id, status, message],
+    )?;
+    if let Some(action) = action {
+        crate::install::recompute(&tx, action)?;
+    }
+    tx.commit()?;
+    Ok(true)
+}
 
 pub(crate) fn retry(database: &Path, id: i64) -> Result<(), Box<dyn Error + Send + Sync>> {
     if !database.is_absolute() || id <= 0 {

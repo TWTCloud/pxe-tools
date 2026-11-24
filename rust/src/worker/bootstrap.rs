@@ -63,6 +63,10 @@ const JOBS: &[(&str, &str, Option<&str>)] = &[
     (AUTO_CATALOG, "bootstrap-refresh-catalog-v2.sh", None),
 ];
 
+pub(super) fn supports(kind: &str) -> bool {
+    JOBS.iter().any(|(job, _, _)| *job == kind)
+}
+
 pub(crate) fn run(database: &Path, id: i64, scripts: &Path) -> Result<(), ErrorBox> {
     if !database.is_absolute() || !scripts.is_absolute() || id <= 0 {
         return Err("Expected a positive job ID and absolute worker paths".into());

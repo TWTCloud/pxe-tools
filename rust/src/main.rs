@@ -120,6 +120,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     if let [flag, config, path] = args.as_slice() {
+        if flag == "--work-guided" {
+            return worker::service::run(Path::new(config), Path::new(path));
+        }
         if flag == "--run-ansible-retry" {
             let id = path
                 .to_str()

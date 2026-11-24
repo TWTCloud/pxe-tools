@@ -6,6 +6,7 @@ pub(crate) mod download;
 pub(crate) mod postboot;
 pub(crate) mod power;
 pub(crate) mod schedule;
+pub(crate) mod service;
 
 use crate::connect;
 use rusqlite::{OpenFlags, TransactionBehavior};
