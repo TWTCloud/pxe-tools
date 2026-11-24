@@ -545,7 +545,9 @@ sélectionner comme périphérique d’amorçage. WinPE exige Secure Boot, un
 TPM 2.0, l’UUID du banc et un seul disque modifiable, vierge et identifié
 par son numéro de série. DISM applique l’image sur ce disque. La sonde
 s’exécute de nouveau pendant le premier démarrage, dans la phase
-`specialize`. Tester ce chemin sur un banc muni des médias approuvés.
+`specialize`. Les deux étapes déposent leur preuve dans la partition EFI
+du disque jetable et arrêtent la VM. Le banc relit les fichiers après
+chaque arrêt sans monter la partition en écriture.
 
 Le manifeste du cas contient `guest_id` (UUID), `disk_serial`,
 `edition` (par exemple `Professional`), `iso_sha256` et
@@ -568,7 +570,7 @@ même livraison iPXE dans `ipxe/`, `ipxe-shim.efi` et `ipxe.efi`. Le
 manifeste ajoute leurs empreintes dans `ipxe_sha256`. Le banc vérifie
 les médias, crée son propre réseau sans route par défaut, un TPM
 jetable et un disque qcow2 neuf. Le second démarrage ne monte plus l’ISO
-et doit produire la preuve Windows sur le port série. L’accélération KVM
+et doit produire la preuve Windows depuis le système installé. L’accélération KVM
 est utilisée par défaut. L’option `--accelerator tcg` permet de répéter le
 même parcours avec le processeur émulé, Secure Boot et TPM 2.0 actifs.
 
@@ -581,6 +583,12 @@ client iPXE signé a atteint le script Rust et demandé les quatre fichiers.
 Rust a répondu en HTTP 200, dont une réponse de 502 104 147 octets pour le
 WIM. Le banc KVM s’est arrêté sans preuve série WinPE.
 [Journal Windows KVM](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45316153541/job/138183384980)
+
+Sur `a1a0f5f`, QEMU TCG exécute le WinPE personnalisé après amorçage
+PXE. La sonde atteint l’écriture de sa preuve après les contrôles du
+firmware, du TPM et du disque vierge. Elle échoue parce que WinPE ne
+voit pas COM1, avant l’application de l’image Windows au disque.
+[Journal Windows TCG](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45320450489/job/138197444715)
 
 ### Contrôles des deux distributions
 

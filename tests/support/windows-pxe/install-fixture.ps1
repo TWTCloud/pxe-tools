@@ -41,7 +41,8 @@ if ($images.Count -ne 1) {
     throw 'Attach exactly one approved Windows installation ISO as a read-only optical drive.'
 }
 $probe = Join-Path $PSScriptRoot 'pxe-collect.ps1'
-& $probe -GuestId $GuestId -DiskSerial $DiskSerial
+$receipt = Join-Path $env:TEMP 'pxe-winpe-receipt.log'
+& $probe -GuestId $GuestId -DiskSerial $DiskSerial -ReceiptPath $receipt
 
 function Invoke-Checked {
     param([string]$Program, [string[]]$Arguments)
@@ -54,7 +55,7 @@ $commands = Join-Path $env:TEMP 'pxe-fixture-partitions.txt'
 @"
 select disk $($disk.Number)
 convert gpt
-create partition efi size=260
+create partition efi size=260 offset=1024
 format quick fs=fat32 label=System
 assign letter=S
 create partition msr size=16
@@ -68,12 +69,14 @@ try {
 } finally {
     Remove-Item -LiteralPath $commands -ErrorAction SilentlyContinue
 }
-if ((Get-Partition -DriveLetter S).DiskNumber -ne $disk.Number -or
+$esp = Get-Partition -DriveLetter S
+if ($esp.DiskNumber -ne $disk.Number -or $esp.Offset -ne 1MB -or $esp.Size -ne 260MB -or
     (Get-Partition -DriveLetter W).DiskNumber -ne $disk.Number) {
     throw 'The assigned partitions do not match the disposable disk.'
 }
 Invoke-Checked -Program 'dism.exe' -Arguments @('/Apply-Image',"/ImageFile:$($images[0])","/Index:$ImageIndex",'/ApplyDir:W:\')
 Copy-Item -LiteralPath $probe -Destination 'W:\Windows\System32\pxe-collect.ps1'
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'pxe-first-boot.ps1') -Destination 'W:\Windows\System32'
 $panther = 'W:\Windows\Panther\Unattend'
 $null = New-Item -ItemType Directory -Path $panther -Force
 @"
@@ -85,7 +88,7 @@ $null = New-Item -ItemType Directory -Path $panther -Force
         <RunSynchronousCommand xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" wcm:action="add">
           <Order>1</Order>
           <Description>Collect the first Windows boot evidence</Description>
-          <Path>%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File %SystemRoot%\System32\pxe-collect.ps1 -GuestId $GuestId -DiskSerial $DiskSerial</Path>
+          <Path>%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File %SystemRoot%\System32\pxe-first-boot.ps1 -GuestId $GuestId -DiskSerial $DiskSerial</Path>
         </RunSynchronousCommand>
       </RunSynchronous>
     </component>
@@ -93,4 +96,6 @@ $null = New-Item -ItemType Directory -Path $panther -Force
 </unattend>
 "@ | Set-Content -LiteralPath (Join-Path $panther 'Unattend.xml') -Encoding Ascii
 Invoke-Checked -Program 'bcdboot.exe' -Arguments @('W:\Windows','/s','S:','/f','UEFI')
-Invoke-Checked -Program 'wpeutil.exe' -Arguments @('Reboot')
+$null = New-Item -ItemType Directory -Path 'S:\PXE-LAB'
+Copy-Item -LiteralPath $receipt -Destination 'S:\PXE-LAB\WINPE.LOG'
+Invoke-Checked -Program 'wpeutil.exe' -Arguments @('Shutdown')

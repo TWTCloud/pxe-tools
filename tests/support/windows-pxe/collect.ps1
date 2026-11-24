@@ -4,7 +4,8 @@
 param(
     [Parameter(Mandatory)][guid]$GuestId,
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]{1,40}$')][string]$DiskSerial,
-    [ValidatePattern('^COM[1-9][0-9]?$')][string]$SerialPort = 'COM1'
+    [ValidatePattern('^COM[1-9][0-9]?$')][string]$SerialPort = 'COM1',
+    [string]$ReceiptPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +44,10 @@ if ($isWinPE) {
 }
 
 $message = 'PXE_TOOLS_WINDOWS ' + (ConvertTo-Json -InputObject $receipt -Compress)
+if ($ReceiptPath) {
+    Set-Content -LiteralPath $ReceiptPath -Value $message -Encoding Ascii
+    return
+}
 $port = [System.IO.Ports.SerialPort]::new($SerialPort, 115200, 'None', 8, 'One')
 try {
     $port.WriteTimeout = 5000

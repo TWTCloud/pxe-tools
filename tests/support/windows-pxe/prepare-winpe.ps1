@@ -102,6 +102,7 @@ try {
     $parameters = "-GuestId $GuestId -DiskSerial $DiskSerial"
     if ($InstallImageIndex -gt 0) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-fixture.ps1') -Destination $system
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'first-boot-fixture.ps1') -Destination (Join-Path $system 'pxe-first-boot.ps1')
         $script = "install-fixture.ps1"
         $parameters += " -ImageIndex $InstallImageIndex"
     }

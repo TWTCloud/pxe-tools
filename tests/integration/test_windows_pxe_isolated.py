@@ -47,7 +47,7 @@ def check_case(media):
 
 def build_windows_runner(helper):
     docker('build','--tag',helper,'-',input=f"""FROM {image}
-RUN apt-get update && apt-get install --yes --no-install-recommends ovmf swtpm \\
+RUN apt-get update && apt-get install --yes --no-install-recommends ovmf swtpm mtools \\
     && rm -rf /var/lib/apt/lists/*
 """)
 
@@ -145,11 +145,22 @@ def preflight(accelerator):
                 docker('rm','-fv',name,check=False)
 
 
-def count_receipts(transcript):
-    if not transcript.exists():
-        return 0
-    with transcript.open(encoding='utf-8', errors='replace') as stream:
-        return sum(line.startswith(PREFIX) and line.endswith('\n') for line in stream)
+def read_receipt(root, helper, name):
+    disk = '/fixture-data/client.qcow2'
+    image = '/fixture-data/proof-esp.img'
+    mount = ('--mount', f'type=bind,src={root},dst=/fixture-data')
+    # DiskPart writes a 260 MiB ESP starting 1 MiB into this disposable disk.
+    # QEMU has already closed the disk, so the read sees committed guest writes.
+    try:
+        docker('run','--rm','--network','none',*mount,'--entrypoint','qemu-img',helper,
+               'dd','-f','qcow2','-O','raw','bs=1048576','count=261',f'if={disk}',f'of={image}')
+        receipt = docker('run','--rm','--network','none',*mount,'--entrypoint','mcopy',helper,
+                         '-i',f'{image}@@1048576',f'::/PXE-LAB/{name}','-').stdout
+        if len(receipt) > 4096 or len(receipt.splitlines()) != 1 or not receipt.startswith(PREFIX):
+            raise RuntimeError(f'Invalid {name} receipt on the disposable EFI partition.')
+        return receipt.rstrip('\r\n')
+    finally:
+        (root/'proof-esp.img').unlink(missing_ok=True)
 
 
 def boot_asset_served(log, name, size):
@@ -210,7 +221,7 @@ def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery)
         mount += ('--mount', f'type=bind,src={media/"windows.iso"},dst=/approved.iso,readonly')
     (root/'qemu-monitor.sock').unlink(missing_ok=True)
     (root/'qmp.sock').unlink(missing_ok=True)
-    serial = 'winpe.log' if discovery else 'windows.log'
+    serial = 'winpe-serial.log' if discovery else 'windows-serial.log'
     network_order, disk_order = (1, 2) if discovery else (2, 1)
     restart = ('-no-reboot',) if discovery else ()
     devices,settings = guest_acceleration(accelerator)
@@ -239,18 +250,11 @@ def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery)
         if state['ExitCode'] != 0:
             errors = docker('logs','--tail','12',client,check=False).stderr.strip()
             raise RuntimeError(f'{phase} QEMU process failed: {errors}')
-        receipts = count_receipts(root/serial)
-        if receipts > 1:
-            raise RuntimeError(f'{phase} produced duplicate receipts.')
-        if not state['Running'] and receipts == 0:
-            raise RuntimeError(f'{phase} shut down before producing a receipt.')
         if state['Running']:
             virtual_state = qemu_state(root)
             if virtual_state in {'internal-error','io-error','guest-panicked'}:
                 raise RuntimeError(f'{phase} paused with QEMU status {virtual_state}.')
-        if discovery:
-            return not state['Running'] and receipts == 1
-        return receipts == 1
+        return not state['Running']
 
     try:
         wait_for(completed, 1500 if accelerator=='tcg' else 900, phase)
@@ -321,13 +325,15 @@ def main():
                 size = (boot_assets/name).stat().st_size
                 if not boot_asset_served(boot_log,name,size):
                     raise RuntimeError(f'The Rust server did not serve the verified {name} to the PXE guest.')
-            print('The WinPE guest sent its receipt and requested a reboot.',flush=True)
+            winpe = read_receipt(root, helper, 'WINPE.LOG')
+            print('The WinPE guest wrote its receipt and powered off after installing the selected Windows image.',flush=True)
             run_guest(client,lan,helper,root,media,case,args.accelerator,discovery=False)
+            windows = read_receipt(root, helper, 'WINDOWS.LOG')
             log = docker('exec',dhcp,'cat','/tmp/windows-dhcp.log').stdout
             observed = all(re.search(rf'sent .*{re.escape(name)} to {re.escape(CLIENT)}(?:\s|$)', log)
                            for name in SIGNED_IPXE)
             transcript = root/'receipts.log'
-            transcript.write_bytes((root/'winpe.log').read_bytes() + b'\n' + (root/'windows.log').read_bytes())
+            transcript.write_text(f'{winpe}\n{windows}\n', encoding='ascii')
             verify(case, {
                 'guest_id':case['guest_id'], 'architecture':'uefi-amd64',
                 'efi_boot_manager_transferred':observed, 'winpe_sha256':case['winpe_sha256'],
