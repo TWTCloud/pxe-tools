@@ -215,23 +215,40 @@ def qemu_query(root, query):
         return None
 
 
+def start_tpm(tpm, helper, root):
+    # QEMU shuts down its TPM connection when a guest exits. Start the next
+    # emulator against the same persistent state after removing the old socket.
+    docker('rm','-f',tpm,check=False)
+    (root/'tpm.sock').unlink(missing_ok=True)
+    docker('run','-d','--name',tpm,'--network','none',
+           '--mount',f'type=bind,src={root},dst=/fixture-data','--entrypoint','swtpm',helper,
+           'socket','--tpm2','--tpmstate','dir=/fixture-data/tpm',
+           '--ctrl','type=unixio,path=/fixture-data/tpm.sock')
+    wait_for(lambda: (root/'tpm.sock').is_socket() and inspect(tpm)['State']['Running'],
+             30,'disposable TPM socket')
+
+
 def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery):
     mount = ('--mount', f'type=bind,src={root},dst=/fixture-data')
     iso = ()
+    network = ('--network','none')
+    nic = ('-nic','none')
     if discovery:
         iso = (
             '-drive','file=/approved.iso,format=raw,if=none,media=cdrom,readonly=on,id=windows_iso',
             '-device','ide-cd,drive=windows_iso,bus=ide.1',
         )
         mount += ('--mount', f'type=bind,src={media/"windows.iso"},dst=/approved.iso,readonly')
+        network = ('--network','container:'+lan,'--cap-add','NET_ADMIN','--device','/dev/net/tun')
+        nic = ('-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
+               '-device',f'virtio-net-pci,disable-legacy=on,romfile=,netdev=lan,mac={MAC},bootindex=1')
     (root/'qemu-monitor.sock').unlink(missing_ok=True)
     (root/'qmp.sock').unlink(missing_ok=True)
     serial = 'winpe-serial.log' if discovery else 'windows-serial.log'
-    network_order, disk_order = (1, 2) if discovery else (2, 1)
+    disk_order = 2 if discovery else 1
     restart = ('-no-reboot',) if discovery else ()
     devices,settings = guest_acceleration(accelerator)
-    docker('run','-di','--name',client,'--network','container:'+lan,'--cap-add','NET_ADMIN',
-           '--device','/dev/net/tun',*devices,*mount,
+    docker('run','-di','--name',client,*network,*devices,*mount,
            '--entrypoint','qemu-system-x86_64',helper,
            '-machine','q35,smm=on',*settings,'-smp','4' if accelerator=='tcg' else '2','-m','6144','-display','none',
            '-global','driver=cfi.pflash01,property=secure,value=on',
@@ -245,8 +262,7 @@ def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery)
            '-fw_cfg','name=opt/org.tianocore/IPv6Support,string=no',
            '-drive','file=/fixture-data/client.qcow2,format=qcow2,if=none,id=disk',
            '-device',f'ide-hd,drive=disk,bus=ide.0,serial={case["disk_serial"]},bootindex={disk_order}',
-           *iso,'-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
-           '-device',f'virtio-net-pci,disable-legacy=on,romfile=,netdev=lan,mac={MAC},bootindex={network_order}')
+           *iso,*nic)
     phase = 'WinPE deployment' if discovery else 'first Windows boot'
     print(f'{phase} started on the isolated guest network with {accelerator}.', flush=True)
     started = time.monotonic()
@@ -322,9 +338,6 @@ def main():
                    helper,'create','-f','qcow2','/fixture-data/client.qcow2','72G')
             docker('run','--rm','--network','none',*fixture,'--entrypoint','cp',
                    helper,'/usr/share/OVMF/OVMF_VARS_4M.ms.fd','/fixture-data/vars.fd')
-            docker('run','-d','--name',tpm,'--network','none',*fixture,'--entrypoint','swtpm',helper,
-                   'socket','--tpm2','--tpmstate','dir=/fixture-data/tpm',
-                   '--ctrl','type=unixio,path=/fixture-data/tpm.sock')
             docker('run','-d','--name',lan,'--network','none','--entrypoint','sleep',helper,'3600')
             docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
                    '--mount',f'type=bind,src={root/"tftp"},dst=/pxe,readonly',
@@ -341,7 +354,7 @@ def main():
                    f'--dhcp-boot=tag:ipxe,http://{SERVER}/boot.ipxe',
                    '--enable-tftp','--tftp-root=/pxe','--log-dhcp','--log-facility=/tmp/windows-dhcp.log')
             start_appliance(app,lan,dhcp,root,boot_assets)
-            wait_for(lambda:(root/'tpm.sock').is_socket(), 30, 'disposable TPM socket')
+            start_tpm(tpm,helper,root)
             run_guest(client,lan,helper,root,media,case,args.accelerator,discovery=True)
             boot_log = docker('logs',app).stdout
             for name in ('wimboot','BCD','boot.sdi','boot.wim'):
@@ -350,6 +363,7 @@ def main():
                     raise RuntimeError(f'The Rust server did not serve the verified {name} to the PXE guest.')
             winpe = read_receipt(root, helper, 'WINPE.LOG')
             print('The WinPE guest wrote its receipt and powered off after installing the selected Windows image.',flush=True)
+            start_tpm(tpm,helper,root)
             run_guest(client,lan,helper,root,media,case,args.accelerator,discovery=False)
             windows = read_receipt(root, helper, 'WINDOWS.LOG')
             log = docker('exec',dhcp,'cat','/tmp/windows-dhcp.log').stdout

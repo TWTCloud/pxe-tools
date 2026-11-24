@@ -110,6 +110,11 @@ $null = New-Item -ItemType Directory -Path $panther -Force
 </unattend>
 "@ | Set-Content -LiteralPath (Join-Path $panther 'Unattend.xml') -Encoding Ascii
 Invoke-Checked -Program 'bcdboot.exe' -Arguments @('W:\Windows','/s','S:','/f','UEFI')
+$defaultLoader = 'S:\EFI\Boot\bootx64.efi'
+if (-not (Test-Path -LiteralPath $defaultLoader -PathType Leaf)) {
+    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $defaultLoader) -Force
+    Copy-Item -LiteralPath 'S:\EFI\Microsoft\Boot\bootmgfw.efi' -Destination $defaultLoader
+}
 Copy-Item -LiteralPath $receipt -Destination 'S:\PXE-LAB\WINPE.LOG'
 Set-Content -LiteralPath $stage -Value 'winpe-finished' -Encoding Ascii
 Invoke-Checked -Program 'wpeutil.exe' -Arguments @('Shutdown')
