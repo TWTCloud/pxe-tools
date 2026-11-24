@@ -519,7 +519,7 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
 <main><h1>{label}</h1>"#
     );
     terminology_form(&mut html, DEVICE_SETTINGS, term);
-    html.push_str(r#"<nav><a href="/machines/new">Ajouter un appareil</a> · <a href="/machines/bulk">Déployer par lots</a> · <a href="/activity">Activité</a> · <a href="/jobs">Tâches</a> · <a href="/presets">Modèles</a> · <a href="/settings/images">Images PXE</a> · <a href="/settings">Paramètres</a> · <a href="/admin/certificates">Certificats TLS</a></nav>"#);
+    html.push_str(r#"<nav><a href="/machines/new">Ajouter un appareil</a> · <a href="/machines/bulk">Déployer par lots</a> · <a href="/machines/bulk-delete">Supprimer par lots</a> · <a href="/activity">Activité</a> · <a href="/jobs">Tâches</a> · <a href="/presets">Modèles</a> · <a href="/settings/images">Images PXE</a> · <a href="/settings">Paramètres</a> · <a href="/admin/certificates">Certificats TLS</a></nav>"#);
     if matches!(
         std::env::var("AUTH_MODE").unwrap_or_default().as_str(),
         "" | "local"

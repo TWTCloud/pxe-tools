@@ -366,8 +366,39 @@ def verify_device_removal(client, database, authorization, tftp):
     assert not target.exists() and not list(menus.glob('01-02-00-00-00-47-54.pending-delete-*'))
     with closing(sqlite3.connect(database)) as db, db:
         assert db.execute("SELECT COUNT(*) FROM actions WHERE machine_id=?", (device,)).fetchone() == (0,)
+        idle, active = [
+            db.execute("INSERT INTO machines(mac,hostname,status) VALUES(?,?,?)",
+                       (mac, name, status)).lastrowid
+            for mac, name, status in (
+                ('02:00:00:00:47:56', 'bulk-idle', 'discovered'),
+                ('02:00:00:00:47:57', 'bulk-active', 'installing'),
+            )
+        ]
         db.execute("INSERT INTO machines(mac,hostname) VALUES('02:00:00:00:47:55','reset-fixture')")
         db.execute("INSERT INTO presets(name,distro,admin_user_login) VALUES('Reset preserved','debian','fixture')")
+    bulk = '/machines/bulk-delete'
+    first = menus/'01-02-00-00-00-47-56'
+    second = menus/'01-02-00-00-00-47-57'
+    first.write_text('bulk menu to restore')
+    second.mkdir()
+    fields = [('machine_ids[]', idle), ('machine_ids[]', active), ('machine_ids[]', idle),
+              ('machine_ids[]', device), ('confirm', 'SUPPRIMER')]
+    assert b'bulk-active' in client.request(bulk, authorization=authorization)[2]
+    assert client.request(bulk, form=fields)[0] == 401
+    assert client.request(bulk, form=fields, authorization=authorization, origin='https://outside.example')[0] == 403
+    assert client.request(bulk, form=fields[:-1], authorization=authorization)[0] == 422
+    assert client.request(bulk, form=fields, authorization=authorization)[0] == 409
+    assert first.read_text() == 'bulk menu to restore' and second.is_dir()
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute("SELECT COUNT(*) FROM machines WHERE id IN (?,?)", (idle, active)).fetchone() == (2,)
+    second.rmdir()
+    second.write_text('bulk active menu')
+    status, _, report = client.request(bulk, form=fields, authorization=authorization)
+    assert status == 200
+    assert '2 appareil(s) supprimé(s), dont 1 en cours d’opération. 1 appareil(s) déjà absent(s).'.encode() in report
+    assert not first.exists() and not second.exists() and not list(menus.glob('*.pending-delete-*'))
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute('SELECT hostname FROM machines').fetchall() == [('reset-fixture',)]
     assert client.request('/settings/reset', form={'confirm':'autre'}, authorization=authorization)[0] == 422
     status, location, _ = client.request('/settings/reset', form={'confirm':'RESET'}, authorization=authorization)
     assert status == 303 and location.startswith('/jobs/'), (status, location)
@@ -377,7 +408,7 @@ def verify_device_removal(client, database, authorization, tftp):
         assert db.execute('SELECT COUNT(*) FROM users').fetchone() == (1,)
         status, = db.execute("SELECT job_type FROM init_jobs WHERE id=?", (int(location.rsplit('/',1)[1]),)).fetchone()
         assert status == 'bootstrap:render_templates'
-    print('Rust device removal restores the menu on SQL failure and resets only the disposable fleet', flush=True)
+    print('Rust device removal preserves menus on error, removes selected devices and resets only the disposable fleet', flush=True)
 
 
 def verify_tls_import(client, original, imported, persistent, authorization):

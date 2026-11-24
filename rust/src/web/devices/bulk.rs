@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::{advanced, escape, page, Device, ErrorBox, Reply};
+use super::{advanced, escape, page, removal, Device, ErrorBox, Reply};
 use crate::{connect, install, migrations, preseed, pxe, web::jobs::json_reply};
 use hyper::{Method, StatusCode};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
@@ -11,6 +11,7 @@ pub(in crate::web) enum Route {
     Form,
     Preview,
     Install,
+    Delete,
 }
 
 impl Route {
@@ -19,6 +20,7 @@ impl Route {
             "/machines/bulk" => Self::Form,
             "/machines/bulk-preflight" => Self::Preview,
             "/machines/bulk-install" => Self::Install,
+            "/machines/bulk-delete" => Self::Delete,
             _ => return None,
         })
     }
@@ -26,6 +28,7 @@ impl Route {
     pub(in crate::web) fn allows(&self, method: &Method) -> bool {
         match self {
             Self::Form => matches!(*method, Method::GET | Method::HEAD),
+            Self::Delete => matches!(*method, Method::GET | Method::HEAD | Method::POST),
             _ => *method == Method::POST,
         }
     }
@@ -41,6 +44,12 @@ impl Route {
         if matches!(self, Self::Form) {
             return selection_form(db, number);
         }
+        if matches!(self, Self::Delete) {
+            return match form {
+                Some(form) => removal::bulk(path, form),
+                None => delete_form(db, number),
+            };
+        }
         let Some(selection) = form.and_then(Selection::parse) else {
             return json_reply(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -50,7 +59,7 @@ impl Route {
         match self {
             Self::Preview => preview(db, &selection),
             Self::Install => queue(path, username, &selection),
-            Self::Form => unreachable!("handled above"),
+            Self::Form | Self::Delete => unreachable!("handled above"),
         }
     }
 }
@@ -127,9 +136,30 @@ fn selection_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
         escape(&mut html, &row.get::<_, String>(1)?);
         html.push_str("</option>");
     }
-    html.push_str("</select></label></p><fieldset><legend>Appareils cibles</legend>");
+    html.push_str("</select></label></p>");
+    let next = device_checkboxes(db, number, &mut html)?;
+    html.push_str("<p><label><input type=\"checkbox\" name=\"wake_now\" value=\"1\"> Demander le redémarrage des appareils</label></p><button>Vérifier les cibles</button></form>");
+    pagination(&mut html, "/machines/bulk", number, next)?;
+    Ok(page("Déploiement Debian par lots", &html))
+}
+
+fn delete_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
+    let mut html = String::from(
+        r#"<nav><a href="/admin/devices">Appareils</a></nav>
+<p>La suppression retire les fiches sélectionnées et leurs historiques, même si une opération est en cours.</p>
+<form method="post" action="/machines/bulk-delete">"#,
+    );
+    let next = device_checkboxes(db, number, &mut html)?;
+    html.push_str(r#"<p><label>Saisissez SUPPRIMER <input name="confirm" required autocomplete="off"></label></p>
+<button>Supprimer les appareils sélectionnés</button></form>"#);
+    pagination(&mut html, "/machines/bulk-delete", number, next)?;
+    Ok(page("Suppression par lots", &html))
+}
+
+fn device_checkboxes(db: &Connection, number: u32, html: &mut String) -> Result<bool, ErrorBox> {
+    html.push_str("<fieldset><legend>Appareils cibles</legend>");
     let mut devices = db.prepare(
-        "SELECT id,COALESCE(NULLIF(hostname,''),mac) FROM machines ORDER BY id LIMIT 101 OFFSET ?",
+        "SELECT id,COALESCE(hostname,''),mac,status FROM machines ORDER BY id LIMIT 101 OFFSET ?",
     )?;
     let mut rows = devices.query([i64::from(number - 1) * 100])?;
     for _ in 0..100 {
@@ -139,25 +169,33 @@ fn selection_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
             "<p><label><input type=\"checkbox\" name=\"machine_ids[]\" value=\"{}\"> ",
             row.get::<_, i64>(0)?
         )?;
-        escape(&mut html, &row.get::<_, String>(1)?);
+        let hostname: String = row.get(1)?;
+        if !hostname.is_empty() {
+            escape(html, &hostname);
+            html.push_str(" · ");
+        }
+        escape(html, &row.get::<_, String>(2)?);
+        if removal::in_progress(&row.get::<_, String>(3)?) {
+            html.push_str(" · opération en cours");
+        }
         html.push_str("</label></p>");
     }
-    html.push_str("</fieldset><p><label><input type=\"checkbox\" name=\"wake_now\" value=\"1\"> Demander le redémarrage des appareils</label></p><button>Vérifier les cibles</button></form>");
+    html.push_str("</fieldset>");
+    Ok(rows.next()?.is_some())
+}
+
+fn pagination(html: &mut String, route: &str, number: u32, next: bool) -> std::fmt::Result {
     if number > 1 {
         write!(
             html,
-            "<a href=\"/machines/bulk?page={}\">Précédente</a> ",
+            "<a href=\"{route}?page={}\">Précédente</a> ",
             number - 1
         )?;
     }
-    if rows.next()?.is_some() && number < u32::MAX {
-        write!(
-            html,
-            "<a href=\"/machines/bulk?page={}\">Suivante</a>",
-            number + 1
-        )?;
+    if next && number < u32::MAX {
+        write!(html, "<a href=\"{route}?page={}\">Suivante</a>", number + 1)?;
     }
-    Ok(page("Déploiement Debian par lots", &html))
+    Ok(())
 }
 
 struct Plan {
