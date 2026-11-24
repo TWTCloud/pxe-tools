@@ -87,15 +87,18 @@ class PreseedInvariants(unittest.TestCase):
                              module_enabled='on', module_key='ssh-ed25519 AAAA test')
         self.assertIn('d-i pkgsel/include string curl iproute2 sudo openssh-server python3\n', output)
         self.assertNotIn('systemctl enable pxe-', output)
-        match = re.search(r'echo ([A-Za-z0-9+/=]+) \| base64 -d > /target/etc/systemd/system-generators/pxe-first-boot', output)
+        match = re.search(r"(?m)^\s+(/bin/sh -ec 'umask 077; [^'\n]+/pxe-first-boot' \|\| exit 1) ;", output)
         self.assertIsNotNone(match)
-        script = base64.b64decode(match[1])
         with tempfile.TemporaryDirectory(prefix='pxe-first-boot-') as tmp:
             root = Path(tmp)
-            generator = root / 'pxe-first-boot'
-            generator.write_bytes(script)
-            generated = root / 'generator'
-            subprocess.run(['sh', str(generator), str(generated)], check=True)
+            target = root / 'installed'
+            generator = target / 'etc/systemd/system-generators/pxe-first-boot'
+            install = match[1].replace('/target/', str(target) + '/')
+            subprocess.run(['sh', '-ec', install], check=True)
+            self.assertEqual(generator.stat().st_mode & 0o777, 0o700)
+            self.assertEqual([path for path in target.rglob('*') if path.is_file()], [generator])
+            generated = target / 'run/systemd/generator'
+            subprocess.run([str(generator), str(generated)], check=True)
             unit = generated / 'pxe-first-boot.service'
             self.assertIn('After=network-online.target ssh.service', unit.read_text())
             self.assertIn('Type=oneshot', unit.read_text())
@@ -117,15 +120,16 @@ printf '%s\n' "$RECEIPT"
                 ('accepted', 2, 0, 3), ('closed', 0, 0, 1), ('', 100, 1, 12),
             ):
                 with self.subTest(receipt=receipt):
-                    generator.write_bytes(script)
+                    subprocess.run(['sh', '-ec', install], check=True)
                     calls = root / 'calls'
                     calls.write_text('')
                     env = dict(os.environ, PATH=f'{tmp}:{os.environ["PATH"]}',
                                CALLS=str(calls), FAILURES=str(failures), RECEIPT=receipt)
-                    result = subprocess.run(['sh', str(generator), '--notify'], env=env, capture_output=True)
+                    result = subprocess.run([str(generator), '--notify'], env=env, capture_output=True)
                     self.assertEqual(result.returncode, expected_status)
                     self.assertEqual(len(calls.read_text().splitlines()), expected_calls)
                     self.assertFalse(generator.exists())
+                    self.assertFalse(any(path.is_file() for path in (target / 'etc').rglob('*')))
 
     def test_postboot_marks_completion_only_after_a_receipt(self):
         templates = ROOT / 'docker/worker/templates'
