@@ -143,13 +143,13 @@ if ($latestAnsibleStart > $latestAnsibleFinish) {
     unset($eventByCode['ansible_finished']);
 }
 
-// Une installation sans rôle Ansible se termine à la fin du debian-installer.
-// Les jalons de reboot et de post-installation ne font pas partie de cette
-// action ; leur observation reste dans l'historique de boot de la machine.
+// Pour une installation Debian seule, conserver les jalons du premier
+// démarrage quand l'installateur les annonce ou que le système les a confirmés.
 $installations = $subjobs['installations'] ?? [];
 $latestInstallation = $installations ? end($installations) : null;
 $ansibleSkipped = ($latestInstallation['ansible_status'] ?? null) === 'no_role'
     && in_array($actionType, ['install_only', 'reinstall'], true);
+$firstBootTracked = isset($eventByCode['os_first_boot_expected']) || isset($eventByCode['os_first_boot']);
 // Un ancien verdict d'échec ne peut pas décrire une installation devenue
 // réussie après retry, même si le ping final du retry a été perdu.
 if ($actionStatus === 'success'
@@ -158,8 +158,12 @@ if ($actionStatus === 'success'
     unset($eventByCode['ansible_finished']);
 }
 if ($ansibleSkipped) {
+    $skippedCodes = ['ansible_started', 'ansible_finished'];
+    if (!$firstBootTracked) {
+        array_push($skippedCodes, 'install_reboot_done', 'os_first_boot');
+    }
     $catalog = array_values(array_filter($catalog, static fn(array $entry): bool =>
-        $entry['phase'] !== 'post' && $entry['code'] !== 'install_reboot_done'
+        !in_array($entry['code'], $skippedCodes, true)
     ));
 }
 
@@ -184,7 +188,7 @@ foreach ($catalog as $i => $entry) {
 // actions existantes ; le script corrigé émet désormais le ping avant wipe-end.
 $inferredCompletion = $actionStatus === 'success' && $total > 0 && (
     ($actionType === 'wipe_only' && $reachedIndex === $total - 1)
-    || ($ansibleSkipped && ($latestInstallation['install_status'] ?? null) === 'success')
+    || ($ansibleSkipped && !$firstBootTracked && ($latestInstallation['install_status'] ?? null) === 'success')
     || (in_array($actionType, ['install_only', 'reinstall'], true)
         && ($latestInstallation['ansible_status'] ?? null) === 'success')
 );

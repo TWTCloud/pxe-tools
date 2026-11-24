@@ -455,6 +455,13 @@ final class PxeController
             Machine::setStatus((int)$m['id'], $machineStatus);
             if ($statusParam === 'success' && $installId !== null) {
                 Machine::setLocalBootSource((int)$m['id'], 'pxe');
+                if (($_POST['first_boot'] ?? null) === '1') {
+                    // Persist the expectation with install-end before the worker can see the queued installation.
+                    $pdo->prepare(
+                        'INSERT INTO machine_events (machine_id, level, message, checkpoint, action_id) VALUES (?, ?, ?, ?, ?)'
+                    )->execute([(int)$m['id'], MachineEvent::LEVEL_INFO, 'Confirmation du premier démarrage attendue',
+                        'os_first_boot_expected', (int)$action['id']]);
+                }
                 $fingerprint = $_POST['ssh_host_fingerprint'] ?? null;
                 if (is_string($fingerprint) && preg_match('/\ASHA256:[A-Za-z0-9+\/]{43}\z/', $fingerprint)) {
                     MachineEvent::log((int)$m['id'], MachineEvent::LEVEL_INFO,
