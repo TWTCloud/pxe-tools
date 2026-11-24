@@ -221,7 +221,7 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
     lan_identity=endpoint(lan) if uefi_image else None
     for name, boot, marker, timeout in (
         ('Discovery','n','PXE_NATIVE_DISCOVERY_OK',1500),
-        ('Installer','n','PXE_NATIVE_INSTALL_OK',3000),
+        ('Installer','n','PXE_NATIVE_INSTALL_OK',3900 if client_arch=='arm64' else 3000),
         ('First boot','c','PXE_NATIVE_FIRST_BOOT_OK',900),
     ):
         (root/'qemu-monitor.sock').unlink(missing_ok=True)

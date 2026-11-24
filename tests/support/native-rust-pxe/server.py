@@ -283,7 +283,9 @@ def follow(_root):
     machine, report = wait_for(inventory, 1200, "native inventory")
     action = schedule(machine, report)
     print("PXE_NATIVE_DISCOVERY_OK", flush=True)
-    wait_for(lambda: successful_install(action), 2400, "native install callback")
+    # A same-architecture runner without KVM uses TCG for the guest.
+    install_timeout = 3600 if EXPECTED_ARCH == "aarch64" else 2400
+    wait_for(lambda: successful_install(action), install_timeout, "native install callback")
     print("PXE_NATIVE_INSTALL_OK", flush=True)
     try:
         kernel = wait_for(lambda: first_boot(action), 900, "native first-boot checkpoint and HTTP acknowledgement")
