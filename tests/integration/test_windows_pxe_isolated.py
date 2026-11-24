@@ -104,16 +104,24 @@ def run_guest(client, lan, helper, root, media, case, *, discovery):
            '-device',f'ide-hd,drive=disk,bus=ide.0,serial={case["disk_serial"]},bootindex={disk_order}',
            *iso,'-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
            '-device',f'e1000e,netdev=lan,mac={MAC},bootindex={network_order}')
+    phase = 'WinPE deployment' if discovery else 'first Windows boot'
+    print(f'{phase} started on the isolated guest network.', flush=True)
 
     def completed():
         state = inspect(client)['State']
         if state['ExitCode'] != 0:
-            raise RuntimeError('Windows QEMU exited unexpectedly.')
+            errors = docker('logs','--tail','12',client,check=False).stderr.strip()
+            raise RuntimeError(f'{phase} QEMU process failed: {errors}')
+        receipts = count_receipts(root/serial)
+        if receipts > 1:
+            raise RuntimeError(f'{phase} produced duplicate receipts.')
+        if not state['Running'] and receipts == 0:
+            raise RuntimeError(f'{phase} shut down before producing a receipt.')
         if discovery:
-            return not state['Running'] and count_receipts(root/serial) == 1
-        return count_receipts(root/serial) == 1
+            return not state['Running'] and receipts == 1
+        return receipts == 1
 
-    wait_for(completed, 900, 'WinPE deployment shutdown' if discovery else 'first Windows boot receipt')
+    wait_for(completed, 900, phase)
     docker('rm','-f',client)
 
 
@@ -181,6 +189,9 @@ def main():
             }, transcript)
             print('Windows 11 first boot verified after isolated WinPE PXE with Secure Boot and TPM 2.0.',flush=True)
         finally:
+            summary = docker('exec',dhcp,'tail','-n','25','/tmp/windows-dhcp.log',check=False).stdout
+            if summary:
+                print(summary,end='',flush=True)
             for name in (client, app, dhcp, lan, tpm):
                 docker('rm','-fv',name,check=False)
             docker('image','rm',helper,check=False)
