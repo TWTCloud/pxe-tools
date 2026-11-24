@@ -11,6 +11,7 @@ fn main() {
     for (name, file) in [
         ("disk_guard_tpl", "disk-guard.sh"),
         ("dilog_tpl", "install-log.sh"),
+        ("firstBoot", "first-boot.sh"),
         ("host_script", "target-hostname.sh"),
         ("bond_script_tpl", "target-bond.sh"),
     ] {

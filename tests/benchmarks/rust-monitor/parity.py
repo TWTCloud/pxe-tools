@@ -503,12 +503,16 @@ def compare_install(ports, paths):
         assert "d-i pkgsel/include string openssh-server curl iproute2" in seed
         assert "--data 'first_boot=1'" in seed
         assert '--data-urlencode "ssh_host_fingerprint=$ssh_fingerprint"' in seed
-    assert "/etc/systemd/system-generators/pxe-first-boot" in decoded[0]
-    assert "systemctl enable pxe-postboot.service || exit 1" in decoded[1]
-    dependency = re.search(r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /etc/systemd/system/pxe-postboot.service.d/ready.conf", decoded[1])
-    assert base64.b64decode(dependency.group(1)) == (
-        b"[Unit]\nRequires=pxe-machine-ready.service\nAfter=pxe-machine-ready.service\n"
-    )
+    generator = r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /target/etc/systemd/system-generators/pxe-first-boot"
+    launchers = [base64.b64decode(re.search(generator, seed).group(1)) for seed in decoded]
+    assert launchers[0] == launchers[1]
+    assert b"Type=oneshot" in launchers[0]
+    assert b"After=network-online.target ssh.service" in launchers[0]
+    assert b"code=os_first_boot&ack=1" in launchers[0]
+    for seed in decoded:
+        assert "pxe-machine-ready.service" not in seed
+        assert "pxe-postboot.service" not in seed
+        assert "/pxe/postboot/" not in seed
     for seed in decoded:
         assert "Bearer " + token in seed and "$6$hidden" not in seed
         assert "services-select multiselect" in seed
