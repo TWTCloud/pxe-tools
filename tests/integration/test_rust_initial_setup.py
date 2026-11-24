@@ -522,6 +522,42 @@ def verify_preset_editor(client, database, authorization):
           flush=True)
 
 
+def verify_manual_preset_import(client, database, authorization):
+    route = '/presets/import'
+    assert client.request(route)[0] == 401
+    assert client.request(route,authorization=authorization)[0] == 200
+    plan = {'target_disks':['/dev/vda'],'disks':[{'path':'/dev/vda','partitions':[
+        {'id':'efi','fs':'efi','mount':'/boot/efi','size_mb':512},
+        {'id':'boot','fs':'ext4','mount':'/boot','size_mb':768},
+        {'id':'root','fs':'ext4','mount':'/','fill':True},
+    ]}]}
+    payload = {'name':'Imported EFI fixture','distro':'debian','variant':'debian','codename':'trixie',
+               'network_mode':'dhcp','partition_mode':'custom','partition_custom_json':plan,
+               'admin_user_login':'fixture','admin_user_pwhash':'$6$fixture','root_login_mode':'disabled'}
+
+    def upload(data, **kwargs):
+        return client.request(route,authorization=authorization,
+                              form={'preset_json_raw':json.dumps(data)},**kwargs)
+
+    assert upload(payload,origin='https://outside.example')[0] == 403
+    assert upload({**payload,'partition_custom_json':{}})[0] == 422
+    saved = upload(payload)
+    assert saved[0] == 303 and saved[1].startswith('/presets/'), saved
+    assert upload({**payload,'description':'Imported revision'})[:2] == saved[:2]
+    listing = client.request(saved[1]+'.json',authorization=authorization)
+    assert json.loads(listing[2])['partition_custom_json']['target_disks'] == ['/dev/vda']
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT description FROM presets WHERE name=?",[payload['name']]).fetchall() == [
+            ('Imported revision',),
+        ]
+        db.execute("INSERT INTO settings(key,value) VALUES('ansible_repo_profile','fixture.json') "
+                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+    assert upload({**payload,'ansible_role':'unverified'})[0] == 422
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("DELETE FROM settings WHERE key='ansible_repo_profile'")
+    print('Rust imported an advanced EFI plan from the console and preserved the repository role policy',flush=True)
+
+
 def verify_activity(client, database, authorization):
     with closing(sqlite3.connect(database)) as db, db:
         device = db.execute("INSERT INTO machines(mac,hostname) VALUES(?,?)",
@@ -2092,6 +2128,7 @@ def local(binary):
         verify_image_console(updated, database, authorization, public)
         verify_job_console(updated, database, authorization)
         verify_preset_editor(updated, database, authorization)
+        verify_manual_preset_import(updated, database, authorization)
         verify_activity(updated, database, authorization)
         replacement.terminate()
         replacement.wait(timeout=5)

@@ -19,7 +19,7 @@ use std::{
 };
 
 type ErrorBox = Box<dyn Error + Send + Sync>;
-const LIMIT: usize = 1024 * 1024;
+pub(crate) const LIMIT: usize = 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,10 +48,24 @@ pub(crate) fn run(config: &Path) -> Result<(), ErrorBox> {
     if request.repository_profile != php_trim(&crate::setting(&tx, "ansible_repo_profile")?) {
         return Err("Le profil du dépôt Ansible a changé pendant l’importation".into());
     }
-    let incoming = Value::Object(request.preset);
+    let (id, action, name) = ingest(
+        &tx,
+        &Value::Object(request.preset),
+        request.allowed_roles.as_deref(),
+    )?;
+    tx.commit()?;
+    println!("{}", json!({"action":action,"id":id,"name":name}));
+    Ok(())
+}
+
+pub(crate) fn ingest(
+    db: &Connection,
+    incoming: &Value,
+    roles: Option<&[String]>,
+) -> Result<(i64, &'static str, String), ErrorBox> {
     let name = php_string(&incoming["name"]);
     let name = php_trim(&name);
-    let existing: Option<(i64, String, String)> = tx
+    let existing: Option<(i64, String, String)> = db
         .query_row(
             "SELECT id,root_login_mode,variant FROM presets WHERE name=?1",
             [name],
@@ -65,14 +79,12 @@ pub(crate) fn run(config: &Path) -> Result<(), ErrorBox> {
         return Err("Ce modèle Proxmox VE historique est conservé en lecture seule.".into());
     }
     let payload = normalize(
-        &incoming,
+        incoming,
         existing.as_ref().map(|(_, mode, _)| mode.as_str()),
     )?;
-    validation::preset(&tx, &payload, request.allowed_roles.as_deref())?;
-    let (id, action) = persist(&tx, &payload, existing.map(|(id, _, _)| id))?;
-    tx.commit()?;
-    println!("{}", json!({"action":action,"id":id,"name":name}));
-    Ok(())
+    validation::preset(db, &payload, roles)?;
+    let (id, action) = persist(db, &payload, existing.map(|(id, _, _)| id))?;
+    Ok((id, action, name.to_owned()))
 }
 
 fn normalize(incoming: &Value, current_root: Option<&str>) -> Result<Map<String, Value>, ErrorBox> {

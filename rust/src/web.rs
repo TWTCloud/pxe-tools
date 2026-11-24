@@ -506,7 +506,7 @@ async fn dispatch(
             if parts.method == Method::DELETE {
                 Some(Bytes::new())
             } else {
-                match read_form(&parts.headers, body, 16384).await {
+                match read_form(&parts.headers, body, route.form_limit()).await {
                     Ok(form) => Some(form),
                     Err(reply) => return reply,
                 }

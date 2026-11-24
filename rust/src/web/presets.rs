@@ -26,6 +26,7 @@ pub(super) const GUIDED: &str = "distro='debian' AND variant='debian' AND networ
 #[derive(Clone, Copy)]
 pub(super) enum Route {
     New,
+    Import,
     Detail(i64),
     Snapshot(i64),
     Push(i64),
@@ -36,6 +37,9 @@ impl Route {
         let suffix = path.strip_prefix("/presets/")?;
         if suffix == "new" {
             return Some(Self::New);
+        }
+        if suffix == "import" {
+            return Some(Self::Import);
         }
         let parse = |part: &str| part.parse::<i64>().ok().filter(|id| *id > 0);
         if let Some(id) = suffix.strip_suffix(".json") {
@@ -50,10 +54,18 @@ impl Route {
     pub(super) fn allows(self, method: &Method) -> bool {
         match (self, method) {
             (Self::Push(_), &Method::POST) => true,
+            (Self::Import, &Method::POST) => true,
             (Self::Push(_), _) => false,
             (_, &Method::GET | &Method::HEAD) => true,
             (Self::Detail(_), &Method::PUT | &Method::POST | &Method::DELETE) => true,
             _ => false,
+        }
+    }
+    pub(super) fn form_limit(self) -> usize {
+        if matches!(self, Self::Import) {
+            3 * crate::preset_import::LIMIT + 32
+        } else {
+            16384
         }
     }
 }
@@ -67,6 +79,12 @@ pub(super) fn item(
 ) -> Result<Reply, ErrorBox> {
     let id = match route {
         Route::New => return Ok(page("Nouveau modèle Debian 13", create_form())),
+        Route::Import => {
+            return match form {
+                Some(body) => import(path, body),
+                None => Ok(import_form(None)),
+            }
+        }
         Route::Detail(id) | Route::Snapshot(id) | Route::Push(id) => id,
     };
     if matches!(route, Route::Snapshot(_)) {
@@ -149,7 +167,7 @@ pub(super) fn serve(
             number + 1
         )?;
     }
-    content.push_str(r#"<a href="/admin/devices">Appareils</a></nav>"#);
+    content.push_str(r#"<a href="/admin/devices">Appareils</a> · <a href="/presets/import">Importer un modèle JSON</a></nav>"#);
     if !crate::setting(db, "ansible_repo_url")?.trim().is_empty() {
         content.push_str(r#"<form method="post" action="/presets/pull-github"><button>Synchroniser depuis le dépôt Ansible</button></form>"#);
     }
@@ -167,6 +185,67 @@ fn create_form() -> &'static str {
 <p><label>Mot de passe <input type="password" name="password" minlength="12" maxlength="128" autocomplete="new-password" required></label></p>
 <p><label>Confirmation <input type="password" name="confirm" minlength="12" maxlength="128" autocomplete="new-password" required></label></p>
 <button>Créer le modèle</button></form>"#
+}
+
+fn import_form(problem: Option<&str>) -> Reply {
+    let mut html = String::from(r#"<p><a href="/presets">Liste des modèles</a></p>"#);
+    if let Some(message) = problem {
+        html.push_str("<p role=\"alert\">");
+        escape(&mut html, message);
+        html.push_str("</p>");
+    }
+    html.push_str(
+        r#"<form method="post" action="/presets/import"><label>Modèle JSON
+<textarea name="preset_json_raw" rows="18" cols="65" required></textarea></label>
+<p>Un modèle portant le même nom sera mis à jour.</p><button>Importer</button></form>"#,
+    );
+    let mut reply = page("Importer un modèle", &html);
+    if problem.is_some() {
+        *reply.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+    }
+    reply
+}
+
+fn import(path: &Path, body: &[u8]) -> Result<Reply, ErrorBox> {
+    let mut form = form_urlencoded::parse(body);
+    let payload = match (form.next(), form.next()) {
+        (Some((key, value)), None)
+            if key == "preset_json_raw" && value.len() <= crate::preset_import::LIMIT =>
+        {
+            serde_json::from_str::<Value>(&value)
+                .ok()
+                .filter(Value::is_object)
+        }
+        _ => None,
+    };
+    let Some(payload) = payload else {
+        return Ok(import_form(Some("Modèle JSON invalide ou trop volumineux")));
+    };
+    let name = payload["name"].as_str().unwrap_or_default().trim();
+    if !valid_profile_name(name) {
+        return Ok(import_form(Some("Le nom du modèle est requis")));
+    }
+    let mut db = connect(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // The repository worker supplies validated playbooks for scoped imports.
+    // A manually submitted document cannot provide those authorizations.
+    let id = match crate::preset_import::ingest(&tx, &payload, None) {
+        Ok((id, _, _)) => id,
+        Err(error) if error.is::<rusqlite::Error>() => return Err(error),
+        Err(error) => return Ok(import_form(Some(&error.to_string()))),
+    };
+    if repository_configured(&tx)? {
+        enqueue(
+            &tx,
+            &format!("preset:push_github:{id}"),
+            "Synchronisation du modèle demandée",
+        )?;
+    }
+    tx.commit()?;
+    Ok(redirect(StatusCode::SEE_OTHER, format!("{ROUTE}/{id}")))
 }
 
 fn detail(db: &Connection, id: i64) -> Result<Reply, ErrorBox> {
