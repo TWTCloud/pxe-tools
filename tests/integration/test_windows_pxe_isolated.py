@@ -79,6 +79,20 @@ def configure_instance(root, media):
             (root/'tftp'/name).chmod(0o644)
 
 
+def stage_boot_assets(root, media, case):
+    # WSL exposes the Windows drive with permissive metadata. Stage only the
+    # four HTTP files on the Linux filesystem where the service can verify
+    # their ownership and mode. The ISO remains on the same runner, read-only.
+    boot = root/'boot'
+    boot.mkdir(mode=0o755)
+    for name in ('wimboot','BCD','boot.sdi','boot.wim'):
+        target = boot/name
+        shutil.copyfile(media/'boot'/name,target)
+        target.chmod(0o444)
+    check_boot_assets(case, boot)
+    return boot
+
+
 def start_appliance(app, lan, probe, root, boot_assets):
     docker('run','-d','--name',app,'--network','container:'+lan,'--cap-add','NET_ADMIN','--cap-add','NET_RAW',
            '-e','PXE_WINPE_CLIENT_IP='+CLIENT,
@@ -109,7 +123,7 @@ def preflight():
     result = docker('run','--rm','-i','--network','none','--device','/dev/kvm',
                     '--entrypoint','qemu-system-x86_64',image,
                     '-machine','q35,accel=kvm','-cpu','host','-nodefaults','-display','none',
-                    '-S','-m','256','-qmp','stdio',input=qmp,check=False)
+                    '-S','-m','256','-qmp','stdio',input=qmp,check=False,timeout=30)
     if result.returncode or '"QMP"' not in result.stdout or '"return"' not in result.stdout:
         raise RuntimeError(f'The isolated runner could not start a KVM guest: {result.stderr.strip()}')
     print('QEMU opened a disposable nested KVM guest.',flush=True)
@@ -215,6 +229,7 @@ def main():
         root = Path(temporary)
         root.chmod(0o755)
         configure_instance(root,media)
+        boot_assets = stage_boot_assets(root, media, case)
         fixture = ('--mount',f'type=bind,src={root},dst=/fixture-data')
         try:
             build_windows_runner(helper)
@@ -238,7 +253,7 @@ def main():
                    '--dhcp-match=set:uefi,option:client-arch,9',
                    f'--dhcp-boot=tag:uefi,ipxe-shim.efi,,{DHCP}',
                    '--enable-tftp','--tftp-root=/pxe','--log-dhcp','--log-facility=/tmp/windows-dhcp.log')
-            start_appliance(app,lan,dhcp,root,media/'boot')
+            start_appliance(app,lan,dhcp,root,boot_assets)
             wait_for(lambda:(root/'tpm.sock').is_socket(), 30, 'disposable TPM socket')
             run_guest(client,lan,helper,root,media,case,discovery=True)
             print('The WinPE guest sent its receipt and requested a reboot.',flush=True)
