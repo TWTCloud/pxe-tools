@@ -200,7 +200,16 @@ RUN apt-get update && apt-get install --yes --no-install-recommends {firmware} p
     return helper
 
 
-def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None, uefi_image=None, raid_disk=False):
+def installer_bootloader_log(container):
+    data=docker('exec',container,'cat','/tmp/fixture-installer.log',check=False).stdout
+    messages=re.split(r'(?=<\d{1,3}>)|\n',data)
+    return '\n'.join(message for message in messages if re.search(
+        r'grub-(?:installer|install|efi)|efibootmgr|efivarfs',message,re.IGNORECASE,
+    ))[-9000:]
+
+
+def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None, uefi_image=None,
+                    raid_disk=False, installer_syslog=None):
     machine_arch='aarch64' if client_arch=='arm64' else 'x86_64'
     use_kvm=os.uname().machine==machine_arch and Path('/dev/kvm').is_char_device()
     if client_arch=='arm64' and os.uname().machine!=machine_arch:
@@ -252,13 +261,19 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
         print(name+' started on the isolated guest network', flush=True)
         wakeup=False
         next_screen=0.0
+        next_installer_log=0.0
 
         def completed():
-            nonlocal wakeup,next_screen,next_trace
+            nonlocal wakeup,next_screen,next_trace,next_installer_log
             state=inspect(client)['State']
             receipt=log.read_text()
             if 'Traceback (most recent call last)' in receipt:
                 raise RuntimeError('Rust server validation failed')
+            if name=='Installer' and installer_syslog and time.monotonic()>=next_installer_log:
+                next_installer_log=time.monotonic()+20
+                if re.search(r'main-menu.*(?:configuring|menu item).*grub-installer.*failed',
+                             installer_bootloader_log(installer_syslog),re.IGNORECASE):
+                    raise RuntimeError('Debian Installer reported a failure configuring GRUB')
             if access_log and time.monotonic() >= next_trace:
                 next_trace=time.monotonic()+20
                 access=docker('exec',*access_log[:1],'tail','-n','80',access_log[1],check=False).stdout
@@ -430,6 +445,8 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
             'ipv6.disable=1 netcfg/no_default_route=true netcfg/get_nameservers=192.0.2.2')
     if secure_boot or custom_partition:
         kernel += f' console=tty0 console={tty},115200n8'
+    if client_arch=='arm64':
+        kernel += ' log_host=192.0.2.2 log_port=5514'
     env=[
         'TFTP_ROOT='+tftp_root, 'HTTP_ROOT='+http_root,
         'PXE_DB_PATH=/var/lib/pxe-tools/stale.sqlite', 'WORKER_POLL_S=1', 'KERNEL_OPTS='+kernel,
@@ -522,6 +539,9 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s,"fixture_ar
            '--log-dhcp','--log-facility=/tmp/fixture-dhcp.log')
     docker('exec','-d',dhcp,'socat','TCP-LISTEN:80,bind=192.0.2.2,fork,reuseaddr',
            'UNIX-CONNECT:/fixture-data/mirror.sock')
+    if client_arch=='arm64':
+        docker('exec','-d',dhcp,'/bin/bash','-ec',
+               'exec socat -u UDP4-RECV:5514,bind=192.0.2.2,reuseaddr STDOUT >> /tmp/fixture-installer.log')
     wait_for(lambda:docker('exec',dhcp,'curl','-fsS','--max-time','3',
                            'http://192.0.2.2/debian/dists/trixie/InRelease',check=False).returncode==0,
              30,'fixture mirror inside isolated network')
@@ -673,7 +693,8 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s,"fixture_ar
            'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
     status=fixture/'native-status.log'
     wait_for(lambda:status.is_file() and 'PXE_NATIVE_READY' in status.read_text(),30,'packaged Rust fixture ready')
-    run_rust_guests(lan,client,root,status,screen_login=True,uefi_image=uefi_image,raid_disk=custom_partition)
+    run_rust_guests(lan,client,root,status,screen_login=True,uefi_image=uefi_image,raid_disk=custom_partition,
+                    installer_syslog=dhcp if client_arch=='arm64' else None)
     if custom_partition:
         if 'Custom GPT/RAID1 partition recipe verified from the installed guest' not in status.read_text():
             raise RuntimeError('Missing proof of the custom GPT/RAID1 recipe')
@@ -1056,6 +1077,12 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
             print('Only the disposable qcow2 disk and isolated bridge were used.',flush=True)
         except Exception:
             diagnostic_screen(root)
+            if packaged and client_arch=='arm64':
+                installer_log=installer_bootloader_log(dhcp)
+                if installer_log:
+                    installer_log=re.sub(r'https?://[^\s]+','[URL]',installer_log)
+                    installer_log=re.sub(r'[A-Za-z0-9+/=]{100,}','[encoded]',installer_log)
+                    print('ARM64 Debian Installer bootloader log:\n'+installer_log,flush=True)
             if packaged:
                 with sqlite3.connect(data/'chosen.sqlite') as db:
                     for label, query in (
