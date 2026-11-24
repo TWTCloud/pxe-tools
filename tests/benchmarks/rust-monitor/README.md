@@ -609,7 +609,10 @@ python3 tests/support/windows-pxe/cache-install-image.py \
 
 Après l’import, relancer la commande avec `--iso-sha256` et `--cache`
 suffit à retrouver et à contrôler l’image en cache. L’ISO n’est requise
-que pour le premier import et pour préparer un nouveau média WinPE.
+que pour le premier import. Pour préparer un autre média WinPE à partir
+du cache, remplacer `-WindowsIso` par `-CachedInstallImage` et
+`-CachedInstallImageSha256`, en conservant `-WindowsIsoSha256` pour la
+traçabilité de la source.
 
 Pour une installation depuis PXE Tools, passer également
 `-InstallImageUri http://<serveur>/pxe/windows/<identifiant>/install.wim`
