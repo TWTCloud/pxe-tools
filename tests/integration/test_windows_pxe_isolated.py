@@ -288,9 +288,9 @@ def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery)
         return not state['Running']
 
     try:
-        # Software emulation still wrote the Windows image at 40 minutes
-        # on a hosted runner. Keep each phase independently bounded.
-        timeout = (3900 if discovery else 1800) if accelerator=='tcg' else 900
+        # The hosted software emulator took 64 minutes to apply the image
+        # and Windows was still preparing at 30 minutes on the first boot.
+        timeout = (4500 if discovery else 3600) if accelerator=='tcg' else 900
         wait_for(completed, timeout, phase)
     except RuntimeError:
         diagnostic_screen(root)
@@ -300,10 +300,11 @@ def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery)
         docker('stop','-t','5',client,check=False)
         try:
             stage = read_efi_file(root,helper,'STAGE.LOG').strip()
-            if stage in {'apply-windows','prepare-first-boot','winpe-finished'}:
-                print(f'Last completed WinPE stage marker: {stage}',flush=True)
+            if stage in {'apply-windows','prepare-first-boot','winpe-finished',
+                         'windows-specialize','windows-finished'}:
+                print(f'Last guest stage marker: {stage}',flush=True)
         except subprocess.CalledProcessError:
-            print('No WinPE stage marker was recoverable from the fixture disk.',flush=True)
+            print('No guest stage marker was recoverable from the fixture disk.',flush=True)
         raise
     docker('rm','-f',client)
 

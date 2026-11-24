@@ -11,18 +11,7 @@ Set-StrictMode -Version Latest
 if (Test-Path -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\MiniNT') {
     throw 'This command requires the installed Windows fixture.'
 }
-$receipt = Join-Path $env:TEMP 'pxe-windows-receipt.log'
-& (Join-Path $PSScriptRoot 'pxe-collect.ps1') -GuestId $GuestId -DiskSerial $DiskSerial -ReceiptPath $receipt
 $prefix = 'PXE_TOOLS_WINDOWS '
-$started = Get-Content -LiteralPath $receipt -Raw
-if (-not $started.StartsWith($prefix)) {
-    throw 'Missing first-boot receipt.'
-}
-$windows = $started.Substring($prefix.Length) | ConvertFrom-Json
-if ($windows.phase -ne 'windows' -or -not $windows.system_disk_matches -or
-    -not $windows.secure_boot -or $windows.tpm_spec -ne '2.0') {
-    throw 'The installed fixture did not boot with the expected disk, Secure Boot and TPM 2.0.'
-}
 if (Test-Path -LiteralPath 'S:\') {
     throw 'The fixture EFI drive letter is already in use.'
 }
@@ -36,7 +25,21 @@ try {
         $winpe.disk_serial -cne $DiskSerial) {
         throw 'The EFI partition does not have the verified WinPE fixture identity.'
     }
+    $stage = 'S:\PXE-LAB\STAGE.LOG'
+    Set-Content -LiteralPath $stage -Value 'windows-specialize' -Encoding Ascii
+    $receipt = Join-Path $env:TEMP 'pxe-windows-receipt.log'
+    & (Join-Path $PSScriptRoot 'pxe-collect.ps1') -GuestId $GuestId -DiskSerial $DiskSerial -ReceiptPath $receipt
+    $started = Get-Content -LiteralPath $receipt -Raw
+    if (-not $started.StartsWith($prefix)) {
+        throw 'Missing first-boot receipt.'
+    }
+    $windows = $started.Substring($prefix.Length) | ConvertFrom-Json
+    if ($windows.phase -ne 'windows' -or -not $windows.system_disk_matches -or
+        -not $windows.secure_boot -or $windows.tpm_spec -ne '2.0') {
+        throw 'The installed fixture did not boot with the expected disk, Secure Boot and TPM 2.0.'
+    }
     Copy-Item -LiteralPath $receipt -Destination 'S:\PXE-LAB\WINDOWS.LOG'
+    Set-Content -LiteralPath $stage -Value 'windows-finished' -Encoding Ascii
 } finally {
     & mountvol.exe 'S:' '/d'
     if ($LASTEXITCODE -ne 0) { throw 'The EFI partition could not be unmounted.' }
