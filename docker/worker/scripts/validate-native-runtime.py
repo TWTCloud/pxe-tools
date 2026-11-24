@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import importlib.util
 import os
 from pathlib import Path
+import pwd
 import re
 import secrets
 import stat
@@ -102,7 +103,9 @@ def legacy_docker_tls(path):
                 return {}
             try:
                 info = os.fstat(directory)
-                if info.st_uid != 0 or info.st_mode & 0o022:
+                # The beta 12 image pre-created this directory as www-data.
+                # The certificate and key must still be protected root-owned files.
+                if info.st_uid not in (0, pwd.getpwnam('www-data').pw_uid) or info.st_mode & 0o022:
                     raise ValueError('legacy TLS directory is not protected')
                 return tls_material(directory)
             finally:
