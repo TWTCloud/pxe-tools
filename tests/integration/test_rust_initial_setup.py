@@ -769,6 +769,44 @@ echo json_encode(array_map([Admin\Models\Preset::class, 'toInstallConfig'], $pre
     print('Rust restored assigned preset snapshots with PHP parity and preserved existing machine snapshots', flush=True)
 
 
+def verify_legacy_netboot_migration(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-netboot-migration-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        config = root/'db.conf'
+        config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
+        http = root/'http'
+        netboot = http/'netboot'
+        legacy = netboot/'trixie'
+        installed = legacy/'amd64'
+        installed.mkdir(parents=True)
+        (legacy/'linux').write_bytes(b'local kernel')
+        (legacy/'firmware.cpio.gz').write_bytes(b'firmware')
+        (installed/'initrd.gz').write_bytes(b'initrd already moved')
+        outside = root/'outside'
+        (outside/'amd64').mkdir(parents=True)
+        (outside/'amd64/linux').write_bytes(b'external data')
+        (netboot/'other').symlink_to(outside, target_is_directory=True)
+        schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+        command = [str(binary),'--migrate-sqlite',str(config),str(http)]
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            db.executemany("INSERT INTO os_images(distro,version,arch,enabled) VALUES('debian',?,?,1)",
+                           [('trixie','arm64'),('trixie','amd64'),('other','amd64')])
+        for _ in range(2):
+            subprocess.run(command, check=True, capture_output=True)
+            with closing(sqlite3.connect(database)) as db:
+                assert db.execute('PRAGMA journal_mode').fetchone()==('wal',)
+                assert db.execute('SELECT status,size_bytes FROM os_images ORDER BY id').fetchall()==[
+                    ('pending',None),('downloaded',len(b'local kernelfirmwareinitrd already moved')),('pending',None),
+                ]
+        assert (installed/'linux').read_bytes()==b'local kernel' and not (legacy/'linux').exists()
+        assert (installed/'initrd.gz').read_bytes()==b'initrd already moved'
+        assert (outside/'amd64/linux').read_bytes()==b'external data'
+        assert not (legacy/'arm64').exists()
+    print('Rust resumed a legacy image move and kept external paths and other architectures untouched', flush=True)
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -831,6 +869,7 @@ def local(binary):
     verify_preset_distribution_migration(binary)
     verify_image_metadata_migration(binary)
     verify_assigned_preset_migration(binary)
+    verify_legacy_netboot_migration(binary)
 
 
 def main():

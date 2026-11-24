@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod netboot;
 mod snapshots;
 
+pub(super) use netboot::legacy_image_files;
 pub(super) use snapshots::assigned_presets;
 
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
@@ -61,6 +63,28 @@ pub fn network_settings(config: &Path) -> Result<(), Box<dyn Error + Send + Sync
 }
 
 const SCHEMA: &str = include_str!("../../app/db/schema.sqlite.sql");
+const DEBIAN_RELEASES: &[(u32, &str, &str, Option<&str>)] = &[
+    (12, "bookworm", "oldstable", Some("12.14.0")),
+    (13, "trixie", "stable", Some("13.5.0")),
+    (14, "forky", "testing", None),
+];
+
+pub fn upgrade(config: &Path, http: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
+    schema(config)?;
+    let path = crate::configured_database(config).ok_or("Existing SQLite database required")?;
+    crate::connect(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?
+    .pragma_update(None, "journal_mode", "WAL")?;
+    preset_network(config)?;
+    assigned_presets(config)?;
+    network_settings(config)?;
+    image_metadata(config)?;
+    legacy_image_files(config, http)?;
+    preset_distributions(config)?;
+    netboot::current_debian_images(config)
+}
 
 // Keep the historical ALTER defaults, including the legacy enabled root
 // login. The current schema supplies the defaults for newly created databases.
@@ -444,11 +468,7 @@ pub fn image_metadata(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>>
     )?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Classify the codenames assigned to Debian images in the pre-v2 catalog.
-    for (major, codename, channel) in [
-        (12, "bookworm", "oldstable"),
-        (13, "trixie", "stable"),
-        (14, "forky", "testing"),
-    ] {
+    for &(major, codename, channel, _) in DEBIAN_RELEASES {
         tx.execute(
             "UPDATE os_images SET codename=?1,major=?2
              WHERE distro='debian' AND version=?1 AND (codename IS NULL OR codename='')",

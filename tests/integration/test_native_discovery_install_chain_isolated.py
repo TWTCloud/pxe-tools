@@ -426,6 +426,10 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         (ROOT/'tests/support/native-rust-pxe/server.py','/fixture-data/rust-server.py'),
     ):
         mounts.extend(('--mount',f'type=bind,src={source},dst={target}'))
+    legacy_migration = '/usr/lib/pxe-tools/app/db/migrate.php' if native else '/app/db/migrate.php'
+    forbidden_migration = root/'forbidden-migration.php'
+    forbidden_migration.write_text('<?php exit(89);\n')
+    mounts.extend(('--mount',f'type=bind,src={forbidden_migration},dst={legacy_migration},readonly'))
 
     if client_arch=='arm64':
         env.append('PXE_ARM64_SECURE_BOOT=1')

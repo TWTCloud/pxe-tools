@@ -215,15 +215,7 @@ impl ImageKey {
     fn available(&self, root: &Path) -> Result<bool, ErrorBox> {
         let mut path = root.join("netboot");
         let mut push = |component: &str| -> Result<(), ErrorBox> {
-            if !component
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_alphanumeric)
-                || component.contains("..")
-                || !component
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-            {
+            if !safe_netboot_component(component) {
                 return Err("Invalid netboot image path".into());
             }
             path.push(component);
@@ -249,4 +241,15 @@ impl ImageKey {
                 .is_ok_and(|info| info.is_file() && info.len() > 0)
         }))
     }
+}
+
+pub(crate) fn safe_netboot_component(component: &str) -> bool {
+    component
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphanumeric)
+        && !component.contains("..")
+        && component
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }

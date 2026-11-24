@@ -97,85 +97,69 @@ function isLegacyPartitionsJson(?string $raw): bool {
     return array_is_list($d);
 }
 
-$rustGuided = $driver === 'sqlite' && getenv('PXE_RUST_GUIDED') === '1';
-$runsRustMigration = static function (string $operation): void {
-    $process = proc_open(
-        ['/usr/lib/pxe-tools/pxe-tools-rust', $operation, '/etc/pxe-tools/db.conf'],
-        [0 => ['file', '/dev/null', 'r'], 1 => STDOUT, 2 => STDERR],
-        $pipes
-    );
-    if (!is_resource($process) || proc_close($process) !== 0) {
-        fwrite(STDERR, "Migration SQLite Rust refusée.\n");
+// Avant toute modification, refuser les données que cette migration ne peut
+// pas convertir sans perte. Une sauvegarde et un outil dédié sont nécessaires.
+foreach (['partition_target_disk', 'partition_lvm_vg'] as $column) {
+    if (Db::columnExists('presets', $column)) {
+        fwrite(STDERR, "Migration refusée : colonnes historiques de partition à examiner.\n");
         exit(2);
     }
-};
-if ($rustGuided) {
-    $runsRustMigration('--migrate-schema');
-} else {
-    // Avant toute modification, refuser les données que cette migration ne peut
-    // pas convertir sans perte. Une sauvegarde et un outil dédié sont nécessaires.
-    foreach (['partition_target_disk', 'partition_lvm_vg'] as $column) {
-        if (Db::columnExists('presets', $column)) {
-            fwrite(STDERR, "Migration refusée : colonnes historiques de partition à examiner.\n");
-            exit(2);
+}
+$legacyModes = ['atomic_lvm', 'home_separate', 'var_separate', 'encrypted'];
+foreach ($pdo->query('SELECT partition_mode, partition_custom_json FROM presets')->fetchAll(PDO::FETCH_ASSOC) as $preset) {
+    if (in_array($preset['partition_mode'], $legacyModes, true) || isLegacyPartitionsJson($preset['partition_custom_json'])) {
+        fwrite(STDERR, "Migration refusée : recette de partition historique à examiner.\n");
+        exit(2);
+    }
+}
+foreach ($pdo->query('SELECT install_config_json FROM machines WHERE install_config_json IS NOT NULL')->fetchAll(PDO::FETCH_COLUMN) as $rawConfig) {
+    $config = json_decode((string)$rawConfig, true);
+    if (!is_array($config)) continue;
+    $partitions = $config['partition_custom_json'] ?? null;
+    if (in_array($config['partition_mode'] ?? null, $legacyModes, true)
+        || (is_string($partitions) && isLegacyPartitionsJson($partitions))
+        || (is_array($partitions) && array_is_list($partitions))) {
+        fwrite(STDERR, "Migration refusée : configuration machine historique à examiner.\n");
+        exit(2);
+    }
+}
+$keyQ = Db::quoteIdent('key');
+$sensitiveLegacy = (int)$pdo->query("SELECT COUNT(*) FROM settings WHERE $keyQ IN ('ansible_vault_password', 'ansible_vault_applied_hash')")->fetchColumn();
+if ($sensitiveLegacy > 0) {
+    fwrite(STDERR, "Migration refusée : anciennes données sensibles à traiter séparément.\n");
+    exit(2);
+}
+$legacyDhcp = $pdo->query("SELECT value FROM settings WHERE $keyQ='dhcp_mode'")->fetchColumn();
+if ($legacyDhcp !== false && !in_array($legacyDhcp, ['proxy', 'tftp_only'], true)) {
+    fwrite(STDERR, "Migration refusée : ancien mode réseau non reconnu.\n");
+    exit(2);
+}
+// Refuse populated tables outside the current core schema. They may contain
+// independently managed data that this edition cannot safely migrate or delete.
+// Empty unknown tables are left untouched. A future module registry must make
+// module-owned tables explicit before this conservative guard can be relaxed.
+$schemaFile = __DIR__ . '/schema.' . ($driver === 'sqlite' ? 'sqlite' : 'mysql') . '.sql';
+$schema = @file_get_contents($schemaFile);
+if ($schema === false || !preg_match_all('/^[ \t]*CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([a-zA-Z_][a-zA-Z0-9_]*)/mi', $schema, $matches)) {
+    fwrite(STDERR, "Migration refusée : schéma de référence indisponible.\n");
+    exit(2);
+}
+$coreTables = array_fill_keys($matches[1], true);
+try {
+    $tableQuery = $driver === 'sqlite'
+        ? "SELECT name FROM sqlite_master WHERE type='table' AND substr(name, 1, 7) <> 'sqlite_'"
+        : "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE'";
+    $tables = $pdo->query($tableQuery)->fetchAll(PDO::FETCH_COLUMN);
+    foreach ($tables as $table) {
+        if (isset($coreTables[(string)$table])) continue;
+        $quoted = Db::quoteIdent((string)$table);
+        if ($pdo->query("SELECT 1 FROM $quoted LIMIT 1")->fetchColumn() !== false) {
+            throw new RuntimeException('unmanaged populated table');
         }
     }
-    $legacyModes = ['atomic_lvm', 'home_separate', 'var_separate', 'encrypted'];
-    foreach ($pdo->query('SELECT partition_mode, partition_custom_json FROM presets')->fetchAll(PDO::FETCH_ASSOC) as $preset) {
-        if (in_array($preset['partition_mode'], $legacyModes, true) || isLegacyPartitionsJson($preset['partition_custom_json'])) {
-            fwrite(STDERR, "Migration refusée : recette de partition historique à examiner.\n");
-            exit(2);
-        }
-    }
-    foreach ($pdo->query('SELECT install_config_json FROM machines WHERE install_config_json IS NOT NULL')->fetchAll(PDO::FETCH_COLUMN) as $rawConfig) {
-        $config = json_decode((string)$rawConfig, true);
-        if (!is_array($config)) continue;
-        $partitions = $config['partition_custom_json'] ?? null;
-        if (in_array($config['partition_mode'] ?? null, $legacyModes, true)
-            || (is_string($partitions) && isLegacyPartitionsJson($partitions))
-            || (is_array($partitions) && array_is_list($partitions))) {
-            fwrite(STDERR, "Migration refusée : configuration machine historique à examiner.\n");
-            exit(2);
-        }
-    }
-    $keyQ = Db::quoteIdent('key');
-    $sensitiveLegacy = (int)$pdo->query("SELECT COUNT(*) FROM settings WHERE $keyQ IN ('ansible_vault_password', 'ansible_vault_applied_hash')")->fetchColumn();
-    if ($sensitiveLegacy > 0) {
-        fwrite(STDERR, "Migration refusée : anciennes données sensibles à traiter séparément.\n");
-        exit(2);
-    }
-    $legacyDhcp = $pdo->query("SELECT value FROM settings WHERE $keyQ='dhcp_mode'")->fetchColumn();
-    if ($legacyDhcp !== false && !in_array($legacyDhcp, ['proxy', 'tftp_only'], true)) {
-        fwrite(STDERR, "Migration refusée : ancien mode réseau non reconnu.\n");
-        exit(2);
-    }
-    // Refuse populated tables outside the current core schema. They may contain
-    // independently managed data that this edition cannot safely migrate or delete.
-    // Empty unknown tables are left untouched. A future module registry must make
-    // module-owned tables explicit before this conservative guard can be relaxed.
-    $schemaFile = __DIR__ . '/schema.' . ($driver === 'sqlite' ? 'sqlite' : 'mysql') . '.sql';
-    $schema = @file_get_contents($schemaFile);
-    if ($schema === false || !preg_match_all('/^[ \t]*CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([a-zA-Z_][a-zA-Z0-9_]*)/mi', $schema, $matches)) {
-        fwrite(STDERR, "Migration refusée : schéma de référence indisponible.\n");
-        exit(2);
-    }
-    $coreTables = array_fill_keys($matches[1], true);
-    try {
-        $tableQuery = $driver === 'sqlite'
-            ? "SELECT name FROM sqlite_master WHERE type='table' AND substr(name, 1, 7) <> 'sqlite_'"
-            : "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE'";
-        $tables = $pdo->query($tableQuery)->fetchAll(PDO::FETCH_COLUMN);
-        foreach ($tables as $table) {
-            if (isset($coreTables[(string)$table])) continue;
-            $quoted = Db::quoteIdent((string)$table);
-            if ($pdo->query("SELECT 1 FROM $quoted LIMIT 1")->fetchColumn() !== false) {
-                throw new RuntimeException('unmanaged populated table');
-            }
-        }
-    } catch (Throwable $error) {
-        fwrite(STDERR, "Migration refusée : données externes ou tables non reconnues à examiner séparément.\n");
-        exit(2);
-    }
+} catch (Throwable $error) {
+    fwrite(STDERR, "Migration refusée : données externes ou tables non reconnues à examiner séparément.\n");
+    exit(2);
 }
 if ($driver === 'sqlite') {
     $pdo->exec('PRAGMA journal_mode = WAL');
@@ -184,43 +168,39 @@ if ($driver === 'sqlite') {
 // ---------------------------------------------------------------------------
 // 1. Presets : netmask / DNS / partition_mode legacy
 // ---------------------------------------------------------------------------
-if ($rustGuided) {
-    $runsRustMigration('--migrate-preset-network');
-} else {
-    $rows = $pdo->query('SELECT id, static_netmask, static_cidr, static_dns, partition_mode, partition_custom_json FROM presets')->fetchAll(PDO::FETCH_ASSOC);
-    $migrated = 0;
+$rows = $pdo->query('SELECT id, static_netmask, static_cidr, static_dns, partition_mode, partition_custom_json FROM presets')->fetchAll(PDO::FETCH_ASSOC);
+$migrated = 0;
 
-    foreach ($rows as $row) {
-        $updates = [];
-        $params  = [];
+foreach ($rows as $row) {
+    $updates = [];
+    $params  = [];
 
-        if ($row['static_cidr'] === null && !empty($row['static_netmask'])) {
-            $cidr = netmaskToCidr($row['static_netmask']);
-            if ($cidr !== null) {
-                $updates[] = 'static_cidr = ?';
-                $params[]  = $cidr;
-            }
-        }
-
-        $dns = $row['static_dns'];
-        if ($dns !== null && $dns !== '') {
-            $decoded = json_decode((string)$dns, true);
-            if (!is_array($decoded)) {
-                $updates[] = 'static_dns = ?';
-                $params[]  = normalizeDns($dns);
-            }
-        }
-
-        if (!empty($updates)) {
-            $params[] = $row['id'];
-            $sql = 'UPDATE presets SET ' . implode(', ', $updates) . ' WHERE id = ?';
-            $pdo->prepare($sql)->execute($params);
-            $migrated++;
+    if ($row['static_cidr'] === null && !empty($row['static_netmask'])) {
+        $cidr = netmaskToCidr($row['static_netmask']);
+        if ($cidr !== null) {
+            $updates[] = 'static_cidr = ?';
+            $params[]  = $cidr;
         }
     }
 
-    echo "migrate-presets: $migrated row(s) updated, " . count($rows) . " total\n";
+    $dns = $row['static_dns'];
+    if ($dns !== null && $dns !== '') {
+        $decoded = json_decode((string)$dns, true);
+        if (!is_array($decoded)) {
+            $updates[] = 'static_dns = ?';
+            $params[]  = normalizeDns($dns);
+        }
+    }
+
+    if (!empty($updates)) {
+        $params[] = $row['id'];
+        $sql = 'UPDATE presets SET ' . implode(', ', $updates) . ' WHERE id = ?';
+        $pdo->prepare($sql)->execute($params);
+        $migrated++;
+    }
 }
+
+echo "migrate-presets: $migrated row(s) updated, " . count($rows) . " total\n";
 
 // Les anciennes colonnes et configurations de partition restent intactes.
 
@@ -233,28 +213,24 @@ if ($rustGuided) {
 // nouveaux champs avancés, créant des snapshots legacy qui fallback bait au
 // mode 'enabled' même si le preset était 'disabled'.
 
-if ($rustGuided) {
-    $runsRustMigration('--migrate-assigned-presets');
-} else {
-    $snapshotsCreated = 0;
-    $machineRowsToSnapshot = $pdo->query(
-        'SELECT m.id, m.preset_id, m.install_config_json, p.* '
-      . 'FROM machines m LEFT JOIN presets p ON m.preset_id = p.id '
-      . 'WHERE m.preset_id IS NOT NULL '
-      . 'AND (m.install_config_json IS NULL OR m.install_config_json = "")'
-    )->fetchAll(PDO::FETCH_ASSOC);
+$snapshotsCreated = 0;
+$machineRowsToSnapshot = $pdo->query(
+    'SELECT m.id, m.preset_id, m.install_config_json, p.* '
+  . 'FROM machines m LEFT JOIN presets p ON m.preset_id = p.id '
+  . 'WHERE m.preset_id IS NOT NULL '
+  . 'AND (m.install_config_json IS NULL OR m.install_config_json = "")'
+)->fetchAll(PDO::FETCH_ASSOC);
 
-    foreach ($machineRowsToSnapshot as $mrow) {
-        if (empty($mrow['preset_id']) || empty($mrow['name'])) continue;
-        $config = Preset::toInstallConfig($mrow);
-        $json = json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        $pdo->prepare('UPDATE machines SET install_config_json = ? WHERE id = ?')
-            ->execute([$json, $mrow['id']]);
-        $snapshotsCreated++;
-    }
-
-    echo "migrate-machines: $snapshotsCreated snapshot(s) créé(s) depuis preset assigné\n";
+foreach ($machineRowsToSnapshot as $mrow) {
+    if (empty($mrow['preset_id']) || empty($mrow['name'])) continue;
+    $config = Preset::toInstallConfig($mrow);
+    $json = json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $pdo->prepare('UPDATE machines SET install_config_json = ? WHERE id = ?')
+        ->execute([$json, $mrow['id']]);
+    $snapshotsCreated++;
 }
+
+echo "migrate-machines: $snapshotsCreated snapshot(s) créé(s) depuis preset assigné\n";
 
 // ---------------------------------------------------------------------------
 // 5. ALTER TABLE idempotents — back-compat upgrades SQLite legacy
@@ -265,52 +241,48 @@ if (!Db::columnExists('init_jobs', 'updated_at')) {
     echo "migrate-init: added init_jobs.updated_at column (heartbeat watchdog)\n";
 }
 
-if ($rustGuided) {
-    $runsRustMigration('--migrate-network-settings');
+// Sentinel wizard_completed : ne pose '0' QUE si la row n'existe pas.
+// Bug historique : Db::upsert faisait ON CONFLICT DO UPDATE value=excluded
+// → écrasait la valeur '1' à chaque restart container → wizard re-déclenché
+// après chaque deploy. Maintenant : check d'existence + INSERT seulement
+// si absent → la value '1' posée par un /init/complete précédent est
+// préservée à travers les restarts.
+$keyQ = Db::quoteIdent('key');
+$exists = (int)$pdo->query("SELECT COUNT(*) FROM settings WHERE $keyQ='wizard_completed'")->fetchColumn();
+if ($exists === 0) {
+    $pdo->prepare("INSERT INTO settings ($keyQ, value) VALUES ('wizard_completed', '0')")->execute();
+    echo "migrate-auth: settings.wizard_completed sentinel posed (initial)\n";
 } else {
-    // Sentinel wizard_completed : ne pose '0' QUE si la row n'existe pas.
-    // Bug historique : Db::upsert faisait ON CONFLICT DO UPDATE value=excluded
-    // → écrasait la valeur '1' à chaque restart container → wizard re-déclenché
-    // après chaque deploy. Maintenant : check d'existence + INSERT seulement
-    // si absent → la value '1' posée par un /init/complete précédent est
-    // préservée à travers les restarts.
-    $keyQ = Db::quoteIdent('key');
-    $exists = (int)$pdo->query("SELECT COUNT(*) FROM settings WHERE $keyQ='wizard_completed'")->fetchColumn();
-    if ($exists === 0) {
-        $pdo->prepare("INSERT INTO settings ($keyQ, value) VALUES ('wizard_completed', '0')")->execute();
-        echo "migrate-auth: settings.wizard_completed sentinel posed (initial)\n";
-    } else {
-        echo "migrate-auth: settings.wizard_completed sentinel already present (kept)\n";
-    }
+    echo "migrate-auth: settings.wizard_completed sentinel already present (kept)\n";
+}
 
-    // ---------------------------------------------------------------------------
-    // 5bis. Renommage settings.orchestrator_ip → pxe_ip (rename 2026-05-12)
-    // ---------------------------------------------------------------------------
-    // Recopier l'ancienne valeur si nécessaire, sans supprimer l'originale.
-    $keyQ = Db::quoteIdent('key');
-    $oldIp = $pdo->query("SELECT value FROM settings WHERE $keyQ='orchestrator_ip'")->fetchColumn();
-    $newIp = $pdo->query("SELECT value FROM settings WHERE $keyQ='pxe_ip'")->fetchColumn();
-    if ($oldIp !== false && $newIp === false) {
-        $pdo->prepare("INSERT INTO settings ($keyQ, value) VALUES ('pxe_ip', ?)")->execute([$oldIp]);
-        echo "migrate-settings: copied the previous server setting\n";
-    } elseif ($oldIp !== false && $newIp !== false) {
-        echo "migrate-settings: both server settings retained\n";
-    }
+// ---------------------------------------------------------------------------
+// 5bis. Renommage settings.orchestrator_ip → pxe_ip (rename 2026-05-12)
+// ---------------------------------------------------------------------------
+// Recopier l'ancienne valeur si nécessaire, sans supprimer l'originale.
+$keyQ = Db::quoteIdent('key');
+$oldIp = $pdo->query("SELECT value FROM settings WHERE $keyQ='orchestrator_ip'")->fetchColumn();
+$newIp = $pdo->query("SELECT value FROM settings WHERE $keyQ='pxe_ip'")->fetchColumn();
+if ($oldIp !== false && $newIp === false) {
+    $pdo->prepare("INSERT INTO settings ($keyQ, value) VALUES ('pxe_ip', ?)")->execute([$oldIp]);
+    echo "migrate-settings: copied the previous server setting\n";
+} elseif ($oldIp !== false && $newIp !== false) {
+    echo "migrate-settings: both server settings retained\n";
+}
 
-    // ---------------------------------------------------------------------------
-    // 6. Renommage settings.dhcp_mode → dhcp_proxy_enabled (mai 2026)
-    // ---------------------------------------------------------------------------
-    $old = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='dhcp_mode'")->fetchColumn();
-    $new = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='dhcp_proxy_enabled'")->fetchColumn();
-    if ($old !== false && $new === false) {
-        $mapped = ($old === 'proxy') ? 'on' : 'off';
-        $pdo->prepare(
-            "INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('dhcp_proxy_enabled', ?)"
-        )->execute([$mapped]);
-        echo "migrate-settings: copied the previous network mode\n";
-    } elseif ($old !== false && $new !== false) {
-        echo "migrate-settings: both network settings retained\n";
-    }
+// ---------------------------------------------------------------------------
+// 6. Renommage settings.dhcp_mode → dhcp_proxy_enabled (mai 2026)
+// ---------------------------------------------------------------------------
+$old = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='dhcp_mode'")->fetchColumn();
+$new = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='dhcp_proxy_enabled'")->fetchColumn();
+if ($old !== false && $new === false) {
+    $mapped = ($old === 'proxy') ? 'on' : 'off';
+    $pdo->prepare(
+        "INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('dhcp_proxy_enabled', ?)"
+    )->execute([$mapped]);
+    echo "migrate-settings: copied the previous network mode\n";
+} elseif ($old !== false && $new !== false) {
+    echo "migrate-settings: both network settings retained\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -408,45 +380,41 @@ if ($driver !== 'mysql') {
 }
 echo "migrate-images: catalog_entries table ensured (v2)\n";
 
-if ($rustGuided) {
-    $runsRustMigration('--migrate-image-metadata');
-} else {
-    // Backfill version_full + codename + major depuis DebianCatalog::MAPPING (v2)
-    foreach (DebianCatalog::MAPPING as $major => $meta) {
-        $cn = $meta['codename'] ?? null;
-        if ($cn === null) continue;
-        $pdo->prepare(
-            "UPDATE os_images SET codename = ?, major = ? "
-          . "WHERE distro = 'debian' AND version = ? AND (codename IS NULL OR codename = '')"
-        )->execute([$cn, $major, $cn]);
-    }
-    // version_full = COALESCE(minor_version, version || '.0') pour rows debian existantes
-    $pdo->exec(
-        "UPDATE os_images SET version_full = minor_version "
-      . "WHERE distro = 'debian' AND minor_version IS NOT NULL AND minor_version != '' "
-      . "AND (version_full IS NULL OR version_full = '')"
-    );
-    echo "migrate-images: backfilled v2 columns (codename, major, version_full)\n";
-
-    // Les images et leurs fichiers sont conservés, même si une version n'est plus
-    // proposée dans le catalogue. Leur suppression doit être une action explicite.
-
-    // v2 : suppression des pre-seeds Debian. Le catalogue commence vide ; l'admin
-    // ajoute des images via le picker (/settings/images/add). Les rows existantes
-    // sur les déploiements v1 sont préservées (pas de DELETE), juste plus de
-    // re-création automatique au démarrage.
-
-    // Backfill channel depuis DebianCatalog::MAPPING (pour rows v1 préservées).
-    foreach (DebianCatalog::MAPPING as $major => $meta) {
-        $codename = $meta['codename'] ?? null;
-        if ($codename === null) continue;
-        $pdo->prepare(
-            "UPDATE os_images SET channel = ? "
-          . "WHERE distro = 'debian' AND version = ? AND (channel IS NULL OR channel = '')"
-        )->execute([$meta['channel'], $codename]);
-    }
-    echo "migrate-images: backfilled channel from DebianCatalog::MAPPING (rétro-compat v1 rows)\n";
+// Backfill version_full + codename + major depuis DebianCatalog::MAPPING (v2)
+foreach (DebianCatalog::MAPPING as $major => $meta) {
+    $cn = $meta['codename'] ?? null;
+    if ($cn === null) continue;
+    $pdo->prepare(
+        "UPDATE os_images SET codename = ?, major = ? "
+      . "WHERE distro = 'debian' AND version = ? AND (codename IS NULL OR codename = '')"
+    )->execute([$cn, $major, $cn]);
 }
+// version_full = COALESCE(minor_version, version || '.0') pour rows debian existantes
+$pdo->exec(
+    "UPDATE os_images SET version_full = minor_version "
+  . "WHERE distro = 'debian' AND minor_version IS NOT NULL AND minor_version != '' "
+  . "AND (version_full IS NULL OR version_full = '')"
+);
+echo "migrate-images: backfilled v2 columns (codename, major, version_full)\n";
+
+// Les images et leurs fichiers sont conservés, même si une version n'est plus
+// proposée dans le catalogue. Leur suppression doit être une action explicite.
+
+// v2 : suppression des pre-seeds Debian. Le catalogue commence vide ; l'admin
+// ajoute des images via le picker (/settings/images/add). Les rows existantes
+// sur les déploiements v1 sont préservées (pas de DELETE), juste plus de
+// re-création automatique au démarrage.
+
+// Backfill channel depuis DebianCatalog::MAPPING (pour rows v1 préservées).
+foreach (DebianCatalog::MAPPING as $major => $meta) {
+    $codename = $meta['codename'] ?? null;
+    if ($codename === null) continue;
+    $pdo->prepare(
+        "UPDATE os_images SET channel = ? "
+      . "WHERE distro = 'debian' AND version = ? AND (channel IS NULL OR channel = '')"
+    )->execute([$meta['channel'], $codename]);
+}
+echo "migrate-images: backfilled channel from DebianCatalog::MAPPING (rétro-compat v1 rows)\n";
 
 // Migration layout legacy /netboot/<version>/ → /netboot/<version>/<arch>/
 $httpRoot = '/srv/http';
@@ -483,40 +451,38 @@ foreach ($rows as $row) {
 // ---------------------------------------------------------------------------
 // 8. Spec F — Ansible optionnel + sentinel par défaut
 // ---------------------------------------------------------------------------
-if (!$rustGuided) {
-    $repoUrl = trim((string)(getenv('ANSIBLE_REPO_URL') ?: ''));
-    if ($repoUrl !== '') {
-        $existingRepo = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_repo_url'")->fetchColumn();
-        if ($existingRepo === false) {
-            $pdo->prepare("INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_repo_url', ?)")
-                ->execute([$repoUrl]);
-            echo "migrate-ansible: ansible_repo_url initialisé depuis l'environnement\n";
-        } elseif (trim((string)$existingRepo) === '') {
-            $pdo->prepare("UPDATE settings SET value=? WHERE " . Db::quoteIdent('key') . "='ansible_repo_url'")
-                ->execute([$repoUrl]);
-        }
+$repoUrl = trim((string)(getenv('ANSIBLE_REPO_URL') ?: ''));
+if ($repoUrl !== '') {
+    $existingRepo = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_repo_url'")->fetchColumn();
+    if ($existingRepo === false) {
+        $pdo->prepare("INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_repo_url', ?)")
+            ->execute([$repoUrl]);
+        echo "migrate-ansible: ansible_repo_url initialisé depuis l'environnement\n";
+    } elseif (trim((string)$existingRepo) === '') {
+        $pdo->prepare("UPDATE settings SET value=? WHERE " . Db::quoteIdent('key') . "='ansible_repo_url'")
+            ->execute([$repoUrl]);
     }
-    $envPubkey = trim((string)(getenv('ANSIBLE_SSH_PUBKEY') ?: ''));
-    if ($envPubkey !== '') {
-        $existingPubkey = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")->fetchColumn();
-        if ($existingPubkey === false) {
-            $pdo->prepare("INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_ssh_pubkey', ?)")
-                ->execute([$envPubkey]);
-            echo "migrate-ansible: clé publique initialisée depuis l'environnement\n";
-        } elseif (trim((string)$existingPubkey) === '') {
-            $pdo->prepare("UPDATE settings SET value=? WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")
-                ->execute([$envPubkey]);
-        }
+}
+$envPubkey = trim((string)(getenv('ANSIBLE_SSH_PUBKEY') ?: ''));
+if ($envPubkey !== '') {
+    $existingPubkey = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")->fetchColumn();
+    if ($existingPubkey === false) {
+        $pdo->prepare("INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_ssh_pubkey', ?)")
+            ->execute([$envPubkey]);
+        echo "migrate-ansible: clé publique initialisée depuis l'environnement\n";
+    } elseif (trim((string)$existingPubkey) === '') {
+        $pdo->prepare("UPDATE settings SET value=? WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")
+            ->execute([$envPubkey]);
     }
-    $ansibleEnabled = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_enabled'")->fetchColumn();
-    if ($ansibleEnabled === false) {
-        $dbPubkey  = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")->fetchColumn() ?: '';
-        $shouldEnable = ($envPubkey !== '' || $dbPubkey !== '');
-        $pdo->prepare(
-            "INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_enabled', ?)"
-        )->execute([$shouldEnable ? 'on' : 'off']);
-        echo "migrate-ansible: ansible_enabled=" . ($shouldEnable ? 'on' : 'off') . " (auto-detected from existing config)\n";
-    }
+}
+$ansibleEnabled = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_enabled'")->fetchColumn();
+if ($ansibleEnabled === false) {
+    $dbPubkey  = $pdo->query("SELECT value FROM settings WHERE " . Db::quoteIdent('key') . "='ansible_ssh_pubkey'")->fetchColumn() ?: '';
+    $shouldEnable = ($envPubkey !== '' || $dbPubkey !== '');
+    $pdo->prepare(
+        "INSERT INTO settings (" . Db::quoteIdent('key') . ", value) VALUES ('ansible_enabled', ?)"
+    )->execute([$shouldEnable ? 'on' : 'off']);
+    echo "migrate-ansible: ansible_enabled=" . ($shouldEnable ? 'on' : 'off') . " (auto-detected from existing config)\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -652,34 +618,30 @@ if (!Db::columnExists('presets', 'codename')) {
 // Backfill distro=codename → distro=nom OS + codename. Résolution codename→distro
 // via catalog_entries, fallback DebianCatalog::MAPPING (couvre catalogue vide au
 // 1er boot). Idempotent : skip si codename déjà rempli OU distro déjà un nom OS.
-if ($rustGuided) {
-    $runsRustMigration('--migrate-preset-distributions');
-} else {
-    $osNames = $pdo->query("SELECT DISTINCT distro FROM catalog_entries")->fetchAll(PDO::FETCH_COLUMN) ?: [];
-    $osNames = array_values(array_unique(array_map('strtolower', array_merge(
-        $osNames, ['debian', 'ubuntu', 'rocky', 'almalinux', 'fedora', 'centos']
-    ))));
-    $cnToDistro = [];   // codename(lower) => distro
-    foreach ($pdo->query("SELECT DISTINCT codename, distro FROM catalog_entries WHERE codename IS NOT NULL AND codename != ''")->fetchAll(PDO::FETCH_ASSOC) as $r) {
-        $cnToDistro[strtolower((string)$r['codename'])] = (string)$r['distro'];
-    }
-    foreach (DebianCatalog::MAPPING as $meta) {
-        $cn = strtolower((string)($meta['codename'] ?? ''));
-        if ($cn !== '' && !isset($cnToDistro[$cn])) $cnToDistro[$cn] = 'debian';
-    }
-    $dnMigrated = 0;
-    foreach ($pdo->query("SELECT id, distro, codename FROM presets")->fetchAll(PDO::FETCH_ASSOC) as $pr) {
-        $d  = strtolower(trim((string)$pr['distro']));
-        $cn = $pr['codename'];
-        if (($cn !== null && $cn !== '') || in_array($d, $osNames, true)) continue;  // déjà migré / déjà nom OS
-        $newDistro = $cnToDistro[$d] ?? 'debian';   // fallback debian (homelab Debian-only)
-        $pdo->prepare("UPDATE presets SET distro = ?, codename = ? WHERE id = ?")
-            ->execute([$newDistro, $d, (int)$pr['id']]);
-        $dnMigrated++;
-    }
-    if ($dnMigrated > 0) {
-        echo "migrate-presets: $dnMigrated preset(s) migré(s) vers distro-name (distro=nom OS + codename)\n";
-    }
+$osNames = $pdo->query("SELECT DISTINCT distro FROM catalog_entries")->fetchAll(PDO::FETCH_COLUMN) ?: [];
+$osNames = array_values(array_unique(array_map('strtolower', array_merge(
+    $osNames, ['debian', 'ubuntu', 'rocky', 'almalinux', 'fedora', 'centos']
+))));
+$cnToDistro = [];   // codename(lower) => distro
+foreach ($pdo->query("SELECT DISTINCT codename, distro FROM catalog_entries WHERE codename IS NOT NULL AND codename != ''")->fetchAll(PDO::FETCH_ASSOC) as $r) {
+    $cnToDistro[strtolower((string)$r['codename'])] = (string)$r['distro'];
+}
+foreach (DebianCatalog::MAPPING as $meta) {
+    $cn = strtolower((string)($meta['codename'] ?? ''));
+    if ($cn !== '' && !isset($cnToDistro[$cn])) $cnToDistro[$cn] = 'debian';
+}
+$dnMigrated = 0;
+foreach ($pdo->query("SELECT id, distro, codename FROM presets")->fetchAll(PDO::FETCH_ASSOC) as $pr) {
+    $d  = strtolower(trim((string)$pr['distro']));
+    $cn = $pr['codename'];
+    if (($cn !== null && $cn !== '') || in_array($d, $osNames, true)) continue;  // déjà migré / déjà nom OS
+    $newDistro = $cnToDistro[$d] ?? 'debian';   // fallback debian (homelab Debian-only)
+    $pdo->prepare("UPDATE presets SET distro = ?, codename = ? WHERE id = ?")
+        ->execute([$newDistro, $d, (int)$pr['id']]);
+    $dnMigrated++;
+}
+if ($dnMigrated > 0) {
+    echo "migrate-presets: $dnMigrated preset(s) migré(s) vers distro-name (distro=nom OS + codename)\n";
 }
 
 // Les profils sont définis par l'administrateur ; aucune configuration personnelle

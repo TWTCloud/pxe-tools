@@ -106,9 +106,17 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             return web::serve(Path::new(config));
         }
     }
-    if let [flag, config, database] = args.as_slice() {
+    if let [flag, config, path] = args.as_slice() {
         if flag == "--adopt-existing-sqlite" && Path::new(config).is_absolute() {
-            return web::adopt_existing_database(Path::new(config), Path::new(database));
+            return web::adopt_existing_database(Path::new(config), Path::new(path));
+        }
+        if Path::new(config).is_absolute() && Path::new(path).is_absolute() {
+            if flag == "--migrate-netboot-files" {
+                return migrations::legacy_image_files(Path::new(config), Path::new(path));
+            }
+            if flag == "--migrate-sqlite" {
+                return migrations::upgrade(Path::new(config), Path::new(path));
+            }
         }
     }
     if let [flag, id, job, db] = args.as_slice() {

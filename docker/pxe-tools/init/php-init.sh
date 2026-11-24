@@ -498,9 +498,17 @@ PYTHON
         fi
     fi
 
-    if [ -f "$MIGRATE_PHP" ] && [ -f "$DB_PATH" ]; then
-        echo "[php-init] Migrations data SQLite : $MIGRATE_PHP"
-        run_as_web php "$MIGRATE_PHP" || { echo "[php-init] ERREUR : migration refusée ou échouée ; démarrage arrêté." >&2; exit 1; }
+    if [ -f "$DB_PATH" ]; then
+        if [ "${PXE_RUST_GUIDED:-0}" = 1 ]; then
+            echo '[php-init] Migrations data SQLite avec Rust'
+            run_as_web /usr/lib/pxe-tools/pxe-tools-rust --migrate-sqlite "$DB_CONF" "${HTTP_ROOT:-/srv/http}" || {
+                echo '[php-init] ERREUR : migration Rust refusée ou échouée ; démarrage arrêté.' >&2
+                exit 1
+            }
+        elif [ -f "$MIGRATE_PHP" ]; then
+            echo "[php-init] Migrations data SQLite : $MIGRATE_PHP"
+            run_as_web php "$MIGRATE_PHP" || { echo "[php-init] ERREUR : migration refusée ou échouée ; démarrage arrêté." >&2; exit 1; }
+        fi
     fi
 fi
 
