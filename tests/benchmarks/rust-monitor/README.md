@@ -166,7 +166,8 @@ par le worker. La vue `/jobs` ouvre les tâches du worker, leurs états et
 les dernières lignes du journal. Les URL de suivi par identifiant et l’API
 de statut par type restent accessibles à la console authentifiée.
 
-Les deux variantes fonctionnent sans installer Nginx ni PHP-FPM.
+Les variantes guidées APT et Docker construisent leur environnement
+d’exécution sans Nginx ni PHP.
 Dans la variante guidée, Rust réserve la suppression d’une image en
 contrôlant ses dépendances et en gardant le verrou SQLite pendant que
 le worker déplace les fichiers protégés. Le worker conserve son protocole
@@ -183,7 +184,9 @@ La reprise du worker remet en file les téléchargements
 et suppressions interrompus et conserve le journal de suppression.
 Rust actualise les six catalogues d’images et planifie le téléchargement
 des remplacements Debian. Le worker vérifie leur intégrité avant de les
-publier. L’import des modèles utilise encore PHP CLI. Le renderer couvre les recettes de partition
+publier. L’import des modèles du dépôt Ansible utilise le même binaire
+pour valider le rôle, la recette de disque et les interfaces de référence.
+Le renderer couvre les recettes de partition
 sur un disque identifié, avec partitions physiques BIOS ou UEFI. Un plan
 LVM sur ce disque peut définir ses groupes de volumes et volumes logiques.
 La vérification compare le rendu à PHP et refuse les volumes qui désignent

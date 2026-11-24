@@ -5,6 +5,7 @@ mod snapshots;
 
 pub(super) use netboot::legacy_image_files;
 pub(super) use snapshots::assigned_presets;
+pub(crate) use snapshots::{dns_list, integer, partition_plan};
 
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use serde_json::Value;
@@ -323,9 +324,10 @@ fn list_layout(value: &Value) -> bool {
     match value {
         Value::Array(_) => true,
         // PHP decodes objects with sequential numeric keys as lists.
-        Value::Object(fields) => {
-            (0..fields.len()).all(|index| fields.contains_key(&index.to_string()))
-        }
+        Value::Object(fields) => fields
+            .keys()
+            .enumerate()
+            .all(|(index, key)| key == &index.to_string()),
         _ => false,
     }
 }

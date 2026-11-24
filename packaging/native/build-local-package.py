@@ -25,14 +25,18 @@ GRUB_DEPENDENCIES = {
     'amd64': 'grub-efi-amd64-bin, grub-efi-amd64-signed',
     'arm64': 'grub-efi-arm64-bin',
 }
-PHP_FPM_DEPENDENCY = 'php-fpm | php8.4-fpm | php8.3-fpm | php8.2-fpm, '
-PHP_CURL_DEPENDENCY = 'php-curl | php8.4-curl | php8.3-curl | php8.2-curl, '
+PHP_DEPENDENCIES = (
+    'php-cli | php8.4-cli | php8.3-cli | php8.2-cli, '
+    'php-curl | php8.4-curl | php8.3-curl | php8.2-curl, '
+    'php-fpm | php8.4-fpm | php8.3-fpm | php8.2-fpm, '
+    'php-sqlite3 | php8.4-sqlite3 | php8.3-sqlite3 | php8.2-sqlite3, '
+)
 CONTROL = '''Package: {package_name}
 Version: {version}
 Architecture: {architecture}
 Maintainer: {maintainer}
 Pre-Depends: python3 (>= 3.11)
-Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, dnsmasq-base, gettext-base, git, gpgv, {grub_dependencies}, iproute2, ipxe, mokutil, {nginx_dependency}openssh-client, openssl, php-cli | php8.4-cli | php8.3-cli | php8.2-cli, {php_curl_dependency}{php_fpm_dependency}php-sqlite3 | php8.4-sqlite3 | php8.3-sqlite3 | php8.2-sqlite3, pxelinux, python3-jinja2, python3-nacl, sbsigntool, {shim_dependency}sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
+Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, dnsmasq-base, gettext-base, git, gpgv, {grub_dependencies}, iproute2, ipxe, mokutil, {nginx_dependency}openssh-client, openssl, {php_dependencies}pxelinux, python3-jinja2, python3-nacl, sbsigntool, {shim_dependency}sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
 Section: admin
 Priority: optional
 Description: {description}
@@ -197,8 +201,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             version=version, package_name=package_name, architecture=architecture,
             grub_dependencies=GRUB_DEPENDENCIES[architecture],
             nginx_dependency='' if rust_guided else 'nginx, ',
-            php_curl_dependency='' if rust_guided else PHP_CURL_DEPENDENCY,
-            php_fpm_dependency='' if rust_guided else PHP_FPM_DEPENDENCY,
+            php_dependencies='' if rust_guided else PHP_DEPENDENCIES,
             shim_dependency='shim-signed, ' if architecture == 'amd64' else '',
             startup=('The Rust variant starts its initial administration on the loopback interface.'
                      if rust_guided else 'On a fresh system the administration interface starts without enabling PXE.'),

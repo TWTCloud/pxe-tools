@@ -157,7 +157,7 @@ fn array_like(value: &Value) -> bool {
     value.is_array() || value.is_object()
 }
 
-fn integer(value: &Value) -> Option<i64> {
+pub(crate) fn integer(value: &Value) -> Option<i64> {
     value
         .as_i64()
         .or_else(|| value.as_f64().map(|number| number as i64))
@@ -172,7 +172,7 @@ fn integer(value: &Value) -> Option<i64> {
         })
 }
 
-fn dns_list(value: &Value) -> Vec<String> {
+pub(crate) fn dns_list(value: &Value) -> Vec<String> {
     if let Some(raw) = value.as_str() {
         let decoded = decode(value);
         if array_like(&decoded) {
@@ -326,7 +326,7 @@ fn partition_fields(data: &Value, fs: &str) -> Map<String, Value> {
     ])
 }
 
-fn partition_plan(plan: &Value) -> Value {
+pub(crate) fn partition_plan(plan: &Value) -> Value {
     let mut targets = HashSet::new();
     let target_disks: Vec<_> = text_values(&plan["target_disks"])
         .into_iter()

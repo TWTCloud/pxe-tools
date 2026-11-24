@@ -17,12 +17,6 @@ RUN set -eu; \
         *) echo 'Supported server architectures are amd64 and arm64.' >&2; exit 1 ;; \
     esac; \
     apt-get update && apt-get install -y --no-install-recommends \
-    # Compatibility for optional repository preset imports
-    php8.4-sqlite3 \
-    php8.4-cli \
-    # NOTE : libsodium pour Admin\Util\Crypto est dispo par défaut dans
-    # php8.4-cli sur Debian Trixie (depuis PHP 7.2, sodium est builtin).
-    # Pas besoin d'un php8.4-sodium séparé (ce package n'existe pas).
     # DHCP/TFTP
     dnsmasq \
     iproute2 \
@@ -257,7 +251,7 @@ ENTRYPOINT ["/init"]
 FROM appliance AS php-appliance
 EXPOSE 8443 8080
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    nginx php8.4-curl php8.4-fpm php8.4-mysql php8.4-opcache mariadb-client \
+    nginx php8.4-cli php8.4-curl php8.4-fpm php8.4-mysql php8.4-opcache php8.4-sqlite3 mariadb-client \
     && rm -f /etc/php/8.4/fpm/pool.d/www.conf \
     && rm -rf /var/lib/apt/lists/*
 COPY docker/pxe-tools/php-fpm/zz-pxe.conf /etc/php/8.4/fpm/pool.d/zz-pxe.conf

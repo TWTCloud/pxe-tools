@@ -10,6 +10,7 @@ mod migrations;
 mod monitoring;
 mod postboot;
 mod preseed;
+mod preset_import;
 mod pxe;
 mod web;
 mod worker;
@@ -99,6 +100,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
         if flag == "--refresh-catalog" && Path::new(config).is_absolute() {
             return catalog::refresh(Path::new(config));
+        }
+        if flag == "--import-preset" && Path::new(config).is_absolute() {
+            return preset_import::run(Path::new(config));
         }
         if flag == "--recover-interrupted-jobs" && Path::new(config).is_absolute() {
             return worker::recover(Path::new(config));

@@ -921,6 +921,67 @@ else:
     print('Rust refreshed the six catalogs and queued an authenticated replacement while keeping published files', flush=True)
 
 
+def verify_preset_import(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-preset-import-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        config = root/'db.conf'
+        config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
+        schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+        boot = {'id':'boot','fs':'ext4','mount':'/boot','size_mb':512}
+        system = {'id':'root','fs':'ext4','mount':'/','size_mb':4000}
+        profile = {
+            'name':'Profil Café','distro':'debian','codename':'trixie',
+            'root_login_mode':'enabled','admin_user_login':'fixture','partition_mode':'custom',
+            'partition_custom_json':{'target_disks':['/dev/sda'],'disks':[{'path':'/dev/sda','partitions':[boot,system]}]},
+            'based_on_machine_id':19,'ansible_role':'debian_test',
+            'advanced_config_json':{
+                'timezone':{'zone':'Europe/Paris','ntp_server':'ntp.example.test'},
+                'network':{'primary':0,'interfaces':[
+                    {'match_by':'mac','match':{'mac':'02:00:00:01:00:01'},'mode':'dhcp'},
+                    {'match_by':'mac','match':{'mac':'02:00:00:01:00:02'},'mode':'static',
+                     'static':{'ip':'192.0.2.20','cidr':24,'gateway':'192.0.2.1','dns':['192.0.2.53']},'vlan':{'id':42}},
+                ]},
+                'disk_target_constraints':{'/dev/sda':'fixture-serial'},
+            },
+        }
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            db.execute("INSERT INTO settings(key,value) VALUES('ansible_repo_profile','profile.json')")
+            db.execute("INSERT INTO machines(id,mac,inventory_json) VALUES(19,'02:00:00:01:00:01',?)",
+                       (json.dumps({'disks':[{'name':'sda','size_bytes':8000000000}],
+                                    'interfaces':[{'mac':'02:00:00:01:00:01'},{'mac':'02:00:00:01:00:02'}]}),))
+
+        def ingest(row, roles=('debian_test',)):
+            return subprocess.run(
+                [str(binary),'--import-preset',str(config)],
+                input=json.dumps({'preset':row,'allowed_roles':roles}),text=True,capture_output=True,
+            )
+
+        assert ingest(profile,[]).returncode
+        added = ingest(profile)
+        assert added.returncode==0, added.stderr
+        identity = json.loads(added.stdout)
+        assert identity['action']=='created' and identity['name']=='Profil Café'
+        assert json.loads(ingest(profile).stdout)['action']=='unchanged'
+        previous = {key:value for key,value in profile.items() if key!='root_login_mode'}
+        updated = ingest({**previous,'description':'Description'})
+        assert json.loads(updated.stdout)['action']=='updated'
+        broken = json.loads(json.dumps(profile))
+        broken['advanced_config_json']['network']['interfaces'][1]['static']['gateway'] = '198.51.100.1'
+        assert ingest(broken).returncode
+        broken = json.loads(json.dumps(profile))
+        broken['partition_custom_json']['disks'][0]['partitions'][1]['size_mb'] = 9000
+        assert ingest(broken).returncode
+        assert ingest({**profile,'variant':'proxmox-ve'}).returncode
+        assert ingest({**profile,'root_login_mode':'disabled'}).returncode
+        with closing(sqlite3.connect(database)) as db:
+            assert db.execute('SELECT id,name,description,root_login_mode FROM presets').fetchall()==[
+                (identity['id'],'Profil Café','Description','enabled'),
+            ]
+    print('Rust imports, updates and validates repository presets with persisted identity and reference hardware', flush=True)
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -987,6 +1048,7 @@ def local(binary):
     verify_assigned_preset_migration(binary)
     verify_legacy_netboot_migration(binary)
     verify_catalog_refresh(binary)
+    verify_preset_import(binary)
 
 
 def main():

@@ -533,10 +533,13 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s,"fixture_ar
             raise RuntimeError('The packaged appliance stopped during startup')
         return docker('exec',dhcp,'curl','-fsS','--max-time','2',pxe_url+'/healthz',check=False).returncode==0
     wait_for(http_ready,90,'packaged PXE listener')
-    for package_name in ('nginx','nginx-common','php8.4-fpm','php8.4-curl'):
+    for package_name in ('nginx','nginx-common','php8.4-fpm','php8.4-cli','php8.4-curl','php8.4-sqlite3'):
         state=docker('exec',app,'dpkg-query','-W','-f=${Status}',package_name,check=False).stdout
         if state.strip()=='install ok installed':
             raise RuntimeError(f'Unexpected package in the guided appliance: {package_name}')
+    for executable in ('php','nginx'):
+        if docker('exec',app,'sh','-c','command -v "$1"','check-runtime',executable,check=False).returncode==0:
+            raise RuntimeError(f'Unexpected executable in the guided appliance: {executable}')
 
     tls_dir='/var/lib/pxe-tools-native/tls' if native else '/var/lib/pxe-tools-tls'
     docker('cp',f'{app}:{tls_dir}/cert.pem',str(fixture/'rust-cert.pem'))

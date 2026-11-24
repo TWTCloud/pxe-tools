@@ -967,7 +967,8 @@ def run_preset_pull_github(job: dict) -> None:
         update_init_job(job_id, progress_percent=25, updated_at=now())
         flush_log()
 
-        preset_directory = _preset_relative_directory()
+        profile = _repository_profile()
+        preset_directory = profile["presets_path"] if profile else "host_vars"
         host_vars_dir = os.path.join(WORKDIR, preset_directory)
         if not os.path.isdir(host_vars_dir):
             log_lines.append(f"[worker] aucun dossier {preset_directory}/ dans le repo, rien à importer\n")
@@ -1000,8 +1001,9 @@ def run_preset_pull_github(job: dict) -> None:
         log_lines.append(f"[worker] {len(files)} fichier(s) à traiter\n")
         flush_log()
 
+        rust_guided = os.environ.get("PXE_RUST_GUIDED") == "1"
         cli_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cli", "preset-import.php")
-        if not os.path.isfile(cli_script):
+        if not rust_guided and not os.path.isfile(cli_script):
             raise RuntimeError(f"CLI introuvable : {cli_script}")
 
         created = 0
@@ -1023,9 +1025,11 @@ def run_preset_pull_github(job: dict) -> None:
                 continue
             # Une modification locale sauvegardée pendant ce pull attend son
             # propre push. Ne pas l'écraser avec une version GitHub plus vieille.
+            payload = None
             try:
                 with open(path, encoding="utf-8") as source:
-                    imported_name = json.load(source).get("name")
+                    payload = json.load(source)
+                imported_name = payload.get("name")
                 with db_connect() as db:
                     local = db.execute(
                         "SELECT * FROM presets WHERE name = ?", (imported_name,)
@@ -1047,10 +1051,21 @@ def run_preset_pull_github(job: dict) -> None:
                     continue
             except (OSError, ValueError, AttributeError):
                 pass  # Le CLI d'import remontera l'erreur du fichier invalide.
-            r = subprocess.run(
-                ["php", cli_script, f"--json-file={path}"],
-                capture_output=True, text=True, timeout=30,
-            )
+            if rust_guided:
+                command = ["/usr/lib/pxe-tools/pxe-tools-rust", "--import-preset", "/etc/pxe-tools/db.conf"]
+                if isinstance(payload, dict):
+                    request = {
+                        "preset": payload,
+                        "allowed_roles": list(profile["playbooks"]) if profile else None,
+                    }
+                    r = subprocess.run(command, input=json.dumps(request), capture_output=True, text=True, timeout=30)
+                else:
+                    r = subprocess.CompletedProcess(command, 2, stderr="Modèle JSON invalide.")
+            else:
+                r = subprocess.run(
+                    ["php", cli_script, f"--json-file={path}"],
+                    capture_output=True, text=True, timeout=30,
+                )
             if r.returncode == 0:
                 try:
                     out = json.loads(r.stdout.strip())
