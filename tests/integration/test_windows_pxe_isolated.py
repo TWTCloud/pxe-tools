@@ -53,11 +53,12 @@ RUN apt-get update && apt-get install --yes --no-install-recommends ovmf swtpm \
 
 def configure_instance(root, media):
     for name in ('data', 'configuration', 'tftp', 'tpm'):
-        (root/name).mkdir(mode=0o700 if name in ('configuration', 'tpm') else 0o755)
+        (root/name).mkdir(mode=0o700 if name == 'tpm' else 0o755)
     data, configuration = root/'data', root/'configuration'
     (configuration/'db.conf').write_text(json.dumps({
         'driver':'sqlite', 'path':'/var/lib/pxe-tools/windows-fixture.sqlite',
     }))
+    (configuration/'db.conf').chmod(0o600)
     key = configuration/'master.key'
     key.write_bytes(os.urandom(32))
     key.chmod(0o600)
@@ -72,9 +73,50 @@ def configure_instance(root, media):
     (root/'tftp/autoexec.ipxe').write_text(
         f'#!ipxe\ndhcp || exit\nchain http://{SERVER}/boot.ipxe || exit\n'
     )
-    for name in SIGNED_IPXE:
-        shutil.copyfile(media/'ipxe'/name,root/'tftp'/name)
-        (root/'tftp'/name).chmod(0o644)
+    if media is not None:
+        for name in SIGNED_IPXE:
+            shutil.copyfile(media/'ipxe'/name,root/'tftp'/name)
+            (root/'tftp'/name).chmod(0o644)
+
+
+def start_appliance(app, lan, probe, root, boot_assets):
+    docker('run','-d','--name',app,'--network','container:'+lan,'--cap-add','NET_ADMIN','--cap-add','NET_RAW',
+           '-e','PXE_WINPE_CLIENT_IP='+CLIENT,
+           '--mount',f'type=bind,src={root/"data"},dst=/var/lib/pxe-tools',
+           '--mount',f'type=bind,src={root/"configuration"},dst=/etc/pxe-tools',
+           '--mount',f'type=bind,src={boot_assets},dst=/srv/http/winpe/amd64,readonly',
+           appliance_image)
+
+    def healthy():
+        if not inspect(app)['State']['Running']:
+            raise RuntimeError('The Rust appliance stopped during startup.')
+        return docker('exec',probe,'curl','-fsS','--max-time','2',
+                      f'http://{SERVER}/healthz',check=False).returncode==0
+    try:
+        wait_for(healthy, 90, 'Rust boot server')
+    except RuntimeError:
+        logs = docker('logs','--tail','80',app,check=False)
+        print(logs.stdout+logs.stderr, end='', flush=True)
+        raise
+    print('Rust boot server is reachable from the isolated PXE network.',flush=True)
+
+
+def preflight():
+    suffix = secrets.token_hex(5)
+    app, lan, probe = (f'pxe-win-preflight-{name}-{suffix}' for name in ('app','lan','probe'))
+    with tempfile.TemporaryDirectory(prefix='pxe-windows-preflight-',dir='/var/tmp') as temporary:
+        root = Path(temporary)
+        root.chmod(0o755)
+        configure_instance(root, None)
+        (root/'boot').mkdir()
+        try:
+            for name in (lan, probe):
+                docker('run','-d','--name',name,'--network','none','--entrypoint','sleep',image,'180')
+            connect_fixture_lan(lan,probe)
+            start_appliance(app,lan,probe,root,root/'boot')
+        finally:
+            for name in (app, probe, lan):
+                docker('rm','-fv',name,check=False)
 
 
 def count_receipts(transcript):
@@ -134,10 +176,16 @@ def run_guest(client, lan, helper, root, media, case, *, discovery):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('media', type=Path)
+    parser.add_argument('media', type=Path, nargs='?')
+    parser.add_argument('--server-only', action='store_true')
     args = parser.parse_args()
     if backend != 'rust-docker' or os.uname().machine != 'x86_64' or not Path('/dev/kvm').is_char_device():
         parser.error('A disposable amd64 Linux runner with KVM and the Rust Docker image is required.')
+    if args.server_only and args.media is None:
+        preflight()
+        return
+    if args.media is None or args.server_only:
+        parser.error('Select the server preflight or provide the Windows test media.')
     media = args.media.resolve(strict=True)
     case = check_case(media)
     suffix = secrets.token_hex(5)
@@ -170,14 +218,7 @@ def main():
                    '--dhcp-match=set:uefi,option:client-arch,9',
                    f'--dhcp-boot=tag:uefi,ipxe-shim.efi,,{DHCP}',
                    '--enable-tftp','--tftp-root=/pxe','--log-dhcp','--log-facility=/tmp/windows-dhcp.log')
-            docker('run','-d','--name',app,'--network','container:'+lan,'--cap-add','NET_ADMIN',
-                   '-e','PXE_WINPE_CLIENT_IP='+CLIENT,
-                   '--mount',f'type=bind,src={root/"data"},dst=/var/lib/pxe-tools',
-                   '--mount',f'type=bind,src={root/"configuration"},dst=/etc/pxe-tools',
-                   '--mount',f'type=bind,src={media/"boot"},dst=/srv/http/winpe/amd64,readonly',
-                   appliance_image)
-            wait_for(lambda:docker('exec',dhcp,'curl','-fsS','--max-time','2',
-                                   f'http://{SERVER}/healthz',check=False).returncode==0, 90,'Rust boot server')
+            start_appliance(app,lan,dhcp,root,media/'boot')
             wait_for(lambda:(root/'tpm.sock').is_socket(), 30, 'disposable TPM socket')
             run_guest(client,lan,helper,root,media,case,discovery=True)
             print('The WinPE guest sent its receipt and requested a reboot.',flush=True)
