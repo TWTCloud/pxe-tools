@@ -29,7 +29,8 @@ INSTALL_MENU = TFTP / "pxelinux.cfg" / ("01-" + MAC.replace(":", "-"))
 DIRECT_HTTP = os.environ.get("PXE_RUST_DIRECT_HTTP") == "1"
 SECURE_BOOT = os.environ.get("PXE_FIXTURE_SECURE_BOOT") == "1"
 EXPECTED_ARCH = "aarch64" if os.environ.get("PXE_FIXTURE_CLIENT_ARCH") == "arm64" else "x86_64"
-CUSTOM_PARTITIONS = os.environ.get("PXE_FIXTURE_CUSTOM_PARTITIONS") == "1"
+RAID_LEVEL = int(os.environ.get("PXE_FIXTURE_RAID_LEVEL", "0"))
+RAID_DISKS = {0: {}, 1: {"vda":"ONE", "vdb":"TWO"}, 5: {"vda":"ONE", "vdb":"TWO", "vdc":"THREE"}}[RAID_LEVEL]
 USE_WORKER_QUEUE = os.environ.get("PXE_FIXTURE_USE_WORKER") == "1"
 
 
@@ -182,32 +183,30 @@ def schedule(machine, report):
                          "apt": {"services_select": [], "contrib": False, "non_free_firmware": False,
                                  "hw_detect_load_firmware": False}, "finish": {"reboot": "quiet"}},
         }
-        if CUSTOM_PARTITIONS:
-            disk = config["system_disk_path"]
-            if disk != "/dev/vda":
+        if RAID_DISKS:
+            if config["system_disk_path"] != "/dev/vda":
                 raise RuntimeError("Unexpected disk for the disposable partition recipe")
-            second = next((item for item in observed["disks"]
-                           if item["identity"]["value"] == "PXE-TEST-TWO"
-                           and item["identity"]["status"] == "valid"), None)
-            if not second or second["name"].removeprefix("/dev/") != "vdb":
-                raise RuntimeError("Discovery failed to identify the second disposable disk")
+            targets = {}
+            for name, serial in RAID_DISKS.items():
+                matches = [item for item in observed["disks"] if item["name"].removeprefix("/dev/") == name
+                           and item["identity"]["value"] == f"PXE-TEST-{serial}"
+                           and item["identity"]["status"] == "valid"]
+                if len(matches) != 1:
+                    raise RuntimeError(f"Discovery failed to identify the disposable disk {name}")
+                targets[f"/dev/{name}"] = matches[0]["identity"]
             config["partition_mode"] = "custom"
             config["review_boot_mode"] = "bios"
-            config["advanced"]["bootloader"] = {"bootdev": disk}
+            config["advanced"]["bootloader"] = {"bootdev": config["system_disk_path"]}
             config["partition_custom_json"] = json.dumps({
-                "target_disks": [disk, "/dev/vdb"],
-                "target_disk_identities": {disk: target["identity"], "/dev/vdb": second["identity"]},
+                "target_disks": list(targets),
+                "target_disk_identities": targets,
                 "disks": [
-                    {"path": disk, "partitions": [
-                        {"id": "vda1", "fs": "biosgrub", "size_mb": 1},
-                        {"id": "vda2", "fs": "raid-member", "fill": True},
-                    ]},
-                    {"path": "/dev/vdb", "partitions": [
-                        {"id": "vdb1", "fs": "biosgrub", "size_mb": 1},
-                        {"id": "vdb2", "fs": "raid-member", "fill": True},
-                    ]},
+                    {"path": f"/dev/{name}", "partitions": [
+                        {"id": f"{name}1", "fs": "biosgrub", "size_mb": 1},
+                        {"id": f"{name}2", "fs": "raid-member", "fill": True},
+                    ]} for name in RAID_DISKS
                 ],
-                "raid_arrays": [{"name": "md0", "level": 1, "members": ["vda2", "vdb2"]}],
+                "raid_arrays": [{"name": "md0", "level": RAID_LEVEL, "members": [f"{name}2" for name in RAID_DISKS]}],
             })
         db.execute("UPDATE machines SET status='configured',hostname='pxe-fixture',domain='example.test',"
                    " install_config_json=? WHERE id=?", (json.dumps(config), machine))
@@ -261,8 +260,8 @@ def first_boot(action):
         raise RuntimeError("The installed guest did not boot with Secure Boot enabled")
     if SECURE_BOOT and payload.get("fixture_arch") != EXPECTED_ARCH:
         raise RuntimeError("The installed guest reported an unexpected CPU architecture")
-    if CUSTOM_PARTITIONS and payload.get("fixture_layout") != "gpt-raid1-two-disks":
-        raise RuntimeError("The installed system did not boot from the requested GPT/RAID1 recipe")
+    if RAID_DISKS and payload.get("fixture_layout") != f"gpt-raid{RAID_LEVEL}-{len(RAID_DISKS)}-disks":
+        raise RuntimeError(f"The installed system did not boot from the requested GPT/RAID{RAID_LEVEL} recipe")
     # The postboot client asked for an acknowledgement. "accepted\n" is nine bytes.
     if not DIRECT_HTTP and not any(line.startswith(f"{CLIENT} ") and "code=os_first_boot&ack=1" in line and '" 200 9 ' in line
                for line in NGINX_LOG.read_text().splitlines()):
@@ -318,8 +317,8 @@ def follow(_root):
                      "/api/machine-ready?", "code=os_first_boot"):
             if not any(line.startswith(f"{CLIENT} ") and path in line and '" 200 ' in line for line in log):
                 raise RuntimeError("Missing native HTTP evidence for " + path)
-    if CUSTOM_PARTITIONS:
-        print("Custom GPT/RAID1 partition recipe verified from the installed guest", flush=True)
+    if RAID_DISKS:
+        print(f"Custom GPT/RAID{RAID_LEVEL} partition recipe verified from the installed guest", flush=True)
     if SECURE_BOOT:
         print("UEFI Secure Boot verified in discovery and the installed guest", flush=True)
     print(f"PXE_NATIVE_FIRST_BOOT_OK kernel={kernel} peer={CLIENT} action={action} ack=accepted", flush=True)

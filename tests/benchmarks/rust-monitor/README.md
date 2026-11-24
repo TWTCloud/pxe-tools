@@ -244,9 +244,11 @@ LVM sur ce disque peut définir ses groupes de volumes et volumes logiques.
 La vérification compare le rendu à PHP et refuse les volumes qui désignent
 un groupe ou une partition physique absente. Les plans LVM peuvent
 référencer des PV supplémentaires sur des disques identifiés. Le profil
-RAID utilise deux ou plusieurs disques identifiés avec une recette BIOS
-GPT symétrique et la racine sur RAID1. Rust refuse les plans avec des
-membres ambigus ou réutilisés, les recettes RAID asymétriques et les
+RAID place la racine sur une grappe avec une recette BIOS GPT symétrique.
+Les essais différentiels couvrent le rendu des niveaux 0, 1, 5, 6 et 10,
+dont des disques de secours pour les niveaux redondants. Le banc amd64
+vérifie séparément le démarrage sur une racine RAID1 ou RAID5. Rust refuse
+les membres ambigus ou réutilisés, les recettes RAID asymétriques et les
 recettes multi-disques en mode régulier. La console programme des tests
 SMART ou de surface, collecte leurs résultats et permet de modifier
 l’action de fin ou d’annuler le suivi. Le test de parité vérifie la

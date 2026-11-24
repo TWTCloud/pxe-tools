@@ -662,6 +662,36 @@ def compare_install(ports, paths):
             assert partman_block(rendered[1]).count("method{ raid }") == 1
         else:
             assert f"device{{ {target} }}" in rendered[1] and f"device{{ {second} }}" in rendered[1]
+    raid_paths = [target, second, "/dev/vdc", "/dev/vdd", "/dev/vde"]
+    for level, minimum, spares in ((0,2,0),(1,2,1),(5,3,1),(6,4,1),(10,4,0)):
+        active = [f"raid{index}" for index in range(minimum)]
+        spare = [f"raid{index}" for index in range(minimum, minimum+spares)]
+        target_paths = raid_paths[:minimum+spares]
+        expanded = {
+            "target_disks": target_paths,
+            "target_disk_identities": {
+                path: {**proof, "value": f"PXE-LEVEL-{index}"} for index, path in enumerate(target_paths)
+            },
+            "disks": [
+                {"path":path, "partitions":[
+                    {**first, "id":f"bios{index}"},
+                    {"id":f"raid{index}", "fs":"raid-member", "fill":True},
+                ]}
+                for index, path in enumerate(target_paths)
+            ],
+            "raid_arrays": [{**array, "level":level, "members":active, "spares":spare}],
+        }
+        set_config({**multiconfig, "partition_custom_json":json.dumps(expanded)})
+        seeds = [response(port, PRESEED + query, peer="lan") for port in ports]
+        assert [item[0] for item in seeds] == [200,200], seeds[1][3]
+        rendered = [item[3].decode() for item in seeds]
+        assert directives(rendered[0]) == directives(rendered[1])
+        assert partman_block(rendered[0]) == partman_block(rendered[1])
+        partitions = [f"{path}{'p' if path[-1].isdigit() else ''}2" for path in target_paths]
+        expected = f"{level} {minimum} {spares} ext4 / {'#'.join(partitions[:minimum])}"
+        if spares:
+            expected += f" {'#'.join(partitions[minimum:])}"
+        assert expected in rendered[1] and "pxe-disk-guard.sh strict " in rendered[1]
     for invalid in (
         {**raid_plan, "disks":[{**layouts[0], "partitions":[first,boot,layouts[0]["partitions"][1]]}, layouts[1]]},
         {**raid_plan, "raid_arrays":[{**array,"is_pv":True}],
@@ -674,6 +704,7 @@ def compare_install(ports, paths):
         {**raid_plan, "raid_arrays":[{**array,"members":["arrayA","arrayA"]}]},
         {**raid_plan, "raid_arrays":[{**array,"members":["arrayA","nvme_bios"]}]},
         {**raid_plan, "raid_arrays":[{**array,"level":6}]},
+        {**raid_plan, "raid_arrays":[{**array,"level":0,"spares":["arrayB"]}]},
         {**raid_plan, "raid_arrays":[]},
     ):
         set_config({**multiconfig, "partition_custom_json":json.dumps(invalid)})

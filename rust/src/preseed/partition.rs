@@ -64,12 +64,8 @@ impl Layout {
         let raid_layout = !arrays.is_empty();
         if raid_layout {
             // Debian applies the entire physical recipe to each RAID disk.
-            // The guided profile supports a symmetric GPT BIOS RAID1 root.
-            if arrays.len() != 1
-                || php_string(&arrays[0]["level"]) != "1"
-                || php_truthy(&arrays[0]["is_pv"])
-                || lvm.first_group.is_some()
-            {
+            // The root array requires a symmetric GPT BIOS partition recipe.
+            if arrays.len() != 1 || php_truthy(&arrays[0]["is_pv"]) || lvm.first_group.is_some() {
                 return None;
             }
         } else if multi && lvm.first_group.is_none() {
@@ -320,9 +316,16 @@ d-i partman-basicfilesystems/no_swap boolean false"
 
 fn raid_directives(array: &Value, members: &HashMap<&str, (&str, String)>) -> Option<String> {
     lvm_name(&array["name"])?;
+    let level = php_string(&array["level"]);
+    let minimum = match level.as_str() {
+        "0" | "1" => 2,
+        "5" => 3,
+        "6" | "10" => 4,
+        _ => return None,
+    };
     let active = array["members"].as_array()?;
     let spares = collection(&array["spares"])?;
-    if active.len() < 2 {
+    if active.len() < minimum || (level == "0" && !spares.is_empty()) {
         return None;
     }
     let mut disks = HashSet::new();
@@ -347,7 +350,7 @@ fn raid_directives(array: &Value, members: &HashMap<&str, (&str, String)>) -> Op
         return None;
     }
     let continued = " \\\n      ";
-    Some(format!("d-i partman-auto-raid/recipe string{continued}1 {} {} ext4 / {devices}{spare_field}{continued}.\nd-i partman-md/confirm boolean true\nd-i partman-md/confirm_nooverwrite boolean true\n", active.len(), spares.len()))
+    Some(format!("d-i partman-auto-raid/recipe string{continued}{level} {} {} ext4 / {devices}{spare_field}{continued}.\nd-i partman-md/confirm boolean true\nd-i partman-md/confirm_nooverwrite boolean true\n", active.len(), spares.len()))
 }
 
 struct Lvm<'a> {

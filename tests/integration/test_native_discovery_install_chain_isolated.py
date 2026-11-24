@@ -209,7 +209,7 @@ def installer_bootloader_log(container):
 
 
 def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None, uefi_image=None,
-                    raid_disk=False, installer_syslog=None):
+                    raid_level=None, installer_syslog=None):
     machine_arch='aarch64' if client_arch=='arm64' else 'x86_64'
     use_kvm=os.uname().machine==machine_arch and Path('/dev/kvm').is_char_device()
     if client_arch=='arm64' and os.uname().machine!=machine_arch:
@@ -218,13 +218,15 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
     devices=['--device','/dev/kvm'] if use_kvm else []
     print(f'QEMU client {machine_arch} on {os.uname().machine}, accelerator={accelerator}',flush=True)
     extra_disk=[]
-    if raid_disk:
+    raid_serials = {None: (), 1: ('TWO',), 5: ('TWO', 'THREE')}[raid_level]
+    for index, serial in enumerate(raid_serials, 2):
+        filename = f'fixture-raid{index}.qcow2'
         docker('run','--rm','--network','none','--mount',f'type=bind,src={root},dst=/fixture-data',
-               '--entrypoint','qemu-img',image,'create','-f','qcow2','/fixture-data/fixture-raid.qcow2','12G')
-        extra_disk=[
-            '-drive','file=/fixture-data/fixture-raid.qcow2,if=none,id=raid,format=qcow2',
-            '-device','virtio-blk-pci,drive=raid,serial=PXE-TEST-TWO',
-        ]
+               '--entrypoint','qemu-img',image,'create','-f','qcow2',f'/fixture-data/{filename}','12G')
+        extra_disk.extend((
+            '-drive',f'file=/fixture-data/{filename},if=none,id=raid{index},format=qcow2',
+            '-device',f'virtio-blk-pci,drive=raid{index},serial=PXE-TEST-{serial}',
+        ))
     paths_seen=set()
     next_trace=0.0
     lan_identity=endpoint(lan) if uefi_image else None
@@ -432,6 +434,9 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     boot_tree=root/f'http/netboot/debian/13.0/{client_arch}'
     verify_packaged_rust_setup(app+'-setup', boot_tree if amd64 else None)
     custom_partition=native and amd64
+    raid_level = int(os.environ.get('PXE_NATIVE_PXE_RAID_LEVEL', '1')) if custom_partition else None
+    if raid_level not in (None, 1, 5):
+        raise RuntimeError('The isolated fixture supports RAID1 or RAID5.')
     secure_boot=not native or client_arch=='arm64'
     if secure_boot:
         verify_arm64_signed_loaders(root if client_arch=='arm64' else None,native=native)
@@ -480,18 +485,22 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     if custom_partition:
         source=(ROOT/'docker/worker/templates/postboot.sh.j2').read_text()
         original=next(line for line in source.splitlines() if line.startswith('PAYLOAD='))
-        instrument=r'''layout=unexpected
+        disks = ('vda','vdb','vdc') if raid_level==5 else ('vda','vdb')
+        instrument=rf'''layout=unexpected
 md_source="$(findmnt -n -o SOURCE /)"
 md_name="$(basename "$(readlink -f "$md_source")")"
+members_ok=1
+for disk in {' '.join(disks)}; do
+    if [ "$(lsblk -dn -o PTTYPE "/dev/$disk")" != gpt ] || [ ! -d "/sys/block/$md_name/slaves/${{disk}}2" ]; then
+        members_ok=0
+    fi
+done
 if [ "$(findmnt -n -o TARGET /boot 2>/dev/null || true)" != /boot ] \
-        && [ "$(lsblk -dn -o PTTYPE /dev/vda)" = gpt ] \
-        && [ "$(lsblk -dn -o PTTYPE /dev/vdb)" = gpt ] \
-        && [ "$(cat "/sys/block/$md_name/md/level" 2>/dev/null)" = raid1 ] \
-        && [ -d "/sys/block/$md_name/slaves/vda2" ] \
-        && [ -d "/sys/block/$md_name/slaves/vdb2" ]; then
-    layout=gpt-raid1-two-disks
+        && [ "$(cat "/sys/block/$md_name/md/level" 2>/dev/null)" = raid{raid_level} ] \
+        && [ "$members_ok" = 1 ]; then
+    layout=gpt-raid{raid_level}-{len(disks)}-disks
 fi
-PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_layout":"%s"}' "$IP" "$(uname -r)" "$layout")"'''
+PAYLOAD="$(printf '{{"ip":"%s","kernel":"%s","fixture_layout":"%s"}}' "$IP" "$(uname -r)" "$layout")"'''
         postboot=root/'postboot.sh.j2'
         postboot.write_text(source.replace(original,instrument))
         mounts.extend(('--mount',f'type=bind,src={postboot},dst=/opt/pxe-tools/templates/postboot.sh.j2,readonly'))
@@ -688,7 +697,7 @@ else:
                'source /var/lib/pxe-tools-native/runtime.env; set +a; ') if native else (
                'export PXE_APP_DIR=/app; ')
     if custom_partition:
-        check_env+='export PXE_FIXTURE_CUSTOM_PARTITIONS=1; '
+        check_env+=f'export PXE_FIXTURE_RAID_LEVEL={raid_level}; '
     uefi_image=None
     if secure_boot:
         check_env+='export PXE_FIXTURE_SECURE_BOOT=1; '
@@ -707,12 +716,13 @@ else:
            'exec python3 /fixture-data/rust-server.py follow /fixture-data >/fixture-data/native-status.log 2>&1')
     status=fixture/'native-status.log'
     wait_for(lambda:status.is_file() and 'PXE_NATIVE_READY' in status.read_text(),30,'packaged Rust fixture ready')
-    run_rust_guests(lan,client,root,status,screen_login=True,uefi_image=uefi_image,raid_disk=custom_partition,
+    run_rust_guests(lan,client,root,status,screen_login=True,uefi_image=uefi_image,raid_level=raid_level,
                     installer_syslog=dhcp if client_arch=='arm64' else None)
     if custom_partition:
-        if 'Custom GPT/RAID1 partition recipe verified from the installed guest' not in status.read_text():
-            raise RuntimeError('Missing proof of the custom GPT/RAID1 recipe')
-        print('Custom GPT/RAID1 partition recipe verified from the installed guest',flush=True)
+        marker = f'Custom GPT/RAID{raid_level} partition recipe verified from the installed guest'
+        if marker not in status.read_text():
+            raise RuntimeError(f'Missing proof of the custom GPT/RAID{raid_level} recipe')
+        print(marker,flush=True)
     if native:
         logs=docker('exec',app,'journalctl','--no-pager','-u','pxe-tools-pxe-http.service','-o','cat').stdout
     else:
