@@ -178,6 +178,8 @@ def main():
                 ('catalog_auto_refresh_enabled','off')])
             db.execute('INSERT INTO users(username,password_hash) VALUES(?,?)',('fixture-admin',login_hash))
             db.execute("INSERT INTO os_images(distro,version,arch,codename,version_full,enabled,status) VALUES('debian','13.0','amd64','trixie','13.0',1,'downloaded')")
+        if provision:
+            (data/'chosen.sqlite').chmod(0o600)
         # A stale but valid DB must never drive the appliance, even when its
         # path is present in the inherited environment.
         with sqlite3.connect(data/'stale.sqlite') as db:
@@ -304,6 +306,12 @@ done
                     with sqlite3.connect(data/'chosen.sqlite') as db:
                         row=db.execute("SELECT value FROM settings WHERE key='ansible_runtime_status'").fetchone()
                     return row is not None and json.loads(row[0]).get('state')=='ready'
+                runtime=docker('exec',app,'env','PXE_ANSIBLE_MODE=system',
+                               'PXE_DB_PATH=/var/lib/pxe-tools/chosen.sqlite',
+                               'PYTHONPATH=/usr/lib/pxe-tools/app',
+                               'python3','-c','import worker; worker.resolve_ansible_runtime()',check=False)
+                if runtime.returncode:
+                    raise RuntimeError('Native Ansible runtime rejected the fixture: '+runtime.stderr)
                 wait_for(module_ready,90,'packaged Ansible runtime ready')
             def ready():
                 if not inspect(app)['State']['Running']:raise RuntimeError('appliance stopped during startup')
