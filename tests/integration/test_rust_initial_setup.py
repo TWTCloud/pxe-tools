@@ -570,7 +570,7 @@ def verify_activity(client, database, authorization):
             "INSERT INTO actions(machine_id,type,status,token,created_by) VALUES(?,'install_only','running',?,?)",
             (device, action_token, '<fixture-author>'),
         ).lastrowid
-        db.execute("INSERT INTO machine_events(machine_id,action_id,message) VALUES(?,?,?)",
+        db.execute("INSERT INTO machine_events(machine_id,action_id,checkpoint,message) VALUES(?,?,'os_first_boot',?)",
                    (device, action, '<fixture-event>'))
         finished = db.execute(
             "INSERT INTO installations(machine_id,install_status,install_log,action_id) VALUES(?,'success','<first>',?)",
@@ -598,6 +598,15 @@ def verify_activity(client, database, authorization):
     assert client.request(path.replace('/activity?', '/activity/list?')+'&sig='+signature,
                           authorization=authorization)[0] == 204
     detail = request(f'/tasks/{action}')[2]
+    checklist = request(f'/tasks/{action}/checklist')[2]
+    assert checklist.startswith(b'<section id="checklist">') and checklist in detail
+    assert ' · Reçue</li>'.encode() in checklist and action_token.encode() not in checklist
+    assert request(f'/tasks/install-{finished}')[:2] == (301, f'/tasks/{action}')
+    assert request(f'/tasks/install-{legacy}')[0] == 404
+    assert request(f'/machines/{device}/tasks/install-{finished}')[0] == 200
+    assert request(f'/machines/{device+1000}/tasks/install-{finished}')[0] == 404
+    device_tasks = request(f'/machines/{device}/tasks')[2]
+    assert f'href="/tasks/{action}"'.encode() in device_tasks
     install_log = f'/actions/{action}/log/install'
     close_action = f'/actions/{action}/force-complete'
     assert b'&lt;fixture-event&gt;' in detail and action_token.encode() not in detail

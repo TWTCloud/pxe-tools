@@ -67,7 +67,7 @@ type Reply = Response<Body>;
 struct Site {
     database: PathBuf,
     assets: assets::Assets,
-    catalog: monitoring::Catalog,
+    catalog: Arc<monitoring::Catalog>,
     pxe_ip: Option<Ipv4Addr>,
     https_port: u16,
     http_port: u16,
@@ -117,7 +117,7 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
                 .map(PathBuf::from)
                 .ok_or("HTTP_ROOT is required")?,
         )?,
-        catalog: serde_json::from_str(include_str!("checkpoints.json"))?,
+        catalog: Arc::new(serde_json::from_str(include_str!("checkpoints.json"))?),
         pxe_ip,
         https_port,
         http_port,
@@ -592,7 +592,12 @@ async fn dispatch(
         }
         return site
             .admin
-            .serve(&parts, peer, &site.database, admin::Action::Activity(view))
+            .serve(
+                &parts,
+                peer,
+                &site.database,
+                admin::Action::Activity(view, Arc::clone(&site.catalog)),
+            )
             .await;
     }
     if onboarding::is_route(path) {

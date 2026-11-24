@@ -27,6 +27,10 @@ impl Checkpoint {
     pub fn has_code(&self, code: &str) -> bool {
         self.code == code
     }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
 }
 
 pub type Catalog = HashMap<String, Vec<Checkpoint>>;

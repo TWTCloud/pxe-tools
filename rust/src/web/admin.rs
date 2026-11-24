@@ -49,7 +49,7 @@ pub(super) enum Action {
     Preset(super::presets::Route, Option<Bytes>),
     PullPresets,
     Jobs(super::jobs::View),
-    Activity(super::activity::View),
+    Activity(super::activity::View, Arc<crate::monitoring::Catalog>),
     Terminology(&'static str, &'static str),
     Settings(super::settings::Route, Option<Bytes>),
     Setup(String, Option<Bytes>),
@@ -305,8 +305,8 @@ impl Console {
                 if let Action::Register(form) = &action {
                     return super::devices::register(&db_path, form.as_deref()).ok();
                 }
-                if let Action::Activity(view) = &action {
-                    return view.serve(&db, &db_path, &path, &query, page).ok();
+                if let Action::Activity(view, catalog) = &action {
+                    return view.serve(&db, &db_path, &path, &query, page, catalog).ok();
                 }
                 if let Action::Jobs(view) = &action {
                     return view.serve(&db, page).ok();

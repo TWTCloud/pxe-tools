@@ -6,7 +6,7 @@ use super::{
     setup::{page, redirect},
     ErrorBox, Reply,
 };
-use crate::connect;
+use crate::{connect, monitoring::Catalog};
 use hyper::{Method, Response, StatusCode};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{
@@ -69,7 +69,10 @@ ORDER BY updated_at DESC,source,id DESC LIMIT ?5 OFFSET ?6";
 pub(super) enum View {
     List,
     Fragment,
+    DeviceTasks(i64),
     Task(i64),
+    Checklist(i64),
+    Legacy(i64, Operation, Option<i64>),
     Installation(i64),
     Wipe(i64),
     DiskTest(i64),
@@ -83,6 +86,49 @@ pub(super) enum Journal {
     Ansible,
 }
 
+pub(super) enum Operation {
+    Install,
+    Wipe,
+    DiskTest,
+    Discovery,
+}
+
+impl Operation {
+    fn from_segment(value: &str) -> Option<(i64, Self)> {
+        let (kind, id) = value.split_once('-')?;
+        let id = id.parse().ok().filter(|id| *id > 0)?;
+        Some((
+            id,
+            match kind {
+                "install" => Self::Install,
+                "wipe" => Self::Wipe,
+                "disktest" => Self::DiskTest,
+                "discovery" => Self::Discovery,
+                _ => return None,
+            },
+        ))
+    }
+
+    fn columns(&self) -> (&'static str, &'static str, &'static str, &'static str) {
+        match self {
+            Self::Install => (
+                "installations",
+                "install_status",
+                "install_log",
+                "Installation",
+            ),
+            Self::Wipe => ("wipes", "wipe_status", "log", "Effacement"),
+            Self::DiskTest => ("disk_tests", "job_status", "log", "Test disque"),
+            Self::Discovery => (
+                "discoveries",
+                "discovery_status",
+                "last_phase",
+                "Inventaire",
+            ),
+        }
+    }
+}
+
 impl View {
     pub(super) fn for_route(path: &str) -> Option<Self> {
         match path {
@@ -92,9 +138,20 @@ impl View {
         }
         let (section, rest) = path.strip_prefix('/')?.split_once('/')?;
         let (id, endpoint) = rest.split_once('/').unwrap_or((rest, ""));
+        if section == "tasks" && endpoint.is_empty() {
+            if let Some((legacy, kind)) = Operation::from_segment(id) {
+                return Some(Self::Legacy(legacy, kind, None));
+            }
+        }
         let id = id.parse().ok().filter(|id| *id > 0)?;
         match (section, endpoint) {
             ("tasks", "") => Some(Self::Task(id)),
+            ("tasks", "checklist") => Some(Self::Checklist(id)),
+            ("machines", "tasks") => Some(Self::DeviceTasks(id)),
+            ("machines", endpoint) => {
+                let (legacy, kind) = Operation::from_segment(endpoint.strip_prefix("tasks/")?)?;
+                Some(Self::Legacy(legacy, kind, Some(id)))
+            }
             ("installations", "") => Some(Self::Installation(id)),
             ("wipes", "") => Some(Self::Wipe(id)),
             ("disktests", "") => Some(Self::DiskTest(id)),
@@ -120,6 +177,7 @@ impl View {
         path: &str,
         query: &str,
         number: u32,
+        catalog: &Catalog,
     ) -> Result<Reply, ErrorBox> {
         match self {
             Self::List | Self::Fragment => {
@@ -129,23 +187,52 @@ impl View {
                 }
                 list(db, &filter, number, matches!(self, Self::Fragment))
             }
-            Self::Task(id) => task(db, *id),
-            Self::Installation(id) => operation(
-                db,
-                *id,
-                "installations",
-                "install_status",
-                "install_log",
-                "Installation",
-            ),
-            Self::Wipe(id) => operation(db, *id, "wipes", "wipe_status", "log", "Effacement"),
-            Self::DiskTest(id) => {
-                operation(db, *id, "disk_tests", "job_status", "log", "Test disque")
+            Self::DeviceTasks(id) => {
+                if !db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM machines WHERE id=?1)",
+                    [id],
+                    |row| row.get::<_, bool>(0),
+                )? {
+                    return Ok(plain(StatusCode::NOT_FOUND, "Appareil introuvable\n"));
+                }
+                let mut filter = Filter::parse(query);
+                filter.machine = *id;
+                list(db, &filter, number, true)
             }
+            Self::Task(id) => task(db, *id, catalog, false),
+            Self::Checklist(id) => task(db, *id, catalog, true),
+            Self::Legacy(id, kind, bound) => legacy_task(db, *id, kind, *bound),
+            Self::Installation(id) => operation(db, *id, &Operation::Install),
+            Self::Wipe(id) => operation(db, *id, &Operation::Wipe),
+            Self::DiskTest(id) => operation(db, *id, &Operation::DiskTest),
             Self::ForceComplete(id) => close(db_path, *id, false),
             Self::CancelInstallation(id) => close(db_path, *id, true),
             Self::Download(id, journal) => download(db, *id, journal),
         }
+    }
+}
+
+fn legacy_task(
+    db: &Connection,
+    id: i64,
+    kind: &Operation,
+    bound: Option<i64>,
+) -> Result<Reply, ErrorBox> {
+    let (table, _, _, _) = kind.columns();
+    let row = db
+        .query_row(
+            &format!("SELECT machine_id,action_id FROM {table} WHERE id=?1"),
+            [id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()?;
+    match row {
+        Some((machine, _)) if bound == Some(machine) => operation(db, id, kind),
+        Some((_, Some(action))) if bound.is_none() => Ok(redirect(
+            StatusCode::MOVED_PERMANENTLY,
+            format!("/tasks/{action}"),
+        )),
+        _ => Ok(plain(StatusCode::NOT_FOUND, "Tâche introuvable\n")),
     }
 }
 
@@ -428,20 +515,39 @@ fn list(db: &Connection, filter: &Filter, number: u32, fragment: bool) -> Result
     Ok(page("Activité", &form))
 }
 
-fn task(db: &Connection, id: i64) -> Result<Reply, ErrorBox> {
+fn task(db: &Connection, id: i64, catalog: &Catalog, fragment: bool) -> Result<Reply, ErrorBox> {
     let Some((target, kind, state)) = db.query_row(
         "SELECT COALESCE(m.hostname,m.mac),a.type,a.status FROM actions a JOIN machines m ON m.id=a.machine_id WHERE a.id=?",
         [id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
     ).optional()? else {
         return Ok(plain(StatusCode::NOT_FOUND, "Tâche introuvable\n"));
     };
-    let mut output = String::from("<p>");
+    let terminal = matches!(state.as_str(), "success" | "failed" | "cancelled");
+    let mut output = String::from("<section id=\"checklist\"><p>");
     escape(&mut output, &target);
     output.push_str(" · ");
     escape(&mut output, &kind);
     output.push_str(" · ");
     escape(&mut output, label(STATUSES, &state));
     output.push_str("</p>");
+    if let Some(steps) = catalog.get(&kind) {
+        let mut checkpoints = db.prepare(
+            "SELECT DISTINCT checkpoint FROM machine_events WHERE action_id=?1 AND checkpoint IS NOT NULL",
+        )?;
+        let seen = checkpoints
+            .query_map([id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        output.push_str("<h2>Étapes</h2><ol>");
+        for step in steps {
+            output.push_str("<li>");
+            escape(&mut output, step.label());
+            if seen.iter().any(|code| step.has_code(code)) {
+                output.push_str(" · Reçue");
+            }
+            output.push_str("</li>");
+        }
+        output.push_str("</ol>");
+    }
     let (install, ansible): (bool, bool) = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM installations WHERE action_id=?1 AND install_log NOT IN ('','0')),
                 EXISTS(SELECT 1 FROM installations WHERE action_id=?1 AND ansible_log NOT IN ('','0'))",
@@ -459,10 +565,10 @@ fn task(db: &Connection, id: i64) -> Result<Reply, ErrorBox> {
             )?;
         }
     }
-    if !matches!(state.as_str(), "success" | "failed" | "cancelled") {
+    if !terminal {
         write!(output, "<details><summary>Clôturer le suivi</summary><form method=\"post\" action=\"/actions/{id}/force-complete\"><p>Vérifiez que l’opération est terminée sur l’appareil avant de clôturer son suivi.</p><button>Confirmer la clôture</button></form></details>")?;
     }
-    output.push_str("<ul>");
+    output.push_str("<h2>Événements</h2><ul>");
     let mut statement = db.prepare("SELECT created_at,message FROM machine_events WHERE action_id=? ORDER BY id DESC LIMIT 100")?;
     let mut rows = statement.query([id])?;
     while let Some(row) = rows.next()? {
@@ -472,18 +578,19 @@ fn task(db: &Connection, id: i64) -> Result<Reply, ErrorBox> {
         escape(&mut output, &row.get::<_, String>(1)?);
         output.push_str("</li>");
     }
-    output.push_str("</ul><a href=\"/activity\">Activité</a>");
+    output.push_str("</ul></section>");
+    if fragment {
+        return Ok(Response::builder()
+            .header("Content-Type", "text/html; charset=utf-8")
+            .header("Cache-Control", "no-store")
+            .body(bytes(output))?);
+    }
+    output.push_str("<a href=\"/activity\">Activité</a>");
     Ok(page("Suivi de la tâche", &output))
 }
 
-fn operation(
-    db: &Connection,
-    id: i64,
-    table: &str,
-    state: &str,
-    log: &str,
-    title: &str,
-) -> Result<Reply, ErrorBox> {
+fn operation(db: &Connection, id: i64, kind: &Operation) -> Result<Reply, ErrorBox> {
+    let (table, state, log, title) = kind.columns();
     // The route controls the three identifiers, and only the row ID is user input.
     let Some((target, state, log)) = db
         .query_row(

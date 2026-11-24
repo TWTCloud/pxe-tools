@@ -308,6 +308,10 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
     }
     super::device_settings::form(db, id, &mut output)?;
     device_ansible::form(db, id, &mut output)?;
+    write!(
+        output,
+        "<p><a href=\"/activity?machine={id}\">Historique de l’appareil</a></p>"
+    )?;
     output.push_str("<h2>Derniers événements</h2><ul>");
     let mut events = db.prepare(
         "SELECT message FROM machine_events WHERE machine_id=? ORDER BY id DESC LIMIT 25",
