@@ -637,6 +637,37 @@ def verify_preset_network_migration(binary):
     print('Rust migrated legacy preset network values and preserved explicit settings', flush=True)
 
 
+def verify_preset_distribution_migration(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-preset-distributions-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        config = root/'db.conf'
+        config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
+        schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+        command = [str(binary),'--migrate-preset-distributions',str(config)]
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            db.execute("INSERT INTO catalog_entries(distro,codename,version_full,arch) VALUES('ubuntu','Noble','24.04','amd64')")
+            db.executemany(
+                "INSERT INTO presets(name,distro,codename,admin_user_login) VALUES(?,?,?,'fixture')",
+                [
+                    ('legacy-debian',' Trixie ',None),
+                    ('legacy-ubuntu','NOBLE',None),
+                    ('explicit','debian','bookworm'),
+                    ('known-distro','fedora',None),
+                    ('unknown-alias','other',None),
+                ],
+            )
+        for _ in range(2):
+            subprocess.run(command, check=True, capture_output=True)
+            with closing(sqlite3.connect(database)) as db:
+                assert db.execute('SELECT distro,codename FROM presets ORDER BY id').fetchall()==[
+                    ('debian','trixie'),('ubuntu','noble'),('debian','bookworm'),
+                    ('fedora',None),('debian','other'),
+                ]
+    print('Rust migrated historical preset aliases and kept explicit distributions', flush=True)
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -696,6 +727,7 @@ def local(binary):
     verify_worker_recovery(binary)
     verify_schema_migration(binary)
     verify_preset_network_migration(binary)
+    verify_preset_distribution_migration(binary)
 
 
 def main():

@@ -2,7 +2,11 @@
 
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use serde_json::Value;
-use std::{collections::HashSet, error::Error, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    path::Path,
+};
 
 pub fn network_settings(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     let path = crate::configured_database(config).ok_or("Existing SQLite database required")?;
@@ -371,4 +375,59 @@ fn legacy_dns(value: &str) -> Option<String> {
         .filter(|item| !item.is_empty())
         .collect();
     serde_json::to_string(&list).ok()
+}
+
+pub fn preset_distributions(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let path = crate::configured_database(config).ok_or("Existing SQLite database required")?;
+    let mut db = crate::connect(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut names: HashSet<_> = ["debian", "ubuntu", "rocky", "almalinux", "fedora", "centos"]
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    let mut aliases = HashMap::new();
+    {
+        let mut catalog = tx.prepare("SELECT DISTINCT codename,distro FROM catalog_entries")?;
+        let mut rows = catalog.query([])?;
+        while let Some(row) = rows.next()? {
+            let codename: Option<String> = row.get(0)?;
+            let distro: String = row.get(1)?;
+            names.insert(distro.to_ascii_lowercase());
+            if let Some(codename) = codename.filter(|value| !value.is_empty()) {
+                aliases.insert(codename.to_ascii_lowercase(), distro);
+            }
+        }
+    }
+    let mut updates = Vec::new();
+    {
+        let mut presets =
+            tx.prepare("SELECT id,distro FROM presets WHERE codename IS NULL OR codename=''")?;
+        let mut rows = presets.query([])?;
+        while let Some(row) = rows.next()? {
+            let distro: String = row.get(1)?;
+            let codename = crate::php_trim(&distro).to_ascii_lowercase();
+            if !names.contains(&codename) {
+                updates.push((row.get::<_, i64>(0)?, codename));
+            }
+        }
+    }
+    for (id, codename) in &updates {
+        let distro = aliases
+            .get(codename)
+            .map(String::as_str)
+            .unwrap_or("debian");
+        tx.execute(
+            "UPDATE presets SET distro=?1,codename=?2 WHERE id=?3",
+            rusqlite::params![distro, codename, id],
+        )?;
+    }
+    tx.commit()?;
+    println!(
+        "Rust normalized the distribution of {} preset(s)",
+        updates.len()
+    );
+    Ok(())
 }

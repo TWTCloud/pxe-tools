@@ -644,30 +644,34 @@ if (!Db::columnExists('presets', 'codename')) {
 // Backfill distro=codename → distro=nom OS + codename. Résolution codename→distro
 // via catalog_entries, fallback DebianCatalog::MAPPING (couvre catalogue vide au
 // 1er boot). Idempotent : skip si codename déjà rempli OU distro déjà un nom OS.
-$osNames = $pdo->query("SELECT DISTINCT distro FROM catalog_entries")->fetchAll(PDO::FETCH_COLUMN) ?: [];
-$osNames = array_values(array_unique(array_map('strtolower', array_merge(
-    $osNames, ['debian', 'ubuntu', 'rocky', 'almalinux', 'fedora', 'centos']
-))));
-$cnToDistro = [];   // codename(lower) => distro
-foreach ($pdo->query("SELECT DISTINCT codename, distro FROM catalog_entries WHERE codename IS NOT NULL AND codename != ''")->fetchAll(PDO::FETCH_ASSOC) as $r) {
-    $cnToDistro[strtolower((string)$r['codename'])] = (string)$r['distro'];
-}
-foreach (DebianCatalog::MAPPING as $meta) {
-    $cn = strtolower((string)($meta['codename'] ?? ''));
-    if ($cn !== '' && !isset($cnToDistro[$cn])) $cnToDistro[$cn] = 'debian';
-}
-$dnMigrated = 0;
-foreach ($pdo->query("SELECT id, distro, codename FROM presets")->fetchAll(PDO::FETCH_ASSOC) as $pr) {
-    $d  = strtolower(trim((string)$pr['distro']));
-    $cn = $pr['codename'];
-    if (($cn !== null && $cn !== '') || in_array($d, $osNames, true)) continue;  // déjà migré / déjà nom OS
-    $newDistro = $cnToDistro[$d] ?? 'debian';   // fallback debian (homelab Debian-only)
-    $pdo->prepare("UPDATE presets SET distro = ?, codename = ? WHERE id = ?")
-        ->execute([$newDistro, $d, (int)$pr['id']]);
-    $dnMigrated++;
-}
-if ($dnMigrated > 0) {
-    echo "migrate-presets: $dnMigrated preset(s) migré(s) vers distro-name (distro=nom OS + codename)\n";
+if ($rustGuided) {
+    $runsRustMigration('--migrate-preset-distributions');
+} else {
+    $osNames = $pdo->query("SELECT DISTINCT distro FROM catalog_entries")->fetchAll(PDO::FETCH_COLUMN) ?: [];
+    $osNames = array_values(array_unique(array_map('strtolower', array_merge(
+        $osNames, ['debian', 'ubuntu', 'rocky', 'almalinux', 'fedora', 'centos']
+    ))));
+    $cnToDistro = [];   // codename(lower) => distro
+    foreach ($pdo->query("SELECT DISTINCT codename, distro FROM catalog_entries WHERE codename IS NOT NULL AND codename != ''")->fetchAll(PDO::FETCH_ASSOC) as $r) {
+        $cnToDistro[strtolower((string)$r['codename'])] = (string)$r['distro'];
+    }
+    foreach (DebianCatalog::MAPPING as $meta) {
+        $cn = strtolower((string)($meta['codename'] ?? ''));
+        if ($cn !== '' && !isset($cnToDistro[$cn])) $cnToDistro[$cn] = 'debian';
+    }
+    $dnMigrated = 0;
+    foreach ($pdo->query("SELECT id, distro, codename FROM presets")->fetchAll(PDO::FETCH_ASSOC) as $pr) {
+        $d  = strtolower(trim((string)$pr['distro']));
+        $cn = $pr['codename'];
+        if (($cn !== null && $cn !== '') || in_array($d, $osNames, true)) continue;  // déjà migré / déjà nom OS
+        $newDistro = $cnToDistro[$d] ?? 'debian';   // fallback debian (homelab Debian-only)
+        $pdo->prepare("UPDATE presets SET distro = ?, codename = ? WHERE id = ?")
+            ->execute([$newDistro, $d, (int)$pr['id']]);
+        $dnMigrated++;
+    }
+    if ($dnMigrated > 0) {
+        echo "migrate-presets: $dnMigrated preset(s) migré(s) vers distro-name (distro=nom OS + codename)\n";
+    }
 }
 
 // Les profils sont définis par l'administrateur ; aucune configuration personnelle
