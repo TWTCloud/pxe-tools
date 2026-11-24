@@ -503,6 +503,8 @@ def compare_install(ports, paths):
         assert "d-i pkgsel/include string openssh-server curl\n" in seed
         assert "system-generators/pxe-first-boot" not in seed
         assert "pxe-machine-ready" not in seed and "pxe-postboot" not in seed
+        assert "$(in-target --pass-stdout /usr/bin/ssh-keygen" in seed
+        assert "$(in-target --pass-stdout /usr/bin/curl" in seed
         assert "--data-urlencode" in seed and "ssh_host_fingerprint=$ssh_fingerprint" in seed
     for seed in decoded:
         assert "Bearer " + token in seed and "$6$hidden" not in seed
