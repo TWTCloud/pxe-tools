@@ -62,13 +62,8 @@ impl Layout {
         }
         let multi = plan_targets.len() > 1;
         let raid_layout = !arrays.is_empty();
-        if raid_layout {
-            // Debian applies the entire physical recipe to each RAID disk.
-            // The root array requires a symmetric GPT BIOS partition recipe.
-            if arrays.len() != 1 || php_truthy(&arrays[0]["is_pv"]) || lvm.first_group.is_some() {
-                return None;
-            }
-        } else if multi && lvm.first_group.is_none() {
+        let raid_lvm = raid_layout && lvm.first_group.is_some();
+        if !raid_layout && multi && lvm.first_group.is_none() {
             // D-I regular mode partitions only the first matching device.
             return None;
         }
@@ -136,8 +131,9 @@ impl Layout {
                         return None;
                     }
                     bios_partition = true;
+                    let ignore = if raid_lvm { "$lvmignore{ } " } else { "" };
                     disk_segments.push(format!(
-                        "{size} {size} {size} free $bios_boot{{ }} method{{ biosgrub }} ."
+                        "{size} {size} {size} free {ignore}$bios_boot{{ }} method{{ biosgrub }} ."
                     ));
                     continue;
                 }
@@ -178,6 +174,9 @@ impl Layout {
                         };
                         let path = format!("{disk}{separator}{}", position + 1);
                         raid_members.insert(id, (disk, path));
+                        if raid_lvm {
+                            segment.push_str(" $lvmignore{ }");
+                        }
                         segment.push_str(" method{ raid }");
                     }
                     _ => {
@@ -203,16 +202,14 @@ impl Layout {
                 segments.extend(disk_segments);
             }
         }
-        if lvm.first_group.is_some() && !mounts.contains("/boot") {
-            return None;
-        }
-        let raid = if let Some(array) = arrays.first() {
-            mounts.insert("/");
-            raid_directives(array, &raid_members)?
+        let raid = if raid_layout {
+            raid_directives(arrays, &raid_members, &lvm, &mut pv_ids, &mut mounts)?
         } else {
             String::new()
         };
-        if !lvm.physical.keys().all(|id| pv_ids.contains(id)) {
+        if (lvm.first_group.is_some() && !mounts.contains("/boot"))
+            || !lvm.physical.keys().all(|id| pv_ids.contains(id))
+        {
             return None;
         }
         lvm.render_volumes(&mut segments, &mut mounts, &mut reserved)?;
@@ -314,8 +311,68 @@ d-i partman-basicfilesystems/no_swap boolean false"
     }
 }
 
-fn raid_directives(array: &Value, members: &HashMap<&str, (&str, String)>) -> Option<String> {
-    lvm_name(&array["name"])?;
+fn raid_directives<'a>(
+    arrays: &'a [Value],
+    members: &HashMap<&str, (&str, String)>,
+    lvm: &Lvm<'a>,
+    pvs: &mut HashSet<&'a str>,
+    mounts: &mut HashSet<&'a str>,
+) -> Option<String> {
+    // partman-auto-raid gives a single VG its PV from the MD recipe. Explicit
+    // placement across multiple VGs would require a different installer plan.
+    let lvm_raid = lvm.first_group.is_some();
+    if lvm_raid && (lvm.groups.len() != 1 || lvm.physical.len() != 1 || arrays.len() != 2) {
+        return None;
+    }
+    let mut names = HashSet::new();
+    let mut claimed = HashSet::new();
+    let mut recipes = Vec::new();
+    for array in arrays {
+        let name = lvm_name(&array["name"])?;
+        if members.contains_key(name) || !names.insert(name) {
+            return None;
+        }
+        let pv = php_truthy(&array["is_pv"]);
+        let mount = if pv {
+            if !lvm.physical.contains_key(name)
+                || !pvs.insert(name)
+                || !matches!(array["mount"].as_str(), None | Some("-"))
+            {
+                return None;
+            }
+            "-"
+        } else {
+            let target = if lvm_raid { "/boot" } else { "/" };
+            if array["mount"].as_str().is_some_and(|mount| mount != target)
+                || !mounts.insert(target)
+            {
+                return None;
+            }
+            target
+        };
+        recipes.push(raid_array(
+            array,
+            members,
+            &mut claimed,
+            if pv { "lvm" } else { "ext4" },
+            mount,
+        )?);
+    }
+    if claimed.len() != members.len() {
+        return None;
+    }
+    let continued = " \\\n      ";
+    let recipes = recipes.join(&format!("{continued}.{continued}"));
+    Some(format!("d-i partman-auto-raid/recipe string{continued}{recipes}{continued}.\nd-i partman-md/confirm boolean true\nd-i partman-md/confirm_nooverwrite boolean true\n"))
+}
+
+fn raid_array<'a>(
+    array: &'a Value,
+    members: &HashMap<&str, (&str, String)>,
+    claimed: &mut HashSet<&'a str>,
+    filesystem: &str,
+    mount: &str,
+) -> Option<String> {
     let level = php_string(&array["level"]);
     let minimum = match level.as_str() {
         "0" | "1" => 2,
@@ -329,12 +386,13 @@ fn raid_directives(array: &Value, members: &HashMap<&str, (&str, String)>) -> Op
         return None;
     }
     let mut disks = HashSet::new();
-    let mut paths = |values: &[Value]| -> Option<String> {
+    let mut paths = |values: &'a [Value]| -> Option<String> {
         let paths = values
             .iter()
             .map(|value| {
-                let (disk, path) = members.get(value.as_str()?)?;
-                disks.insert(*disk).then_some(path.as_str())
+                let id = value.as_str()?;
+                let (disk, path) = members.get(id)?;
+                (disks.insert(*disk) && claimed.insert(id)).then_some(path.as_str())
             })
             .collect::<Option<Vec<_>>>()?;
         Some(paths.join("#"))
@@ -346,11 +404,11 @@ fn raid_directives(array: &Value, members: &HashMap<&str, (&str, String)>) -> Op
     } else {
         format!(" {}", paths(spares)?)
     };
-    if disks.len() != members.len() {
-        return None;
-    }
-    let continued = " \\\n      ";
-    Some(format!("d-i partman-auto-raid/recipe string{continued}{level} {} {} ext4 / {devices}{spare_field}{continued}.\nd-i partman-md/confirm boolean true\nd-i partman-md/confirm_nooverwrite boolean true\n", active.len(), spares.len()))
+    Some(format!(
+        "{level} {} {} {filesystem} {mount} {devices}{spare_field}",
+        active.len(),
+        spares.len()
+    ))
 }
 
 struct Lvm<'a> {

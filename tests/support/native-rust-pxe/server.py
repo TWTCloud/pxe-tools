@@ -30,7 +30,9 @@ DIRECT_HTTP = os.environ.get("PXE_RUST_DIRECT_HTTP") == "1"
 SECURE_BOOT = os.environ.get("PXE_FIXTURE_SECURE_BOOT") == "1"
 EXPECTED_ARCH = "aarch64" if os.environ.get("PXE_FIXTURE_CLIENT_ARCH") == "arm64" else "x86_64"
 RAID_LEVEL = int(os.environ.get("PXE_FIXTURE_RAID_LEVEL", "0"))
+RAID_LVM = os.environ.get("PXE_FIXTURE_RAID_LVM") == "1"
 RAID_DISKS = {0: {}, 1: {"vda":"ONE", "vdb":"TWO"}, 5: {"vda":"ONE", "vdb":"TWO", "vdc":"THREE"}}[RAID_LEVEL]
+RAID_LAYOUT = f"gpt-raid{RAID_LEVEL}{'-lvm' if RAID_LVM else ''}-{len(RAID_DISKS)}-disks"
 USE_WORKER_QUEUE = os.environ.get("PXE_FIXTURE_USE_WORKER") == "1"
 
 
@@ -197,7 +199,7 @@ def schedule(machine, report):
             config["partition_mode"] = "custom"
             config["review_boot_mode"] = "bios"
             config["advanced"]["bootloader"] = {"bootdev": config["system_disk_path"]}
-            config["partition_custom_json"] = json.dumps({
+            plan = {
                 "target_disks": list(targets),
                 "target_disk_identities": targets,
                 "disks": [
@@ -207,7 +209,18 @@ def schedule(machine, report):
                     ]} for name in RAID_DISKS
                 ],
                 "raid_arrays": [{"name": "md0", "level": RAID_LEVEL, "members": [f"{name}2" for name in RAID_DISKS]}],
-            })
+            }
+            if RAID_LVM:
+                for item, name in zip(plan["disks"], RAID_DISKS, strict=True):
+                    item["partitions"][1] = {"id": f"{name}2", "fs": "raid-member", "size_mb": 768}
+                    item["partitions"].append({"id": f"{name}3", "fs": "raid-member", "fill": True})
+                plan["raid_arrays"].append({
+                    "name": "md1", "level": RAID_LEVEL, "is_pv": True,
+                    "members": [f"{name}3" for name in RAID_DISKS],
+                })
+                plan["vgs"] = [{"name":"vg_pxe","pvs":["md1"]}]
+                plan["logical_volumes"] = [{"vg":"vg_pxe","name":"root","fs":"ext4","mount":"/","fill":True}]
+            config["partition_custom_json"] = json.dumps(plan)
         db.execute("UPDATE machines SET status='configured',hostname='pxe-fixture',domain='example.test',"
                    " install_config_json=? WHERE id=?", (json.dumps(config), machine))
         if USE_WORKER_QUEUE:
@@ -260,7 +273,7 @@ def first_boot(action):
         raise RuntimeError("The installed guest did not boot with Secure Boot enabled")
     if SECURE_BOOT and payload.get("fixture_arch") != EXPECTED_ARCH:
         raise RuntimeError("The installed guest reported an unexpected CPU architecture")
-    if RAID_DISKS and payload.get("fixture_layout") != f"gpt-raid{RAID_LEVEL}-{len(RAID_DISKS)}-disks":
+    if RAID_DISKS and payload.get("fixture_layout") != RAID_LAYOUT:
         raise RuntimeError(f"The installed system did not boot from the requested GPT/RAID{RAID_LEVEL} recipe")
     # The postboot client asked for an acknowledgement. "accepted\n" is nine bytes.
     if not DIRECT_HTTP and not any(line.startswith(f"{CLIENT} ") and "code=os_first_boot&ack=1" in line and '" 200 9 ' in line
@@ -318,7 +331,7 @@ def follow(_root):
             if not any(line.startswith(f"{CLIENT} ") and path in line and '" 200 ' in line for line in log):
                 raise RuntimeError("Missing native HTTP evidence for " + path)
     if RAID_DISKS:
-        print(f"Custom GPT/RAID{RAID_LEVEL} partition recipe verified from the installed guest", flush=True)
+        print(f"Custom GPT/RAID{RAID_LEVEL}{'/LVM' if RAID_LVM else ''} partition recipe verified from the installed guest", flush=True)
     if SECURE_BOOT:
         print("UEFI Secure Boot verified in discovery and the installed guest", flush=True)
     print(f"PXE_NATIVE_FIRST_BOOT_OK kernel={kernel} peer={CLIENT} action={action} ack=accepted", flush=True)

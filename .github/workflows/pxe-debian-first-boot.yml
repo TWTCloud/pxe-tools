@@ -21,7 +21,7 @@ on:
       raid_level:
         description: GPT RAID recipe for the amd64 APT client
         type: choice
-        options: ['1', '5']
+        options: ['1', '5', '1-lvm']
         default: '1'
 
 permissions:
@@ -31,7 +31,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.label.name == 'ci:pxe-debian')
+       (github.event.label.name == 'ci:pxe-debian' || github.event.label.name == 'ci:pxe-raid-lvm'))
     strategy:
       fail-fast: false
       matrix:
@@ -46,18 +46,24 @@ jobs:
       PXE_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
       PXE_ARCH: ${{ matrix.arch }}
       PXE_VARIANT: ${{ matrix.variant }}
-      PXE_RAID_LEVEL: ${{ inputs.raid_level || '1' }}
+      PXE_RAID_LEVEL: ${{ github.event.label.name == 'ci:pxe-raid-lvm' && '1-lvm' || inputs.raid_level || '1' }}
+      PXE_VARIANT_SELECTED: >-
+        ${{ (github.event.label.name != 'ci:pxe-raid-lvm' && inputs.raid_level != '1-lvm'
+             || (matrix.arch == 'amd64' && matrix.variant == 'apt'))
+             && (github.event_name != 'workflow_dispatch'
+             || ((inputs.architecture == 'both' || inputs.architecture == matrix.arch)
+             && (inputs.variant == 'both' || inputs.variant == matrix.variant))) }}
     steps:
       - name: Validate the exact revision
-        if: github.event_name != 'workflow_dispatch' || ((inputs.architecture == 'both' || inputs.architecture == matrix.arch) && (inputs.variant == 'both' || inputs.variant == matrix.variant))
+        if: env.PXE_VARIANT_SELECTED == 'true'
         run: '[[ "$PXE_SOURCE" =~ ^[a-f0-9]{40}$ ]]'
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        if: github.event_name != 'workflow_dispatch' || ((inputs.architecture == 'both' || inputs.architecture == matrix.arch) && (inputs.variant == 'both' || inputs.variant == matrix.variant))
+        if: env.PXE_VARIANT_SELECTED == 'true'
         with:
           ref: ${{ env.PXE_SOURCE }}
           persist-credentials: false
       - name: Build the requested guided distribution and fixture tools
-        if: github.event_name != 'workflow_dispatch' || ((inputs.architecture == 'both' || inputs.architecture == matrix.arch) && (inputs.variant == 'both' || inputs.variant == matrix.variant))
+        if: env.PXE_VARIANT_SELECTED == 'true'
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$PXE_SOURCE"
@@ -91,7 +97,7 @@ jobs:
           echo "PXE_NATIVE_PXE_IMAGE=$image" >> "$GITHUB_ENV"
           echo "PXE_RUST_GUIDED_DOCKER_IMAGE=$appliance" >> "$GITHUB_ENV"
       - name: Install Debian from PXE and verify first boot with PHP-FPM stopped
-        if: github.event_name != 'workflow_dispatch' || ((inputs.architecture == 'both' || inputs.architecture == matrix.arch) && (inputs.variant == 'both' || inputs.variant == matrix.variant))
+        if: env.PXE_VARIANT_SELECTED == 'true'
         run: |
           set -euo pipefail
           sudo apt-get -qq update

@@ -436,9 +436,11 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     boot_tree=root/f'http/netboot/debian/13.0/{client_arch}'
     verify_packaged_rust_setup(app+'-setup', boot_tree if amd64 else None)
     custom_partition=native and amd64
-    raid_level = int(os.environ.get('PXE_NATIVE_PXE_RAID_LEVEL', '1')) if custom_partition else None
+    raid_profile = os.environ.get('PXE_NATIVE_PXE_RAID_LEVEL', '1') if custom_partition else ''
+    raid_lvm = raid_profile == '1-lvm'
+    raid_level = int(raid_profile.removesuffix('-lvm')) if raid_profile else None
     if raid_level not in (None, 1, 5):
-        raise RuntimeError('The isolated fixture supports RAID1 or RAID5.')
+        raise RuntimeError('The isolated fixture supports RAID1, RAID5 or LVM on RAID1.')
     secure_boot=not native or client_arch=='arm64'
     if secure_boot:
         verify_arm64_signed_loaders(root if client_arch=='arm64' else None,native=native)
@@ -501,6 +503,31 @@ if [ "$(findmnt -n -o TARGET /boot 2>/dev/null || true)" != /boot ] \
         && [ "$(cat "/sys/block/$md_name/md/level" 2>/dev/null)" = raid{raid_level} ] \
         && [ "$members_ok" = 1 ]; then
     layout=gpt-raid{raid_level}-{len(disks)}-disks
+fi
+PAYLOAD="$(printf '{{"ip":"%s","kernel":"%s","fixture_layout":"%s"}}' "$IP" "$(uname -r)" "$layout")"'''
+        if raid_lvm:
+            instrument=rf'''layout=unexpected
+root_source="$(findmnt -n -o SOURCE --mountpoint /)"
+boot_source="$(findmnt -n -o SOURCE --mountpoint /boot || true)"
+root_name="$(basename "$(readlink -f "$root_source")")"
+boot_name="$(basename "$(readlink -f "${{boot_source:-/dev/no-such-drive}}")")"
+set -- /sys/block/"$root_name"/slaves/*
+if [ "$#" = 1 ] && [ -e "$1" ]; then
+    pv_name="$(basename "$1")"
+    members_ok=1
+    for disk in {' '.join(disks)}; do
+        if [ "$(lsblk -dn -o PTTYPE "/dev/$disk")" != gpt ] \
+                || [ ! -d "/sys/block/$boot_name/slaves/${{disk}}2" ] \
+                || [ ! -d "/sys/block/$pv_name/slaves/${{disk}}3" ]; then
+            members_ok=0
+        fi
+    done
+    if [ "$boot_name" != "$pv_name" ] && [ "$members_ok" = 1 ] \
+            && [ "$(lsblk -dn -o TYPE "$root_source")" = lvm ] \
+            && [ "$(cat "/sys/block/$boot_name/md/level" 2>/dev/null)" = raid1 ] \
+            && [ "$(cat "/sys/block/$pv_name/md/level" 2>/dev/null)" = raid1 ]; then
+        layout=gpt-raid1-lvm-{len(disks)}-disks
+    fi
 fi
 PAYLOAD="$(printf '{{"ip":"%s","kernel":"%s","fixture_layout":"%s"}}' "$IP" "$(uname -r)" "$layout")"'''
         postboot=root/'postboot.sh.j2'
@@ -700,6 +727,8 @@ else:
                'export PXE_APP_DIR=/app; ')
     if custom_partition:
         check_env+=f'export PXE_FIXTURE_RAID_LEVEL={raid_level}; '
+        if raid_lvm:
+            check_env+='export PXE_FIXTURE_RAID_LVM=1; '
     uefi_image=None
     if secure_boot:
         check_env+='export PXE_FIXTURE_SECURE_BOOT=1; '
@@ -721,7 +750,7 @@ else:
     run_rust_guests(lan,client,root,status,screen_login=True,uefi_image=uefi_image,raid_level=raid_level,
                     installer_syslog=dhcp if client_arch=='arm64' else None)
     if custom_partition:
-        marker = f'Custom GPT/RAID{raid_level} partition recipe verified from the installed guest'
+        marker = f"Custom GPT/RAID{raid_level}{'/LVM' if raid_lvm else ''} partition recipe verified from the installed guest"
         if marker not in status.read_text():
             raise RuntimeError(f'Missing proof of the custom GPT/RAID{raid_level} recipe')
         print(marker,flush=True)

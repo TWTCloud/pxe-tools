@@ -257,7 +257,13 @@ référencer des PV supplémentaires sur des disques identifiés. Le profil
 RAID place la racine sur une grappe avec une recette BIOS GPT symétrique.
 Les essais différentiels couvrent le rendu des niveaux 0, 1, 5, 6 et 10,
 dont des disques de secours pour les niveaux redondants. Le banc amd64
-vérifie séparément le démarrage sur une racine RAID1 ou RAID5. Rust refuse
+vérifie séparément le démarrage sur une racine RAID1 ou RAID5. Un plan BIOS
+GPT symétrique peut aussi déclarer deux grappes, une pour `/boot` et une
+pour le PV d’un unique groupe LVM contenant la racine. Le profil de banc
+`1-lvm` vérifie la racine LVM et les deux grappes depuis le système installé.
+[Recette LVM sur RAID de Debian](https://sources.debian.org/src/debian-installer/20250803%2Bdeb13u8/doc/devel/partman-auto-raid-recipe.txt)
+
+Rust refuse
 les membres ambigus ou réutilisés, les recettes RAID asymétriques et les
 recettes multi-disques en mode régulier. La console programme des tests
 SMART ou de surface, collecte leurs résultats et permet de modifier

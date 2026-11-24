@@ -692,10 +692,35 @@ def compare_install(ports, paths):
         if spares:
             expected += f" {'#'.join(partitions[minimum:])}"
         assert expected in rendered[1] and "pxe-disk-guard.sh strict " in rendered[1]
+    lvm_array = {"name":"md1", "level":1, "members":["lvmA","lvmB"], "is_pv":True}
+    on_raid = {
+        **raid_plan,
+        "disks": [
+            {**disk, "partitions":[disk["partitions"][0],
+                                   {"id":member,"fs":"raid-member","size_mb":768},
+                                   {"id":volume,"fs":"raid-member","fill":True}]}
+            for disk, member, volume in zip(layouts, ("arrayA","arrayB"), ("lvmA","lvmB"), strict=True)
+        ],
+        "raid_arrays":[array, lvm_array],
+        "vgs":[{**group,"pvs":["md1"]}],
+        "logical_volumes":[lv_root],
+    }
+    set_config({**multiconfig, "partition_custom_json":json.dumps(on_raid)})
+    status, _, _, rendered = response(ports[1], PRESEED + query, peer="lan")
+    assert status == 200, rendered
+    text = rendered.decode()
+    assert f"1 2 0 ext4 /boot /dev/vda2#{second}p2" in text
+    assert f"1 2 0 lvm - /dev/vda3#{second}p3" in text
+    assert "$lvmignore{ } method{ raid }" in text
+    assert f"in_vg{{ {group['name']} }} lv_name{{ system }}" in text
+    assert "pxe-disk-guard.sh strict " in text
     for invalid in (
         {**raid_plan, "disks":[{**layouts[0], "partitions":[first,boot,layouts[0]["partitions"][1]]}, layouts[1]]},
         {**raid_plan, "raid_arrays":[{**array,"is_pv":True}],
          "vgs":[{**group, "pvs":["md0"]}], "logical_volumes":[lv_root]},
+        {**on_raid, "raid_arrays":[array, {**lvm_array, "members":["lvmA","arrayB"]}]},
+        {**on_raid, "raid_arrays":[{**array,"mount":"/"}, lvm_array]},
+        {**on_raid, "vgs":[{**group,"pvs":["md0"]}]},
         {**multi_lvm, "disks":[multi_lvm["disks"][0], {**multi_lvm["disks"][1],
          "partitions":[{"id":"other", "fs":"ext4", "mount":"/srv", "fill":True}]}]},
 
