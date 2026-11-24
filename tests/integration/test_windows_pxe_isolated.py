@@ -387,13 +387,15 @@ def main():
                 if not boot_asset_served(boot_log,name,size):
                     raise RuntimeError(f'The Rust server did not serve the verified {name} to the PXE guest.')
             winpe = read_receipt(root, helper, 'WINPE.LOG')
+            log = docker('exec',dhcp,'cat','/tmp/windows-dhcp.log').stdout
+            observed = all(re.search(rf'sent .*{re.escape(name)} to {re.escape(CLIENT)}(?:\s|$)', log)
+                           for name in SIGNED_IPXE)
+            if not observed:
+                raise RuntimeError('The isolated DHCP/TFTP log did not record both iPXE boot files.')
             print('The WinPE guest wrote its receipt and powered off after installing the selected Windows image.',flush=True)
             start_tpm(tpm,helper,root)
             run_guest(client,lan,helper,root,media,case,installed,discovery=False)
             windows = read_receipt(root, helper, 'WINDOWS.LOG')
-            log = docker('exec',dhcp,'cat','/tmp/windows-dhcp.log').stdout
-            observed = all(re.search(rf'sent .*{re.escape(name)} to {re.escape(CLIENT)}(?:\s|$)', log)
-                           for name in SIGNED_IPXE)
             transcript = root/'receipts.log'
             transcript.write_text(f'{winpe}\n{windows}\n', encoding='ascii')
             verify(case, {
