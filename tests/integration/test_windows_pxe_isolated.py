@@ -48,7 +48,7 @@ def check_case(media):
 
 def build_windows_runner(helper):
     docker('build','--tag',helper,'-',input=f"""FROM {image}
-RUN apt-get update && apt-get install --yes --no-install-recommends ovmf swtpm mtools \\
+RUN apt-get update && apt-get install --yes --no-install-recommends ovmf swtpm mtools python3-libnbd python3-tsk \\
     && rm -rf /var/lib/apt/lists/*
 """)
 
@@ -165,6 +165,18 @@ def read_efi_file(root, helper, name):
                       '-i',f'{image}@@1048576',f'::/PXE-LAB/{name}','-').stdout
     finally:
         (root/'proof-esp.img').unlink(missing_ok=True)
+
+
+def report_windows_setup(root, helper):
+    script = ROOT/'tests/support/windows-pxe/report-setup-logs.py'
+    try:
+        report = docker('run','--rm','-i','--network','none',
+                        '--mount',f'type=bind,src={root},dst=/fixture-data,readonly',
+                        '--entrypoint','python3',helper,'-','/fixture-data/client.qcow2',
+                        input=script.read_text(),check=False,timeout=45)
+        print(report.stdout+report.stderr, end='',flush=True)
+    except subprocess.TimeoutExpired:
+        print('Windows Setup diagnostics exceeded their time limit.',flush=True)
 
 
 def read_receipt(root, helper, name):
@@ -294,9 +306,9 @@ def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery)
         return not state['Running']
 
     try:
-        # The hosted software emulator took 64 minutes to apply the image
-        # and Windows was still preparing at 30 minutes on the first boot.
-        timeout = (4500 if discovery else 3600) if accelerator=='tcg' else 900
+        # Software WinPE took over an hour to apply the image. The installed
+        # guest still had disk activity after 15 minutes even with nested KVM.
+        timeout = (4500 if accelerator=='tcg' else 900) if discovery else 3600
         wait_for(completed, timeout, phase)
     except RuntimeError:
         diagnostic_screen(root)
@@ -311,6 +323,8 @@ def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery)
                 print(f'Last guest stage marker: {stage}',flush=True)
         except subprocess.CalledProcessError:
             print('No guest stage marker was recoverable from the fixture disk.',flush=True)
+        if not discovery:
+            report_windows_setup(root,helper)
         raise
     docker('rm','-f',client)
 
