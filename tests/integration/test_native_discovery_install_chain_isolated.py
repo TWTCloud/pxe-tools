@@ -335,7 +335,9 @@ def verify_arm64_signed_loaders(root=None, *, native=False):
         for source,target in (('tftp','/run/fixture-tftp'),(mok_dir,'/run/fixture-mok')):
             mounts.extend(('--mount',f'type=bind,src={root/source},dst={target}'))
     source_image=image if native else appliance_image
-    result=docker('run','--rm','--network','bridge',*mounts,'--entrypoint','/bin/bash',source_image,'-ec',
+    app_dir='/usr/lib/pxe-tools/app' if native else '/app'
+    result=docker('run','--rm','--network','bridge','-e',f'PXE_APP_DIR={app_dir}',
+                  *mounts,'--entrypoint','/bin/bash',source_image,'-ec',
                   'export PXE_ARM64_SECURE_BOOT=1 PXE_IP=192.0.2.1 MOK_DIR=/run/fixture-mok '
                   'HTTP_ROOT=/run/fixture-http TFTP_ROOT=/run/fixture-tftp; '
                   'install -d "$HTTP_ROOT" "$TFTP_ROOT"; '
