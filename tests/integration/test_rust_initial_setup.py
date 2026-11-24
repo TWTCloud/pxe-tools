@@ -67,7 +67,7 @@ class Client:
         raise RuntimeError('The isolated Rust instance did not become ready')
 
 
-def setup(client, credentials, config, database):
+def setup(client, credentials, config, database, *, probe_pending_reset=False):
     code = (credentials/'setup-code').read_text().strip()
     master_key = config.with_name('master.key')
     original = master_key.read_bytes()
@@ -97,6 +97,16 @@ def setup(client, credentials, config, database):
             'code': code, 'username': username,
             'password': 'fixture-password', 'password_confirm': 'fixture-password',
         })
+
+    if probe_pending_reset:
+        # A local fixture has no worker to race this synthetic pending reset.
+        with closing(sqlite3.connect(database)) as db, db:
+            job = db.execute("INSERT INTO init_jobs(job_type) VALUES('system:factory_reset_wipe')").lastrowid
+        assert client.request('/admin/')[:2] == (302, '/init')
+        assert 'Réinitialisation PXE en cours'.encode() in client.request('/init')[2]
+        assert create('reset-race')[0] == 409
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('DELETE FROM init_jobs WHERE id=?', (job,))
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = dict(zip(('operator','other'), pool.map(create, ('operator','other')), strict=True))
@@ -436,6 +446,67 @@ def verify_device_removal(client, database, authorization, tftp):
     assert not reset_menu.is_symlink()
     assert shared_menu.read_bytes() == b'Owners can preserve shared menus.' and retained.read_bytes() == b'Current menu'
     print('Rust device removal preserves menus on error, removes selected devices and resets only the disposable fleet', flush=True)
+
+
+def verify_factory_reset(client, database, authorization, credentials, http, tftp, mok):
+    endpoint = '/settings/factory-reset'
+    confirmation = {'confirm': 'REINITIALISER'}
+    assert client.request(endpoint, form=confirmation)[0] == 401
+    assert client.request(endpoint, form=confirmation, authorization=authorization, origin='https://elsewhere.example')[0] == 403
+    assert client.request(endpoint, form={'confirm': 'RESET'}, authorization=authorization)[0] == 422
+    old_key = Path('/etc/pxe-tools/master.key').read_bytes()
+    old_mok = (mok/'MOK.der').read_bytes()
+    netboot = http/'netboot'/'reset-test'
+    netboot.mkdir(parents=True)
+    outside = http/'preserved-fixture'
+    outside.write_text('outside netboot')
+    (netboot/'escape').symlink_to(outside)
+    boot_file = tftp/'fixture-loader'
+    boot_file.write_text('stale boot loader')
+    lock = tftp/'.pxe-menu.lock'
+    old_inode = lock.stat().st_ino
+    with closing(sqlite3.connect(database)) as db, db:
+        old_job = db.execute("INSERT INTO init_jobs(job_type,status) VALUES('fixture:retired','success')").lastrowid
+        db.execute("INSERT INTO settings(key,value) VALUES('reset_fixture','old configuration')")
+    headers = {}
+    result = client.request(endpoint, form=confirmation, authorization=authorization, response_headers=headers)
+    assert result[:2] == (303, '/init'), result
+    assert 'Max-Age=0' in headers['set-cookie']
+
+    deadline = time.monotonic() + 110
+    while time.monotonic() < deadline:
+        with closing(sqlite3.connect(database)) as db:
+            outcome = db.execute("SELECT id,status,message FROM init_jobs WHERE job_type='system:factory_reset_wipe'").fetchone()
+            boot = dict(db.execute("SELECT job_type,status FROM init_jobs WHERE id>? AND job_type LIKE 'bootstrap:%'",
+                                   (outcome[0],))) if outcome else {}
+        if outcome:
+            assert outcome[0] > old_job
+            assert outcome[1] != 'failed', outcome[2]
+            if outcome[1] == 'success' and boot.get('bootstrap:generate_mok') == 'success' and all(
+                    kind in boot for kind in ('bootstrap:install_pxe_bins','bootstrap:build_grub','bootstrap:render_templates')):
+                break
+            assert boot.get('bootstrap:generate_mok') != 'failed', boot
+        time.sleep(.3)
+    else:
+        raise AssertionError(f'Rust did not reset and prepare the new PXE installation: {outcome}, {boot}')
+    assert not netboot.exists() and not boot_file.exists()
+    assert outside.read_text() == 'outside netboot' and lock.stat().st_ino == old_inode
+    assert (mok/'MOK.der').read_bytes() != old_mok
+    assert Path('/etc/pxe-tools/master.key').read_bytes() == old_key
+    with closing(sqlite3.connect(database)) as db:
+        for table in ('users','machines','presets','os_images'):
+            assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone() == (0,), table
+        settings = dict(db.execute("SELECT key,value FROM settings"))
+        assert settings['pxe_enabled'] == 'off' and 'reset_fixture' not in settings
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+    client.ready()
+    assert client.request('/admin/devices', authorization=authorization)[0] == 401
+    assert client.request('/init')[:2] == (302, '/init/admin')
+    code = (credentials/'setup-code').read_text().strip()
+    new_auth = {'code':code, 'username':'after-reset', 'password':'fixture-password', 'password_confirm':'fixture-password'}
+    assert client.request('/init/admin', form=new_auth)[:2] == (303, '/admin/devices')
+    assert client.request('/admin/devices', authorization='after-reset:fixture-password')[0] == 200
+    print('Packaged Rust factory reset retired the old instance data and MOK, preserved TLS and the master key, and reopened setup', flush=True)
 
 
 def verify_tls_import(client, original, imported, persistent, authorization):
@@ -2511,7 +2582,7 @@ def local(binary):
         assert client.request('/init/db', form={'code': code})[0] == 503
         assert not config.exists() and database.read_bytes() == original
         database.unlink()
-        authorization = setup(client, credentials, config, database)
+        authorization = setup(client, credentials, config, database, probe_pending_reset=True)
         verify_browser_login(client, database, authorization, first_run=True)
         verify_configuration(client, database, authorization, packaged=False)
         verify_browser_login(client, database, authorization)
@@ -2575,6 +2646,7 @@ def main():
     parser.add_argument('--http-root', type=Path)
     parser.add_argument('--netboot-fixture', type=Path)
     parser.add_argument('--tftp-root', type=Path)
+    parser.add_argument('--mok-root', type=Path)
     parser.add_argument('--dnsmasq-config', type=Path)
     parser.add_argument('--installed', action='store_true',
                         help='verify a newly installed test appliance in an isolated namespace')
@@ -2603,8 +2675,11 @@ def main():
         if args.tftp_root:
             verify_device_removal(client, database, authorization, Path(args.tftp_root))
         with tempfile.TemporaryDirectory(prefix='pxe-tls-test-') as temporary:
-            verify_tls_import(client, credentials, Path(temporary),
-                              database.parent/'tls-import', authorization)
+            updated = verify_tls_import(client, credentials, Path(temporary),
+                                        database.parent/'tls-import', authorization)
+            if args.http_root and args.tftp_root and args.mok_root:
+                verify_factory_reset(updated, database, authorization, credentials,
+                                     args.http_root, args.tftp_root, args.mok_root)
     else:
         binary = args.binary or Path(__file__).resolve().parents[2]/'rust/target/release/pxe-tools-rust'
         local(binary.resolve())

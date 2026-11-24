@@ -5,7 +5,7 @@ use super::{
     setup::{page, redirect},
     ErrorBox, Reply,
 };
-use crate::{connect, setting};
+use crate::{connect, setting, worker::factory_reset as reset_job};
 use hyper::{body::Bytes, StatusCode};
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use std::{net::Ipv4Addr, path::Path};
@@ -21,6 +21,7 @@ pub(super) enum Route {
     RegenerateMok,
     Apply,
     ResetDevices,
+    FactoryReset,
 }
 
 impl Route {
@@ -35,6 +36,7 @@ impl Route {
             "/settings/regenerate-mok" => Self::RegenerateMok,
             "/settings/apply-config" => Self::Apply,
             "/settings/reset" => Self::ResetDevices,
+            "/settings/factory-reset" => Self::FactoryReset,
             _ => return None,
         })
     }
@@ -67,18 +69,20 @@ impl Route {
             };
         };
         let input: Vec<_> = form_urlencoded::parse(&form).collect();
-        if matches!(self, Self::ResetDevices) {
-            if !matches!(input.as_slice(), [(name, value)] if name == "confirm" && value == "RESET")
+        if matches!(self, Self::ResetDevices | Self::FactoryReset) {
+            let factory = matches!(self, Self::FactoryReset);
+            let expected = if factory { "REINITIALISER" } else { "RESET" };
+            if !matches!(input.as_slice(), [(name, value)] if name == "confirm" && value == expected)
             {
                 return Ok(invalid());
             }
-            return reset_devices(db_path);
+            return reset(db_path, factory);
         }
         let mut database = connect(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let tx = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let target = match self {
             Self::Ansible | Self::VaultUnlock => unreachable!("handled above"),
-            Self::ResetDevices => unreachable!("handled above"),
+            Self::ResetDevices | Self::FactoryReset => unreachable!("handled above"),
             Self::General => {
                 let [(key, value)] = input.as_slice() else {
                     return Ok(invalid());
@@ -208,7 +212,12 @@ impl Route {
         html.push_str(r#"</section><details><summary>Réinitialiser le parc</summary>
 <form method="post" action="/settings/reset"><p>Les fiches d’appareils et leurs historiques seront supprimés. La configuration de l’appliance et les modèles sont conservés.</p>
 <p><label>Saisissez RESET <input name="confirm" required autocomplete="off"></label></p>
-<button>Réinitialiser le parc</button></form></details>"#);
+<button>Réinitialiser le parc</button></form></details>
+<details><summary>Réinitialiser l’appliance</summary>
+<form method="post" action="/settings/factory-reset">
+<p>Les comptes, paramètres, modèles, inventaires, images de démarrage et clés MOK de cette instance seront supprimés. Le PXE sera désactivé. Accédez ensuite à la console locale avec le code de configuration pour recréer le compte.</p>
+<p><label>Saisissez REINITIALISER <input name="confirm" required autocomplete="off"></label></p>
+<button>Réinitialiser l’appliance</button></form></details>"#);
         Ok(page("Paramètres PXE", &html))
     }
 
@@ -228,7 +237,7 @@ impl Route {
     }
 }
 
-fn reset_devices(path: &Path) -> Result<Reply, ErrorBox> {
+fn reset(path: &Path, factory: bool) -> Result<Reply, ErrorBox> {
     let _menus = match crate::menu_store::Menus::lock_configured() {
         Ok(menus) => menus,
         Err(error) => {
@@ -244,6 +253,9 @@ fn reset_devices(path: &Path) -> Result<Reply, ErrorBox> {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if factory {
+        return factory_reset(tx);
+    }
     tx.execute("DELETE FROM machines", [])?;
     tx.execute(
         "INSERT INTO init_jobs(job_type,status,message) VALUES
@@ -253,6 +265,44 @@ fn reset_devices(path: &Path) -> Result<Reply, ErrorBox> {
     let job = tx.last_insert_rowid();
     tx.commit()?;
     Ok(redirect(StatusCode::SEE_OTHER, format!("/jobs/{job}")))
+}
+
+fn factory_reset(tx: rusqlite::Transaction<'_>) -> Result<Reply, ErrorBox> {
+    if reset_job::pending(&tx)? {
+        return Ok(plain(
+            StatusCode::CONFLICT,
+            "Réinitialisation déjà demandée\n",
+        ));
+    }
+    // Keep the sequence numbers so that callbacks and retained job processes
+    // cannot accidentally refer to a new record after setup.
+    tx.execute_batch(
+        "DELETE FROM boot_sessions;
+         DELETE FROM disk_smart_snapshots;
+         DELETE FROM disk_tests;
+         DELETE FROM machine_events;
+         DELETE FROM discoveries;
+         DELETE FROM installations;
+         DELETE FROM wipes;
+         DELETE FROM actions;
+         DELETE FROM task_phases;
+         DELETE FROM machines;
+         DELETE FROM presets;
+         DELETE FROM os_images;
+         DELETE FROM catalog_entries;
+         DELETE FROM users;
+         DELETE FROM settings;
+         DELETE FROM init_jobs;
+         INSERT INTO settings(key,value) VALUES ('db_init_done','1'), ('admin_created','0'),
+           ('wizard_completed','0'), ('pxe_enabled','off'), ('dhcp_proxy_enabled','off');",
+    )?;
+    tx.execute(
+        "INSERT INTO init_jobs(job_type,status,message) VALUES
+         (?1,'pending','Réinitialisation des artefacts PXE')",
+        [reset_job::JOB],
+    )?;
+    tx.commit()?;
+    Ok(super::sessions::cookie("", "/init"))
 }
 
 fn invalid() -> Reply {

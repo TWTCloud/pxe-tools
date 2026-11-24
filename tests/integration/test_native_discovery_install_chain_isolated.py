@@ -392,6 +392,7 @@ def verify_packaged_rust_setup(name, boot_tree=None):
            '--mount',f'type=bind,src=/dev/null,dst={legacy_cli},readonly')
     http_root='/var/lib/pxe-tools-http' if native else '/srv/http'
     tftp_root='/var/lib/pxe-tools-tftp' if native else '/srv/tftp'
+    mok_root='/var/lib/pxe-tools-native/mok' if native else '/etc/pxe-tools/mok'
     activation=()
     if boot_tree:
         input_dir='/fixture-images'
@@ -413,7 +414,8 @@ def verify_packaged_rust_setup(name, boot_tree=None):
         else:
             docker('run','-d','--name',name,'--network','none','--cap-add','NET_ADMIN',*mount,appliance_image)
         result=docker('exec','-e','PXE_DISPOSABLE_SETUP_TEST=1',name,'python3',probe,'--installed',
-                      '--http-root',http_root,'--tftp-root',tftp_root,*activation,check=False)
+                      '--http-root',http_root,'--tftp-root',tftp_root,'--mok-root',mok_root,
+                      *activation,check=False)
         print(result.stdout, end='', flush=True)
         if result.returncode:
             print(result.stderr, end='', flush=True)

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{bytes, credential_directory, plain, ErrorBox, Reply};
-use crate::{configured_database, connect, setting};
+use crate::{configured_database, connect, setting, worker::factory_reset};
 use hyper::{header::LOCATION, Response, StatusCode};
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use std::{
@@ -20,6 +20,7 @@ const SCHEMA: &str = include_str!("../../../app/db/schema.sqlite.sql");
 enum Stage {
     Database,
     Admin,
+    Resetting,
     Closed,
 }
 
@@ -45,6 +46,7 @@ impl Wizard {
         match read_stage(config).await {
             Some(Stage::Database) => Some(redirect(StatusCode::FOUND, "/init/welcome")),
             Some(Stage::Admin) => Some(redirect(StatusCode::FOUND, "/init/admin")),
+            Some(Stage::Resetting) => Some(redirect(StatusCode::FOUND, "/init")),
             Some(Stage::Closed) => None,
             None => Some(unavailable()),
         }
@@ -74,6 +76,10 @@ impl Wizard {
 <button>Créer le compte</button></form>"#,
             ),
             (Some(Stage::Admin), _) => redirect(StatusCode::FOUND, "/init/admin"),
+            (Some(Stage::Resetting), _) => page(
+                "Réinitialisation PXE en cours",
+                r#"<p>Le worker libère le réseau et efface les artefacts de démarrage.</p><a href="/init">Vérifier l’avancement</a>"#,
+            ),
             (Some(Stage::Closed), _) => redirect(StatusCode::FOUND, "/admin/devices"),
             (None, _) => unavailable(),
         }
@@ -136,6 +142,7 @@ impl Wizard {
                     Ok(redirect(StatusCode::SEE_OTHER, "/init/admin"))
                 }
                 Stage::Admin => Ok(redirect(StatusCode::SEE_OTHER, "/init/admin")),
+                Stage::Resetting => Ok(resetting()),
                 Stage::Closed => Ok(closed()),
             }
         })
@@ -173,6 +180,9 @@ fn stage(config: &Path) -> Result<Stage, ErrorBox> {
     let db = connect(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     if setup_closed(&db)? {
         return Ok(Stage::Closed);
+    }
+    if factory_reset::pending(&db)? {
+        return Ok(Stage::Resetting);
     }
     if setting(&db, "db_init_done")? == "1" {
         return Ok(Stage::Admin);
@@ -300,12 +310,16 @@ fn create_admin(config: &Path, username: &str, password: &str) -> Result<Reply, 
     match stage(config)? {
         Stage::Database => return Ok(redirect(StatusCode::SEE_OTHER, "/init/db")),
         Stage::Closed => return Ok(closed()),
+        Stage::Resetting => return Ok(resetting()),
         Stage::Admin => {}
     }
     let hash = bcrypt::hash(password, bcrypt::DEFAULT_COST)?;
     let path = configured_database(config).ok_or("Invalid SQLite configuration")?;
     let mut db = connect(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let transaction = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if factory_reset::pending(&transaction)? {
+        return Ok(resetting());
+    }
     if setup_closed(&transaction)? || setting(&transaction, "db_init_done")? != "1" {
         return Ok(closed());
     }
@@ -328,6 +342,10 @@ fn closed() -> Reply {
         StatusCode::CONFLICT,
         "Le compte initial est déjà configuré\n",
     )
+}
+
+fn resetting() -> Reply {
+    plain(StatusCode::CONFLICT, "Réinitialisation en cours\n")
 }
 
 fn unavailable() -> Reply {

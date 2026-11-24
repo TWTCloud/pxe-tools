@@ -3,6 +3,7 @@
 pub(crate) mod ansible;
 pub(crate) mod bootstrap;
 pub(crate) mod download;
+pub(crate) mod factory_reset;
 pub(crate) mod postboot;
 pub(crate) mod power;
 pub(crate) mod schedule;
@@ -21,8 +22,8 @@ pub fn recover(path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let deletions = tx.execute(
         "UPDATE init_jobs SET status='pending', updated_at=CURRENT_TIMESTAMP
-         WHERE status='running' AND job_type GLOB 'image:delete:[0-9]*'",
-        [],
+         WHERE status='running' AND (job_type GLOB 'image:delete:[0-9]*' OR job_type=?1)",
+        [factory_reset::JOB],
     )?;
     let failed = tx.execute(
         "UPDATE init_jobs SET status='failed', ended_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP,

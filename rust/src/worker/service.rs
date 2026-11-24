@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::{ansible, bootstrap, download, postboot, power, schedule};
+use super::{ansible, bootstrap, download, factory_reset, postboot, power, schedule};
 use crate::{configured_database, connect, menu_store::Menus, setting};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{
@@ -162,6 +162,12 @@ fn enqueue_initial(database: &Path, tftp: &Path) -> Result<(), ErrorBox> {
     }
     let mut db = open(database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    enqueue_bootstrap(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn enqueue_bootstrap(db: &Connection) -> rusqlite::Result<()> {
     for (kind, message) in [
         ("bootstrap:install_pxe_bins", "Copie des binaires PXE"),
         ("bootstrap:generate_mok", "Initialisation de la clé MOK"),
@@ -171,7 +177,7 @@ fn enqueue_initial(database: &Path, tftp: &Path) -> Result<(), ErrorBox> {
         ),
         ("bootstrap:render_templates", "Génération des menus PXE"),
     ] {
-        tx.execute(
+        db.execute(
             "INSERT INTO init_jobs(job_type,status,message)
              SELECT ?1,'pending',?2 WHERE NOT EXISTS(
                  SELECT 1 FROM init_jobs WHERE job_type=?1 AND status IN ('pending','running','success')
@@ -179,7 +185,6 @@ fn enqueue_initial(database: &Path, tftp: &Path) -> Result<(), ErrorBox> {
             params![kind, message],
         )?;
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -260,7 +265,9 @@ impl Worker<'_> {
             return ansible::retry(database, id);
         } else if kind == "bootstrap:cleanup_per_mac_files" {
             return cleanup_per_mac(database, id, &self.tftp);
-        } else if kind == "system:factory_reset_wipe" || kind.starts_with("image:delete:") {
+        } else if kind == factory_reset::JOB {
+            return self.factory_reset(database, id);
+        } else if kind.starts_with("image:delete:") {
             return self.python("job", Some(database), Some(id));
         } else if matches!(
             kind,
@@ -284,6 +291,50 @@ impl Worker<'_> {
         } else {
             fail_job(database, id, "Type de tâche inconnu ou non disponible.")?;
         }
+        Ok(())
+    }
+
+    fn factory_reset(&self, database: &Path, id: i64) -> Result<(), ErrorBox> {
+        let mut db = open(database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let has_users: bool =
+            tx.query_row("SELECT EXISTS(SELECT 1 FROM users)", [], |row| row.get(0))?;
+        if has_users || setting(&tx, "pxe_enabled")? != "off" {
+            return Err("L’instance doit rester désactivée pendant sa réinitialisation".into());
+        }
+        if tx.execute(
+            "UPDATE init_jobs SET status='running',progress_percent=10,
+             started_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+             WHERE id=?1 AND status='pending' AND job_type=?2",
+            params![id, factory_reset::JOB],
+        )? != 1
+        {
+            return Ok(());
+        }
+        tx.commit()?;
+        let http = directory("HTTP_ROOT", "/srv/http");
+        let mok = directory("MOK_DIR", "/etc/pxe-tools/mok");
+        if let Err(error) = factory_reset::wipe(&http, &self.tftp, &mok, &self.scripts) {
+            fail_job(
+                database,
+                id,
+                &format!("Réinitialisation interrompue : {error}"),
+            )?;
+            return Err(error.into());
+        }
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        enqueue_bootstrap(&tx)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO settings(key,value) VALUES('db_init_done','1')",
+            [],
+        )?;
+        tx.execute(
+            "UPDATE init_jobs SET status='success',progress_percent=100,
+             message='Artefacts PXE effacés. Initialisation des chargeurs relancée.',
+             ended_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+            [id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
