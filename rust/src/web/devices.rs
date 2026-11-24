@@ -312,6 +312,9 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
         output,
         "<p><a href=\"/activity?machine={id}\">Historique de l’appareil</a></p>"
     )?;
+    if let Some(progress) = super::activity::progress::render(db, id)? {
+        output.push_str(&progress);
+    }
     output.push_str("<h2>Derniers événements</h2><ul>");
     let mut events = db.prepare(
         "SELECT message FROM machine_events WHERE machine_id=? ORDER BY id DESC LIMIT 25",

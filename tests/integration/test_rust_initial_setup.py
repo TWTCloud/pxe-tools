@@ -587,6 +587,11 @@ def verify_activity(client, database, authorization):
             "INSERT INTO installations(machine_id,install_status,install_log) VALUES(?,'in_progress','<legacy-log>')",
             (device,),
         ).lastrowid
+        db.execute(
+            "INSERT INTO task_phases(task_type,task_id,phase_key,status,message) "
+            "VALUES('install',?,'disk-guard','success','<fixture-phase>')",
+            (legacy,),
+        )
     path = '/activity?' + urlencode({'type':'install', 'q':'_%', 'machine':device})
     assert client.request(path)[0] == 401
     assert client.request(path, secure=False)[0] == 404
@@ -607,6 +612,17 @@ def verify_activity(client, database, authorization):
     assert request(f'/machines/{device+1000}/tasks/install-{finished}')[0] == 404
     device_tasks = request(f'/machines/{device}/tasks')[2]
     assert f'href="/tasks/{action}"'.encode() in device_tasks
+    progress = f'/api/machines/{device}/task-progress'
+    assert client.request(progress)[0] == 401 and request(progress, secure=False)[0] == 404
+    result = request(progress)[2]
+    assert b'<progress value="1" max="13">' in result and b'&lt;fixture-phase&gt;' in result
+    assert result in request(f'/machines/{device}')[2]
+    with closing(sqlite3.connect(database)) as db, db:
+        wipe = db.execute("INSERT INTO wipes(machine_id,disks_json,wipe_mode,wipe_status) "
+                          "VALUES(?,'[]','partial','running')", (device,)).lastrowid
+    assert f'href="/wipes/{wipe}"'.encode() in request(progress)[2]
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE wipes SET wipe_status='success' WHERE id=?", (wipe,))
     install_log = f'/actions/{action}/log/install'
     close_action = f'/actions/{action}/force-complete'
     assert b'&lt;fixture-event&gt;' in detail and action_token.encode() not in detail
@@ -634,6 +650,9 @@ def verify_activity(client, database, authorization):
     assert b'&lt;legacy-log&gt;' in request(f'/installations/{legacy}')[2]
     assert request(f'/installations/{legacy}/cancel', form={})[:2] == (303, f'/installations/{legacy}')
     assert request(f'/installations/{finished}/cancel', form={})[:2] == (303, f'/installations/{finished}')
+    headers = {}
+    assert request(progress, response_headers=headers) == (200, None, b'')
+    assert headers['hx-redirect'] == f'/machines/{device}'
     with closing(sqlite3.connect(database)) as db:
         assert db.execute('SELECT status FROM machines WHERE id=?', (device,)).fetchone() == before
         assert db.execute('SELECT status,ended_at IS NOT NULL FROM actions WHERE id=?', (action,)).fetchone() == ('cancelled', 1)

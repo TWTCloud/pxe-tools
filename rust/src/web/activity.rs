@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+pub(super) mod progress;
+
 use super::{
     admin::escape,
     bytes, plain,
@@ -70,6 +72,7 @@ pub(super) enum View {
     List,
     Fragment,
     DeviceTasks(i64),
+    DeviceProgress(i64),
     Task(i64),
     Checklist(i64),
     Legacy(i64, Operation, Option<i64>),
@@ -131,6 +134,13 @@ impl Operation {
 
 impl View {
     pub(super) fn for_route(path: &str) -> Option<Self> {
+        if let Some(id) = path
+            .strip_prefix("/api/machines/")
+            .and_then(|rest| rest.strip_suffix("/task-progress"))
+            .and_then(|id| id.parse().ok().filter(|id| *id > 0))
+        {
+            return Some(Self::DeviceProgress(id));
+        }
         match path {
             "/activity" | "/installations" => return Some(Self::List),
             "/activity/list" => return Some(Self::Fragment),
@@ -200,6 +210,7 @@ impl View {
                 list(db, &filter, number, true)
             }
             Self::Task(id) => task(db, *id, catalog, false),
+            Self::DeviceProgress(id) => progress::fragment(db, *id),
             Self::Checklist(id) => task(db, *id, catalog, true),
             Self::Legacy(id, kind, bound) => legacy_task(db, *id, kind, *bound),
             Self::Installation(id) => operation(db, *id, &Operation::Install),
