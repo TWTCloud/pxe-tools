@@ -39,7 +39,7 @@ KEYRING = ROOT / "packaging/native/keyrings/debian-archive-2025.1.gpg"
 
 def native_vhost(mirror_upstream="http://10.0.2.100"):
     serial = base64.b64encode(b'GRUB_CMDLINE_LINUX="console=ttyS0,115200n8 net.ifnames=0"\n').decode()
-    hook = "in-target /bin/systemctl enable pxe-machine-ready.service"
+    hook = "&phase=finished&status=success' || true"
     instrument = f"{hook} ; in-target /bin/sh -c 'echo {serial} | base64 -d >> /etc/default/grub; update-grub'"
     return f"""server {{
     listen @@PXE_IPV4@@:80 default_server;

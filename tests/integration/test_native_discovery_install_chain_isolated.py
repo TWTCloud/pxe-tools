@@ -211,8 +211,77 @@ def installer_bootloader_log(container):
     ))[-12000:]
 
 
+def check_installed_guest(lan, identity, fixture, log, raid_level, raid_lvm, secure_boot):
+    if endpoint(lan)!=identity:
+        raise RuntimeError('fixture namespace changed before the SSH host-key scan')
+    namespace = ('nsenter', '-t', str(identity[0]), '-n')
+    address = '192.0.2.100'
+    known_hosts = fixture/'known_hosts'
+    if not known_hosts.exists():
+        scan = run(*namespace, 'ssh-keyscan', '-T', '2', '-t', 'ed25519', address, check=False)
+        if scan.returncode != 0 or not scan.stdout:
+            return None
+        digest = run('ssh-keygen', '-E', 'sha256', '-lf', '-', input=scan.stdout).stdout.split()[1]
+        expected = re.search(r'PXE_NATIVE_INSTALL_OK .* fingerprint=(SHA256:[A-Za-z0-9+/]{43})', log.read_text())
+        if expected is None or digest != expected[1]:
+            raise RuntimeError('The isolated guest SSH key does not match its installer fingerprint')
+        known_hosts.write_text(scan.stdout)
+        known_hosts.chmod(0o600)
+    commands = [
+        'set -eu', 'test "$(systemctl is-active ssh.service)" = active',
+        "timeout 30 /bin/sh -c 'while [ -e /etc/systemd/system-generators/pxe-first-boot ]; do sleep 1; done'",
+        'test -z "$(find /etc/systemd/system /etc/systemd/system-generators -iname \'*pxe*\' -print 2>/dev/null)"',
+        'test ! -e /usr/local/sbin/pxe-machine-ready', 'test ! -e /usr/local/bin/postboot.sh',
+        'test "$(systemctl show -p FragmentPath --value pxe-first-boot.service)" = /run/systemd/generator/pxe-first-boot.service',
+        'test "$(systemctl show -p Result --value pxe-first-boot.service)" = success',
+    ]
+    if secure_boot:
+        architecture = 'aarch64' if client_arch == 'arm64' else 'x86_64'
+        commands += [
+            f'test "$(uname -m)" = {architecture}',
+            'secure=0',
+            'for var in /sys/firmware/efi/efivars/SecureBoot-*; do '
+            'if [ "$(od -An -j4 -N1 -tu1 "$var" | tr -d " ")" = 1 ]; then secure=1; fi; done',
+            'test "$secure" = 1',
+        ]
+    if raid_level:
+        disks = ('vda', 'vdb', 'vdc') if raid_level == 5 else ('vda', 'vdb')
+        commands += [
+            'root="$(findmnt -n -o SOURCE --mountpoint /)"',
+            'root_name="$(basename "$(readlink -f "$root")")"',
+        ]
+        if raid_lvm:
+            commands += [
+                'boot="$(findmnt -n -o SOURCE --mountpoint /boot)"',
+                'boot_name="$(basename "$(readlink -f "$boot")")"',
+                'test "$(lsblk -dn -o TYPE "$root")" = lvm',
+                'set -- /sys/block/"$root_name"/slaves/*',
+                'test "$#" = 1',
+                'root_name="$(basename "$1")"',
+                'test "$root_name" != "$boot_name"',
+                'test "$(cat "/sys/block/$boot_name/md/level")" = raid1',
+            ]
+        else:
+            commands += ['test "$(findmnt -n -o TARGET /boot 2>/dev/null || true)" != /boot']
+        commands += [f'test "$(cat "/sys/block/$root_name/md/level")" = raid{raid_level}']
+        for disk in disks:
+            commands += [
+                f'test "$(lsblk -dn -o PTTYPE /dev/{disk})" = gpt',
+                f'test -d "/sys/block/$root_name/slaves/{disk}{3 if raid_lvm else 2}"',
+            ]
+            if raid_lvm:
+                commands.append(f'test -d "/sys/block/$boot_name/slaves/{disk}2"')
+    command = "printf '%s\\n' fixture-password | sudo -S /bin/sh -c " + shlex.quote('\n'.join(commands))
+    result = guest_command(lan, identity, fixture, 'fixture', command)
+    if result.returncode == 255 and ('Connection' in result.stderr or 'timed out' in result.stderr):
+        return None
+    if result.returncode != 0:
+        raise RuntimeError('The installed Debian guest failed its disk, Secure Boot or postboot checks: ' + result.stderr)
+    return True
+
+
 def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None, uefi_image=None,
-                    raid_level=None, installer_syslog=None):
+                    raid_level=None, raid_lvm=False, installer_syslog=None):
     machine_arch='aarch64' if client_arch=='arm64' else 'x86_64'
     use_kvm=os.uname().machine==machine_arch and Path('/dev/kvm').is_char_device()
     if client_arch=='arm64' and os.uname().machine!=machine_arch:
@@ -232,7 +301,7 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
         ))
     paths_seen=set()
     next_trace=0.0
-    lan_identity=endpoint(lan) if uefi_image else None
+    lan_identity=endpoint(lan)
     for name, boot, marker, timeout in (
         ('Discovery','n','PXE_NATIVE_DISCOVERY_OK',1500),
         ('Installer','n','PXE_NATIVE_INSTALL_OK',3900 if client_arch=='arm64' else 3000),
@@ -326,8 +395,16 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
         wait_for(completed,min(600,timeout) if uefi_image and client_arch=='amd64' else timeout,
                  name+' and '+marker)
         print(next(line for line in log.read_text().splitlines() if line.startswith(marker)), flush=True)
+        if boot == 'c':
+            wait_for(lambda:check_installed_guest(lan,lan_identity,root/'ssh',log,raid_level,raid_lvm,bool(uefi_image)),
+                     180,'installed guest reached strict SSH and passed the first-boot checks')
+            print('Strict SSH verified the volatile first-boot unit and launcher cleanup',flush=True)
+            if raid_level:
+                print(f"Custom GPT/RAID{raid_level}{'/LVM' if raid_lvm else ''} partition recipe verified from the installed guest",flush=True)
+            if uefi_image:
+                print('UEFI Secure Boot verified in discovery and the installed guest',flush=True)
         docker('rm','-f',client)
-        if lan_identity and name=='Discovery':
+        if uefi_image and name=='Discovery':
             # A fresh GRUB 2.12 starts again at the same TCP source port.
             # The fixture recreates the whole guest with the same IP and MAC.
             # Let the previous connections drain before reusing that identity.
@@ -488,68 +565,6 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         env.append('PXE_WINPE_CLIENT_IP=192.0.2.2')
         if not native:
             mounts.extend(('--mount',f'type=bind,src={windows.parent},dst={http_root}/winpe,readonly'))
-
-    if custom_partition:
-        source=(ROOT/'docker/worker/templates/postboot.sh.j2').read_text()
-        original=next(line for line in source.splitlines() if line.startswith('PAYLOAD='))
-        disks = ('vda','vdb','vdc') if raid_level==5 else ('vda','vdb')
-        instrument=rf'''layout=unexpected
-md_source="$(findmnt -n -o SOURCE /)"
-md_name="$(basename "$(readlink -f "$md_source")")"
-members_ok=1
-for disk in {' '.join(disks)}; do
-    if [ "$(lsblk -dn -o PTTYPE "/dev/$disk")" != gpt ] || [ ! -d "/sys/block/$md_name/slaves/${{disk}}2" ]; then
-        members_ok=0
-    fi
-done
-if [ "$(findmnt -n -o TARGET /boot 2>/dev/null || true)" != /boot ] \
-        && [ "$(cat "/sys/block/$md_name/md/level" 2>/dev/null)" = raid{raid_level} ] \
-        && [ "$members_ok" = 1 ]; then
-    layout=gpt-raid{raid_level}-{len(disks)}-disks
-fi
-PAYLOAD="$(printf '{{"ip":"%s","kernel":"%s","fixture_layout":"%s"}}' "$IP" "$(uname -r)" "$layout")"'''
-        if raid_lvm:
-            instrument=rf'''layout=unexpected
-root_source="$(findmnt -n -o SOURCE --mountpoint /)"
-boot_source="$(findmnt -n -o SOURCE --mountpoint /boot || true)"
-root_name="$(basename "$(readlink -f "$root_source")")"
-boot_name="$(basename "$(readlink -f "${{boot_source:-/dev/no-such-drive}}")")"
-set -- /sys/block/"$root_name"/slaves/*
-if [ "$#" = 1 ] && [ -e "$1" ]; then
-    pv_name="$(basename "$1")"
-    members_ok=1
-    for disk in {' '.join(disks)}; do
-        if [ "$(lsblk -dn -o PTTYPE "/dev/$disk")" != gpt ] \
-                || [ ! -d "/sys/block/$boot_name/slaves/${{disk}}2" ] \
-                || [ ! -d "/sys/block/$pv_name/slaves/${{disk}}3" ]; then
-            members_ok=0
-        fi
-    done
-    if [ "$boot_name" != "$pv_name" ] && [ "$members_ok" = 1 ] \
-            && [ "$(lsblk -dn -o TYPE "$root_source")" = lvm ] \
-            && [ "$(cat "/sys/block/$boot_name/md/level" 2>/dev/null)" = raid1 ] \
-            && [ "$(cat "/sys/block/$pv_name/md/level" 2>/dev/null)" = raid1 ]; then
-        layout=gpt-raid1-lvm-{len(disks)}-disks
-    fi
-fi
-PAYLOAD="$(printf '{{"ip":"%s","kernel":"%s","fixture_layout":"%s"}}' "$IP" "$(uname -r)" "$layout")"'''
-        postboot=root/'postboot.sh.j2'
-        postboot.write_text(source.replace(original,instrument))
-        mounts.extend(('--mount',f'type=bind,src={postboot},dst=/opt/pxe-tools/templates/postboot.sh.j2,readonly'))
-
-    if secure_boot:
-        source=(ROOT/'docker/worker/templates/postboot.sh.j2').read_text()
-        original=next(line for line in source.splitlines() if line.startswith('PAYLOAD='))
-        instrument=r'''secure_boot=0
-for var in /sys/firmware/efi/efivars/SecureBoot-*; do
-    if [ -r "$var" ] && [ "$(od -An -j4 -N1 -tu1 "$var" | tr -d ' ')" = 1 ]; then
-        secure_boot=1
-    fi
-done
-PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s,"fixture_arch":"%s"}' "$IP" "$(uname -r)" "$secure_boot" "$(uname -m)")"'''
-        postboot=root/'postboot.sh.j2'
-        postboot.write_text(source.replace(original,instrument))
-        mounts.extend(('--mount',f'type=bind,src={postboot},dst=/opt/pxe-tools/templates/postboot.sh.j2,readonly'))
 
     if native:
         env.extend(('PXE_TOOLS_DATA_DIR=/var/lib/pxe-tools-native/rendered','MOK_DIR='+mok_root))
@@ -751,12 +766,7 @@ else:
     status=fixture/'native-status.log'
     wait_for(lambda:status.is_file() and 'PXE_NATIVE_READY' in status.read_text(),30,'packaged Rust fixture ready')
     run_rust_guests(lan,client,root,status,screen_login=True,uefi_image=uefi_image,raid_level=raid_level,
-                    installer_syslog=dhcp if client_arch=='arm64' else None)
-    if custom_partition:
-        marker = f"Custom GPT/RAID{raid_level}{'/LVM' if raid_lvm else ''} partition recipe verified from the installed guest"
-        if marker not in status.read_text():
-            raise RuntimeError(f'Missing proof of the custom GPT/RAID{raid_level} recipe')
-        print(marker,flush=True)
+                    raid_lvm=raid_lvm,installer_syslog=dhcp if client_arch=='arm64' else None)
     if native:
         logs=docker('exec',app,'journalctl','--no-pager','-u','pxe-tools-pxe-http.service','-o','cat').stdout
     else:
@@ -765,17 +775,14 @@ else:
     for marker in (
         'PXE request peer=192.0.2.100 route=/api/discovery status=200',
         'PXE request peer=192.0.2.100 route=/preseed.php status=200',
-        'PXE request peer=192.0.2.100 route=/pxe/postboot/ status=200',
         'PXE request peer=192.0.2.100 route=/api/install-end status=200',
-        'PXE request peer=192.0.2.100 route=/api/machine-ready status=200',
         'PXE first boot peer=192.0.2.100 status=200 bytes=9',
     ):
         if marker not in logs.splitlines():
             raise RuntimeError(f'Missing evidence in the Rust server log: {marker}')
-    if secure_boot:
-        if 'UEFI Secure Boot verified in discovery and the installed guest' not in status.read_text():
-            raise RuntimeError('Missing Secure Boot proof')
-        print('UEFI Secure Boot verified in discovery and the installed guest',flush=True)
+    if any('peer=192.0.2.100' in line and ('route=/pxe/postboot/' in line or 'route=/api/machine-ready' in line)
+           for line in logs.splitlines()):
+        raise RuntimeError('The installed guest requested a legacy postboot callback')
     print('Direct Rust access records and first-boot acknowledgement verified',flush=True)
     pair=('sha256sum',tls_dir+'/cert.pem',tls_dir+'/key.pem')
     before=docker('exec',app,*pair).stdout
@@ -855,6 +862,8 @@ def main():
         ssh_fixture=root/'ssh'; ssh_fixture.mkdir(mode=0o700)
         run('ssh-keygen','-q','-t','ed25519','-N','','-f',str(ssh_fixture/'client-key'))
         client_pubkey=(ssh_fixture/'client-key.pub').read_text().strip()
+        if rust_lab:
+            (fixture/'guest-fixture.pub').write_text(client_pubkey+'\n')
         data,conf,http,tftp=(root/x for x in ('data','conf','http','tftp'))
         for directory in (data,conf,http,tftp):directory.mkdir(mode=0o755)
         (conf/'master.key').write_bytes(os.urandom(32));(conf/'master.key').chmod(0o600)
