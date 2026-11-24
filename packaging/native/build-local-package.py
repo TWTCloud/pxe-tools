@@ -175,8 +175,8 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
     if upgrade_fixture and (package_name != 'pxe-tools' or not rust_guided or version != '0.1.0~rust1'):
         raise ValueError('Use the dedicated Rust upgrade fixture version and package name')
     if rust_binary is not None:
-        if package_name != 'pxe-tools-local-test' and not upgrade_fixture:
-            raise ValueError('The Rust variants are only available in the local test package')
+        if package_name == 'pxe-tools' and not rust_guided:
+            raise ValueError('The named Rust candidate must serve PXE directly without PHP or Nginx')
         if rust_binary.is_symlink() or not rust_binary.is_file():
             raise ValueError('Use a regular file for the Rust binary')
         with rust_binary.open('rb') as binary:

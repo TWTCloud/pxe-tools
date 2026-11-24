@@ -86,6 +86,17 @@ python3 packaging/native/build-local-package.py /tmp/pxe-tools-guided.deb \
 docker build --target rust-guided -f docker/pxe-tools/Dockerfile -t pxe-tools:rust-guided .
 ```
 
+Pour tester le paquet portant le nom de distribution `pxe-tools` sur
+un système vierge, compiler le binaire Linux natif comme ci-dessus, puis
+construire le candidat APT avec la commande suivante.
+
+```sh
+python3 packaging/native/build-apt-package-candidate.py /tmp/pxe-tools-candidat.deb \
+  --architecture "$(dpkg --print-architecture)" --version '0.1.0~guided1' \
+  --maintainer 'PXE Tools <security@pxetools.com>' \
+  --rust-binary rust/target/release/pxe-tools-rust
+```
+
 Ces variantes réutilisent le `db.conf`, la clé maître et les données
 d'une instance SQLite existante. Sur une instance vierge, la console
 écoute uniquement sur `127.0.0.1`. Ouvrir
@@ -521,6 +532,13 @@ avec les médias Microsoft sur le runner Windows. Le label `ci:pxe-raid-lvm`
 exerce le profil LVM sur RAID1 avec APT amd64. Chaque workflow récupère
 le SHA exact de la PR. Le déclenchement manuel est aussi disponible
 depuis Actions une fois les workflows présents sur la branche par défaut.
+
+Le label `ci:rust-distributions` vérifie aussi l’installation vierge du
+paquet nommé `pxe-tools` et de l’image Rust sur les deux architectures.
+Il contrôle l’accès HTTPS à l’assistant et l’absence d’écoute DHCP avant
+la configuration. Le démarrage de l’invité PXE exige KVM avec ce label.
+Si le runner ne l’expose pas, le résultat se limite aux vérifications
+du serveur et le journal le signale.
 
 Le client de test Debian x86-64 utilise OVMF avec Secure Boot actif.
 Le banc prend le shim et le GRUB signés que fournit le serveur, inscrit

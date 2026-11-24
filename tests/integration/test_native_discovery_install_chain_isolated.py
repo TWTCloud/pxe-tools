@@ -577,7 +577,7 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
                *mounts,image,'--unit=basic.target')
         wait_for(lambda:docker('exec',app,'systemctl','list-units','--no-legend',check=False).returncode==0,
                  60,'native systemd')
-        package=docker('exec',app,'dpkg-query','-W','-f=${Status}|${Version}','pxe-tools-local-test').stdout
+        package=docker('exec',app,'dpkg-query','-W','-f=${Status}|${Version}','pxe-tools').stdout
         if package.strip()!='install ok installed|0.1.0~guided1':
             raise RuntimeError('Expected the packaged Rust APT candidate')
         docker('exec',app,'install','-d','-m','0755','/var/lib/pxe-tools-native/rendered')

@@ -102,7 +102,8 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
-       (github.event.label.name == 'ci:pxe-debian' || github.event.label.name == 'ci:pxe-raid-lvm'))
+       (github.event.label.name == 'ci:pxe-debian' || github.event.label.name == 'ci:pxe-raid-lvm'
+        || github.event.label.name == 'ci:rust-distributions'))
     strategy:
       fail-fast: false
       matrix:
@@ -117,6 +118,7 @@ jobs:
       PXE_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
       PXE_ARCH: ${{ matrix.arch }}
       PXE_VARIANT: ${{ matrix.variant }}
+      PXE_NATIVE_ONLY: ${{ github.event.label.name == 'ci:rust-distributions' }}
       PXE_RAID_LEVEL: ${{ github.event.label.name == 'ci:pxe-raid-lvm' && '1-lvm' || inputs.raid_level || '1' }}
       PXE_VARIANT_SELECTED: >-
         ${{ (github.event.label.name != 'ci:pxe-raid-lvm' && inputs.raid_level != '1-lvm'
@@ -133,6 +135,18 @@ jobs:
         with:
           ref: ${{ env.PXE_SOURCE }}
           persist-credentials: false
+      - name: Check for hardware acceleration
+        if: env.PXE_VARIANT_SELECTED == 'true'
+        id: kvm
+        run: |
+          if test -c /dev/kvm; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            if [ "$PXE_NATIVE_ONLY" = 'true' ]; then
+              echo 'No KVM on this runner. Only the fresh distribution install will be tested.' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
       - name: Build the requested guided distribution and fixture tools
         if: env.PXE_VARIANT_SELECTED == 'true'
         run: |
@@ -142,31 +156,52 @@ jobs:
           inputs=$(mktemp -d "$RUNNER_TEMP/guided-rust.XXXXXXXX")
           image="pxe-native-e2e-${PXE_SOURCE:0:10}:local"
           appliance="pxe-guided-${PXE_SOURCE:0:10}:local"
+          fresh="pxe-fresh-${PXE_SOURCE:0:10}:local"
           if [ "$PXE_VARIANT" = apt ]; then
             rustup toolchain install 1.96.0 --profile minimal
             cargo +1.96.0 build --locked --release --manifest-path rust/Cargo.toml
             strip rust/target/release/pxe-tools-rust
-            python3 packaging/native/build-local-package.py "$inputs/native.deb" --architecture "$PXE_ARCH" \
-              --version '0.1.0~guided1' --rust-guided --rust-binary rust/target/release/pxe-tools-rust
+            python3 packaging/native/build-apt-package-candidate.py "$inputs/native.deb" --architecture "$PXE_ARCH" \
+              --version '0.1.0~guided1' --rust-binary rust/target/release/pxe-tools-rust \
+              --maintainer 'PXE Tools <security@pxetools.com>'
             dpkg-deb --field "$inputs/native.deb" Package Version Architecture Depends
             test "$(stat -c %s "$inputs/native.deb")" -le 26214400
             stat -c 'Guided .deb: %s bytes' "$inputs/native.deb"
-            docker build --platform "linux/$PXE_ARCH" --tag "$image" -f - "$inputs" <<'DOCKERFILE'
+            docker build --platform "linux/$PXE_ARCH" --target fresh --tag "$fresh" -f - "$inputs" <<'DOCKERFILE'
+          FROM debian:13-slim AS fresh
+          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates systemd systemd-sysv && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+            if [ "$PXE_NATIVE_ONLY" != 'true' ] || [ "$PXE_HAS_KVM" = 'true' ]; then
+              docker build --platform "linux/$PXE_ARCH" --tag "$image" -f - "$inputs" <<'DOCKERFILE'
           FROM debian:13-slim
           COPY native.deb /var/tmp/native.deb
           RUN apt-get update && apt-get install -y --no-install-recommends /var/tmp/native.deb systemd-sysv qemu-system-x86 qemu-utils socat && rm -f /var/tmp/native.deb && rm -rf /var/lib/apt/lists/*
           RUN ! dpkg-query -W -f='${Status}' php8.4-fpm 2>/dev/null | grep -q 'install ok installed'
           DOCKERFILE
+            fi
           else
-            docker build --platform "linux/$PXE_ARCH" --target rust-guided -f docker/pxe-tools/Dockerfile --tag "$appliance" .
+            docker build --platform "linux/$PXE_ARCH" --target rust-guided -f docker/pxe-tools/Dockerfile \
+              --build-arg 'APP_VERSION=0.1.0~guided1' --label "org.opencontainers.image.revision=$PXE_SOURCE" \
+              --tag "$appliance" .
             docker image inspect -f 'Guided image: {{.Os}}/{{.Architecture}} {{.Size}} bytes' "$appliance"
-            docker build --platform "linux/$PXE_ARCH" --tag "$image" - <<'DOCKERFILE'
+            if [ "$PXE_NATIVE_ONLY" != 'true' ] || [ "$PXE_HAS_KVM" = 'true' ]; then
+              docker build --platform "linux/$PXE_ARCH" --tag "$image" - <<'DOCKERFILE'
           FROM debian:13-slim
           RUN apt-get update && apt-get install -y --no-install-recommends debian-archive-keyring ca-certificates cpio gpgv curl dnsmasq-base python3 qemu-system-x86 qemu-utils socat && rm -rf /var/lib/apt/lists/*
           DOCKERFILE
+            fi
           fi
-          echo "PXE_NATIVE_PXE_IMAGE=$image" >> "$GITHUB_ENV"
-          echo "PXE_RUST_GUIDED_DOCKER_IMAGE=$appliance" >> "$GITHUB_ENV"
+          {
+            echo "PXE_NATIVE_PXE_IMAGE=$image"
+            echo "PXE_RUST_GUIDED_DOCKER_IMAGE=$appliance"
+            echo "PXE_FRESH_APT_IMAGE=$fresh"
+            echo "PXE_GUIDED_DEB=$inputs/native.deb"
+          } >> "$GITHUB_ENV"
+        env:
+          PXE_HAS_KVM: ${{ steps.kvm.outputs.available }}
+      - name: Install the fresh APT or Docker candidate and verify the Rust console
+        if: env.PXE_VARIANT_SELECTED == 'true'
+        run: bash tests/integration/test_rust_fresh_distribution.sh "$PXE_VARIANT"
       - name: Verify Rust console, worker and PHP parity
         if: env.PXE_VARIANT_SELECTED == 'true' && matrix.arch == 'amd64' && matrix.variant == 'apt' && env.PXE_RAID_LEVEL == '1'
         run: |
@@ -182,7 +217,9 @@ jobs:
               python3 tests/integration/test_rust_initial_setup.py
             '
       - name: Install Debian from PXE and verify first boot with PHP-FPM stopped
-        if: env.PXE_VARIANT_SELECTED == 'true'
+        if: >-
+          env.PXE_VARIANT_SELECTED == 'true' &&
+          (github.event.label.name != 'ci:rust-distributions' || steps.kvm.outputs.available == 'true')
         run: |
           set -euo pipefail
           sudo apt-get -qq update
