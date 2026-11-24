@@ -46,8 +46,10 @@ def check_boot_assets(case, directory):
 def verify(case, network, transcript):
     guest = str(uuid.UUID(case['guest_id']))
     disk = case['disk_serial']
-    if re.fullmatch(r'[A-Za-z0-9-]{1,40}', disk) is None:
-        raise ValueError('Invalid disposable disk serial')
+    identity = case.get('disk_identity', 'serial')
+    patterns = {'serial': r'[A-Za-z0-9-]{1,40}', 'unique_id': r'[A-F0-9]{32}'}
+    if identity not in patterns or re.fullmatch(patterns[identity], disk) is None:
+        raise ValueError('Invalid disposable disk identifier')
     if (network['guest_id'] != guest or network['architecture'] != 'uefi-amd64'
             or network['efi_boot_manager_transferred'] is not True
             or network['winpe_sha256'] != case['winpe_sha256']):
@@ -65,8 +67,9 @@ def verify(case, network, transcript):
         raise ValueError('Expected one WinPE boot followed by one installed Windows boot')
     for receipt in receipts:
         if (receipt['guest_id'] != guest or receipt['disk_serial'] != disk
+                or receipt.get('disk_identity', 'serial') != identity
                 or receipt['secure_boot'] is not True or receipt['tpm_spec'] != '2.0'):
-            raise ValueError('Guest identity, disk serial, Secure Boot or TPM evidence differs')
+            raise ValueError('Guest identity, disk identifier, Secure Boot or TPM evidence differs')
     winpe, windows = receipts
     if winpe['pe_boot_type'] not in WINPE_RAMDISK or winpe['partition_style'] != 'RAW':
         raise ValueError('WinPE did not boot with the blank fixture disk')
