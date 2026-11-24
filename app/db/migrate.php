@@ -404,41 +404,45 @@ if ($driver !== 'mysql') {
 }
 echo "migrate-images: catalog_entries table ensured (v2)\n";
 
-// Backfill version_full + codename + major depuis DebianCatalog::MAPPING (v2)
-foreach (DebianCatalog::MAPPING as $major => $meta) {
-    $cn = $meta['codename'] ?? null;
-    if ($cn === null) continue;
-    $pdo->prepare(
-        "UPDATE os_images SET codename = ?, major = ? "
-      . "WHERE distro = 'debian' AND version = ? AND (codename IS NULL OR codename = '')"
-    )->execute([$cn, $major, $cn]);
+if ($rustGuided) {
+    $runsRustMigration('--migrate-image-metadata');
+} else {
+    // Backfill version_full + codename + major depuis DebianCatalog::MAPPING (v2)
+    foreach (DebianCatalog::MAPPING as $major => $meta) {
+        $cn = $meta['codename'] ?? null;
+        if ($cn === null) continue;
+        $pdo->prepare(
+            "UPDATE os_images SET codename = ?, major = ? "
+          . "WHERE distro = 'debian' AND version = ? AND (codename IS NULL OR codename = '')"
+        )->execute([$cn, $major, $cn]);
+    }
+    // version_full = COALESCE(minor_version, version || '.0') pour rows debian existantes
+    $pdo->exec(
+        "UPDATE os_images SET version_full = minor_version "
+      . "WHERE distro = 'debian' AND minor_version IS NOT NULL AND minor_version != '' "
+      . "AND (version_full IS NULL OR version_full = '')"
+    );
+    echo "migrate-images: backfilled v2 columns (codename, major, version_full)\n";
+
+    // Les images et leurs fichiers sont conservés, même si une version n'est plus
+    // proposée dans le catalogue. Leur suppression doit être une action explicite.
+
+    // v2 : suppression des pre-seeds Debian. Le catalogue commence vide ; l'admin
+    // ajoute des images via le picker (/settings/images/add). Les rows existantes
+    // sur les déploiements v1 sont préservées (pas de DELETE), juste plus de
+    // re-création automatique au démarrage.
+
+    // Backfill channel depuis DebianCatalog::MAPPING (pour rows v1 préservées).
+    foreach (DebianCatalog::MAPPING as $major => $meta) {
+        $codename = $meta['codename'] ?? null;
+        if ($codename === null) continue;
+        $pdo->prepare(
+            "UPDATE os_images SET channel = ? "
+          . "WHERE distro = 'debian' AND version = ? AND (channel IS NULL OR channel = '')"
+        )->execute([$meta['channel'], $codename]);
+    }
+    echo "migrate-images: backfilled channel from DebianCatalog::MAPPING (rétro-compat v1 rows)\n";
 }
-// version_full = COALESCE(minor_version, version || '.0') pour rows debian existantes
-$pdo->exec(
-    "UPDATE os_images SET version_full = minor_version "
-  . "WHERE distro = 'debian' AND minor_version IS NOT NULL AND minor_version != '' "
-  . "AND (version_full IS NULL OR version_full = '')"
-);
-echo "migrate-images: backfilled v2 columns (codename, major, version_full)\n";
-
-// Les images et leurs fichiers sont conservés, même si une version n'est plus
-// proposée dans le catalogue. Leur suppression doit être une action explicite.
-
-// v2 : suppression des pre-seeds Debian. Le catalogue commence vide ; l'admin
-// ajoute des images via le picker (/settings/images/add). Les rows existantes
-// sur les déploiements v1 sont préservées (pas de DELETE), juste plus de
-// re-création automatique au démarrage.
-
-// Backfill channel depuis DebianCatalog::MAPPING (pour rows v1 préservées).
-foreach (DebianCatalog::MAPPING as $major => $meta) {
-    $codename = $meta['codename'] ?? null;
-    if ($codename === null) continue;
-    $pdo->prepare(
-        "UPDATE os_images SET channel = ? "
-      . "WHERE distro = 'debian' AND version = ? AND (channel IS NULL OR channel = '')"
-    )->execute([$meta['channel'], $codename]);
-}
-echo "migrate-images: backfilled channel from DebianCatalog::MAPPING (rétro-compat v1 rows)\n";
 
 // Migration layout legacy /netboot/<version>/ → /netboot/<version>/<arch>/
 $httpRoot = '/srv/http';

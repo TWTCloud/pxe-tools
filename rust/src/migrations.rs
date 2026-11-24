@@ -431,3 +431,37 @@ pub fn preset_distributions(config: &Path) -> Result<(), Box<dyn Error + Send + 
     );
     Ok(())
 }
+
+pub fn image_metadata(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let path = crate::configured_database(config).ok_or("Existing SQLite database required")?;
+    let mut db = crate::connect(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Classify the codenames assigned to Debian images in the pre-v2 catalog.
+    for (major, codename, channel) in [
+        (12, "bookworm", "oldstable"),
+        (13, "trixie", "stable"),
+        (14, "forky", "testing"),
+    ] {
+        tx.execute(
+            "UPDATE os_images SET codename=?1,major=?2
+             WHERE distro='debian' AND version=?1 AND (codename IS NULL OR codename='')",
+            rusqlite::params![codename, major],
+        )?;
+        tx.execute(
+            "UPDATE os_images SET channel=?1
+             WHERE distro='debian' AND version=?2 AND (channel IS NULL OR channel='')",
+            rusqlite::params![channel, codename],
+        )?;
+    }
+    tx.execute(
+        "UPDATE os_images SET version_full=minor_version
+         WHERE distro='debian' AND COALESCE(minor_version,'')<>'' AND COALESCE(version_full,'')=''",
+        [],
+    )?;
+    tx.commit()?;
+    println!("Rust backfilled historical Debian image metadata");
+    Ok(())
+}

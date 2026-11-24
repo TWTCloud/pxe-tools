@@ -87,6 +87,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         if flag == "--migrate-preset-distributions" && Path::new(config).is_absolute() {
             return migrations::preset_distributions(Path::new(config));
         }
+        if flag == "--migrate-image-metadata" && Path::new(config).is_absolute() {
+            return migrations::image_metadata(Path::new(config));
+        }
         if flag == "--migrate-network-settings" && Path::new(config).is_absolute() {
             return migrations::network_settings(Path::new(config));
         }

@@ -668,6 +668,35 @@ def verify_preset_distribution_migration(binary):
     print('Rust migrated historical preset aliases and kept explicit distributions', flush=True)
 
 
+def verify_image_metadata_migration(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-image-metadata-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        config = root/'db.conf'
+        config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
+        schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+        command = [str(binary),'--migrate-image-metadata',str(config)]
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            db.executemany(
+                'INSERT INTO os_images(distro,version,minor_version,codename,major,channel,version_full) VALUES(?,?,?,?,?,?,?)',
+                [
+                    ('debian','trixie','13.4.0',None,None,None,None),
+                    ('debian','forky',None,None,None,'explicit',None),
+                    ('debian','bookworm','12.13.0','preserved',12,None,'12.14.0'),
+                    ('ubuntu','noble','24.04',None,None,None,None),
+                ],
+            )
+        for _ in range(2):
+            subprocess.run(command, check=True, capture_output=True)
+            with closing(sqlite3.connect(database)) as db:
+                assert db.execute('SELECT codename,major,channel,version_full FROM os_images ORDER BY id').fetchall()==[
+                    ('trixie',13,'stable','13.4.0'),('forky',14,'explicit',None),
+                    ('preserved',12,'oldstable','12.14.0'),(None,None,None,None),
+                ]
+    print('Rust migrated Debian catalog metadata and preserved explicitly selected releases', flush=True)
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -728,6 +757,7 @@ def local(binary):
     verify_schema_migration(binary)
     verify_preset_network_migration(binary)
     verify_preset_distribution_migration(binary)
+    verify_image_metadata_migration(binary)
 
 
 def main():
