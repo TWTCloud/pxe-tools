@@ -186,6 +186,13 @@ par le worker. La vue `/jobs` ouvre les tâches du worker, leurs états et
 les dernières lignes du journal. Les URL de suivi par identifiant et l’API
 de statut par type restent accessibles à la console authentifiée.
 
+La fiche appareil expose son contexte matériel en JSON et programme la
+récupération, un nouvel inventaire ou une commande d’alimentation. Pour un
+appareil en attente, le prochain appel de découverte reçoit la commande.
+Le worker traite les demandes destinées au système installé. La fiche
+permet également de demander la synchronisation Ansible, un redéploiement
+ou le réessai d’une phase en échec quand le module est activé.
+
 La page `/settings` enregistre le protocole de découverte et les DNS IPv4
 proposés aux prochains déploiements. Elle permet de demander au worker
 d’appliquer la configuration, de reconstruire GRUB ou de régénérer la clé

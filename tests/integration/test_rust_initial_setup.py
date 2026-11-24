@@ -608,6 +608,88 @@ def verify_device_operations(client, database, authorization):
     print('Rust recovery, inventory and power helpers reject conflicts and select the existing poll or worker channel', flush=True)
 
 
+def verify_device_ansible(client, database, authorization):
+    def request(path, **kwargs):
+        return client.request(path, authorization=authorization, **kwargs)
+
+    with closing(sqlite3.connect(database)) as db, db:
+        device = db.execute("""INSERT INTO machines(mac,hostname,status)
+                              VALUES('02:00:00:00:09:22','fixture-ansible','installed')""").lastrowid
+    path = f'/machines/{device}/ansible'
+    assert client.request(path+'/pull',form={})[0] == 401
+    assert request(path+'/pull',form={},origin='https://outside.example')[0] == 403
+    assert request(path+'/pull')[0] == 405
+    assert request(path+'/redeploy',form={})[0] == 409
+    assert request(path+'/retry',form={})[0] == 409
+    pull = request(path+'/pull',form={})
+    assert pull[0] == 303 and pull[1].startswith('/jobs/')
+    assert request(path+'/pull',form={})[:2] == pull[:2]
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE machines SET install_config_json=? WHERE id=?",
+                   [json.dumps({'ansible_role':'sample-role'}), device])
+        action = db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES (?,'install_only','failed',?)",
+                            [device,secrets.token_hex(32)]).lastrowid
+        db.execute("""INSERT INTO installations(machine_id,action_id,install_status,ansible_status)
+                      VALUES (?,?,'success','failed')""", [device,action])
+    deploy = request(path+'/redeploy',form={})
+    assert deploy[0] == 303 and deploy[1].startswith('/jobs/')
+    assert request(path+'/redeploy',form={})[:2] == deploy[:2]
+    assert request(path+'/retry',form={})[0] == 409
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE init_jobs SET status='success' WHERE id=?", [int(deploy[1].split('/')[-1])])
+    assert request(path+'/retry',form={})[:2] == (303,f'/tasks/{action}')
+    assert request(path+'/retry',form={})[0] == 409
+    with closing(sqlite3.connect(database)) as db:
+        kinds = ('ansible_repo:pull', f'machine:ansible_redeploy:{device}', f'action:ansible_retry:{action}')
+        for kind in kinds:
+            assert db.execute('SELECT COUNT(*) FROM init_jobs WHERE job_type=?', [kind]).fetchone() == (1,)
+    print('Rust scheduled Ansible pull, redeploy and retry through the established worker queue', flush=True)
+
+
+def verify_hardware_context(client, database, authorization):
+    def request(path):
+        return client.request(path, authorization=authorization)
+
+    inventory = {
+        'inventory':{'memory_kb':'1048576', 'boot_mode':'UEFI', 'cpu_model':' Fixture CPU ',
+                     'cpu_cores':4, 'cpu_max_mhz':2100},
+        'boot_mac':'02-00-00-00-09-99',
+        'interfaces':[{'mac':'02:00:00:00:09:99', 'name':'eth0','speed_mbps':1000,
+                       'ipv4':['192.0.2.8','192.0.2.9']}],
+        'disks':[{'name':'vda','size_bytes':32000000000,'rota':False,'serial':'Dupe'},
+                 {'name':'/dev/vdb','size_bytes':'64000000000','serial':'DUPE',
+                  'identity':{'kind':'serial','source':'sysfs','value':'DUPE','status':'valid'}},
+                 {'name':'vdc','size_bytes':'1000000000','serial':'OLD'},
+                 {'name':'vdd','serial':'unknown'}],
+    }
+    with closing(sqlite3.connect(database)) as db, db:
+        device = db.execute("""INSERT INTO machines(mac,status,inventory_json)
+                              VALUES('02:00:00:00:09:23','discovered',?)""",
+                            [json.dumps(inventory)]).lastrowid
+    route = f'/machines/{device}/hardware-context.json'
+    assert client.request(route)[0] == 401
+    assert client.request(route,authorization=authorization,secure=False)[0] == 404
+    response = request(route)
+    assert response[0] == 200
+    fields = json.loads(response[2])
+    assert fields['boot_mac'] == '02:00:00:00:09:99'
+    assert fields['is_uefi'] and fields['ram_kb'] == 1048576
+    assert fields['cpu'] == {'model':'Fixture CPU','cores':4,'max_mhz':2100,'current_mhz':None}
+    assert fields['nics'][0]['ipv4'] == '192.0.2.8, 192.0.2.9'
+    assert fields['disk_capacities_mb'] == {'/dev/vda':32000,'/dev/vdb':64000,'/dev/vdc':1000}
+    assert [disk['identity_status'] for disk in fields['disks']] == ['ambiguous','ambiguous','legacy','missing']
+    assert fields['disks'][1]['size_mb'] == 64000
+    assert fields['disks'][1]['identity'] == {'kind':'serial','value':'DUPE','source':'sysfs','status':'valid'}
+    assert fields['disks'][3]['identity'] is None
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE machines SET inventory_json='invalid' WHERE id=?", [device])
+    empty = json.loads(request(route)[2])
+    assert empty['boot_mac'] == '' and empty['disks'] == [] and empty['disk_capacities_mb'] == []
+    missing = request('/machines/123456789/hardware-context.json')
+    assert missing[0] == 404 and json.loads(missing[2]) == {'error':'machine not found'}
+    print('Rust exposes the historical hardware context and flags ambiguous identities', flush=True)
+
+
 def verify_admin_attempt_limit(client, authorization):
     path = '/admin/devices'
     for _ in range(21):
@@ -1285,6 +1367,8 @@ def local(binary):
         verify_device_settings(updated, database, authorization)
         verify_guided_install(updated, database, authorization)
         verify_device_operations(updated, database, authorization)
+        verify_device_ansible(updated, database, authorization)
+        verify_hardware_context(updated, database, authorization)
         verify_appliance_settings(updated, database, authorization)
         verify_admin_attempt_limit(updated, authorization)
         schedule_server.terminate()

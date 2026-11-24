@@ -144,7 +144,7 @@ fn enqueue(db: &Connection, id: i64, command: &str, message: &str) -> rusqlite::
     Ok(())
 }
 
-fn running(status: &str) -> bool {
+pub(super) fn running(status: &str) -> bool {
     matches!(status, "installing" | "wiping" | "inventorying" | "testing")
 }
 

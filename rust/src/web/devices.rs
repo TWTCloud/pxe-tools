@@ -2,6 +2,7 @@
 
 use super::{
     admin::escape,
+    device_ansible,
     device_operations::{self, Operation},
     plain,
     presets::GUIDED,
@@ -73,7 +74,9 @@ enum Section {
     Detail,
     Install,
     Status,
+    HardwareContext,
     Command(Operation),
+    Ansible(device_ansible::Action),
 }
 
 pub(super) fn route(path: &str) -> Option<DeviceRoute> {
@@ -84,12 +87,16 @@ pub(super) fn route(path: &str) -> Option<DeviceRoute> {
         "" => Section::Detail,
         "install" => Section::Install,
         "status" => Section::Status,
+        "hardware-context.json" => Section::HardwareContext,
         "rediscover" => Section::Command(Operation::Rediscover),
         "rescue" => Section::Command(Operation::Rescue),
         "rescue/exit" => Section::Command(Operation::ExitRescue),
         "wake" | "reboot" => Section::Command(Operation::Reboot),
         "shutdown" => Section::Command(Operation::Shutdown),
         "power" => Section::Command(Operation::SchedulePower),
+        "ansible/pull" => Section::Ansible(device_ansible::Action::Pull),
+        "ansible/retry" => Section::Ansible(device_ansible::Action::Retry),
+        "ansible/redeploy" => Section::Ansible(device_ansible::Action::Redeploy),
         _ => return None,
     };
     Some(DeviceRoute { id, section })
@@ -98,9 +105,10 @@ pub(super) fn route(path: &str) -> Option<DeviceRoute> {
 impl DeviceRoute {
     pub(super) fn form_limit(&self, method: &hyper::Method) -> Option<usize> {
         match (&self.section, method) {
-            (Section::Install | Section::Status | Section::Command(_), &hyper::Method::POST) => {
-                Some(2048)
-            }
+            (
+                Section::Install | Section::Status | Section::Command(_) | Section::Ansible(_),
+                &hyper::Method::POST,
+            ) => Some(2048),
             (Section::Detail, &hyper::Method::PUT | &hyper::Method::POST) => Some(64 * 1024),
             _ => None,
         }
@@ -118,6 +126,11 @@ impl DeviceRoute {
             return match &self.section {
                 Section::Install => schedule(path, self.id, form, username),
                 Section::Command(operation) => operation.run(path, self.id, form),
+                Section::Ansible(action) => action.run(path, self.id, form),
+                Section::HardwareContext => Ok(plain(
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "Method not allowed\n",
+                )),
                 Section::Detail | Section::Status => super::device_settings::update(
                     path,
                     self.id,
@@ -127,14 +140,22 @@ impl DeviceRoute {
                 ),
             };
         }
-        let Some(device) = Device::get(db, self.id)? else {
+        let device = Device::get(db, self.id)?;
+        if matches!(self.section, Section::HardwareContext) {
+            return super::hardware_context::serve(
+                device
+                    .as_ref()
+                    .map(|device| (device.mac.as_str(), &device.inventory)),
+            );
+        }
+        let Some(device) = device else {
             return Ok(plain(StatusCode::NOT_FOUND, "Appareil introuvable\n"));
         };
         match self.section {
             Section::Install => install_form(db, self.id, &device),
             Section::Detail => detail(db, self.id, &device),
             Section::Status => super::device_settings::badge(db, self.id, &device.status),
-            Section::Command(_) => Ok(plain(
+            Section::HardwareContext | Section::Command(_) | Section::Ansible(_) => Ok(plain(
                 StatusCode::METHOD_NOT_ALLOWED,
                 "Method not allowed\n",
             )),
@@ -220,6 +241,7 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
         )?;
     }
     super::device_settings::form(db, id, &mut output)?;
+    device_ansible::form(db, id, &mut output)?;
     output.push_str("<h2>Derniers événements</h2><ul>");
     let mut events = db.prepare(
         "SELECT message FROM machine_events WHERE machine_id=? ORDER BY id DESC LIMIT 25",
