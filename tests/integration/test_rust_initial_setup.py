@@ -276,6 +276,33 @@ def verify_activation(client, database, request, plan, http_root, tftp_root, inp
     finally:
         conn.close()
     print('Rust wizard activated the proxy, published BIOS and signed UEFI loaders and served authenticated Debian', flush=True)
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE settings SET value='off' WHERE key='pxe_enabled'")
+        stop = db.execute("INSERT INTO init_jobs(job_type,status) "
+                          "VALUES ('bootstrap:restart_dnsmasq','pending')").lastrowid
+        legacy = db.execute("INSERT INTO init_jobs(job_type,status) "
+                            "VALUES ('system:nginx_reload','pending')").lastrowid
+    deadline = time.monotonic()+45
+    while time.monotonic()<deadline:
+        with closing(sqlite3.connect(database)) as db:
+            status, message = db.execute("SELECT status,message FROM init_jobs WHERE id=?",[stop]).fetchone()
+            retired = db.execute("SELECT status,message FROM init_jobs WHERE id=?",[legacy]).fetchone()
+        assert status!='failed', message
+        if status=='success' and retired[0]=='failed':
+            break
+        time.sleep(.25)
+    else:
+        raise RuntimeError('The worker did not finish disabling the isolated PXE services')
+    assert 'serveur Rust' in retired[1]
+    assert 'no-dhcp-interface=*' in dnsmasq_config.read_text().splitlines()
+    client.ready()
+    assert request('/admin/devices')[0] == 200
+    try:
+        with socket.create_connection((plan['pxe_ip'],80),timeout=2):
+            raise AssertionError('The PXE listener stayed bound to the isolated network address')
+    except OSError:
+        pass
+    print('Rust kept its local HTTPS console available after disabling PXE in the isolated appliance',flush=True)
 
 
 def verify_worker_image_delete(database, http_root):

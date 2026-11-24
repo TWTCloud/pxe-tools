@@ -409,6 +409,11 @@ def run_bootstrap_job(job: dict) -> None:
     pour ne pas saturer SQLite. Heartbeat updated_at à chaque flush."""
     job_id = job["id"]
     job_type = job["job_type"]
+    if (os.environ.get("PXE_RUST_GUIDED") == "1"
+            and job_type in ("system:nginx_reload", "system:release_nginx_port")):
+        update_init_job(job_id, status="failed", ended_at=now(), updated_at=now(),
+                        message="Tâche historique Nginx. Consultez l’état du serveur Rust.")
+        return
 
     if job_type.startswith('image:delete:'):
         run_image_delete(job)

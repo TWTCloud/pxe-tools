@@ -31,6 +31,7 @@ fi
 # Read before touching services: a broken database is not an activation request.
 activation=$(python3 "${PXE_APP_DIR:-/app}/network_activation.py")
 if [[ "$activation" == off ]]; then
+    direct_http="${PXE_RUST_DIRECT_HTTP:-0}"
     if [[ "$manager" == systemd ]]; then
         systemctl stop pxe-tools.target pxe-tools-pxe-http.service pxe-tools-dnsmasq.service
         systemctl disable pxe-tools.target
@@ -40,7 +41,7 @@ if [[ "$activation" == off ]]; then
             fi
         done
     else
-        if [[ "${PXE_RUST_DIRECT_HTTP:-}" == 1 ]]; then
+        if [[ "$direct_http" == 1 ]]; then
             s6-svc -d /run/service/rust-guided
         else
             /opt/pxe-tools/init/render-nginx-conf.sh
@@ -57,6 +58,23 @@ if [[ "$activation" == off ]]; then
         fi
     fi
     PXE_DNSMASQ_STRICT=1 "$renderer"
+    if [[ "$direct_http" == 1 ]]; then
+        if [[ "$manager" == systemd ]]; then
+            systemctl start pxe-tools-pxe-http.service
+        else
+            s6-svc -u /run/service/rust-guided
+        fi
+        console="http://127.0.0.1:${PXE_HTTP_PORT:-80}/healthz"
+        for _ in {1..12}; do
+            if curl --silent --fail --max-time 2 "$console" >/dev/null; then
+                echo '[restart-dnsmasq] Console Rust prête en local ; démarrage réseau désactivé.'
+                exit 0
+            fi
+            sleep 1
+        done
+        echo '[restart-dnsmasq] ERREUR : console Rust indisponible.' >&2
+        exit 1
+    fi
     echo '[restart-dnsmasq] Console prête ; démarrage réseau désactivé.'
     exit 0
 fi
