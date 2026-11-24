@@ -29,10 +29,12 @@ READY = "/api/machine-ready"
 CHECKPOINT = "/api/internal/checkpoint"
 LOG = "/api/internal/install-log"
 PHASE = "/api/task-phase"
+DHCP = "/api/internal/dhcp-event"
+DNSMASQ = "/api/internal/dnsmasq-event"
 PRESEED = "/preseed.php"
 GRUB = "/grub.php"
 ARTIFACT = "/pxe/postboot/162/postboot.sh"
-ROUTES = (ROUTE, BOOT, DISCOVERY, POLL, START, END, READY, CHECKPOINT, LOG, PHASE, PRESEED, GRUB, ARTIFACT)
+ROUTES = (ROUTE, BOOT, DISCOVERY, POLL, START, END, READY, CHECKPOINT, LOG, PHASE, PRESEED, GRUB, ARTIFACT, DHCP, DNSMASQ)
 LAN = "192.0.2.24"
 
 
@@ -229,6 +231,49 @@ def compare_inventory(ports, paths):
     post(data, 409)
     logs, = compare_states(paths, ["SELECT machine_id,level,message FROM machine_events WHERE message LIKE 'Conflit de découverte%' ORDER BY id"])
     assert len(logs) == 2
+
+
+def compare_boot_events(ports, paths):
+    mac = "02:00:00:6f:00:01"
+    args = {"mac": mac, "ip": LAN}
+    direct = DHCP + "?" + urlencode(args)
+    assert compare(ports, direct, 200, method="POST", peer="lan", spoof=True) == b""
+    assert compare_states(paths, [f"SELECT status FROM machines WHERE mac='{mac}'"]) == [[]]
+    assert compare(ports, direct, 200, method="POST", peer="alternate_loopback") == b""
+    assert compare_states(paths, [f"SELECT status FROM machines WHERE mac='{mac}'"]) == [[("inventorying",)]]
+
+    proxy = DNSMASQ + "?" + urlencode({"type": "dhcp_proxy", **args})
+    tftp = DNSMASQ + "?" + urlencode({"type": "tftp_serve", "ip": LAN, "file": "grubnetaa64.efi"})
+    for path in paths:
+        with closing(sqlite3.connect(path)) as db, db:
+            action = db.execute(
+                """INSERT INTO actions(machine_id,type,status,token)
+                   SELECT id,'install_only','running','test-dhcp' FROM machines WHERE mac=?""", [mac]
+            ).lastrowid
+
+    for route in (tftp, proxy, proxy, tftp, tftp):
+        assert compare(ports, route, 200, method="POST") == b""
+    for path in paths:
+        with closing(sqlite3.connect(path)) as db, db:
+            machine, = db.execute("SELECT id FROM machines WHERE mac=?", [mac]).fetchone()
+            address = db.execute(
+                """SELECT message FROM machine_events WHERE machine_id=? AND checkpoint='pxe_boot_observed'
+                   ORDER BY id LIMIT 1""", [machine]
+            ).fetchone()
+            assert address == (f'PXE DHCP observed {{"mac":"{mac}","ip":"{LAN}"}}',)
+            checkpoints = db.execute(
+                """SELECT checkpoint,message FROM machine_events WHERE action_id=?
+                   ORDER BY id""", [action]
+            ).fetchall()
+            assert [(code, json.loads(message.split(" ", 1)[1])) for code, message in checkpoints] == [
+                ("dhcp_request_install", {"mac": mac, "dhcp_ip": LAN, "src": "dnsmasq-tail"}),
+                ("grub_config_served_install", {"bootloader": "grubnetaa64.efi", "ip": LAN, "src": "dnsmasq-tail"}),
+            ]
+            db.execute("INSERT INTO installations(machine_id,action_id,install_status) VALUES (?,?,'success')",
+                       [machine, action])
+    assert compare(ports, proxy, 200, method="POST") == b""
+    rows, = compare_states(paths, [f"SELECT checkpoint FROM machine_events WHERE action_id={action} ORDER BY id"])
+    assert rows[-1] == ("install_reboot_done",)
 
 
 def compare_install(ports, paths):
@@ -627,7 +672,8 @@ def main():
             db.execute("DROP TRIGGER fail_event")
         assert response(ports[1], retry, peer="lan")[0] == 200
         compare_grub(ports, paths)
-    print("Parity OK: 69 summaries, GRUB menus and selection, discovery inventory, preseed with advanced networking and single- and multi-disk recipes, and installation callbacks")
+        compare_boot_events(ports, paths)
+    print("Parity OK: 69 summaries, GRUB menus and selection, DHCP/TFTP events, discovery inventory, preseed with advanced networking and single- and multi-disk recipes, and installation callbacks")
 
 
 if __name__ == "__main__":

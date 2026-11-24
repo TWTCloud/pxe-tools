@@ -214,6 +214,14 @@ fn handle(
             // Read each time so an atomic wizard/administrator change takes effect
             // immediately and requests cannot keep going to the previous database.
             let Some(db) = configured_database(config) else {
+                if method == Method::Post
+                    && matches!(
+                        path,
+                        "/api/internal/dhcp-event" | "/api/internal/dnsmasq-event"
+                    )
+                {
+                    return Ok(internal_reply(response(200, TEXT, "")));
+                }
                 return Ok(response(
                     503,
                     JSON,
@@ -357,6 +365,48 @@ fn handle(
                 _ => unreachable!(),
             };
             json_response(result)
+        }
+        (Method::Post, "/api/internal/dhcp-event" | "/api/internal/dnsmasq-event") => {
+            let result = (|| -> rusqlite::Result<()> {
+                let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+                if !(ip.is_some_and(|ip| ip.is_loopback() || is_mapped_loopback(ip))
+                    || in_subnet(ip, &setting(&db, "docker_internal_cidr")?))
+                {
+                    return Ok(());
+                }
+                let query = parse_query(query.as_bytes());
+                let direct = path == "/api/internal/dhcp-event";
+                let form = if !direct
+                    && request_header(request, "Content-Type").is_some_and(|ct| {
+                        ct.split(';').next().is_some_and(|ty| {
+                            ty.trim()
+                                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+                        })
+                    }) {
+                    match read_body(request, 4097) {
+                        Ok(data) if data.len() <= 4096 => parse_query(&data),
+                        _ => return Ok(()),
+                    }
+                } else {
+                    Params::new()
+                };
+                let value = |key| {
+                    arg(&query, key)
+                        .or_else(|| arg(&form, key))
+                        .unwrap_or_default()
+                };
+                let address = value("ip").parse::<std::net::Ipv4Addr>().ok();
+                if direct || value("type") == "dhcp_proxy" {
+                    pxe::boot_events::dhcp(&mut db, catalog, value("mac"), address, !direct)?;
+                } else if let (Some(address), "tftp_serve") = (address, value("type")) {
+                    pxe::boot_events::tftp(&mut db, catalog, address, value("file"))?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                eprintln!("DHCP/TFTP event write failed: {error}");
+            }
+            Ok(internal_reply(response(200, TEXT, "")))
         }
         (Method::Post, "/api/internal/checkpoint") => {
             let result = (|| -> rusqlite::Result<&'static str> {
