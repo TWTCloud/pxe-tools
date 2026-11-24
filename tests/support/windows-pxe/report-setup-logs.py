@@ -29,9 +29,16 @@ class ReadOnlyDisk(pytsk3.Img_Info):
 
 
 def report(disk):
-    # DiskPart in install-fixture.ps1 creates the 1 MiB alignment gap, the
-    # 260 MiB ESP, and the 16 MiB MSR before the NTFS system partition.
-    ntfs = pytsk3.FS_Info(disk, offset=277 * 1024 * 1024)
+    volumes = pytsk3.Volume_Info(disk, type=pytsk3.TSK_VS_TYPE_GPT)
+    sector = volumes.info.block_size
+    partitions = [
+        part.start * sector for part in volumes
+        if part.flags & pytsk3.TSK_VS_PART_FLAG_ALLOC
+        and disk.read(part.start * sector, sector)[3:11] == b'NTFS    '
+    ]
+    if len(partitions) != 1:
+        raise RuntimeError('Expected one NTFS system partition on the fixture disk.')
+    ntfs = pytsk3.FS_Info(disk, offset=partitions[0], type=pytsk3.TSK_FS_TYPE_NTFS)
     for name in ('setuperr.log', 'setupact.log'):
         try:
             log = ntfs.open(f'/Windows/Panther/{name}')

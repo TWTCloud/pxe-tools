@@ -46,11 +46,17 @@ def check_case(media):
     return case
 
 
-def build_windows_runner(helper):
-    docker('build','--tag',helper,'-',input=f"""FROM {image}
+def build_windows_runner(helper, host_vars):
+    source = """FROM registry.fedoraproject.org/fedora:44 AS firmware
+RUN dnf -y --setopt=install_weak_deps=False install edk2-ovmf
+""" if host_vars else ''
+    firmware = """COPY --from=firmware /usr/share/edk2/ovmf/OVMF.qemuvars.fd /usr/share/OVMF/
+COPY --from=firmware /usr/share/edk2/ovmf/vars.secboot.json /usr/share/OVMF/
+""" if host_vars else ''
+    docker('build','--tag',helper,'-',input=f"""{source}FROM {image}
 RUN apt-get update && apt-get install --yes --no-install-recommends ovmf swtpm mtools python3-libnbd python3-tsk \\
     && rm -rf /var/lib/apt/lists/*
-""")
+{firmware}""")
 
 
 def configure_instance(root, media):
@@ -212,6 +218,21 @@ def guest_acceleration(accelerator):
     return (), ('-accel','tcg,thread=multi','-cpu','max')
 
 
+def guest_firmware(host_vars):
+    if host_vars:
+        # The device protects UEFI variables in QEMU instead of trapping to
+        # nested SMM, which failed inside the GitHub Windows runner.
+        return (
+            '-machine','q35,smm=off','-bios','/usr/share/OVMF/OVMF.qemuvars.fd',
+            '-device','uefi-vars-x64,jsonfile=/fixture-data/vars.json',
+        )
+    return (
+        '-machine','q35,smm=on','-global','driver=cfi.pflash01,property=secure,value=on',
+        '-drive','if=pflash,unit=0,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd',
+        '-drive','if=pflash,unit=1,format=raw,file=/fixture-data/vars.fd',
+    )
+
+
 def qemu_query(root, query):
     try:
         with socket.socket(socket.AF_UNIX) as connection:
@@ -246,7 +267,7 @@ def start_tpm(tpm, helper, root):
              30,'disposable TPM socket')
 
 
-def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery):
+def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery, host_vars):
     mount = ('--mount', f'type=bind,src={root},dst=/fixture-data')
     iso = ()
     network = ('--network','none')
@@ -268,10 +289,7 @@ def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery)
     devices,settings = guest_acceleration(accelerator)
     docker('run','-di','--name',client,*network,*devices,*mount,
            '--entrypoint','qemu-system-x86_64',helper,
-           '-machine','q35,smm=on',*settings,'-smp','4' if accelerator=='tcg' else '2','-m','6144','-display','none',
-           '-global','driver=cfi.pflash01,property=secure,value=on',
-           '-drive','if=pflash,unit=0,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd',
-           '-drive','if=pflash,unit=1,format=raw,file=/fixture-data/vars.fd',
+           *guest_firmware(host_vars),*settings,'-smp','4' if accelerator=='tcg' else '2','-m','6144','-display','none',
            '-chardev','socket,id=chrtpm,path=/fixture-data/tpm.sock',
            '-tpmdev','emulator,id=tpm0,chardev=chrtpm','-device','tpm-tis,tpmdev=tpm0',
            '-uuid',case['guest_id'],*restart,'-serial','file:/fixture-data/'+serial,
@@ -337,9 +355,10 @@ def main():
     parser.add_argument('--installed-accelerator', default='same', choices=('same','kvm','tcg'))
     args = parser.parse_args()
     installed = args.accelerator if args.installed_accelerator=='same' else args.installed_accelerator
+    host_vars = 'kvm' in (args.accelerator,installed)
     if backend != 'rust-docker' or os.uname().machine != 'x86_64':
         parser.error('A disposable amd64 Linux runner with the Rust Docker image is required.')
-    if 'kvm' in (args.accelerator,installed) and not Path('/dev/kvm').is_char_device():
+    if host_vars and not Path('/dev/kvm').is_char_device():
         parser.error('KVM acceleration requires a disposable runner with /dev/kvm.')
     if args.server_only and args.media is None:
         preflight(args.accelerator,installed)
@@ -358,11 +377,12 @@ def main():
         boot_assets = stage_boot_assets(root, media, case)
         fixture = ('--mount',f'type=bind,src={root},dst=/fixture-data')
         try:
-            build_windows_runner(helper)
+            build_windows_runner(helper, host_vars)
             docker('run','--rm','--network','none',*fixture,'--entrypoint','qemu-img',
                    helper,'create','-f','qcow2','/fixture-data/client.qcow2','72G')
+            source, destination = ('vars.secboot.json','vars.json') if host_vars else ('OVMF_VARS_4M.ms.fd','vars.fd')
             docker('run','--rm','--network','none',*fixture,'--entrypoint','cp',
-                   helper,'/usr/share/OVMF/OVMF_VARS_4M.ms.fd','/fixture-data/vars.fd')
+                   helper,f'/usr/share/OVMF/{source}',f'/fixture-data/{destination}')
             docker('run','-d','--name',lan,'--network','none','--entrypoint','sleep',helper,'7200')
             docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
                    '--mount',f'type=bind,src={root/"tftp"},dst=/pxe,readonly',
@@ -380,7 +400,7 @@ def main():
                    '--enable-tftp','--tftp-root=/pxe','--log-dhcp','--log-facility=/tmp/windows-dhcp.log')
             start_appliance(app,lan,dhcp,root,boot_assets)
             start_tpm(tpm,helper,root)
-            run_guest(client,lan,helper,root,media,case,args.accelerator,discovery=True)
+            run_guest(client,lan,helper,root,media,case,args.accelerator,discovery=True,host_vars=host_vars)
             boot_log = docker('logs',app).stdout
             for name in ('wimboot','BCD','boot.sdi','boot.wim'):
                 size = (boot_assets/name).stat().st_size
@@ -394,7 +414,7 @@ def main():
                 raise RuntimeError('The isolated DHCP/TFTP log did not record both iPXE boot files.')
             print('The WinPE guest wrote its receipt and powered off after installing the selected Windows image.',flush=True)
             start_tpm(tpm,helper,root)
-            run_guest(client,lan,helper,root,media,case,installed,discovery=False)
+            run_guest(client,lan,helper,root,media,case,installed,discovery=False,host_vars=host_vars)
             windows = read_receipt(root, helper, 'WINDOWS.LOG')
             transcript = root/'receipts.log'
             transcript.write_text(f'{winpe}\n{windows}\n', encoding='ascii')
