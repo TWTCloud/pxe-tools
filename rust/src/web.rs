@@ -3,6 +3,8 @@
 mod acme;
 mod activity;
 mod admin;
+mod ansible_settings;
+mod ansible_webhook;
 mod assets;
 mod auth_proxy;
 mod certificates;
@@ -610,7 +612,7 @@ async fn dispatch(
             if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
-            match read_form(&parts.headers, body, 2048).await {
+            match read_form(&parts.headers, body, route.form_limit()).await {
                 Ok(form) => Some(form),
                 Err(reply) => return reply,
             }
@@ -662,6 +664,45 @@ async fn dispatch(
                 ),
             )
             .await;
+    }
+    if path == ansible_webhook::ROUTE {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        if parts.method != Method::POST {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        }
+        let Ok(_permit) = site.requests.try_acquire() else {
+            return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
+        };
+        let data = match timeout(
+            Duration::from_secs(15),
+            Limited::new(body, ansible_webhook::BODY_LIMIT).collect(),
+        )
+        .await
+        {
+            Ok(Ok(data)) => data.to_bytes(),
+            Ok(Err(error)) if error.is::<http_body_util::LengthLimitError>() => {
+                return plain(StatusCode::PAYLOAD_TOO_LARGE, "Request body too large\n");
+            }
+            Ok(Err(_)) => return plain(StatusCode::BAD_REQUEST, "Invalid request body\n"),
+            Err(_) => return plain(StatusCode::REQUEST_TIMEOUT, "Request timeout\n"),
+        };
+        let signature = single(&parts.headers, "x-hub-signature-256")
+            .unwrap_or_default()
+            .to_owned();
+        let event = single(&parts.headers, "x-github-event")
+            .unwrap_or_default()
+            .to_owned();
+        let site = site.clone();
+        return match task::spawn_blocking(move || {
+            ansible_webhook::receive(&site.database, &signature, &event, &data)
+        })
+        .await
+        {
+            Ok(Ok(reply)) => reply,
+            _ => plain(StatusCode::SERVICE_UNAVAILABLE, "Webhook unavailable\n"),
+        };
     }
 
     let Some(server) = site.pxe_ip else {

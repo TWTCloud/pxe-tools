@@ -112,6 +112,7 @@ pub(super) fn route(path: &str) -> Option<DeviceRoute> {
         "ansible/pull" => Section::Ansible(device_ansible::Action::Pull),
         "ansible/retry" => Section::Ansible(device_ansible::Action::Retry),
         "ansible/redeploy" => Section::Ansible(device_ansible::Action::Redeploy),
+        "auto-deploy" => Section::Ansible(device_ansible::Action::AutoDeploy),
         _ => return None,
     };
     Some(DeviceRoute { id, section })

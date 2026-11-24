@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS machines (
     boot_mode       TEXT NOT NULL DEFAULT 'http',  -- 'http' (rapide) ou 'tftp' (fiable, pour VMs/firmwares lents)
     local_boot_source TEXT NOT NULL DEFAULT 'none', -- none | pxe (install réussie) | manual (admin)
     rescue_mode     INTEGER NOT NULL DEFAULT 0,    -- 1 = prochain boot servira le menuentry rescue (Debian d-i en récupération)
+    auto_deploy     INTEGER NOT NULL DEFAULT 0,    -- autorise un redéploiement Ansible déclenché par le webhook
     next_action     TEXT,                          -- consigne lue par discover.sh en boucle de poll : NULL=wait (rester allumée), 'poweroff', 'reboot'
     awaiting_action_until DATETIME,                -- timestamp UTC d'expiration de la fenêtre d'attente post-discovery (NOW+1h). NULL = pas en attente.
     boot_arch       TEXT,                          -- Spec D.4 : arch détectée au discovery (uname -m → mapping amd64/arm64) — sert /netboot/<distro>/<boot_arch>/

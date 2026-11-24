@@ -6,6 +6,7 @@ mod disk_identity;
 mod grub;
 mod images;
 mod install;
+mod instance_secrets;
 mod migrations;
 mod monitoring;
 mod postboot;

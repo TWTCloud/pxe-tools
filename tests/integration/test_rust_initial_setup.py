@@ -4,6 +4,7 @@
 import argparse
 import base64
 from hashlib import sha256
+import hmac
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 from http.client import HTTPConnection, HTTPSConnection
@@ -30,7 +31,7 @@ class Client:
         self.https_port = https_port
         self.origin = 'https://127.0.0.1' + (f':{https_port}' if https_port != 443 else '')
 
-    def request(self, path, *, form=None, authorization=None, secure=True, origin=None,
+    def request(self, path, *, form=None, raw_body=None, authorization=None, secure=True, origin=None,
                 extra_headers=None, response_headers=None):
         if secure:
             conn = HTTPSConnection('127.0.0.1', self.https_port, timeout=5, context=self.context)
@@ -43,8 +44,8 @@ class Client:
             if form is not None:
                 headers['Origin'] = origin or self.origin
                 headers['Content-Type'] = 'application/x-www-form-urlencoded'
-            conn.request('GET' if form is None else 'POST', path,
-                         body=None if form is None else urlencode(form), headers=headers)
+            body = raw_body if form is None else urlencode(form)
+            conn.request('GET' if body is None else 'POST', path, body=body, headers=headers)
             response = conn.getresponse()
             if response_headers is not None:
                 response_headers.update((key.lower(), value) for key, value in response.getheaders())
@@ -1606,6 +1607,133 @@ def verify_preset_import(binary):
     print('Rust imports, updates and validates repository presets with persisted identity and reference hardware', flush=True)
 
 
+def verify_ansible_settings(client, database, authorization, key, vault, workdir):
+    def request(path='/settings/ansible', **kwargs):
+        return client.request(path, authorization=authorization, **kwargs)
+
+    assert client.request('/settings/ansible')[0] == 401
+    assert request(secure=False)[0] == 404
+    assert request('/settings/ansible/vault-unlock')[0] == 405
+    assert b'Module Ansible' in request()[2]
+    form = {
+        'ansible_enabled':'on','repo_url':'git@example.test:team/provisioning.git',
+        'repo_branch':'release/next','repo_profile':'pxe/profile.json',
+        'playbooks_dir':str(workdir),'target_user':'fixture_ops',
+        'ssh_pubkey':'ssh-ed25519 QUJDRA== Fixture clé publique',
+        'github_push_user':'fixture-bot','github_push_token':'fixture-only-token',
+    }
+    assert request(form=form,origin='https://outside.example')[0] == 403
+    for invalid in ({'repo_branch':'main.lock'}, {'repo_profile':'.git/private.json'},
+                    {'repo_url':'file:///tmp/repo.git'}, {'target_user':'root'},
+                    {'playbooks_dir':'relative'}, {'ssh_pubkey':'private-key'},
+                    {'ssh_privkey':'fixture-private-key'}):
+        assert request(form={**form,**invalid})[0] == 422
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute("SELECT value FROM settings WHERE key='github_push_token'").fetchone() is None
+    assert request(form=form)[:2] == (303,'/settings/ansible')
+    page = request()[2]
+    assert b'fixture_ops' in page and b'pxe/profile.json' in page
+    assert b'fixture-only-token' not in page
+    with closing(sqlite3.connect(database)) as db, db:
+        secret, = db.execute("SELECT value FROM settings WHERE key='github_push_token'").fetchone()
+        assert secret != form['github_push_token'] and len(base64.b64decode(secret)) > 40
+        db.execute("""CREATE TRIGGER fixture_ansible_atomic BEFORE UPDATE ON settings
+                      WHEN NEW.key='ansible_target_user' BEGIN SELECT RAISE(ABORT,'fixture'); END""")
+    app = Path(__file__).resolve().parents[2]/'app/src/Util/Crypto.php'
+    opened = subprocess.check_output([
+        'php','-r','require $argv[1]; echo Admin\\Util\\Crypto::decrypt(stream_get_contents(STDIN));',str(app),
+    ], input=secret, text=True, env={**os.environ,'PXE_MASTER_KEY_PATH':str(key)})
+    assert opened == form['github_push_token']
+    assert request(form={**form,'repo_branch':'different','github_push_token':'fixture-rollback'})[0] == 503
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT value FROM settings WHERE key='github_push_token'").fetchone() == (secret,)
+        assert db.execute("SELECT value FROM settings WHERE key='ansible_repo_branch'").fetchone() == ('release/next',)
+        db.execute('DROP TRIGGER fixture_ansible_atomic')
+    marker = workdir/'.git/info/sparse-checkout'
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+    assert request(form={**form,'repo_profile':''})[0] == 422
+    vault_route = '/settings/ansible/vault-unlock'
+    assert request(vault_route,form={'vault_password':'x'*1025})[0] == 422
+    assert request(vault_route,form={'vault_password':'isolated-vault-fixture'})[:2] == (303,'/settings/ansible')
+    pending = vault/'unlock'
+    assert pending.stat().st_mode & 0o777 == 0o600
+    assert pending.read_bytes() == b'isolated-vault-fixture'
+    assert b'isolated-vault-fixture' not in request()[2]
+    assert request(vault_route,form={'vault_password':'replacement-fixture'})[0] == 303
+    assert pending.read_bytes() == b'replacement-fixture' and list(vault.iterdir()) == [pending]
+    assert request(form={**form,'github_push_token_clear':'1'})[0] == 303
+    verify_ansible_webhook(client, database, authorization, workdir)
+    assert request(form={})[0] == 303
+    with closing(sqlite3.connect(database)) as db:
+        values = dict(db.execute("SELECT key,value FROM settings WHERE key LIKE 'ansible_%' OR key='github_push_token'"))
+        assert values['ansible_enabled'] == 'off' and values['github_push_token'] == ''
+        assert values['ansible_repo_profile'] == 'pxe/profile.json'
+    print('Rust Ansible settings preserve scoped repositories and PHP secret format, and stage Vault unlocks privately',
+          flush=True)
+
+
+def verify_ansible_webhook(client, database, authorization, workdir):
+    route = '/api/ansible-repo/webhook'
+    (workdir/'inventory.ini').write_text('[fixture]\nwebhook-ready\nwebhook-busy\nwebhook-optout\n')
+    (workdir/'playbooks').mkdir()
+    (workdir/'playbooks/check.yml').write_text('- hosts: fixture\n')
+    generated = client.request('/settings/ansible',
+                               form={'webhook_action':'regen_secret','webhook_enabled':'on'},
+                               authorization=authorization)
+    assert generated[0] == 200
+    secret = generated[2].split(b'id="webhook-secret">',1)[1].split(b'</code>',1)[0]
+    assert len(secret) == 64
+    assert secret not in client.request('/settings/ansible',authorization=authorization)[2]
+    with closing(sqlite3.connect(database)) as db, db:
+        machines = []
+        for index, (name, status) in enumerate([
+            ('webhook-ready','installed'),('webhook-busy','testing'),('webhook-optout','installed'),
+        ]):
+            machines.append(db.execute(
+                'INSERT INTO machines(mac,hostname,status,install_config_json) VALUES (?,?,?,?)',
+                [f'02:00:00:00:09:{80+index}',name,status,json.dumps({'ansible_role':'check'})],
+            ).lastrowid)
+    ready, busy, optout = machines
+    for machine in machines:
+        enable = f'/machines/{machine}/auto-deploy'
+        assert client.request(enable,form={'auto_deploy':'1'})[0] == 401
+        response = client.request(enable,form={'auto_deploy':'1'},authorization=authorization)
+        assert response[0] == 303, response
+    assert client.request(f'/machines/{optout}/auto-deploy',form={},authorization=authorization)[0] == 303
+    body = json.dumps({'commits':[{'modified':['playbooks/check.yml','playbooks/check.yml']}],
+                       'head_commit':{'id':'ab01234aaaaa'}}).encode()
+
+    def delivery(event, data=body, signature=None, **kwargs):
+        signature = signature if signature is not None else 'sha256='+hmac.digest(secret,data,'sha256').hex()
+        return client.request(route, raw_body=data, extra_headers={
+            'x-github-event':event,'x-hub-signature-256':signature,
+        }, **kwargs)
+
+    assert delivery('push',secure=False)[0] == 404
+    assert delivery('push',data=b'bad json',signature='sha256='+'0'*64)[0] == 401
+    assert delivery('push',data=b'bad json')[0] == 400
+    assert json.loads(delivery('ping')[2]) == {'pong':True}
+    first = delivery('push')
+    assert first[0] == 202, first
+    assert json.loads(first[2]) == {
+        'commit':'ab01234','files':1,'impacted':3,
+        'triggered':['webhook-ready'],'skipped':[{'hostname':'webhook-busy','reason':'machine_busy'}],
+    }
+    repeat = json.loads(delivery('push')[2])
+    assert repeat['triggered'] == [] and repeat['skipped'][0] == {
+        'hostname':'webhook-ready','reason':'already_pending',
+    }
+    with closing(sqlite3.connect(database)) as db:
+        rows = db.execute("SELECT job_type,status FROM init_jobs WHERE job_type IN (?,?,?)",
+                          [f'machine:ansible_redeploy:{machine}' for machine in machines]).fetchall()
+        assert rows == [(f'machine:ansible_redeploy:{ready}','pending')]
+    assert client.request('/settings/ansible',form={},authorization=authorization)[0] == 303
+    assert delivery('push')[0] == 503
+    print('Rust webhook verifies GitHub HMAC, scopes deployment, honors opt-in and refuses duplicate jobs',
+          flush=True)
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -1615,6 +1743,7 @@ def local(binary):
         sessions = root/'sessions'
         sessions.mkdir(mode=0o700)
         (conf/'master.key').write_bytes(secrets.token_bytes(32))
+        (conf/'master.key').chmod(0o600)
         (credentials/'setup-code').write_text(secrets.token_hex(24)+'\n')
         generate_tls_pair(credentials, 'localhost')
         with ExitStack() as reservations:
@@ -1630,7 +1759,9 @@ def local(binary):
                'HTTP_ROOT':str(public), 'PXE_DB_DRIVER':'sqlite', 'PXE_DB_PATH':str(database),
                'PXE_SETUP_DATA_ROOT':str(data), 'PXE_HTTP_PORT':str(ports[0]),
                'PXE_HTTPS_PORT':str(ports[1]), 'PXE_PUBLIC_HOST':'pxe.example.test',
-               'PXE_TLS_IMPORT_DIR':str(root/'tls-import'), 'PXE_SESSION_DIR':str(sessions)}
+               'PXE_TLS_IMPORT_DIR':str(root/'tls-import'), 'PXE_SESSION_DIR':str(sessions),
+               'PXE_MASTER_KEY_PATH':str(conf/'master.key'), 'PXE_VAULT_UNLOCK_DIR':str(root/'vault'),
+               'ANSIBLE_WORKDIR':str(root/'playbooks'), 'PXE_ANSIBLE_HOME':str(root/'ansible-home')}
         with closing(sqlite3.connect(database)) as db, db:
             db.execute('CREATE TABLE existing(data TEXT)')
             db.execute("INSERT INTO existing VALUES ('preserve')")
@@ -1673,6 +1804,7 @@ def local(binary):
         verify_device_ansible(updated, database, authorization)
         verify_hardware_context(updated, database, authorization)
         verify_appliance_settings(updated, database, authorization)
+        verify_ansible_settings(updated, database, authorization, conf/'master.key', root/'vault', root/'playbooks')
         verify_admin_attempt_limit(updated, authorization)
         schedule_server.terminate()
         schedule_server.wait(timeout=5)

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{
-    admin, plain,
+    admin, ansible_settings, plain,
     setup::{page, redirect},
     ErrorBox, Reply,
 };
@@ -13,6 +13,8 @@ use std::{net::Ipv4Addr, path::Path};
 #[derive(Clone, Copy)]
 pub(super) enum Route {
     General,
+    Ansible,
+    VaultUnlock,
     Dns,
     Ipxe,
     RebuildGrub,
@@ -24,6 +26,8 @@ impl Route {
     pub(super) fn for_path(path: &str) -> Option<Self> {
         Some(match path {
             "/settings" => Self::General,
+            ansible_settings::ROUTE => Self::Ansible,
+            ansible_settings::VAULT => Self::VaultUnlock,
             "/settings/default-dns" => Self::Dns,
             "/settings/ipxe" => Self::Ipxe,
             "/settings/rebuild-grub" => Self::RebuildGrub,
@@ -33,12 +37,23 @@ impl Route {
         })
     }
 
+    pub(super) fn form_limit(self) -> usize {
+        match self {
+            Self::Ansible => 16384,
+            Self::VaultUnlock => 4096,
+            _ => 2048,
+        }
+    }
+
     pub(super) fn serve(
         self,
         db: &Connection,
         db_path: &Path,
         form: Option<Bytes>,
     ) -> Result<Reply, ErrorBox> {
+        if matches!(self, Self::Ansible | Self::VaultUnlock) {
+            return ansible_settings::serve(db, db_path, matches!(self, Self::VaultUnlock), form);
+        }
         let Some(form) = form else {
             return match self {
                 Self::General => self.general(db),
@@ -53,6 +68,7 @@ impl Route {
         let mut database = connect(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let tx = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let target = match self {
+            Self::Ansible | Self::VaultUnlock => unreachable!("handled above"),
             Self::General => {
                 let [(key, value)] = input.as_slice() else {
                     return Ok(invalid());
@@ -138,7 +154,7 @@ impl Route {
 
     fn general(self, db: &Connection) -> Result<Reply, ErrorBox> {
         let mut html = String::from(
-            r#"<nav><a href="/admin/devices">Console</a> · <a href="/settings/images">Images</a> · <a href="/admin/certificates">Certificats TLS</a> · <a href="/settings/ipxe">iPXE</a></nav>
+            r#"<nav><a href="/admin/devices">Console</a> · <a href="/settings/images">Images</a> · <a href="/admin/certificates">Certificats TLS</a> · <a href="/settings/ipxe">iPXE</a> · <a href="/settings/ansible">Ansible</a></nav>
 <section><h2>Découverte réseau</h2>
 <form method="post" action="/settings"><label>Protocole
 <select name="discovery_boot_proto">"#,
