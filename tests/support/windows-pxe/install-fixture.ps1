@@ -28,7 +28,8 @@ if ($disks.Count -ne 1 -or ([string]$disks[0].SerialNumber).Trim() -cne $DiskSer
     throw 'Expected exactly one writable, blank disposable disk with the configured serial.'
 }
 $disk = $disks[0]
-if (Get-Volume | Where-Object { $_.DriveLetter -in @('S','W') }) {
+if ((Test-Path -LiteralPath 'S:\') -or (Test-Path -LiteralPath 'W:\') -or
+    (Get-Volume | Where-Object { $_.DriveLetter -in @('S','W') })) {
     throw 'The fixture partition letters are already in use.'
 }
 $images = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=5' | ForEach-Object {
@@ -69,15 +70,24 @@ try {
 } finally {
     Remove-Item -LiteralPath $commands -ErrorAction SilentlyContinue
 }
-$esp = Get-Partition -DriveLetter S
-if ($esp.DiskNumber -ne $disk.Number -or $esp.Offset -ne 1MB -or $esp.Size -ne 260MB -or
-    (Get-Partition -DriveLetter W).DiskNumber -ne $disk.Number) {
+Update-HostStorageCache
+# DiskPart mounts the EFI volume even when StorageWMI omits its drive letter.
+$partitions = @(Get-Partition -DiskNumber $disk.Number)
+$esp = @($partitions | Where-Object {
+    $_.GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' -and
+    $_.Offset -eq 1MB -and $_.Size -eq 260MB
+})
+$system = @($partitions | Where-Object { $_.DriveLetter -eq 'W' })
+if ($esp.Count -ne 1 -or $system.Count -ne 1 -or
+    -not (Test-Path -LiteralPath 'S:\' -PathType Container) -or
+    -not (Test-Path -LiteralPath 'W:\' -PathType Container)) {
     throw 'The assigned partitions do not match the disposable disk.'
 }
+Write-Host 'The disposable GPT layout and the WinPE drive mappings are ready.'
 Invoke-Checked -Program 'dism.exe' -Arguments @('/Apply-Image',"/ImageFile:$($images[0])","/Index:$ImageIndex",'/ApplyDir:W:\')
 Copy-Item -LiteralPath $probe -Destination 'W:\Windows\System32\pxe-collect.ps1'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'pxe-first-boot.ps1') -Destination 'W:\Windows\System32'
-$panther = 'W:\Windows\Panther\Unattend'
+$panther = 'W:\Windows\Panther'
 $null = New-Item -ItemType Directory -Path $panther -Force
 @"
 <?xml version="1.0" encoding="utf-8"?>
