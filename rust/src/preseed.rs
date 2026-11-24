@@ -18,6 +18,19 @@ const DISK_GUARD: &str = include_str!(concat!(env!("OUT_DIR"), "/disk-guard.sh")
 const FIRST_BOOT: &str = include_str!(concat!(env!("OUT_DIR"), "/first-boot.sh"));
 const INSTALL_LOG: &str = include_str!(concat!(env!("OUT_DIR"), "/install-log.sh"));
 const TARGET_HOSTNAME: &str = include_str!(concat!(env!("OUT_DIR"), "/target-hostname.sh"));
+
+pub(crate) fn first_boot_script(pxe: Ipv4Addr, port: u16, mac: &str, token: &str) -> String {
+    let script = FIRST_BOOT
+        .replace("__PXE_IP__", &format!("'{pxe}'"))
+        .replace("__MAC__", &format!("'{mac}'"))
+        .replace("__TOKEN__", &format!("'{token}'"));
+    if port == 80 {
+        script
+    } else {
+        script.replace("http://${pxe_ip}/", &format!("http://${{pxe_ip}}:{port}/"))
+    }
+}
+
 pub fn serve(
     db: &mut Connection,
     source: Option<Ipv4Addr>,
@@ -62,6 +75,9 @@ pub fn serve(
             ))
         }
     };
+    if config.get("linux_deployment").is_some() {
+        return Ok(reply(404, ""));
+    }
     let action = install::latest_action(&tx, machine.id)?;
     let action_id = action.as_ref().map(|(id, _)| *id);
     if !install::eligible(&tx, &machine, action_id)?
@@ -358,10 +374,7 @@ impl Profile {
             late.push(command);
         }
         if let Some((_, token)) = action {
-            let script = FIRST_BOOT
-                .replace("__PXE_IP__", &format!("'{pxe}'"))
-                .replace("__MAC__", &format!("'{mac}'"))
-                .replace("__TOKEN__", &format!("'{token}'"));
+            let script = first_boot_script(pxe, 80, mac, token);
             let generator = "/target/etc/systemd/system-generators/pxe-first-boot";
             late.push(format!(
                 "/bin/sh -ec 'umask 077; mkdir -p /target/etc/systemd/system-generators; echo {} | base64 -d > {generator}; chmod 0700 {generator}' || exit 1",

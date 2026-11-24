@@ -3,6 +3,7 @@
 mod advanced;
 pub(super) mod bulk;
 mod diagnostics;
+pub(super) mod linux;
 mod removal;
 mod wipe;
 
@@ -280,6 +281,9 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
         output.push_str("</li>");
     }
     write!(output, "</ul><nav><a href=\"/machines/{id}/install\">Programmer une installation Debian</a> · <a href=\"/activity?machine={id}\">Activité</a> · <a href=\"/admin/devices\">Appareils</a></nav>")?;
+    if linux::supports(device) {
+        write!(output, "<p><a href=\"/machines/{id}/install/linux\">Programmer une installation Ubuntu ou RHEL</a></p>")?;
+    }
     output.push_str("<h2>Opérations PXE</h2>");
     write!(
         output,
@@ -598,7 +602,14 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
         .as_object_mut()
         .expect("installation object")
         .extend(network);
-    let action = record_plan(&tx, id, username, selection.preset, snapshot, diagnostic)?;
+    let action = record_plan(
+        &tx,
+        id,
+        username,
+        Some(selection.preset),
+        snapshot,
+        diagnostic,
+    )?;
     tx.commit()?;
     Ok(redirect(StatusCode::SEE_OTHER, format!("/tasks/{action}")))
 }
@@ -683,7 +694,7 @@ fn record_plan(
     tx: &Transaction<'_>,
     id: i64,
     username: &str,
-    preset: i64,
+    preset: Option<i64>,
     mut snapshot: Value,
     diagnostic: Option<(i64, i64)>,
 ) -> Result<i64, ErrorBox> {
@@ -709,10 +720,14 @@ fn record_plan(
     };
     tx.execute("UPDATE machines SET status=?1,hostname=?2,install_config_json=?3,preset_id=?4,next_action=NULL WHERE id=?5",
                params![state, hostname, snapshot.to_string(), preset, id])?;
-    tx.execute(
-        "INSERT INTO init_jobs(job_type,status) VALUES(?,'pending'),('bootstrap:render_templates','pending')",
-        [format!("action:render_postboot:{action}")],
-    )?;
+    if preset.is_some() {
+        tx.execute(
+            "INSERT INTO init_jobs(job_type,status) VALUES(?,'pending'),('bootstrap:render_templates','pending')",
+            [format!("action:render_postboot:{action}")],
+        )?;
+    } else {
+        pxe::enqueue_menus(tx)?;
+    }
     tx.execute(
         "INSERT INTO machine_events(machine_id,level,message,action_id) VALUES(?1,'action',?2,?3)",
         params![id, if diagnostic.is_some() {

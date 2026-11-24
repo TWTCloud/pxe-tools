@@ -6,6 +6,7 @@ from http.client import HTTPConnection, HTTPSConnection
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import ssl
 import subprocess
@@ -37,13 +38,13 @@ def media(root, profile, edition, label, index):
     }))
 
 
-def request(path, *, tls=None, source=None, form=None, headers=None):
+def request(path, *, tls=None, source=None, form=None, headers=None, method=None):
     if tls:
         connection = HTTPSConnection('127.0.0.1', HTTPS, context=tls, timeout=2)
     else:
         connection = HTTPConnection(SERVER, HTTP, timeout=2, source_address=(source, 0))
     try:
-        connection.request('GET' if form is None else 'POST', path,
+        connection.request(method or ('GET' if form is None else 'POST'), path,
                            None if form is None else urlencode(form), headers=headers or {})
         response = connection.getresponse()
         return response.status, response.getheader('Location'), response.read()
@@ -92,6 +93,81 @@ def check_linux(tls, auth, form_headers):
     assert b'Ubuntu Server 24.04.5' in request('/settings/images/add', tls=tls, headers=auth)[2]
     assert request('/settings/images', tls=tls, form={'image': '1'}, headers=form_headers)[0] == 303
     print('Ubuntu media selection, architecture-specific menus, ISO streaming and RHEL repository verified.')
+
+
+def check_automatic_linux(database, tls, auth, form_headers):
+    for offset, image, file in ((1, 'ubuntu-24.04.5', 'user-data'), (2, 'rhel9', 'kickstart.cfg')):
+        mac = f'02:00:00:00:50:{offset:02x}'
+        serial = f'PXE-TEST-{offset}'
+        inventory = {
+            'boot_mac': mac, 'discovery_ip': WINDOWS_CLIENT, 'inventory': {'boot_mode': 'UEFI'},
+            'disks': [{'name': 'vda', 'serial': serial}],
+        }
+        with sqlite3.connect(database) as db:
+            device = db.execute("""INSERT INTO machines(mac,status,boot_arch,inventory_json)
+                                   VALUES (?,'discovered','amd64',?) RETURNING id""",
+                                (mac, json.dumps(inventory))).fetchone()[0]
+        route = f'/machines/{device}/install/linux'
+        grub = '/grub.php?' + urlencode({'mac': mac, 'arch': 'amd64'})
+        selection = {'image': image, 'disk': f'/dev/vda:{serial}', 'hostname': f'pxe-linux-{offset}',
+                     'login': 'pxecheck', 'password': 'fixture-long-password',
+                     'password_confirm': 'fixture-long-password', 'confirm': 'yes'}
+        assert request(route, tls=tls)[0] == 401
+        assert image.encode() in request(route, tls=tls, headers=auth)[2]
+        assert request(route, tls=tls, form=selection, headers=auth)[0] == 403
+        assert request(route, tls=tls, form={**selection, 'disk': '/dev/vda:WRONG'},
+                       headers=form_headers)[0] == 409
+        status, task, _ = request(route, tls=tls, form=selection, headers=form_headers)
+        assert status == 303 and task.startswith('/tasks/')
+        action = int(task.rsplit('/', 1)[1])
+        assert request(route, tls=tls, form=selection, headers=form_headers)[0] == 409
+        assert request('/preseed.php?' + urlencode({'mac': mac}), source=WINDOWS_CLIENT)[0] == 404
+        assert b'/pxe/linux/auto/' not in request(grub, source=OTHER_CLIENT)[2]
+        menu = request(grub, source=WINDOWS_CLIENT)[2].decode()
+        base = re.search(r'(/pxe/linux/auto/[0-9]+/[a-f0-9]{32}/)grub.cfg', menu)[1]
+        boot, key = base.strip('/').split('/')[-2:]
+        assert request(base + file, source=WINDOWS_CLIENT)[0] == 404
+        selected = '/api/boot-selected?' + urlencode({'boot_id': boot, 'token': key, 'menu': 'install'})
+        assert request(selected, source=WINDOWS_CLIENT)[0] == 200
+        assert request(base + file, source=OTHER_CLIENT)[0] == 404
+        assert request(base + file, source=OUTSIDE_CLIENT)[0] == 404
+        assert request(base.replace(key, '0' * 32) + file, source=WINDOWS_CLIENT)[0] == 404
+        status, _, chain = request(base + 'grub.cfg', source=WINDOWS_CLIENT)
+        assert status == 200 and base.encode() in chain
+        assert request(base + file, method='HEAD', source=WINDOWS_CLIENT) == (200, None, b'')
+        with sqlite3.connect(database) as db:
+            assert db.execute('SELECT COUNT(*) FROM installations WHERE action_id=?', (action,)).fetchone() == (0,)
+        status, _, config = request(base + file, source=WINDOWS_CLIENT)
+        assert status == 200 and b'fixture-long-password' not in config
+        assert request(base + file, source=WINDOWS_CLIENT)[2] == config
+        if image.startswith('ubuntu-'):
+            assert b'autoinstall' in chain and b'ds=nocloud-net;s=' in chain
+            assert request(base + 'meta-data', source=WINDOWS_CLIENT)[2] == f'instance-id: pxe-tools-{action}\n'.encode()
+            settings = json.loads(config.removeprefix(b'#cloud-config\n'))['autoinstall']
+            assert settings['storage']['layout']['match'] == {'path': '/dev/vda'}
+            assert serial in settings['early-commands'][0][2]
+            assert '/api/install-end' in settings['late-commands'][0][2]
+        else:
+            assert b'inst.ks=' in chain and b'inst.nosave=all_ks' in chain
+            assert b'ignoredisk --only-use=vda\nclearpart --all --initlabel --drives=vda' in config
+            assert b'%pre --erroronfail' in config and serial.encode() in config
+            assert b'%post --erroronfail' in config and b'/api/install-end' in config
+        with sqlite3.connect(database) as db:
+            assert db.execute('SELECT install_status FROM installations WHERE action_id=?', (action,)).fetchall() == [('in_progress',)]
+            assert db.execute('SELECT status FROM actions WHERE id=?', (action,)).fetchone() == ('running',)
+            token = db.execute('SELECT token FROM actions WHERE id=?', (action,)).fetchone()[0]
+        bearer = {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/x-www-form-urlencoded'}
+        complete = '/api/install-end?' + urlencode({'mac': mac, 'status': 'success'})
+        assert request(complete, form={'first_boot': '1'}, source=WINDOWS_CLIENT, headers=bearer)[0] == 200
+        assert request(base + file, source=WINDOWS_CLIENT)[0] == 404
+        first_boot = '/api/internal/checkpoint?' + urlencode({'mac': mac, 'code': 'os_first_boot', 'ack': '1'})
+        assert request(first_boot, form={}, source=WINDOWS_CLIENT, headers=bearer)[2] == b'accepted\n'
+        assert request(first_boot, form={}, source=WINDOWS_CLIENT, headers=bearer)[2] == b'accepted\n'
+        with sqlite3.connect(database) as db:
+            assert db.execute('SELECT status,local_boot_source FROM machines WHERE id=?', (device,)).fetchone() == ('installed', 'pxe')
+            assert db.execute("""SELECT COUNT(*) FROM machine_events
+                                 WHERE action_id=? AND checkpoint='os_first_boot'""", (action,)).fetchone() == (1,)
+    print('Ubuntu Autoinstall and RHEL Kickstart console actions, private seeds and first-boot callbacks verified.')
 
 
 def main(binary):
@@ -159,6 +235,7 @@ def main(binary):
                     assert request(f'/pxe/windows/{profile}/case.json', source=WINDOWS_CLIENT)[0] == 404
                 assert request('/pxe/windows/boot.wim', source=WINDOWS_CLIENT)[0] == 404
                 check_linux(tls, auth, form_headers)
+                check_automatic_linux(database, tls, auth, form_headers)
             finally:
                 service.terminate()
         print('Authenticated edition selection, distinct WinPE paths and private installation media verified.')

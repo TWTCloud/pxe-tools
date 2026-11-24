@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use crate::pxe::{log_event, machine_for_mac, menu_label, normalize_mac, parse_subnet};
-use crate::{header, response, setting, HttpResponse, TEXT};
+use crate::{header, linux_install, response, setting, HttpResponse, TEXT};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::fs;
@@ -182,6 +182,11 @@ pub fn serve(
     };
     let proto = if proto == "tftp" { "tftp" } else { "http" };
     let mut body = format!("set timeout=3\nset default=0\nset net_default_server={server}\n\n");
+    let linux = machine.as_ref().and_then(|machine| {
+        serde_json::from_str::<Value>(machine.config.as_deref().unwrap_or_default())
+            .ok()
+            .and_then(|mut snapshot| snapshot.get_mut("linux_deployment").map(Value::take))
+    });
     let render = |template: &str, selected, machine: Option<&Machine>| {
         let hostname: String = machine
             .map(|m| m.hostname.to_ascii_lowercase())
@@ -231,6 +236,31 @@ pub fn serve(
             .replace("$kernel_opts", kernel)
     };
     match menu {
+        "install" if linux.is_some() => {
+            if let Some(id) = boot.filter(|_| {
+                linux
+                    .and_then(|value| serde_json::from_value::<linux_install::Plan>(value).ok())
+                    .is_some_and(|plan| {
+                        plan.valid()
+                            && plan.client == peer
+                            && mac.as_deref() == Some(plan.boot_mac.as_str())
+                    })
+            }) {
+                let port = std::env::var("PXE_HTTP_PORT")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(80);
+                let host = linux_install::authority(server, port);
+                let prefix = linux_install::PREFIX;
+                body.push_str(&format!(
+                    "menuentry 'Installation Linux programmée' {{\n    if [ \"$grub_platform\" = efi ]; then\n\
+                         if source \"(http,{host})/api/boot-selected?boot_id={id}&token={token}&menu=install\"; then\n\
+                           configfile (http,{host}){prefix}{id}/{token}/grub.cfg\n    fi\n    fi\n}}\n"
+                ));
+            } else {
+                body.push_str("set timeout=-1\nmenuentry 'Installation Linux indisponible' { echo 'Vérifier le bail DHCP de l’appareil'; }\n");
+            }
+        }
         "install" => body.push_str(&render(INSTALL, menu, machine.as_ref())),
         "rescue" => body.push_str(&render(RESCUE, menu, machine.as_ref())),
         "disktest" => body.push_str(&render(DISK_TEST, menu, machine.as_ref())),
@@ -242,8 +272,10 @@ pub fn serve(
             } else {
                 body.push_str(&local);
             }
-            body.push('\n');
-            body.push_str(&render(INSTALL, "install", machine.as_ref()));
+            if linux.is_none() {
+                body.push('\n');
+                body.push_str(&render(INSTALL, "install", machine.as_ref()));
+            }
         }
         _ => body.push_str(&render(DISCOVERY, menu, machine.as_ref())),
     }

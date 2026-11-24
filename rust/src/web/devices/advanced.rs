@@ -239,7 +239,7 @@ pub(super) fn submit(
                 ));
             }
             let action = if wipe.is_empty() {
-                record_plan(&tx, id, username, selection.preset, snapshot, None)?
+                record_plan(&tx, id, username, Some(selection.preset), snapshot, None)?
             } else {
                 if selection.erase != "EFFACER" {
                     return Ok(rejected(

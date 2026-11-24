@@ -7,6 +7,7 @@ mod grub;
 mod images;
 mod install;
 mod instance_secrets;
+mod linux_install;
 mod menu_store;
 mod migrations;
 mod monitoring;

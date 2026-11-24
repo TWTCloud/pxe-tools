@@ -587,6 +587,38 @@ async fn dispatch(
             .serve(&parts, peer, &site.database, admin::Action::Jobs(view))
             .await;
     }
+    if let Some(id) = devices::linux::route(path) {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        let form = if readable {
+            None
+        } else if parts.method == Method::POST {
+            if !admin_origin(&parts.headers, peer, site) {
+                return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+            }
+            match read_form(&parts.headers, body, 2048).await {
+                Ok(form) => Some(form),
+                Err(reply) => return reply,
+            }
+        } else {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        };
+        return site
+            .admin
+            .serve(
+                &parts,
+                peer,
+                &site.database,
+                admin::Action::Linux(
+                    id,
+                    site.assets.http_root().to_owned(),
+                    site.rhel_repositories.clone(),
+                    form,
+                ),
+            )
+            .await;
+    }
     if let Some(route) = devices::route(path) {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
@@ -847,16 +879,22 @@ async fn dispatch(
         return plain(StatusCode::NOT_FOUND, "Not found\n");
     };
     if readable && path.starts_with(linux_boot::PREFIX) {
-        let Some(route) = linux_boot::route(path) else {
-            return plain(StatusCode::NOT_FOUND, "Not found\n");
-        };
         let Ok(permit) = site.requests.try_acquire() else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
         };
         let site = site.clone();
         let head = parts.method == Method::HEAD;
-        let result =
-            task::spawn_blocking(move || linux_boot::menu(&site, peer, server, route, head)).await;
+        let path = path.to_owned();
+        let result = task::spawn_blocking(move || {
+            if path.starts_with(crate::linux_install::PREFIX) {
+                linux_boot::automatic(&site, peer, server, &path, head)
+            } else if let Some(route) = linux_boot::route(&path) {
+                linux_boot::menu(&site, peer, server, route, head)
+            } else {
+                Ok(plain(StatusCode::NOT_FOUND, "Not found\n"))
+            }
+        })
+        .await;
         drop(permit);
         return match result {
             Ok(Ok(reply)) => reply,

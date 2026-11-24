@@ -519,9 +519,21 @@ nécessaire dans l’environnement de PXE Tools.
 [Téléchargement Red Hat](https://developers.redhat.com/products/rhel/download) ·
 [Arbre d’installation RHEL](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/interactively_installing_rhel_over_the_network/preparing-network-based-repositories_rhel-installer)
 
-Les deux entrées démarrent l’installateur interactif. Les profils
-automatiques, le suivi de premier démarrage et la qualification des
-chaînes Secure Boot de ces distributions font l’objet d’essais distincts.
+Le menu commun conserve les deux installateurs interactifs. Pour une
+installation automatique, ouvrir la fiche d’un appareil inventorié en UEFI
+et choisir **Programmer une installation Ubuntu ou RHEL**. Sélectionner
+l’image, le disque identifié par son numéro de série et le compte qui sera
+créé, puis confirmer le repartitionnement. L’appareil doit garder l’adresse
+IPv4 et la carte réseau observées pendant l’inventaire.
+
+Le menu GRUB propre à l’appareil charge la configuration NoCloud
+Autoinstall ou Kickstart de l’action. Le serveur vérifie le sous-réseau,
+l’adresse du pair et le jeton de la session GRUB. Les installateurs
+contrôlent le firmware, l’architecture, la carte réseau et le numéro de
+série du disque avant le partitionnement. Le profil utilise DHCP et LVM
+sur le disque confirmé. L’action attend le retour du système installé.
+[Configuration Ubuntu](https://canonical-subiquity.readthedocs-hosted.com/en/latest/reference/autoinstall-reference.html) ·
+[Référence Kickstart RHEL](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/automatically_installing_rhel/kickstart-commands-and-options-reference_rhel-installer)
 
 ### UEFI, Secure Boot et premier déploiement Windows
 

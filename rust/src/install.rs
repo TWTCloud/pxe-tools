@@ -205,11 +205,14 @@ pub fn start(db: &mut Connection, local: bool, mac: &str) -> ApiResult {
     let Some(machine) = machine(&tx, mac, true)? else {
         return failure(404, "machine not found");
     };
-    let config = machine
+    let config: Value = machine
         .config
         .as_deref()
         .and_then(|raw| serde_json::from_str(raw).ok())
         .unwrap_or_default();
+    if config.get("linux_deployment").is_some() {
+        return failure(409, "installation not available");
+    }
     let action = snapshot_action(&tx, &machine, &config)?;
     if !eligible(&tx, &machine, action)? {
         return failure(409, "installation not available");

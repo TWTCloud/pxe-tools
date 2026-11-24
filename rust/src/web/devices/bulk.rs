@@ -527,7 +527,14 @@ fn queue_target(
         return Ok(Err("Contrôle préalable ou confirmation à renouveler."));
     }
     let action = if plan.wipe.is_empty() {
-        super::record_plan(&tx, id, username, selection.preset, plan.snapshot, None)?
+        super::record_plan(
+            &tx,
+            id,
+            username,
+            Some(selection.preset),
+            plan.snapshot,
+            None,
+        )?
     } else {
         super::record_reinstall(
             &tx,

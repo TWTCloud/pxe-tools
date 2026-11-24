@@ -43,6 +43,12 @@ pub(super) fn device_term(term: &str) -> Option<&'static str> {
 pub(super) enum Action {
     Devices,
     Device(super::devices::DeviceRoute, Option<Bytes>),
+    Linux(
+        i64,
+        std::path::PathBuf,
+        super::linux_boot::RhelRepositories,
+        Option<Bytes>,
+    ),
     Register(Option<Bytes>),
     Bulk(super::devices::bulk::Route, Option<Bytes>),
     Images(super::images::Route, Option<Bytes>),
@@ -303,6 +309,18 @@ impl Console {
                     return route
                         .serve(&db, &db_path, &method, form.as_deref(), &username)
                         .ok();
+                }
+                if let Action::Linux(id, root, repositories, form) = &action {
+                    return super::devices::linux::serve(
+                        &db,
+                        &db_path,
+                        *id,
+                        root,
+                        repositories,
+                        form.as_deref(),
+                        &username,
+                    )
+                    .ok();
                 }
                 if let Action::Register(form) = &action {
                     return super::devices::register(&db_path, form.as_deref()).ok();
