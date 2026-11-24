@@ -467,6 +467,13 @@ second banc et remet le retour de premier démarrage `os_first_boot`.
 
 ### UEFI, Secure Boot et premier déploiement Windows
 
+Les qualifications PXE tournent dans GitHub Actions sur le dépôt PXE Tools.
+Sur une PR issue du dépôt, l’ajout du label `ci:pxe-debian` lance la matrice
+APT et Docker amd64/ARM64. Le label `ci:pxe-windows` lance le banc Windows
+avec les médias Microsoft sur le runner Windows. Chaque workflow récupère
+le SHA exact de la PR. Le déclenchement manuel est aussi disponible
+depuis Actions une fois les workflows présents sur la branche par défaut.
+
 Le client de test Debian x86-64 utilise OVMF avec Secure Boot actif.
 Le banc prend le shim et le GRUB signés que fournit le serveur, inscrit
 la clé publique MOK de l’instance d’essai dans une copie privée des
