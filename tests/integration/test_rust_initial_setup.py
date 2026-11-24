@@ -385,7 +385,18 @@ def verify_activity(client, database, authorization):
 
 
 def verify_device_settings(client, database, authorization):
+    assert client.request('/machines',authorization=authorization)[:2]==(302,'/admin/devices')
+    assert client.request('/machines/new')[0]==401
+    assert client.request('/machines/new',authorization=authorization)[0]==200
+    assert client.request('/machines',form={'mac':'invalid'},authorization=authorization)[0]==422
+    manual = {'mac':'02-00-00-00-09-04','hostname':'fixture-manual'}
+    registered = client.request('/machines',form=manual,authorization=authorization)
+    assert registered[0]==303 and registered[1].startswith('/machines/')
+    assert client.request('/machines',form=manual,authorization=authorization)[0]==409
     with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT hostname,status FROM machines WHERE mac='02:00:00:00:09:04'").fetchone()==(
+            'fixture-manual','discovered',
+        )
         device = db.execute(
             """INSERT INTO machines(mac,hostname,status,local_boot_source,next_action,awaiting_action_until)
                VALUES('02:00:00:00:09:03','fixture-edit','installing','manual','reboot',datetime('now','+1 hour'))"""

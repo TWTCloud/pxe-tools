@@ -13,6 +13,56 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBeha
 use serde_json::{json, Value};
 use std::{fmt::Write, io::Read, path::Path};
 
+pub(super) fn register(path: &Path, form: Option<&[u8]>) -> Result<Reply, ErrorBox> {
+    let Some(form) = form else {
+        return Ok(page(
+            "Ajouter un appareil",
+            r#"
+<form method="post" action="/machines">
+<label>Adresse MAC <input name="mac" required placeholder="02:00:00:00:00:01"></label>
+<label>Nom d’hôte (facultatif) <input name="hostname"></label>
+<button>Créer</button>
+</form>
+<p><a href="/admin/devices">Retour aux appareils</a></p>
+"#,
+        ));
+    };
+    let mut mac = None;
+    let mut hostname = None;
+    for (key, value) in form_urlencoded::parse(form) {
+        match key.as_ref() {
+            "mac" if mac.is_none() => mac = Some(value),
+            "hostname" if hostname.is_none() => hostname = Some(value),
+            _ => return Ok(plain(StatusCode::UNPROCESSABLE_ENTITY, "Saisie invalide\n")),
+        }
+    }
+    let Some(mac) = mac.as_deref().and_then(crate::pxe::normalize_mac) else {
+        return Ok(plain(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Adresse MAC invalide\n",
+        ));
+    };
+    let db = connect(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let created: Option<i64> = db
+        .query_row(
+            "INSERT INTO machines(mac,hostname,status) VALUES(?1,?2,'discovered')
+         ON CONFLICT(mac) DO NOTHING RETURNING id",
+            params![mac, hostname.as_deref()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(match created {
+        Some(id) => redirect(StatusCode::SEE_OTHER, format!("/machines/{id}")),
+        None => plain(
+            StatusCode::CONFLICT,
+            "Cette adresse MAC est déjà enregistrée\n",
+        ),
+    })
+}
+
 pub(super) struct DeviceRoute {
     id: i64,
     section: Section,

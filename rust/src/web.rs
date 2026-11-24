@@ -415,6 +415,34 @@ async fn dispatch(
             .serve(&parts, peer, &site.database, admin::Action::Devices)
             .await;
     }
+    if path == "/machines" && readable {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        return setup::redirect(StatusCode::FOUND, "/admin/devices");
+    }
+    if (path == "/machines/new" && readable)
+        || (path == "/machines" && parts.method == Method::POST)
+    {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        let form = if readable {
+            None
+        } else {
+            if !admin_origin(&parts.headers, site) {
+                return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+            }
+            match read_form(&parts.headers, body, 1024).await {
+                Ok(form) => Some(form),
+                Err(reply) => return reply,
+            }
+        };
+        return site
+            .admin
+            .serve(&parts, peer, &site.database, admin::Action::Register(form))
+            .await;
+    }
     if let Some(view) = jobs::View::for_route(path, parts.uri.query().unwrap_or_default()) {
         if !secure || !readable {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
