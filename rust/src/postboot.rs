@@ -14,16 +14,16 @@ const TEMPLATE_LIMIT: u64 = 64 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Context {
-    pxe_ip: Ipv4Addr,
-    token: String,
-    mac: String,
+pub(crate) struct Context {
+    pub(crate) pxe_ip: Ipv4Addr,
+    pub(crate) token: String,
+    pub(crate) mac: String,
 }
 
 #[derive(Serialize)]
-struct Postboot {
-    script: String,
-    service: String,
+pub(crate) struct Postboot {
+    pub(crate) script: String,
+    pub(crate) service: String,
 }
 
 pub fn render(directory: &Path) -> RenderResult<()> {
@@ -33,6 +33,11 @@ pub fn render(directory: &Path) -> RenderResult<()> {
         return Err("Invalid postboot request".into());
     }
     let ctx: Context = serde_json::from_slice(&input).map_err(|_| "Invalid postboot context")?;
+    serde_json::to_writer(io::stdout().lock(), &rendered(directory, &ctx)?)?;
+    Ok(())
+}
+
+pub(crate) fn rendered(directory: &Path, ctx: &Context) -> RenderResult<Postboot> {
     let mac = crate::pxe::normalize_mac(&ctx.mac).ok_or("Invalid postboot MAC")?;
     if ctx.token.is_empty()
         || ctx.token.len() > 256
@@ -57,12 +62,10 @@ pub fn render(directory: &Path) -> RenderResult<()> {
         }
         interpolate(&template, &address, &ctx.token, &mac)
     };
-    let rendered = Postboot {
+    Ok(Postboot {
         script: render_file("postboot.sh.j2")?,
         service: render_file("pxe-postboot.service.j2")?,
-    };
-    serde_json::to_writer(io::stdout().lock(), &rendered)?;
-    Ok(())
+    })
 }
 
 fn interpolate(template: &str, address: &str, token: &str, mac: &str) -> RenderResult<String> {

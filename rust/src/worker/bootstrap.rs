@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+use super::schedule::{catalog_blocked, AUTO_CATALOG};
 use crate::connect;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{
@@ -15,8 +16,6 @@ use std::{
 };
 
 type ErrorBox = Box<dyn Error + Send + Sync>;
-
-const AUTOMATIC_REFRESH: &str = "bootstrap:auto_refresh_catalog_v2";
 
 const JOBS: &[(&str, &str, Option<&str>)] = &[
     (
@@ -61,7 +60,7 @@ const JOBS: &[(&str, &str, Option<&str>)] = &[
         "bootstrap-refresh-catalog-v2.sh",
         None,
     ),
-    (AUTOMATIC_REFRESH, "bootstrap-refresh-catalog-v2.sh", None),
+    (AUTO_CATALOG, "bootstrap-refresh-catalog-v2.sh", None),
 ];
 
 pub(crate) fn run(database: &Path, id: i64, scripts: &Path) -> Result<(), ErrorBox> {
@@ -87,14 +86,8 @@ pub(crate) fn run(database: &Path, id: i64, scripts: &Path) -> Result<(), ErrorB
         .iter()
         .find(|(job, _, _)| *job == kind)
         .ok_or("Unsupported bootstrap job")?;
-    let automatic = kind == AUTOMATIC_REFRESH;
-    if automatic && tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM machines WHERE status IN ('installing','wiping','testing'))
-         OR EXISTS(SELECT 1 FROM actions WHERE status IN ('pending','running'))
-         OR EXISTS(SELECT 1 FROM init_jobs WHERE status IN ('pending','running')
-                   AND job_type IN ('bootstrap:refresh_catalog','bootstrap:refresh_catalog_v2'))",
-        [], |row|row.get::<_,bool>(0),
-    )? {
+    let automatic = kind == AUTO_CATALOG;
+    if automatic && catalog_blocked(&tx, false)? {
         return Ok(());
     }
     let path = scripts.join(script);

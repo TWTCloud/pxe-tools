@@ -1130,6 +1130,9 @@ def run_preset_pull_github(job: dict) -> None:
 
 def enqueue_auto_preset_pull() -> None:
     """Relance les publications échouées, puis actualise depuis le dépôt."""
+    if os.environ.get("PXE_RUST_GUIDED") == "1":
+        schedule_rust_worker_jobs("presets")
+        return
     if not is_ansible_enabled():
         return
     if not db_setting("ansible_repo_url", "") or not os.path.isdir(os.path.join(WORKDIR, ".git")):
@@ -2303,6 +2306,13 @@ def run_render_postboot_job(job: dict) -> None:
     """
     job_id = job["id"]
     job_type = job["job_type"]
+    if os.environ.get("PXE_RUST_GUIDED") == "1":
+        subprocess.run(
+            ["/usr/lib/pxe-tools/pxe-tools-rust", "--run-postboot-job", DB_PATH, str(job_id),
+             os.path.abspath(POSTBOOT_TEMPLATES_DIR), os.path.abspath(POSTBOOT_OUTPUT_DIR)],
+            check=True, timeout=15,
+        )
+        return
     try:
         action_id = int(job_type.rsplit(":", 1)[-1])
     except (IndexError, ValueError):
@@ -3115,6 +3125,9 @@ def start_auto_catalog_refresh(job_id: int) -> bool:
 
 def enqueue_auto_catalog_refresh() -> None:
     """Enfile un refresh périodique uniquement quand aucune machine ne boote."""
+    if os.environ.get("PXE_RUST_GUIDED") == "1":
+        schedule_rust_worker_jobs("catalog")
+        return
     now_epoch = int(time.time())
     try:
         with db_connect() as db:
@@ -3178,6 +3191,17 @@ def enqueue_auto_catalog_refresh() -> None:
                 print("[worker] auto refresh catalogue enqueued", flush=True)
     except Exception as e:
         print(f"[worker] auto refresh catalogue failed: {e}", file=sys.stderr, flush=True)
+
+
+def schedule_rust_worker_jobs(family: str) -> None:
+    try:
+        subprocess.run(
+            ["/usr/lib/pxe-tools/pxe-tools-rust", "--schedule-worker-jobs",
+             DB_PATH, family, os.path.abspath(WORKDIR)],
+            check=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        logging.error("Rust worker could not schedule %s: %s", family, error)
 
 
 def bootstrap_ansible_workspace() -> None:

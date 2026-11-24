@@ -1140,6 +1140,102 @@ def verify_worker_bootstrap(binary):
     print('Rust worker serializes bootstrap claims and records output, exit status and missing scripts', flush=True)
 
 
+def verify_worker_schedule(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-schedule-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        workspace = root/'workspace'
+        (workspace/'.git').mkdir(parents=True)
+        schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            db.executemany('INSERT INTO settings(key,value) VALUES (?,?)',[
+                ('catalog_auto_refresh_enabled','on'),('catalog_auto_refresh_interval_hours','24'),
+                ('catalog_auto_refresh_last_at',str(int(time.time()))),
+                ('ansible_repo_url','https://example.test/provisioning.git'),('ansible_enabled','off'),
+            ])
+            machine = db.execute("INSERT INTO machines(mac,status) VALUES('02:00:00:00:09:91','configured')").lastrowid
+            action = db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES (?,'install_only','pending',?)",
+                                [machine,secrets.token_hex(32)]).lastrowid
+            preset = db.execute("INSERT INTO presets(name,distro,admin_user_login) "
+                                "VALUES ('Fixture','debian','fixture')").lastrowid
+            push = f'preset:push_github:{preset}'
+            db.execute("INSERT INTO init_jobs(job_type,status,ended_at) VALUES (?,'failed',datetime('now','-6 minutes'))",
+                       [push])
+
+        def schedule(family):
+            return subprocess.check_output([str(binary),'--schedule-worker-jobs',str(database),family,str(workspace)],
+                                           text=True)
+
+        assert schedule('catalog') == '' and schedule('presets') == ''
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("UPDATE settings SET value='0' WHERE key='catalog_auto_refresh_last_at'")
+            db.execute("UPDATE settings SET value='on' WHERE key='ansible_enabled'")
+        assert schedule('catalog') == ''
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("UPDATE actions SET status='cancelled' WHERE id=?",[action])
+        for family in ('catalog','presets'):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                decisions = list(pool.map(schedule,[family,family]))
+            assert sum(bool(message) for message in decisions) == 1
+        with closing(sqlite3.connect(database)) as db, db:
+            pending = db.execute("SELECT job_type FROM init_jobs WHERE status='pending' ORDER BY id").fetchall()
+            assert pending == [('bootstrap:auto_refresh_catalog_v2',),(push,)]
+            db.execute("UPDATE init_jobs SET status='success' WHERE job_type=? AND status='pending'",[push])
+            db.execute("INSERT INTO init_jobs(job_type,status,ended_at) "
+                       "VALUES ('preset:delete_github:fixture','failed',datetime('now','-6 minutes'))")
+        assert 'preset:pull_github' in schedule('presets')
+    print('Rust schedules one catalog refresh or repository retry and respects PXE activity and deleted presets',
+          flush=True)
+
+
+def verify_worker_postboot(binary):
+    project = Path(__file__).resolve().parents[2]
+    templates = project/'docker/worker/templates'
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-postboot-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        output = root/'postboot'
+        token = secrets.token_hex(32)
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript((project/'app/db/schema.sqlite.sql').read_text())
+            machine = db.execute("INSERT INTO machines(mac) VALUES('02:00:00:00:09:92')").lastrowid
+            db.execute("INSERT INTO settings(key,value) VALUES('pxe_ip','192.0.2.9')")
+            action = db.execute("INSERT INTO actions(machine_id,type,status,token) "
+                                "VALUES (?,'install_only','pending',?)",[machine,token]).lastrowid
+            cancelled = db.execute("INSERT INTO actions(machine_id,type,status,token) "
+                                   "VALUES (?,'install_only','cancelled',?)",
+                                   [machine,secrets.token_hex(32)]).lastrowid
+            jobs = [db.execute("INSERT INTO init_jobs(job_type,status) VALUES (?,'pending')",
+                               [f'action:render_postboot:{target}']).lastrowid
+                    for target in (action,cancelled)]
+
+        def run(job):
+            return subprocess.run([str(binary),'--run-postboot-job',str(database),str(job),
+                                   str(templates),str(output)],check=True,capture_output=True)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pairs = list(pool.map(run,[jobs[0],jobs[0]]))
+        pairs.append(run(jobs[1]))
+        assert all(token.encode() not in result.stdout+result.stderr for result in pairs)
+        files = output/str(action)
+        assert files.stat().st_mode & 0o777 == 0o750
+        assert sorted(path.name for path in files.iterdir()) == ['postboot.sh','pxe-postboot.service']
+        context = {'pxe_ip':'192.0.2.9','mac':'02:00:00:00:09:92','token':token}
+        rendered = json.loads(subprocess.check_output([str(binary),'--render-postboot',str(templates)],
+                                                      input=json.dumps(context),text=True))
+        for name, key in [('postboot.sh','script'),('pxe-postboot.service','service')]:
+            actual = files/name
+            assert actual.stat().st_mode & 0o777 == 0o640
+            assert actual.read_text() == rendered[key]
+        assert not (output/str(cancelled)).exists()
+        with closing(sqlite3.connect(database)) as db:
+            states = db.execute("SELECT status,message FROM init_jobs ORDER BY id").fetchall()
+            assert [status for status,_ in states] == ['success','failed']
+            assert all(token not in message for _,message in states)
+    print('Rust worker publishes complete private postboot files and refuses a closed action',flush=True)
+
+
 def verify_worker_download(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-download-') as directory:
         root = Path(directory).resolve()
@@ -1811,6 +1907,8 @@ def local(binary):
         verify_authentik_proxy([str(binary),'--serve-guided',str(config)],updated,env,database,authorization)
     verify_worker_commands(binary)
     verify_worker_bootstrap(binary)
+    verify_worker_schedule(binary)
+    verify_worker_postboot(binary)
     verify_worker_download(binary)
     verify_worker_recovery(binary)
     verify_schema_migration(binary)

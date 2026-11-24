@@ -133,6 +133,10 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     if let [flag, database, id, scripts] = args.as_slice() {
+        if flag == "--schedule-worker-jobs" {
+            let family = id.to_str().ok_or("Invalid job family")?;
+            return worker::schedule::run(Path::new(database), family, Path::new(scripts));
+        }
         if flag == "--run-bootstrap-job" {
             let id = id.to_str().ok_or("Invalid bootstrap job ID")?.parse()?;
             return worker::bootstrap::run(Path::new(database), id, Path::new(scripts));
@@ -147,6 +151,17 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             let id = id.to_str().ok_or("Invalid image ID")?.parse()?;
             let job = job.to_str().ok_or("Invalid job ID")?.parse()?;
             return images::reserve_deletion(Path::new(db), id, job);
+        }
+    }
+    if let [flag, database, id, templates, output] = args.as_slice() {
+        if flag == "--run-postboot-job" {
+            let id = id.to_str().ok_or("Invalid postboot job ID")?.parse()?;
+            return worker::postboot::run(
+                Path::new(database),
+                id,
+                Path::new(templates),
+                Path::new(output),
+            );
         }
     }
     let (routes, socket) = match args.as_slice() {

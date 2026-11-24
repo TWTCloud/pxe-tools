@@ -427,18 +427,27 @@ Le banc prend le shim et le GRUB signés que fournit le serveur, inscrit
 la clé publique MOK de l’instance d’essai dans une copie privée des
 variables du firmware et demande une preuve d’activation dans
 l’inventaire de découverte puis dans le premier démarrage installé.
-L’architecture du serveur et celle du client sont distinctes. Le démarrage
-d’un client ARM64 avec Secure Boot utilise une chaîne en qualification.
+L’architecture du serveur et celle du client sont distinctes.
 Le worker des distributions Rust sur ARM64 prépare par défaut le shim et le
 MokManager ARM64 authentifiés depuis Debian, puis publie un GRUB ARM64
 signé par la MOK de l’instance. L’option `PXE_ARM64_SECURE_BOOT=1` active
 cette chaîne sur un serveur amd64. Le preseed trixie demande les paquets
-signés adaptés à l’architecture du client UEFI. Le banc Docker ARM64
-lance un invité AArch64 avec AAVMF sur le runner ARM64. Sur `b08d7e6`,
-le banc a vérifié Secure Boot dans l’inventaire et au premier démarrage
-du disque. Le serveur a accepté le checkpoint `os_first_boot` avec PHP-FPM
-arrêté. [Journal du runner ARM64](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45289644613/job/138094818244)
+signés adaptés à l’architecture du client UEFI. Les bancs APT et Docker
+lancent un invité AArch64 avec AAVMF sur le runner GitHub ARM64. Sur
+`14b5188`, les deux ont vérifié Secure Boot dans l’inventaire et au premier
+démarrage du disque. Le serveur a accepté `os_first_boot` avec PHP-FPM
+arrêté. Le test sur un appareil physique reste à mener.
+[APT ARM64](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45306043139/job/138150020539) ·
+[Docker ARM64](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45306043139/job/138150020332) ·
 [GRUB signé ARM64 de Debian](https://packages.debian.org/trixie/arm64/grub-efi-arm64-signed/filelist)
+
+Sur `b64f5cd`, APT a confirmé le résultat. Le client Docker a atteint
+l’installateur signé et le garde-fou disque, puis a affiché un échec de
+l’installation de GRUB. Le banc ARM64 recueille désormais les messages de
+l’installateur liés au chargeur dans le segment isolé.
+[APT](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45306396700/job/138151182095) ·
+[Échec Docker](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45306396700/job/138151181785) ·
+[Journal distant dans l’installateur Debian](https://www.debian.org/releases/trixie/arm64/ch05s03.en.html)
 
 Le banc Windows utilise Windows 11 Enterprise Evaluation amd64. L’instance de
 test doit disposer d’un firmware UEFI, de Secure Boot actif, d’un TPM
