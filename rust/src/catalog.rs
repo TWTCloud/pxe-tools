@@ -81,8 +81,16 @@ const UBUNTU_RELEASES: &[UbuntuRelease] = &[
         base: "24.04",
         codename: "noble",
         channel: "stable",
-        fallback: "24.04.4",
+        fallback: "24.04.5",
         archives: &["24.04.2", "24.04.1"],
+    },
+    UbuntuRelease {
+        major: 26,
+        base: "26.04",
+        codename: "resolute",
+        channel: "stable",
+        fallback: "26.04.1",
+        archives: &[],
     },
 ];
 

@@ -39,6 +39,10 @@ impl Assets {
         self.root.join("winpe/amd64")
     }
 
+    pub(super) fn http_root(&self) -> &Path {
+        &self.root
+    }
+
     pub(super) async fn serve(
         &self,
         path: &str,

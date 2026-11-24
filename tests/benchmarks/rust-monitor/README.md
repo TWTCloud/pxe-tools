@@ -483,6 +483,35 @@ second banc et remet le retour de premier démarrage `os_first_boot`.
 [APT](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45317928052/job/138189193598) ·
 [Docker](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45317928052/job/138189194848)
 
+### Installateurs Ubuntu Server et RHEL
+
+Dans **Images PXE**, actualiser le catalogue puis télécharger une image
+**Ubuntu Server** amd64 ou arm64. Le worker vérifie la signature Canonical
+et l’empreinte de l’ISO, extrait le noyau et l’initrd Casper puis conserve
+le fichier `source.iso` de la même version. Le menu **Autres installateurs
+Linux** dans GRUB ou iPXE affiche les images activées et entièrement
+préparées pour l’architecture du client. Les images Ubuntu récupérées avec
+une ancienne version peuvent nécessiter une relance du téléchargement
+pour remplir le cache ISO. Casper charge ce fichier auprès de PXE Tools.
+[Netboot Ubuntu Server](https://ubuntu.com/server/docs/how-to/installation/how-to-netboot-the-server-installer-on-amd64/)
+
+Pour **RHEL 9**, préparer un arbre d’installation HTTP privé à partir du
+DVD Red Hat de l’architecture voulue. Sa racine contient `.treeinfo`,
+`images/pxeboot/vmlinuz` et `images/pxeboot/initrd.img`, ainsi que les
+dépôts du DVD. L’URL est celle de cette racine. Fournir
+`PXE_RHEL9_AMD64_REPO` ou `PXE_RHEL9_ARM64_REPO` au service HTTP Rust,
+puis relancer le service. Pour APT, utiliser l’environnement de l’unité
+`pxe-tools-pxe-http.service`. Pour Docker, fournir la variable au conteneur.
+L’arbre doit rester accessible aux clients du subnet PXE. Le chargeur
+et Anaconda utilisent la même source. Aucun compte Red Hat n’est
+nécessaire dans l’environnement de PXE Tools.
+[Téléchargement Red Hat](https://developers.redhat.com/products/rhel/download) ·
+[Arbre d’installation RHEL](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/interactively_installing_rhel_over_the_network/preparing-network-based-repositories_rhel-installer)
+
+Les deux entrées démarrent l’installateur interactif. Les profils
+automatiques, le suivi de premier démarrage et la qualification des
+chaînes Secure Boot de ces distributions font l’objet d’essais distincts.
+
 ### UEFI, Secure Boot et premier déploiement Windows
 
 Les qualifications PXE tournent dans GitHub Actions sur le dépôt PXE Tools.

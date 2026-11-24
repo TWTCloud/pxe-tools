@@ -15,6 +15,7 @@ mod devices;
 mod hardware_context;
 mod images;
 mod jobs;
+mod linux_boot;
 mod onboarding;
 mod presets;
 mod sessions;
@@ -73,6 +74,7 @@ struct Site {
     http_port: u16,
     winpe_client: Option<Ipv4Addr>,
     windows_editions: Arc<winpe::Editions>,
+    rhel_repositories: linux_boot::RhelRepositories,
     public_host: Option<String>,
     requests: Semaphore,
     admin: admin::Console,
@@ -129,6 +131,7 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         http_port,
         winpe_client: winpe::configured_client()?,
         windows_editions: Arc::new(windows_editions),
+        rhel_repositories: linux_boot::RhelRepositories::from_environment(),
         public_host,
         requests: Semaphore::new(8),
         admin: admin::Console::new(),
@@ -843,6 +846,23 @@ async fn dispatch(
     let Some(server) = site.pxe_ip else {
         return plain(StatusCode::NOT_FOUND, "Not found\n");
     };
+    if readable && path.starts_with(linux_boot::PREFIX) {
+        let Some(route) = linux_boot::route(path) else {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        };
+        let Ok(permit) = site.requests.try_acquire() else {
+            return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
+        };
+        let site = site.clone();
+        let head = parts.method == Method::HEAD;
+        let result =
+            task::spawn_blocking(move || linux_boot::menu(&site, peer, server, route, head)).await;
+        drop(permit);
+        return match result {
+            Ok(Ok(reply)) => reply,
+            _ => plain(StatusCode::SERVICE_UNAVAILABLE, "Menu Linux indisponible\n"),
+        };
+    }
     let winpe = winpe::allowed(site.winpe_client, peer);
     if winpe && readable {
         if path == winpe::BOOT {

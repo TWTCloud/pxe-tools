@@ -251,6 +251,7 @@ def main() -> int:
         # Spec H : toggle iPXE chainload — pxelinux/grub conditionnent leurs
         # menuentries "Chainload iPXE" sur ce flag.
         "pxe_ipxe_enabled": ipxe_enabled,
+        "pxe_rust_guided": os.environ.get("PXE_RUST_GUIDED") == "1",
         # Spec D : architecture par défaut pour les paths netboot (/<version>/<arch>/).
         # Utilisé par grub.cfg.j2, pxelinux-default.j2, grub.php.j2, boot.ipxe.j2.
         # En multi-arch full (Spec D.4), preseed.php fera un lookup machine.boot_arch

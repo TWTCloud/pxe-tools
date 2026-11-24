@@ -27,6 +27,9 @@ menu PXE Tools — Sélection du système à installer
 {% for version in pxe_debian_versions %}
 item debian-{{ version }} Debian {{ version }} — installation automatique
 {% endfor %}
+{% if pxe_rust_guided %}
+item linux Autres installateurs Linux
+{% endif %}
 item rescue Mode récupération (Debian {{ pxe_debian_default_version }})
 item shell Console iPXE (debug)
 item exit Quitter (boot disque local)
@@ -42,6 +45,13 @@ initrd --name firmware ${base}/{{ version }}/${arch}/firmware.cpio.gz
 boot || goto menu
 
 {% endfor %}
+{% if pxe_rust_guided %}
+:linux
+iseq ${buildarch} x86_64 && chain http://${orch_ip}/pxe/linux/amd64/boot.ipxe ||
+iseq ${buildarch} arm64 && chain http://${orch_ip}/pxe/linux/arm64/boot.ipxe ||
+goto menu
+
+{% endif %}
 :rescue
 echo Démarrage en mode récupération Debian {{ pxe_debian_default_version }}...
 kernel ${base}/{{ pxe_debian_default_version }}/${arch}/linux {{ pxe_kernel_opts }} rescue/enable=true

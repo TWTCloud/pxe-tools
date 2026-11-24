@@ -45,6 +45,16 @@ menuentry 'Mode dépannage' {
     initrd (http,{{ pxe_ip }})/netboot/{{ pxe_default_netboot_path }}/initrd.gz (http,{{ pxe_ip }})/netboot/{{ pxe_default_netboot_path }}/firmware.cpio.gz
 }
 
+{% if pxe_rust_guided %}
+menuentry 'Autres installateurs Linux' {
+    if [ "$grub_cpu" = "arm64" ]; then
+        configfile (http,{{ pxe_ip }})/pxe/linux/arm64/grub.cfg
+    else
+        configfile (http,{{ pxe_ip }})/pxe/linux/amd64/grub.cfg
+    fi
+}
+{% endif %}
+
 {% if pxe_ipxe_enabled %}
 menuentry 'Chainload iPXE (HTTP boot natif)' {
     echo "Chargement d'iPXE depuis TFTP..."

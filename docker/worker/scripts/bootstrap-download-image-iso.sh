@@ -246,12 +246,8 @@ mv "$extracted_kernel" "$stage_dir/linux"
 mv "$extracted_initrd" "$stage_dir/initrd.gz"
 rm -rf "$extract_tmp"
 
-# Explique le "saut" de taille avant qu'il ne soit visible : l'espace conservé
-# (noyau + initrd) est bien plus petit que l'ISO complète — normal, seuls ces
-# deux fichiers servent au démarrage réseau, le reste de l'ISO (paquets,
-# installeur graphique, etc.) est inutile ici et n'a jamais été conservé.
-extracted_size=$(( $(stat -c%s "$stage_dir/linux" 2>/dev/null || echo 0) + $(stat -c%s "$stage_dir/initrd.gz" 2>/dev/null || echo 0) ))
-publish "$label · système extrait ($(human_size "$extracted_size")) — l'image téléchargée ($(human_size "$iso_real_size")) va être supprimée, seuls le noyau et le système minimal sont conservés" 88
+extracted_size=$(( $(stat -c%s "$stage_dir/linux") + $(stat -c%s "$stage_dir/initrd.gz") ))
+publish "$label · noyau et initrd extraits ($(human_size "$extracted_size"))" 88
 
 # ------------------------------------------------------------------------
 # 3b. Firmware non-free (firmware.cpio.gz) — 2e initrd chargé par TOUS les
@@ -294,9 +290,15 @@ publish "$label · finalisation…" 95
 # 4. Cleanup ISO (par défaut on supprime ; option keep_iso=on conserve)
 # ------------------------------------------------------------------------
 keep_iso=$(sqlite3 "$PXE_DB_PATH" "SELECT value FROM settings WHERE key='keep_iso'" 2>/dev/null || echo "")
+if [ "$distro" = ubuntu ] && [ "${PXE_RUST_GUIDED:-0}" = 1 ]; then
+    # Casper needs the matching live-server ISO after booting the kernel.
+    keep_iso=on
+fi
+retained_iso_bytes=0
 if [ "$keep_iso" = "on" ]; then
     mv "$iso_path" "$stage_dir/source.iso"
     python3 "$publisher" "$stage_dir/source.iso" "$dest_dir/source.iso"
+    retained_iso_bytes=$iso_real_size
     echo "[download-image-iso]   keep_iso=on → ISO conservée à $dest_dir/source.iso"
 else
     rm -f "$iso_path"
@@ -318,11 +320,11 @@ if [ -n "${codename:-}" ] && [ "$extract_method" = "direct" ]; then
 fi
 
 # ------------------------------------------------------------------------
-# 5. Mark downloaded + size_bytes (somme kernel+initrd+firmware, pas l'ISO)
+# 5. Mark downloaded and report the total size retained for this image.
 # ------------------------------------------------------------------------
 size=$(( $(stat -c%s "$stage_dir/linux" 2>/dev/null || echo 0) \
       + $(stat -c%s "$stage_dir/initrd.gz" 2>/dev/null || echo 0) \
-      + $(stat -c%s "$stage_dir/firmware.cpio.gz" 2>/dev/null || echo 0) ))
+      + $(stat -c%s "$stage_dir/firmware.cpio.gz" 2>/dev/null || echo 0) + retained_iso_bytes ))
 # Commit the completed image and a subsequent menu render together. A render
 # already running may have read the old image state, so only a pending render
 # can be reused.

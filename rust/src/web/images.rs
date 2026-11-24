@@ -201,7 +201,7 @@ fn queue_form(
         if !matched {
             return Ok(Some(plain(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "Images Debian indisponibles\n",
+                "Images indisponibles\n",
             )));
         }
     } else {
@@ -212,7 +212,7 @@ fn queue_form(
         if !available {
             return Ok(Some(plain(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "Image Debian indisponible\n",
+                "Image indisponible\n",
             )));
         }
     }
@@ -387,44 +387,54 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
                     kernel_url,initrd_url,firmware_url,iso_url,extract_method,enabled,status)
                 SELECT distro,version_full,version_full,arch,codename,major,channel,
                     kernel_url,initrd_url,firmware_url,iso_url,extract_method,1,'pending'
-                FROM catalog_entries WHERE id=?1 AND distro='debian'
-                    AND extract_method='direct' AND arch IN ('amd64','arm64')
+                FROM catalog_entries WHERE id=?1 AND arch IN ('amd64','arm64')
+                    AND ((distro='debian' AND extract_method='direct')
+                      OR (NOT ?2 AND distro='ubuntu' AND extract_method='iso_extract'))
                 ON CONFLICT(distro,version_full,arch) WHERE version_full IS NOT NULL
                 DO UPDATE SET enabled=1,
                     status=CASE WHEN os_images.status IN ('downloaded','downloading')
                                 THEN os_images.status ELSE 'pending' END,
                     error_msg=CASE WHEN os_images.status IN ('downloaded','downloading')
                                    THEN os_images.error_msg ELSE NULL END
-                WHERE os_images.extract_method='direct' AND ?2",
+                WHERE os_images.extract_method=excluded.extract_method AND ?2",
         rusqlite::params![id, resume],
     )?;
     db.query_row(
         "SELECT i.id FROM os_images i JOIN catalog_entries c
                      ON i.distro=c.distro AND i.version_full=c.version_full AND i.arch=c.arch
-                  WHERE c.id=?1 AND c.distro='debian' AND c.extract_method='direct'
-                    AND c.arch IN ('amd64','arm64') AND i.extract_method='direct'",
-        [id],
+                  WHERE c.id=?1 AND c.arch IN ('amd64','arm64')
+                    AND i.extract_method=c.extract_method
+                    AND ((c.distro='debian' AND c.extract_method='direct')
+                      OR (NOT ?2 AND c.distro='ubuntu' AND c.extract_method='iso_extract'))",
+        rusqlite::params![id, resume],
         |row| row.get(0),
     )
     .optional()
 }
 
 pub(super) fn catalog_form(db: &Connection, action: &'static str) -> rusqlite::Result<String> {
+    let include_ubuntu = action == ROUTE;
     let mut html = format!(
         r#"<form method="post" action="{action}">
-<label>Image Debian <select name="image">"#,
+<label>Image PXE <select name="image">"#,
     );
     let mut query = db.prepare(
-        "SELECT id,version_full,arch FROM catalog_entries
-        WHERE distro='debian' AND extract_method='direct' AND arch IN ('amd64','arm64')
-        ORDER BY major DESC,version_full DESC,arch,id LIMIT 50",
+        "SELECT id,version_full,arch,distro FROM catalog_entries
+        WHERE arch IN ('amd64','arm64') AND ((distro='debian' AND extract_method='direct')
+          OR (?1 AND distro='ubuntu' AND extract_method='iso_extract'))
+        ORDER BY distro,major DESC,version_full DESC,arch,id LIMIT 50",
     )?;
-    let mut rows = query.query([])?;
+    let mut rows = query.query([include_ubuntu])?;
     let mut count = 0;
     while let Some(row) = rows.next()? {
         count += 1;
         let id: i64 = row.get(0)?;
-        html.push_str(&format!(r#"<option value="{id}">Debian "#));
+        let distro = if row.get::<_, String>(3)? == "ubuntu" {
+            "Ubuntu Server"
+        } else {
+            "Debian"
+        };
+        html.push_str(&format!(r#"<option value="{id}">{distro} "#));
         escape(&mut html, &row.get::<_, String>(1)?);
         html.push_str(" · ");
         escape(&mut html, &row.get::<_, String>(2)?);
