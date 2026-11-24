@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{connect, preseed};
 use hyper::StatusCode;
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha_crypt::{PasswordHasher, ShaCrypt};
 use std::{fmt::Write, path::Path};
 
@@ -69,7 +69,11 @@ pub(super) fn serve(
             number + 1
         )?;
     }
-    content.push_str(r#"<a href="/admin/devices">Appareils</a></nav><h2>Nouveau modèle Debian 13</h2>
+    content.push_str(r#"<a href="/admin/devices">Appareils</a></nav>"#);
+    if !crate::setting(db, "ansible_repo_url")?.trim().is_empty() {
+        content.push_str(r#"<form method="post" action="/presets/pull-github"><button>Synchroniser depuis le dépôt Ansible</button></form>"#);
+    }
+    content.push_str(r#"<h2>Nouveau modèle Debian 13</h2>
 <p>DHCP, LVM sur le disque sélectionné et connexion root désactivée.</p>
 <form method="post" action="/presets">
 <p><label>Nom du modèle <input name="name" maxlength="100" required></label></p>
@@ -78,6 +82,41 @@ pub(super) fn serve(
 <p><label>Confirmation <input type="password" name="confirm" minlength="12" maxlength="128" autocomplete="new-password" required></label></p>
 <button>Créer le modèle</button></form>"#);
     Ok(page("Modèles d’installation", &content))
+}
+
+pub(super) fn pull(path: &Path) -> Result<Reply, ErrorBox> {
+    let mut db = connect(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if crate::setting(&tx, "ansible_repo_url")?.trim().is_empty() {
+        return Ok(plain(
+            StatusCode::CONFLICT,
+            "Aucun dépôt Ansible configuré\n",
+        ));
+    }
+    let existing: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM init_jobs
+         WHERE (job_type='preset:pull_github' OR job_type LIKE 'preset:pull_github:%')
+           AND status IN ('pending','running') ORDER BY id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let id = if let Some(id) = existing {
+        id
+    } else {
+        tx.execute(
+            "INSERT INTO init_jobs(job_type,status,message)
+             VALUES('preset:pull_github','pending','Synchronisation des modèles depuis GitHub')",
+            [],
+        )?;
+        tx.last_insert_rowid()
+    };
+    tx.commit()?;
+    Ok(redirect(StatusCode::SEE_OTHER, format!("/jobs/{id}")))
 }
 
 fn create(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {

@@ -444,6 +444,16 @@ def verify_admin_attempt_limit(client, authorization):
 
 
 def verify_guided_install(client, database, authorization):
+    pull = '/presets/pull-github'
+    assert client.request(pull,form={},authorization=authorization)[0]==409
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("INSERT INTO settings(key,value) VALUES('ansible_repo_url','https://example.test/presets')")
+    assert client.request(pull,form={},authorization=authorization,origin='https://other.example')[0]==403
+    first = client.request(pull,form={},authorization=authorization)
+    assert first[0]==303 and first[1].startswith('/jobs/')
+    assert client.request(pull,form={},authorization=authorization)[:2]==first[:2]
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT COUNT(*) FROM init_jobs WHERE job_type='preset:pull_github' AND status='pending'").fetchone()==(1,)
     inventory = {'disks':[{'name':'vda','serial':'FIXTURE-SERIAL',
                            'identity':{'kind':'serial','source':'sysfs','value':'FIXTURE-SERIAL','status':'valid'}}]}
     new_profile = {'name':'Debian <test>', 'login':'fixture','password':'fixture-password','confirm':'fixture-password'}

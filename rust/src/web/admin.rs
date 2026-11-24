@@ -41,6 +41,7 @@ pub(super) enum Action {
     Register(Option<Bytes>),
     Images(Option<Bytes>),
     Presets(Option<Bytes>),
+    PullPresets,
     Jobs(super::jobs::View),
     Activity(super::activity::View),
     Terminology(&'static str),
@@ -147,6 +148,9 @@ impl Console {
             }
             if let Action::Presets(form) = &action {
                 return super::presets::serve(&db, &db_path, form.as_deref(), page).ok();
+            }
+            if let Action::PullPresets = &action {
+                return super::presets::pull(&db_path).ok();
             }
             if let Action::Images(form) = &action {
                 return Some(super::images::serve(&db, &db_path, page, form.as_deref()));

@@ -421,6 +421,18 @@ async fn dispatch(
         }
         return setup::redirect(StatusCode::FOUND, "/admin/devices");
     }
+    if path == "/presets/pull-github" && parts.method == Method::POST {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        if !admin_origin(&parts.headers, site) {
+            return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+        }
+        return site
+            .admin
+            .serve(&parts, peer, &site.database, admin::Action::PullPresets)
+            .await;
+    }
     if (path == "/machines/new" && readable)
         || (path == "/machines" && parts.method == Method::POST)
     {
