@@ -25,6 +25,7 @@ const LIMIT: usize = 1024 * 1024;
 #[serde(deny_unknown_fields)]
 struct Request {
     preset: Map<String, Value>,
+    repository_profile: String,
     allowed_roles: Option<Vec<String>>,
 }
 
@@ -44,6 +45,9 @@ pub(crate) fn run(config: &Path) -> Result<(), ErrorBox> {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if request.repository_profile != php_trim(&crate::setting(&tx, "ansible_repo_profile")?) {
+        return Err("Le profil du dépôt Ansible a changé pendant l’importation".into());
+    }
     let incoming = Value::Object(request.preset);
     let name = php_string(&incoming["name"]);
     let name = php_trim(&name);

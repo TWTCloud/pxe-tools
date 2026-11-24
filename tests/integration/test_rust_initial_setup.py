@@ -952,13 +952,15 @@ def verify_preset_import(binary):
                        (json.dumps({'disks':[{'name':'sda','size_bytes':8000000000}],
                                     'interfaces':[{'mac':'02:00:00:01:00:01'},{'mac':'02:00:00:01:00:02'}]}),))
 
-        def ingest(row, roles=('debian_test',)):
+        def ingest(row, roles=('debian_test',), repository='profile.json'):
             return subprocess.run(
                 [str(binary),'--import-preset',str(config)],
-                input=json.dumps({'preset':row,'allowed_roles':roles}),text=True,capture_output=True,
+                input=json.dumps({'preset':row,'allowed_roles':roles,'repository_profile':repository}),
+                text=True,capture_output=True,
             )
 
         assert ingest(profile,[]).returncode
+        assert ingest(profile,repository='stale.json').returncode
         added = ingest(profile)
         assert added.returncode==0, added.stderr
         identity = json.loads(added.stdout)

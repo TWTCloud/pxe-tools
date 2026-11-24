@@ -578,8 +578,8 @@ def _repository_scope_module():
     return repository_scope
 
 
-def _repository_profile() -> dict | None:
-    path = db_setting("ansible_repo_profile", "").strip()
+def _repository_profile(path: str | None = None) -> dict | None:
+    path = db_setting("ansible_repo_profile", "").strip() if path is None else path
     if not path:
         return None
     return _repository_scope_module().load_profile(
@@ -967,7 +967,8 @@ def run_preset_pull_github(job: dict) -> None:
         update_init_job(job_id, progress_percent=25, updated_at=now())
         flush_log()
 
-        profile = _repository_profile()
+        profile_path = db_setting("ansible_repo_profile", "").strip()
+        profile = _repository_profile(profile_path)
         preset_directory = profile["presets_path"] if profile else "host_vars"
         host_vars_dir = os.path.join(WORKDIR, preset_directory)
         if not os.path.isdir(host_vars_dir):
@@ -1056,6 +1057,7 @@ def run_preset_pull_github(job: dict) -> None:
                 if isinstance(payload, dict):
                     request = {
                         "preset": payload,
+                        "repository_profile": profile_path,
                         "allowed_roles": list(profile["playbooks"]) if profile else None,
                     }
                     r = subprocess.run(command, input=json.dumps(request), capture_output=True, text=True, timeout=30)
