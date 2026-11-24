@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -115,18 +116,18 @@ def start_appliance(app, lan, probe, root, boot_assets):
     print('Rust boot server is reachable from the isolated PXE network.',flush=True)
 
 
-def preflight():
-
+def preflight(accelerator):
     # Probe the VM ioctl through QEMU. A visible /dev/kvm alone does not prove
     # the Windows runner can run a nested KVM guest under WSL.
     qmp = '\n'.join(json.dumps({'execute':command}) for command in ('qmp_capabilities','quit'))+'\n'
-    result = docker('run','--rm','-i','--network','none','--device','/dev/kvm',
-                    '--entrypoint','qemu-system-x86_64',image,
-                    '-machine','q35,accel=kvm','-cpu','host','-nodefaults','-display','none',
-                    '-S','-m','256','-qmp','stdio',input=qmp,check=False,timeout=30)
+    devices,settings = guest_acceleration(accelerator)
+    result = docker('run','--rm','-i','--network','none',*devices,
+                    '--entrypoint','qemu-system-x86_64',image,'-machine','q35',*settings,
+                    '-nodefaults','-display','none','-S','-m','256','-qmp','stdio',
+                    input=qmp,check=False,timeout=30)
     if result.returncode or '"QMP"' not in result.stdout or '"return"' not in result.stdout:
-        raise RuntimeError(f'The isolated runner could not start a KVM guest: {result.stderr.strip()}')
-    print('QEMU opened a disposable nested KVM guest.',flush=True)
+        raise RuntimeError(f'The isolated runner could not start a {accelerator} guest: {result.stderr.strip()}')
+    print(f'QEMU opened a disposable guest with {accelerator}.',flush=True)
     suffix = secrets.token_hex(5)
     app, lan, probe = (f'pxe-win-preflight-{name}-{suffix}' for name in ('app','lan','probe'))
     with tempfile.TemporaryDirectory(prefix='pxe-windows-preflight-',dir='/var/tmp') as temporary:
@@ -171,7 +172,34 @@ def boot_asset_served(log, name, size):
     return covered == size
 
 
-def run_guest(client, lan, helper, root, media, case, *, discovery):
+def guest_acceleration(accelerator):
+    if accelerator == 'kvm':
+        return ('--device','/dev/kvm'), ('-accel','kvm','-cpu','host')
+    return (), ('-accel','tcg,thread=multi','-cpu','max')
+
+
+def qemu_state(root):
+    try:
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(2)
+            connection.connect(str(root/'qmp.sock'))
+            with connection.makefile('rwb') as qmp:
+                qmp.readline()
+                for command in ('qmp_capabilities','query-status'):
+                    qmp.write(json.dumps({'execute':command}).encode()+b'\n')
+                    qmp.flush()
+                    while response := qmp.readline():
+                        received = json.loads(response)
+                        if 'return' in received or 'error' in received:
+                            break
+                    else:
+                        return None
+                return received.get('return',{}).get('status')
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery):
     mount = ('--mount', f'type=bind,src={root},dst=/fixture-data')
     iso = ()
     if discovery:
@@ -181,13 +209,15 @@ def run_guest(client, lan, helper, root, media, case, *, discovery):
         )
         mount += ('--mount', f'type=bind,src={media/"windows.iso"},dst=/approved.iso,readonly')
     (root/'qemu-monitor.sock').unlink(missing_ok=True)
+    (root/'qmp.sock').unlink(missing_ok=True)
     serial = 'winpe.log' if discovery else 'windows.log'
     network_order, disk_order = (1, 2) if discovery else (2, 1)
     restart = ('-no-reboot',) if discovery else ()
+    devices,settings = guest_acceleration(accelerator)
     docker('run','-di','--name',client,'--network','container:'+lan,'--cap-add','NET_ADMIN',
-           '--device','/dev/net/tun','--device','/dev/kvm',*mount,
+           '--device','/dev/net/tun',*devices,*mount,
            '--entrypoint','qemu-system-x86_64',helper,
-           '-machine','q35,smm=on,accel=kvm','-cpu','host','-smp','2','-m','6144','-display','none',
+           '-machine','q35,smm=on',*settings,'-smp','4' if accelerator=='tcg' else '2','-m','6144','-display','none',
            '-global','driver=cfi.pflash01,property=secure,value=on',
            '-drive','if=pflash,unit=0,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd',
            '-drive','if=pflash,unit=1,format=raw,file=/fixture-data/vars.fd',
@@ -195,13 +225,14 @@ def run_guest(client, lan, helper, root, media, case, *, discovery):
            '-tpmdev','emulator,id=tpm0,chardev=chrtpm','-device','tpm-tis,tpmdev=tpm0',
            '-uuid',case['guest_id'],*restart,'-serial','file:/fixture-data/'+serial,
            '-monitor','unix:/fixture-data/qemu-monitor.sock,server=on,wait=off',
+           '-qmp','unix:/fixture-data/qmp.sock,server=on,wait=off',
            '-fw_cfg','name=opt/org.tianocore/IPv6Support,string=no',
            '-drive','file=/fixture-data/client.qcow2,format=qcow2,if=none,id=disk',
            '-device',f'ide-hd,drive=disk,bus=ide.0,serial={case["disk_serial"]},bootindex={disk_order}',
            *iso,'-netdev','tap,id=lan,ifname=tap-pxetest,script=no,downscript=no',
            '-device',f'virtio-net-pci,disable-legacy=on,romfile=,netdev=lan,mac={MAC},bootindex={network_order}')
     phase = 'WinPE deployment' if discovery else 'first Windows boot'
-    print(f'{phase} started on the isolated guest network.', flush=True)
+    print(f'{phase} started on the isolated guest network with {accelerator}.', flush=True)
 
     def completed():
         state = inspect(client)['State']
@@ -213,17 +244,21 @@ def run_guest(client, lan, helper, root, media, case, *, discovery):
             raise RuntimeError(f'{phase} produced duplicate receipts.')
         if not state['Running'] and receipts == 0:
             raise RuntimeError(f'{phase} shut down before producing a receipt.')
+        if state['Running']:
+            virtual_state = qemu_state(root)
+            if virtual_state in {'internal-error','io-error','guest-panicked'}:
+                raise RuntimeError(f'{phase} paused with QEMU status {virtual_state}.')
         if discovery:
             return not state['Running'] and receipts == 1
         return receipts == 1
 
     try:
-        wait_for(completed, 900, phase)
+        wait_for(completed, 1500 if accelerator=='tcg' else 900, phase)
     except RuntimeError:
         diagnostic_screen(root)
-        console = docker('logs','--tail','12',client,check=False)
+        console = docker('logs','--tail','80',client,check=False)
         if console.stderr:
-            print(console.stderr[-1600:],end='',flush=True)
+            print(console.stderr[:4000],end='',flush=True)
         raise
     docker('rm','-f',client)
 
@@ -232,11 +267,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('media', type=Path, nargs='?')
     parser.add_argument('--server-only', action='store_true')
+    parser.add_argument('--accelerator', default='kvm', choices=('kvm','tcg'))
     args = parser.parse_args()
-    if backend != 'rust-docker' or os.uname().machine != 'x86_64' or not Path('/dev/kvm').is_char_device():
-        parser.error('A disposable amd64 Linux runner with KVM and the Rust Docker image is required.')
+    if backend != 'rust-docker' or os.uname().machine != 'x86_64':
+        parser.error('A disposable amd64 Linux runner with the Rust Docker image is required.')
+    if args.accelerator=='kvm' and not Path('/dev/kvm').is_char_device():
+        parser.error('KVM acceleration requires a disposable runner with /dev/kvm.')
     if args.server_only and args.media is None:
-        preflight()
+        preflight(args.accelerator)
         return
     if args.media is None or args.server_only:
         parser.error('Select the server preflight or provide the Windows test media.')
@@ -260,10 +298,10 @@ def main():
             docker('run','-d','--name',tpm,'--network','none',*fixture,'--entrypoint','swtpm',helper,
                    'socket','--tpm2','--tpmstate','dir=/fixture-data/tpm',
                    '--ctrl','type=unixio,path=/fixture-data/tpm.sock')
-            docker('run','-d','--name',lan,'--network','none','--entrypoint','sleep',helper,'2400')
+            docker('run','-d','--name',lan,'--network','none','--entrypoint','sleep',helper,'3600')
             docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
                    '--mount',f'type=bind,src={root/"tftp"},dst=/pxe,readonly',
-                   '--entrypoint','sleep',helper,'2400')
+                   '--entrypoint','sleep',helper,'3600')
             connect_fixture_lan(lan,dhcp)
             docker('exec','-d',dhcp,'dnsmasq','-k','--interface=veth-dhcp','--bind-interfaces',
                    '--no-resolv','--no-hosts','--dhcp-authoritative',
@@ -277,14 +315,14 @@ def main():
                    '--enable-tftp','--tftp-root=/pxe','--log-dhcp','--log-facility=/tmp/windows-dhcp.log')
             start_appliance(app,lan,dhcp,root,boot_assets)
             wait_for(lambda:(root/'tpm.sock').is_socket(), 30, 'disposable TPM socket')
-            run_guest(client,lan,helper,root,media,case,discovery=True)
+            run_guest(client,lan,helper,root,media,case,args.accelerator,discovery=True)
             boot_log = docker('logs',app).stdout
             for name in ('wimboot','BCD','boot.sdi','boot.wim'):
                 size = (boot_assets/name).stat().st_size
                 if not boot_asset_served(boot_log,name,size):
                     raise RuntimeError(f'The Rust server did not serve the verified {name} to the PXE guest.')
             print('The WinPE guest sent its receipt and requested a reboot.',flush=True)
-            run_guest(client,lan,helper,root,media,case,discovery=False)
+            run_guest(client,lan,helper,root,media,case,args.accelerator,discovery=False)
             log = docker('exec',dhcp,'cat','/tmp/windows-dhcp.log').stdout
             observed = all(re.search(rf'sent .*{re.escape(name)} to {re.escape(CLIENT)}(?:\s|$)', log)
                            for name in SIGNED_IPXE)
