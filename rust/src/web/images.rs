@@ -274,7 +274,9 @@ pub(super) fn refresh_catalog(db: &Connection) -> rusqlite::Result<()> {
 }
 
 fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
-    let mut html = String::from(r#"<p><a href="/admin/devices">Retour à la console</a></p>"#);
+    let mut html = String::from(
+        r#"<nav><a href="/admin/devices">Console</a> · <a href="/settings/windows">Éditions Windows</a></nav>"#,
+    );
     html.push_str(&catalog_form(db, ROUTE)?);
     let enabled = if setting(db, "catalog_auto_refresh_enabled")? == "on" {
         " checked"

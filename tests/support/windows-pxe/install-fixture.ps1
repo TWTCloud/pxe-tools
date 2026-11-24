@@ -5,7 +5,9 @@ param(
     [Parameter(Mandatory)][guid]$GuestId,
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]{1,40}$')][string]$DiskSerial,
     [switch]$UseUniqueId,
-    [Parameter(Mandatory)][ValidateRange(1, 128)][int]$ImageIndex
+    [Parameter(Mandatory)][ValidateRange(1, 128)][int]$ImageIndex,
+    [string]$InstallImageUri = '',
+    [string]$InstallImageSha256 = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,14 +36,23 @@ if ((Test-Path -LiteralPath 'S:\') -or (Test-Path -LiteralPath 'W:\') -or
     (Get-Volume | Where-Object { $_.DriveLetter -in @('S','W') })) {
     throw 'The fixture partition letters are already in use.'
 }
-$images = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=5' | ForEach-Object {
-    foreach ($name in @('install.wim','install.esd')) {
-        $candidate = Join-Path ($_.DeviceID + '\') "sources\$name"
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $candidate }
+$image = ''
+if ($InstallImageUri) {
+    if ($InstallImageUri -cnotmatch '^https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/pxe/windows/[a-z0-9-]{1,40}/install\.(?:wim|esd)$' -or
+        $InstallImageSha256 -cnotmatch '^[a-f0-9]{64}$') {
+        throw 'The PXE Tools image URL or digest is invalid.'
     }
-})
-if ($images.Count -ne 1) {
-    throw 'Attach exactly one approved Windows installation ISO as a read-only optical drive.'
+} else {
+    $images = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=5' | ForEach-Object {
+        foreach ($name in @('install.wim','install.esd')) {
+            $candidate = Join-Path ($_.DeviceID + '\') "sources\$name"
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $candidate }
+        }
+    })
+    if ($images.Count -ne 1) {
+        throw 'Attach exactly one approved Windows installation ISO as a read-only optical drive.'
+    }
+    $image = $images[0]
 }
 $probe = Join-Path $PSScriptRoot 'pxe-collect.ps1'
 $receipt = Join-Path $env:TEMP 'pxe-winpe-receipt.log'
@@ -50,8 +61,9 @@ $receipt = Join-Path $env:TEMP 'pxe-winpe-receipt.log'
 function Invoke-Checked {
     param([string]$Program, [string[]]$Arguments)
 
-    & $Program @Arguments | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "$Program failed with exit code $LASTEXITCODE." }
+    # DISM writes console progress while applying an image. Keep that output out of the WinPE PowerShell pipeline.
+    $process = Start-Process -FilePath $Program -ArgumentList $Arguments -NoNewWindow -PassThru -Wait
+    if ($process.ExitCode -ne 0) { throw "$Program failed with exit code $($process.ExitCode)." }
 }
 
 $commands = Join-Path $env:TEMP 'pxe-fixture-partitions.txt'
@@ -87,9 +99,35 @@ if ($esp.Count -ne 1 -or $system.Count -ne 1 -or
 }
 Write-Host 'The disposable GPT layout and the WinPE drive mappings are ready.'
 $null = New-Item -ItemType Directory -Path 'S:\PXE-LAB'
+Copy-Item -LiteralPath $receipt -Destination 'S:\PXE-LAB\WINPE.LOG'
 $stage = 'S:\PXE-LAB\STAGE.LOG'
 Set-Content -LiteralPath $stage -Value 'apply-windows' -Encoding Ascii
-Invoke-Checked -Program 'dism.exe' -Arguments @('/Apply-Image',"/ImageFile:$($images[0])","/Index:$ImageIndex",'/ApplyDir:W:\')
+$download = 'W:\PXE-LAB-download'
+$stagedDownload = $false
+$scratch = 'W:\PXE-LAB-scratch'
+$null = New-Item -ItemType Directory -Path $scratch
+try {
+    if ($InstallImageUri) {
+        $null = New-Item -ItemType Directory -Path $download
+        $stagedDownload = $true
+        $image = Join-Path $download ([IO.Path]::GetFileName(([uri]$InstallImageUri).AbsolutePath))
+        $client = New-Object Net.WebClient
+        try {
+            $client.Proxy = $null
+            $client.DownloadFile([uri]$InstallImageUri, $image)
+        } finally { $client.Dispose() }
+        if ((Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash -ne $InstallImageSha256) {
+            throw 'The cached Windows image does not match the digest in WinPE.'
+        }
+    }
+    Invoke-Checked -Program 'dism.exe' -Arguments @('/Apply-Image',"/ImageFile:$image","/Index:$ImageIndex",'/ApplyDir:W:\',"/ScratchDir:$scratch",'/LogPath:S:\PXE-LAB\DISM.LOG')
+} finally {
+    if ($stagedDownload) {
+        if (Test-Path -LiteralPath $image -PathType Leaf) { Remove-Item -LiteralPath $image -Force }
+        Remove-Item -LiteralPath $download
+    }
+}
+Remove-Item -LiteralPath $scratch
 Set-Content -LiteralPath $stage -Value 'prepare-first-boot' -Encoding Ascii
 Copy-Item -LiteralPath $probe -Destination 'W:\Windows\System32\pxe-collect.ps1'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'pxe-first-boot.ps1') -Destination 'W:\Windows\System32'
@@ -123,6 +161,5 @@ if (-not (Test-Path -LiteralPath $defaultLoader -PathType Leaf)) {
     $null = New-Item -ItemType Directory -Path (Split-Path -Parent $defaultLoader) -Force
     Copy-Item -LiteralPath 'S:\EFI\Microsoft\Boot\bootmgfw.efi' -Destination $defaultLoader
 }
-Copy-Item -LiteralPath $receipt -Destination 'S:\PXE-LAB\WINPE.LOG'
 Set-Content -LiteralPath $stage -Value 'winpe-finished' -Encoding Ascii
 Invoke-Checked -Program 'wpeutil.exe' -Arguments @('Shutdown')

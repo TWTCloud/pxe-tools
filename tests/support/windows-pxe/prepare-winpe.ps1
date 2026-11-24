@@ -12,6 +12,7 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{1,40}$')][string]$Edition,
     [ValidateRange(0, 128)][int]$InstallImageIndex = 0,
     [switch]$UseUniqueId,
+    [string]$InstallImageUri = '',
     [string]$AdkDirectory = "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit"
 )
 
@@ -51,8 +52,44 @@ function Invoke-Checked {
     }
 }
 
-$null = Get-ApprovedMedia -Path $WindowsIso -Sha256 $WindowsIsoSha256
+$approvedIso = Get-ApprovedMedia -Path $WindowsIso -Sha256 $WindowsIsoSha256
 $approvedWimboot = Get-ApprovedMedia -Path $Wimboot -Sha256 $WimbootSha256
+$selectedImage = $null
+$installName = ''
+$installHash = ''
+if ($InstallImageUri -and ($InstallImageIndex -eq 0 -or
+    $InstallImageUri -cnotmatch '^https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/pxe/windows/[a-z0-9-]{1,40}/install\.(?:wim|esd)$')) {
+    throw 'Provide the PXE Tools installation image URL and a valid WIM index.'
+}
+if ($InstallImageIndex -gt 0) {
+    if ((Get-DiskImage -ImagePath $approvedIso.FullName).Attached) {
+        throw 'Dismount the approved ISO before preparing its WinPE edition.'
+    }
+    $isoDrive = Mount-DiskImage -ImagePath $approvedIso.FullName -Access ReadOnly -PassThru
+    try {
+        $root = "$(($isoDrive | Get-Volume).DriveLetter):\sources"
+        $images = @('install.wim', 'install.esd' | ForEach-Object {
+            $candidate = Join-Path $root $_
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $candidate }
+        })
+        if ($images.Count -ne 1) {
+            throw 'The approved ISO must contain one Windows installation image.'
+        }
+        $selectedImage = Get-WindowsImage -ImagePath $images[0] -Index $InstallImageIndex
+        if ($selectedImage.EditionId -ne $Edition) {
+            throw 'The selected WIM index does not match the requested Windows edition.'
+        }
+        if ($InstallImageUri) {
+            $installName = [IO.Path]::GetFileName($images[0])
+            if ($installName -ne [IO.Path]::GetFileName(([uri]$InstallImageUri).AbsolutePath)) {
+                throw 'The installation image URL does not match the file format in the approved ISO.'
+            }
+            $installHash = (Get-FileHash -LiteralPath $images[0] -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    } finally {
+        Dismount-DiskImage -ImagePath $approvedIso.FullName | Out-Null
+    }
+}
 $adk = (Get-Item -LiteralPath $AdkDirectory).FullName
 if ($adk -match '["%&|<>^!\r\n]') {
     throw 'The ADK path contains characters interpreted by its batch files.'
@@ -112,6 +149,7 @@ try {
         $parameters += " -ImageIndex $InstallImageIndex"
     }
     if ($UseUniqueId) { $parameters += ' -UseUniqueId' }
+    if ($installHash) { $parameters += " -InstallImageUri `"$InstallImageUri`" -InstallImageSha256 $installHash" }
     @"
 @echo off
 wpeinit
@@ -146,4 +184,12 @@ $case = [ordered]@{
     boot_sdi_sha256 = Get-BootHash 'boot.sdi'
 }
 if ($UseUniqueId) { $case.Add('disk_identity', 'unique_id') }
-$case | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'case.json') -Encoding Ascii
+if ($selectedImage) {
+    $case.Add('image_index', [int]$selectedImage.ImageIndex)
+    $case.Add('edition_label', [string]$selectedImage.ImageName)
+}
+if ($installHash) {
+    $case.Add('install_image', $installName)
+    $case.Add('install_sha256', $installHash)
+}
+[IO.File]::WriteAllText((Join-Path $output 'case.json'), ($case | ConvertTo-Json), [Text.UTF8Encoding]::new($false))

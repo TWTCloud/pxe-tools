@@ -585,6 +585,42 @@ s’exécute de nouveau pendant le premier démarrage, dans la phase
 du disque jetable et arrêtent la VM. Le banc relit les fichiers après
 chaque arrêt sans monter la partition en écriture.
 
+### Choix de l’édition dans la console Rust
+
+Avec un média qui contient plusieurs éditions, Windows identifie l’édition par son index
+dans `install.wim` ou `install.esd`. La préparation du média WinPE vérifie
+que `-Edition` correspond à `-InstallImageIndex` dans l’ISO approuvée et
+inscrit le libellé et l’index lus dans `case.json`. Pour chaque édition
+préparée, placer `case.json` et les quatre fichiers du dossier `boot`
+dans `$HTTP_ROOT/winpe/amd64/<identifiant>/`. Choisir un identifiant
+distinct pour chaque média proposé, par exemple `windows11-core` ou
+`windows10-professional`. Relancer le serveur après l’ajout des fichiers.
+La page **Éditions Windows**, accessible depuis **Images PXE**, enregistre
+l’édition à utiliser pour le client autorisé par `PXE_WINPE_CLIENT_IP`.
+
+Sur le serveur de préparation Linux, importer une fois le fichier
+d’installation d’une ISO locale avec Python 3.11+ et `7z`. La commande
+renvoie le chemin du fichier extrait et son empreinte SHA-256.
+
+```bash
+python3 tests/support/windows-pxe/cache-install-image.py \
+  --iso "$iso_local" --iso-sha256 "$iso_sha256" --cache "$cache_windows"
+```
+
+Après l’import, relancer la commande avec `--iso-sha256` et `--cache`
+suffit à retrouver et à contrôler l’image en cache. L’ISO n’est requise
+que pour le premier import et pour préparer un nouveau média WinPE.
+
+Pour une installation depuis PXE Tools, passer également
+`-InstallImageUri http://<serveur>/pxe/windows/<identifiant>/install.wim`
+au préparateur WinPE. Le nom dans l’URL doit correspondre au média, y
+compris pour `install.esd`. Ajouter un lien physique du fichier extrait
+vers le dossier de chaque édition issue de la même image. Le cache et
+les dossiers d’édition doivent partager le même système de fichiers.
+WinPE télécharge le fichier autorisé au démarrage et vérifie son empreinte
+avant d’appliquer l’index avec DISM. Le vérificateur du banc conserve
+l’association au client, au disque jetable et à l’édition installée.
+
 Le manifeste du cas contient `guest_id` (UUID), `disk_serial`,
 `edition` (par exemple `Professional`), `iso_sha256` et
 `winpe_sha256`. La preuve réseau produite côté serveur contient

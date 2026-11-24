@@ -35,12 +35,16 @@ impl Assets {
         })
     }
 
+    pub(super) fn winpe_root(&self) -> PathBuf {
+        self.root.join("winpe/amd64")
+    }
+
     pub(super) async fn serve(
         &self,
         path: &str,
         headers: &HeaderMap,
         head: bool,
-        winpe: bool,
+        winpe: Option<&super::winpe::Editions>,
     ) -> Option<Reply> {
         let segments = path
             .strip_prefix('/')?
@@ -61,11 +65,25 @@ impl Assets {
         let names: Vec<&str> = segments.iter().map(|value| value.as_ref()).collect();
 
         let (base, path, mime) = match names.as_slice() {
-            ["pxe", "windows", name @ ("wimboot" | "BCD" | "boot.sdi" | "boot.wim")] if winpe => (
-                self.root.join("winpe/amd64"),
-                PathBuf::from(name),
-                "application/octet-stream",
-            ),
+            ["pxe", "windows", name]
+                if matches!(winpe, Some(super::winpe::Editions::Legacy))
+                    && super::winpe::FILES.contains(name) =>
+            {
+                (
+                    self.winpe_root(),
+                    PathBuf::from(name),
+                    "application/octet-stream",
+                )
+            }
+            ["pxe", "windows", id, name]
+                if winpe.is_some_and(|editions| editions.allows_asset(id, name)) =>
+            {
+                (
+                    self.winpe_root().join(id),
+                    PathBuf::from(name),
+                    "application/octet-stream",
+                )
+            }
             ["netboot", dirs @ .., name] if !dirs.is_empty() => {
                 let mime = match *name {
                     "linux" | "vmlinuz" | "initrd" | "initrd.gz" | "initrd.lz" | "initrd.img"
