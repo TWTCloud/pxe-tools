@@ -44,8 +44,21 @@ jobs:
       - name: Start Linux on the same disposable runner
         shell: pwsh
         run: |
-          wsl.exe --install --distribution Ubuntu-24.04 --no-launch --web-download
+          $ErrorActionPreference = 'Stop'
+          $temp = Get-Item -LiteralPath $env:RUNNER_TEMP
+          $volume = Get-PSDrive -Name $temp.PSDrive.Name
+          $system = Get-PSDrive -Name ($env:SystemDrive.TrimEnd(':'))
+          Write-Output ('Workspace drive {0} has {1:N1} GiB free; system drive {2} has {3:N1} GiB free.' -f $volume.Name, ($volume.Free / 1GB), $system.Name, ($system.Free / 1GB))
+          if ($volume.Free -lt 32GB) { throw 'The disposable workspace drive lacks room for both media and the growing WSL guest disk.' }
+          $location = Join-Path $temp.FullName ('pxe-wsl-' + [guid]::NewGuid().ToString())
+          wsl.exe --install --distribution Ubuntu-24.04 --no-launch --web-download --location "$location"
           if ($LASTEXITCODE -ne 0) { throw 'Installing the WSL guest failed.' }
+          $registration = @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' |
+            Where-Object { $_.GetValue('DistributionName') -eq 'Ubuntu-24.04' })
+          if ($registration.Count -ne 1 -or
+              $registration[0].GetValue('BasePath').Replace('\\?\','') -ne $location) {
+            throw 'WSL did not place its backing disk in the disposable workspace.'
+          }
           wsl.exe --distribution Ubuntu-24.04 --user root --exec /bin/bash -lc 'set -e; test -c /dev/net/tun; apt-get -qq update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io docker-buildx iproute2 tesseract-ocr; service docker start; docker info --format "{{.OSType}}" | grep -Fx linux; docker buildx version'
           if ($LASTEXITCODE -ne 0) { throw 'A compatible Linux Docker host was not available in WSL 2.' }
       - name: Build the exact Linux test images in WSL
@@ -171,6 +184,9 @@ jobs:
         shell: pwsh
         run: |
           $output = Join-Path $env:PXE_MEDIA_TEMP 'prepared'
+          $drive = Get-PSDrive -Name (Get-Item -LiteralPath $output).PSDrive.Name
+          Write-Output ('Fixture drive {0} has {1:N1} GiB free before the Windows installation.' -f $drive.Name, ($drive.Free / 1GB))
+          if ($drive.Free -lt 22GB) { throw 'The fixture drive lacks room for the installed Windows test disk.' }
           $media = (wsl.exe -d Ubuntu-24.04 --exec wslpath -a -u "$output").Trim()
           if ($LASTEXITCODE -ne 0 -or $media -notmatch '^/mnt/[a-z]/') { throw 'The isolated media path could not be shared with WSL.' }
           $imageRevision = $env:PXE_SOURCE.Substring(0,10)
