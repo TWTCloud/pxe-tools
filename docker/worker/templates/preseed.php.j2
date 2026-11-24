@@ -114,9 +114,7 @@ $row = array_merge($machine, $config);
 //   1. Émettre le checkpoint 'preseed_loaded_install' au moment où le preseed
 //      est servi à l'installateur Debian (cf. ActionCheckpoints CATALOG).
 //   2. Injecter token + action_id dans le late_command (wgets checkpoints
-//      partitioning_started (early_command) / late_command_started +
-//      install postboot.sh + pxe-postboot.service via
-//      /pxe/postboot/{action_id}/...).
+//      partitioning_started, late_command_started et install-end).
 //
 // Legacy : une machine configurée qui n'a jamais eu d'action d'installation
 // peut encore recevoir un preseed sans checkpoints ni script postboot.
@@ -1186,13 +1184,17 @@ $admin_pubkeys = trim($row['admin_user_pubkeys'] ?? '');
 // rotation. La configuration courante fait foi pour chaque preseed servi.
 $ansible_pubkey = '';
 $ansible_user = 'ansible';
+$ansible_role = $config['ansible_role'] ?? '';
+$ansible_requested = is_string($ansible_role) && trim($ansible_role) !== '';
+$ansible_enabled = false;
 try {
     $settings = [];
     $stmt = $pdo->query("SELECT key, value FROM settings WHERE key IN ('ansible_enabled', 'ansible_ssh_pubkey', 'ansible_target_user')");
     foreach ($stmt->fetchAll() as $setting) {
         $settings[(string)$setting['key']] = (string)$setting['value'];
     }
-    if (($settings['ansible_enabled'] ?? 'off') === 'on') {
+    $ansible_enabled = ($settings['ansible_enabled'] ?? 'off') === 'on';
+    if ($ansible_requested && $ansible_enabled) {
         $ansible_pubkey = trim($settings['ansible_ssh_pubkey'] ?? '');
         if ($ansible_pubkey !== '' && !preg_match('/^(ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-[a-z0-9-]+)\s+[A-Za-z0-9+\/]+={0,2}(?:\s+[^\r\n]*)?$/D', $ansible_pubkey)) {
             http_response_code(422);
@@ -1477,40 +1479,6 @@ $password_auth = $admin_pwhash !== '' ? 'yes' : 'no';
 $late_command .= "    in-target /bin/sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication " . $password_auth . "/' /etc/ssh/sshd_config ; \\\n"
               .  "    in-target /bin/sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config ; \\\n";
 
-// Service systemd oneshot post-boot : signale à PXE Tools que la machine est
-// bootée et que sshd est up (`After=sshd.service`) — utilisé par le worker
-// Ansible comme signal de readiness avant `ansible-playbook`. Le contenu du
-// fichier .service est encodé base64 pour éviter les newlines littéraux qui
-// casseraient la directive preseed (qui exige des continuation backslashes).
-// Réessayer uniquement une connexion impossible (curl 7) : les erreurs HTTP et
-// les timeouts peuvent correspondre à une requête déjà traitée par le serveur.
-// Une limite de 24 essais évite une boucle infinie si le réseau reste absent.
-$pxe_machine_ready_script = "#!/usr/bin/env bash\n"
-                         .  "for attempt in {1..24}; do\n"
-                         .  "    /usr/bin/curl -fsS --connect-timeout 5 --max-time 10 'http://" . $pxe_ip_local . "/api/machine-ready?mac=" . $mac . "' && exit 0\n"
-                         .  "    status=\$?\n"
-                         .  "    if [ \"\$status\" -ne 7 ] || [ \"\$attempt\" -eq 24 ]; then exit \"\$status\"; fi\n"
-                         .  "    /bin/sleep 5\n"
-                         .  "done\n";
-$pxe_machine_ready_script_b64 = base64_encode($pxe_machine_ready_script);
-$pxe_machine_ready_unit = "[Unit]\n"
-                       .  "Description=PXE Tools — signal machine ready post-reboot\n"
-                       .  "After=network-online.target sshd.service\n"
-                       .  "Wants=network-online.target sshd.service\n"
-                       .  "\n"
-                       .  "[Service]\n"
-                       .  "Type=oneshot\n"
-                       .  "ExecStart=/usr/local/sbin/pxe-machine-ready\n"
-                       .  "TimeoutStartSec=250\n"
-                       .  "RemainAfterExit=yes\n"
-                       .  "\n"
-                       .  "[Install]\n"
-                       .  "WantedBy=multi-user.target\n";
-$pxe_machine_ready_b64 = base64_encode($pxe_machine_ready_unit);
-$late_command .= "    in-target /bin/bash -c 'echo \"" . $pxe_machine_ready_script_b64 . "\" | base64 -d > /usr/local/sbin/pxe-machine-ready && chmod 0755 /usr/local/sbin/pxe-machine-ready' ; \\\n"
-              .  "    in-target /bin/bash -c 'echo \"" . $pxe_machine_ready_b64 . "\" | base64 -d > /etc/systemd/system/pxe-machine-ready.service' ; \\\n"
-              .  "    in-target /bin/systemctl enable pxe-machine-ready.service ; \\\n";
-
 // Les pourcentages de blocs réservés viennent exclusivement du plan de
 // partitionnement (reserved_pct par partition/LV).
 if (!empty($partitions_for_tune2fs)) {
@@ -1527,15 +1495,67 @@ if (!empty($partitions_for_tune2fs)) {
     }
 }
 
-// Le même client HTTP sert au téléchargement et au premier démarrage.
-$installPostboot = $action_token !== null && $action_id !== null;
+// Le générateur écrit uniquement dans /run au démarrage. Le signal réseau est
+// émis plus tard par l'unité volatile, qui retire ensuite son lanceur et le jeton.
+$trackedInstall = $action_token !== null && $action_id !== null;
+$installPostboot = $trackedInstall && $ansible_requested && $ansible_enabled;
 if ($installPostboot) {
-    $postbootUrl = "http://" . $pxe_ip_local . "/pxe/postboot/" . $action_id;
-    $download = 'in-target /usr/bin/curl -fsS --connect-timeout 5 --max-time 20 --retry 3';
-    $late_command .= "    $download '$postbootUrl/postboot.sh' -o /usr/local/bin/postboot.sh && \\\n"
-                  .  "    $download '$postbootUrl/pxe-postboot.service' -o /etc/systemd/system/pxe-postboot.service && \\\n"
-                  .  "    in-target /bin/chmod 0700 /usr/local/bin/postboot.sh && \\\n"
-                  .  "    in-target /bin/systemctl enable pxe-postboot.service || exit 1 ; \\\n";
+    $firstBoot = <<<'SH'
+#!/bin/sh
+set -eu
+
+if [ "$1" != --notify ]; then
+    mkdir -p "$1/multi-user.target.wants"
+    cat > "$1/pxe-first-boot.service" <<'UNIT'
+[Unit]
+Description=Signaler le premier démarrage à PXE Tools
+After=network-online.target ssh.service
+Wants=network-online.target ssh.service
+ConditionPathExists=/etc/systemd/system-generators/pxe-first-boot
+
+[Service]
+Type=oneshot
+ExecStart=/etc/systemd/system-generators/pxe-first-boot --notify
+TimeoutStartSec=190
+UNIT
+    ln -sf ../pxe-first-boot.service "$1/multi-user.target.wants/pxe-first-boot.service"
+    exit 0
+fi
+
+trap 'unlink "$0"' EXIT
+trap 'exit 1' HUP INT TERM
+pxe_ip=__PXE_IP__
+mac=__MAC__
+token=__TOKEN__
+attempt=1
+while [ "$attempt" -le 12 ]; do
+    route=$(ip -4 route get "$pxe_ip" 2>/dev/null || true)
+    source=$(printf '%s\n' "$route" | awk '{for (i=1; i<NF; i++) if ($i=="src") {print $(i+1); exit}}')
+    if [ -n "$source" ]; then
+        payload=$(printf '{"ip":"%s","kernel":"%s"}' "$source" "$(uname -r)")
+        if receipt=$(curl -fsS --connect-timeout 5 --max-time 10 -X POST \
+            "http://${pxe_ip}/api/internal/checkpoint?mac=${mac}&code=os_first_boot&ack=1" \
+            -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
+            --data-raw "$payload"); then
+            case "$receipt" in
+                accepted|closed) exit 0 ;;
+            esac
+        fi
+    fi
+    [ "$attempt" -eq 12 ] || sleep 5
+    attempt=$((attempt + 1))
+done
+printf '%s\n' 'PXE Tools : signal de premier démarrage sans accusé de réception.' >&2
+exit 1
+SH;
+    $firstBoot = strtr($firstBoot, [
+        '__PXE_IP__' => escapeshellarg($pxe_ip_local),
+        '__MAC__' => escapeshellarg($mac),
+        '__TOKEN__' => escapeshellarg($action_token),
+    ]);
+    $generator = '/target/etc/systemd/system-generators/pxe-first-boot';
+    $late_command .= "    /bin/sh -ec 'umask 077; mkdir -p /target/etc/systemd/system-generators; "
+                  .  "echo " . base64_encode($firstBoot . "\n") . " | base64 -d > $generator; chmod 0700 $generator' || exit 1 ; \\\n";
 }
 
 // Phase 3 chantier preset-hardware-aware — émission des configs ifupdown
@@ -1566,19 +1586,17 @@ if ($dilog_enabled) {
     $late_command .= "    kill \$(cat /tmp/pxe-dilog.pid 2>/dev/null) 2>/dev/null || true ; \\\n";
 }
 
-// REINSTCKPT01 (Fix P) — Checkpoint install_reboot RETIRÉ du late_command.
-// Le nouveau signal terminal de réinstallation est le DHCP/TFTP post-install
-// capté par le sidecar dnsmasq-tail (checkpoint install_reboot_done émis
-// APRÈS le reboot d-i, quand la machine re-boote en PXE). Ce signal est plus
-// fiable : il confirme que la machine a réellement redémarré et contacté le
-// DHCP, là où install_reboot n'attestait que la fin du late_command (le reboot
-// physique pouvait encore échouer après).
-// worker.py attend désormais install_reboot_done (poll DB) avant wait_for_ssh.
-
-// The completion callback changes installation state and local boot policy.
-// It must carry the token of this installation action, not only a MAC.
-if ($action_token !== null && $action_id !== null) {
-    $late_command .= "    in-target /usr/bin/curl -fsS -X POST -H 'Authorization: Bearer " . $action_token . "' 'http://" . ($data['pxe_ip'] ?? '{{ pxe_ip }}') . "/api/install-end?mac=$mac&status=success' || true";
+// L'accusé clôt l'installation et autorise le démarrage local. L'empreinte
+// de la clé publique d'hôte est une information de diagnostic, si disponible.
+// Sans --pass-stdout, in-target envoie ces deux résultats au journal de d-i.
+if ($trackedInstall) {
+    $late_command .= "    ssh_fingerprint='' ; \\\n"
+                  .  "    if [ -r /target/etc/ssh/ssh_host_ed25519_key.pub ]; then ssh_fingerprint=\$(in-target --pass-stdout /usr/bin/ssh-keygen -E sha256 -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print \$2}'); fi ; \\\n"
+                  .  "    http_status=\$(in-target --pass-stdout /usr/bin/curl -fsS --connect-timeout 5 --max-time 15 --retry 3 --retry-connrefused "
+                  .  "--output /dev/null --write-out '%{http_code}' "
+                  .  "--data-urlencode \"ssh_host_fingerprint=\$ssh_fingerprint\" -H 'Authorization: Bearer " . $action_token
+                  .  "' 'http://" . $pxe_ip_local . "/api/install-end?mac=$mac&status=success') || exit 1 ; \\\n"
+                  .  "    [ \"\$http_status\" = 200 ] || exit 1";
 }
 
 $admin_user_block = "d-i preseed/late_command string \\\n    $late_command";
@@ -1675,7 +1693,8 @@ if (is_array($pkg['tasksel']) && !empty($pkg['tasksel'])) {
 $pkg_include_combined = array_unique(array_merge(
     is_array($pkg['pkgsel_include'] ?? null) ? $pkg['pkgsel_include'] : [],
     $network_extra_pkgs,
-    $installPostboot ? ['curl', 'iproute2'] : [],
+    $trackedInstall ? ['curl'] : [],
+    $installPostboot ? ['iproute2'] : [],
     $ansible_pubkey !== '' ? ['sudo', 'openssh-server', 'python3'] : []
 ));
 if (!empty($pkg_include_combined)) {
