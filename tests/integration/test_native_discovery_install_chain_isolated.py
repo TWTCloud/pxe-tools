@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import socket
 import sqlite3
 import subprocess
@@ -225,9 +226,11 @@ def check_installed_guest(lan, root, log, raid_level, raid_lvm, secure_boot):
         known_hosts.chmod(0o600)
     commands = [
         'set -e', 'test "$(systemctl is-active ssh.service)" = active',
+        "timeout 30 /bin/sh -c 'while [ -e /etc/systemd/system-generators/pxe-first-boot ]; do sleep 1; done'",
         'test -z "$(find /etc/systemd/system /etc/systemd/system-generators -iname \'*pxe*\' -print 2>/dev/null)"',
         'test ! -e /usr/local/sbin/pxe-machine-ready', 'test ! -e /usr/local/bin/postboot.sh',
-        'test "$(systemctl show -p LoadState --value pxe-first-boot.service)" = not-found',
+        'test "$(systemctl show -p FragmentPath --value pxe-first-boot.service)" = /run/systemd/generator/pxe-first-boot.service',
+        'test "$(systemctl show -p Result --value pxe-first-boot.service)" = success',
         "printf 'PXE_NATIVE_FIRST_BOOT_OK kernel=%s\\n' \"$(uname -r)\"",
     ]
     if secure_boot:
@@ -266,10 +269,11 @@ def check_installed_guest(lan, root, log, raid_level, raid_lvm, secure_boot):
             ]
             if raid_lvm:
                 commands.append(f'test -d "/sys/block/$boot_name/slaves/{disk}2"')
+    command = "printf '%s\\n' fixture-password | sudo -S /bin/sh -c " + shlex.quote('\n'.join(commands))
     result = run(*namespace, 'ssh', '-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
                  '-o', 'ConnectTimeout=3', '-o', 'StrictHostKeyChecking=yes',
                  '-o', f'UserKnownHostsFile={known_hosts}', '-i', str(root/'guest-fixture'),
-                 'fixture@'+address, '\n'.join(commands), check=False)
+                 'fixture@'+address, command, check=False, timeout=90)
     if result.returncode == 255 and ('Connection' in result.stderr or 'timed out' in result.stderr):
         return None
     if result.returncode != 0:
@@ -378,6 +382,8 @@ def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None,
                                    timeout=5,check=False)
                 except subprocess.TimeoutExpired:
                     pass
+            if 'PXE_NATIVE_BOOT_CONFIRMED' not in receipt:
+                return False
             if boot_report is None:
                 boot_report=check_installed_guest(lan,root,log,raid_level,raid_lvm,bool(uefi_image))
                 if boot_report is None:

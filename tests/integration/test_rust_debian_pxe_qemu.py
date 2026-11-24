@@ -248,10 +248,11 @@ def first_boot_recorded(root):
         receipt = db.execute("""SELECT 1 FROM machine_events e JOIN installations i ON i.action_id=e.action_id
             WHERE e.message LIKE 'Empreinte SSH déclarée par Debian Installer : SHA256:%'
             AND i.install_status='success'""").fetchone()
-        old_callback = db.execute("""SELECT 1 FROM machine_events WHERE checkpoint='os_first_boot'
-                                  OR message LIKE 'Machine signalée online%'""").fetchone()
+        boot = db.execute("""SELECT 1 FROM machine_events e JOIN installations i ON i.action_id=e.action_id
+                             WHERE e.checkpoint='os_first_boot' AND i.install_status='success'""").fetchone()
+        old_callback = db.execute("SELECT 1 FROM machine_events WHERE message LIKE 'Machine signalée online%'").fetchone()
         guard = db.execute("SELECT 1 FROM task_phases WHERE phase_key='disk-guard' AND status='success'").fetchone()
-    return receipt is not None and guard is not None and old_callback is None
+    return receipt is not None and guard is not None and boot is not None and old_callback is None
 
 
 def main():

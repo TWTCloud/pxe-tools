@@ -12,7 +12,16 @@ fn pending_installation(db: &Connection, enabled: bool) -> rusqlite::Result<Opti
     db.query_row(
             "SELECT i.id FROM installations i JOIN machines m ON i.machine_id=m.id
              LEFT JOIN actions a ON i.action_id=a.id
-             WHERE i.ansible_status='pending' AND (
+             WHERE i.ansible_status='pending'
+             AND NOT EXISTS (
+              SELECT 1 FROM machine_events e
+              WHERE e.action_id = i.action_id AND e.checkpoint = 'os_first_boot_expected'
+                AND NOT EXISTS (
+                    SELECT 1 FROM machine_events b
+                    WHERE b.action_id = e.action_id AND b.checkpoint = 'os_first_boot'
+                )
+          )
+             AND (
                 a.id IS NULL OR a.status NOT IN ('pending','running')
                 OR a.type NOT IN ('install_only','reinstall') OR COALESCE(i.install_status,'')<>'success'
                 OR COALESCE(unixepoch(i.ended_at),0)+?1<=unixepoch()
@@ -222,7 +231,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_requested_provisioning_waits_for_first_boot() -> rusqlite::Result<()> {
+    fn new_installations_wait_for_boot_and_legacy_supports_fallback() -> rusqlite::Result<()> {
         let db = Connection::open_in_memory()?;
         db.execute_batch(include_str!("../../../app/db/schema.sqlite.sql"))?;
         db.execute_batch(
@@ -238,6 +247,19 @@ mod tests {
         )?;
 
         assert_eq!(pending_installation(&db, true)?, Some(1));
+        db.execute_batch(
+            "INSERT INTO machine_events(machine_id, message, checkpoint, action_id)
+             VALUES (1,'fixture','os_first_boot_expected',1),
+                    (2,'fixture','os_first_boot_expected',2);",
+        )?;
+        assert_eq!(pending_installation(&db, true)?, None);
+        assert_eq!(pending_installation(&db, false)?, None);
+        db.execute_batch(
+            "INSERT INTO machine_events(machine_id, message, checkpoint, action_id)
+             VALUES (1,'fixture','os_first_boot',1);",
+        )?;
+        assert_eq!(pending_installation(&db, true)?, Some(1));
+        db.execute("DELETE FROM machine_events WHERE action_id=2", [])?;
         db.execute(
             "UPDATE installations SET ansible_status='no_role' WHERE id=1",
             [],

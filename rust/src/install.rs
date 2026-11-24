@@ -232,6 +232,7 @@ pub fn end(
     token: &str,
     status: &str,
     fingerprint: &str,
+    first_boot_expected: bool,
 ) -> ApiResult {
     if normalize_mac(raw_mac).is_none() {
         return failure(400, "mac required");
@@ -289,6 +290,16 @@ pub fn end(
     )? != 0 {
         log_event(&tx, machine.id, "action", "Démarrage local : activé après installation PXE réussie", None, None)?;
         enqueue_menus(&tx)?;
+    }
+    if status == "success" && first_boot_expected {
+        log_event(
+            &tx,
+            machine.id,
+            "info",
+            "Confirmation du premier démarrage attendue",
+            Some("os_first_boot_expected"),
+            Some(action.id),
+        )?;
     }
     if status == "success"
         && fingerprint.strip_prefix("SHA256:").is_some_and(|hash| {

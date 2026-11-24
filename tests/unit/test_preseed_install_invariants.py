@@ -65,6 +65,7 @@ class PreseedInvariants(unittest.TestCase):
         self.assertIn('/api/install-end?mac=', output)
         without_action = self.render({'distro': 'debian'})
         self.assertNotIn('/api/install-end?mac=', without_action)
+        self.assertNotIn('/etc/systemd/system-generators/pxe-first-boot', without_action)
 
     def test_preseed_checks_actual_source_before_rendering(self):
         token = 'a' * 64
@@ -83,20 +84,21 @@ class PreseedInvariants(unittest.TestCase):
                 self.assertNotIn('d-i ', result)
                 self.assertNotIn(token, result)
 
-    def test_plain_install_has_completion_callback_and_no_first_boot_files(self):
+    def test_plain_install_reports_first_boot_without_ansible_files(self):
         config = {'distro': 'debian', 'codename': 'trixie',
                   'advanced': {'packages': {'pkgsel_include': []}}}
         for role, enabled in (('', 'on'), ('base', 'off')):
             with self.subTest(role=role, enabled=enabled):
                 output = self.render(dict(config, ansible_role=role), running_action_token='a' * 64,
                                      module_enabled=enabled, module_key='ssh-ed25519 AAAA test')
-                self.assertIn('d-i pkgsel/include string curl\n', output)
+                self.assertIn('d-i pkgsel/include string curl iproute2\n', output)
                 self.assertIn('/api/install-end?mac=', output)
                 self.assertIn('ssh_fingerprint=$(in-target --pass-stdout /usr/bin/ssh-keygen -E sha256 -lf '
                               '/etc/ssh/ssh_host_ed25519_key.pub', output)
                 self.assertIn('http_status=$(in-target --pass-stdout /usr/bin/curl', output)
                 self.assertIn('--data-urlencode "ssh_host_fingerprint=$ssh_fingerprint"', output)
-                self.assertNotIn('system-generators', output)
+                self.assertIn('/etc/systemd/system-generators/pxe-first-boot', output)
+                self.assertIn("--data 'first_boot=1'", output)
                 self.assertNotIn('pxe-machine-ready', output)
                 self.assertNotIn('pxe-postboot.service', output)
                 self.assertNotIn('NOPASSWD', output)

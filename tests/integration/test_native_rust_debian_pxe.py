@@ -31,6 +31,7 @@ SERVER = "192.0.2.1"
 READY = b"PXE_NATIVE_READY"
 DISCOVERED = b"PXE_NATIVE_DISCOVERY_OK"
 INSTALLED = b"PXE_NATIVE_INSTALL_OK"
+BOOT_CONFIRMED = b"PXE_NATIVE_BOOT_CONFIRMED"
 MAC = "02:00:00:00:00:01"
 SERIAL = "PXE-TEST-ONE"
 KEYRING = ROOT / "packaging/native/keyrings/debian-archive-2025.1.gpg"
@@ -225,7 +226,7 @@ def main():
             install_menu = ("pxelinux.cfg/01-" + MAC.replace(":", "-")).encode()
             assert install_menu in switch.tftp_requests, switch.tftp_requests
             print("Native install callback recorded", flush=True)
-            client(root, server, "first-boot", INSTALLED, 900, local=True)
+            client(root, server, "first-boot", BOOT_CONFIRMED, 900, local=True)
             for line in check_server(root, server).decode(errors="replace").splitlines():
                 if line.startswith(("PXE_NATIVE_PLATFORM ", "PXE_NATIVE_PACKAGE ", "PXE_NATIVE_BINARY ",
                                     "PXE_NATIVE_DNSMASQ ", "PXE_NATIVE_FIRST_BOOT_OK ")):

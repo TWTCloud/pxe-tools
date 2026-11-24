@@ -280,14 +280,6 @@ def follow(root):
     install_timeout = 3600 if EXPECTED_ARCH == "aarch64" else 2400
     wait_for(lambda: successful_install(action), install_timeout, "native install callback")
     fingerprint = install_fingerprint(action)
-    if USE_WORKER_QUEUE:
-        def worker_finalized():
-            with closing(sqlite3.connect(DATABASE)) as db:
-                return db.execute(
-                    "SELECT a.status,i.ansible_status FROM actions a "
-                    "JOIN installations i ON i.action_id=a.id WHERE a.id=?", (action,),
-                ).fetchone() == ("success", "no_role")
-        wait_for(worker_finalized, 30, "packaged worker finalized a Debian-only installation")
     if digest(STALE) != original_stale or digest(CONF / "master.key") != original_key:
         raise RuntimeError("The stale database or existing fixture master key was modified")
     assert_php_stopped()
@@ -297,6 +289,23 @@ def follow(root):
             if not any(line.startswith(f"{CLIENT} ") and path in line and '" 200 ' in line for line in log):
                 raise RuntimeError("Missing native HTTP evidence for " + path)
     print(f"PXE_NATIVE_INSTALL_OK action={action} fingerprint={fingerprint}", flush=True)
+    def first_boot_recorded():
+        with closing(sqlite3.connect(DATABASE)) as db:
+            return db.execute(
+                "SELECT 1 FROM machine_events WHERE action_id=? AND checkpoint='os_first_boot'",
+                (action,),
+            ).fetchone() is not None
+
+    wait_for(first_boot_recorded, 900, "installed Debian confirmation")
+    if USE_WORKER_QUEUE:
+        def worker_finalized():
+            with closing(sqlite3.connect(DATABASE)) as db:
+                return db.execute(
+                    "SELECT a.status,i.ansible_status FROM actions a "
+                    "JOIN installations i ON i.action_id=a.id WHERE a.id=?", (action,),
+                ).fetchone() == ("success", "no_role")
+        wait_for(worker_finalized, 30, "packaged worker finalized a Debian-only installation")
+    print(f"PXE_NATIVE_BOOT_CONFIRMED action={action}", flush=True)
     while True:
         assert_php_stopped()
         time.sleep(1)

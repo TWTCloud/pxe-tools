@@ -411,6 +411,7 @@ fn handle(
                         bearer(request),
                         value("status"),
                         param(&form, "ssh_host_fingerprint"),
+                        param(&form, "first_boot") == "1",
                     )
                 }
                 "/api/machine-ready" => install::machine_ready(&mut db, mac),

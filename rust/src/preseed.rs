@@ -153,7 +153,6 @@ struct Profile {
     root_hash: String,
     user_keys: Vec<String>,
     remote_keys: Vec<String>,
-    ansible_requested: bool,
     ansible: Option<(String, String)>,
     advanced: Value,
 }
@@ -292,7 +291,6 @@ impl Profile {
             root_hash,
             user_keys,
             remote_keys,
-            ansible_requested,
             ansible,
             advanced,
         })
@@ -359,8 +357,7 @@ impl Profile {
         if let Some(command) = self.partitions.reserve_blocks() {
             late.push(command);
         }
-        let first_boot = action.is_some() && self.ansible_requested;
-        if let Some((_, token)) = action.filter(|_| first_boot) {
+        if let Some((_, token)) = action {
             let script = FIRST_BOOT
                 .replace("__PXE_IP__", &format!("'{pxe}'"))
                 .replace("__MAC__", &format!("'{mac}'"))
@@ -384,7 +381,7 @@ impl Profile {
             late.push("kill $(cat /tmp/pxe-dilog.pid 2>/dev/null) 2>/dev/null || true".into());
             late.push("ssh_fingerprint=''".into());
             late.push(r#"if [ -r /target/etc/ssh/ssh_host_ed25519_key.pub ]; then ssh_fingerprint=$(in-target --pass-stdout /usr/bin/ssh-keygen -E sha256 -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}'); fi"#.into());
-            late.push(format!(r#"http_status=$(in-target --pass-stdout /usr/bin/curl -fsS --connect-timeout 5 --max-time 15 --retry 3 --retry-connrefused --output /dev/null --write-out '%{{http_code}}' --data-urlencode "ssh_host_fingerprint=$ssh_fingerprint" -H 'Authorization: Bearer {token}' '{base_url}/api/install-end?mac={mac}&status=success') || exit 1"#));
+            late.push(format!(r#"http_status=$(in-target --pass-stdout /usr/bin/curl -fsS --connect-timeout 5 --max-time 15 --retry 3 --retry-connrefused --output /dev/null --write-out '%{{http_code}}' --data 'first_boot=1' --data-urlencode "ssh_host_fingerprint=$ssh_fingerprint" -H 'Authorization: Bearer {token}' '{base_url}/api/install-end?mac={mac}&status=success') || exit 1"#));
             late.push(r#"[ "$http_status" = 200 ] || exit 1"#.into());
         }
         let mut early = commands("preseed/early_command", &early);
@@ -403,10 +400,7 @@ impl Profile {
             ("LOCALIZATION_BLOCK", self.localization_block()),
             ("CLOCK_BLOCK", self.clock_block()),
             ("ACCOUNTS_BLOCK", self.accounts_block()),
-            (
-                "PACKAGES_BLOCK",
-                self.packages_block(action.is_some(), first_boot),
-            ),
+            ("PACKAGES_BLOCK", self.packages_block(action.is_some())),
             ("APT_BLOCK", self.apt_block()),
             ("BOOTLOADER_BLOCK", self.bootloader_block()),
             ("PARTITION_BLOCK", self.partitions.directives.clone()),
@@ -562,7 +556,7 @@ impl Profile {
         block.join("\n")
     }
 
-    fn packages_block(&self, tracked: bool, first_boot: bool) -> String {
+    fn packages_block(&self, tracked: bool) -> String {
         let pkg = &self.advanced["packages"];
         let mut lines = vec![format!(
             "d-i base-installer/install-recommends boolean {}",
@@ -588,10 +582,7 @@ impl Profile {
         );
         include.extend(self.network.packages.iter().copied().map(String::from));
         if tracked {
-            include.push("curl".into());
-        }
-        if first_boot {
-            include.push("iproute2".into());
+            include.extend(["curl", "iproute2"].map(String::from));
         }
         if self.ansible.is_some() {
             include.extend(["sudo", "openssh-server", "python3"].map(String::from));
