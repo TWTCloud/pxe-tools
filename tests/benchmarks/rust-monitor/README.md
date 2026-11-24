@@ -420,6 +420,25 @@ d'accès des artefacts postboot et des payloads netboot.
 | Worker et migrations | Porter les migrations SQLite, l’import de modèles et la suppression d’images, puis les familles de tâches en conservant transactions, reprises et compatibilité Ansible. Contrôler le lancement et les tâches sur des livrables sans PHP. |
 | Qualification | Construire les deux formats sur Debian 13 amd64 et arm64, valider la reprise d’une instance et les démarrages BIOS et UEFI avec Secure Boot, puis mesurer les tailles et la mémoire du livrable. |
 
+### Reprise APT et désactivation du PXE
+
+Sur `b44a5b0`, deux VM Debian 13 amd64 ont installé le paquet APT publié
+de la bêta 12, puis le candidat Rust `0.1.0~rust1` depuis un dépôt signé
+avec une clé de test. Le socle seul et le scénario avec proxy DHCP et
+module Ansible ont conservé la clé maître, la base SQLite, le compte
+administrateur, les données chiffrées et les fichiers témoins. Le test
+vérifie le processus Rust et l’accès HTTPS après remplacement des services
+PHP et Nginx de PXE Tools. Le module Ansible conserve son identité et son
+runtime. [Socle](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45318129101/job/138189845916) ·
+[Module Ansible et proxy DHCP](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45318129101/job/138189846255)
+
+Les deux livrables amd64 sur `69fbe8a` vérifient aussi que l’arrêt du
+PXE ferme l’écoute sur l’interface de test et garde la console HTTPS
+sur la boucle locale. Un client distinct installe ensuite Debian sur un
+second banc et remet le retour de premier démarrage `os_first_boot`.
+[APT](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45317928052/job/138189193598) ·
+[Docker](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45317928052/job/138189194848)
+
 ### UEFI, Secure Boot et premier déploiement Windows
 
 Le client de test Debian x86-64 utilise OVMF avec Secure Boot actif.
