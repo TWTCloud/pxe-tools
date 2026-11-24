@@ -399,6 +399,10 @@ def verify_device_removal(client, database, authorization, tftp):
     assert not first.exists() and not second.exists() and not list(menus.glob('*.pending-delete-*'))
     with closing(sqlite3.connect(database)) as db:
         assert db.execute('SELECT hostname FROM machines').fetchall() == [('reset-fixture',)]
+    reset_menu = menus/'01-02-00-00-00-47-55'
+    reset_menu.write_text('fleet reset menu')
+    shared_menu = menus/'fixture-shared-menu'
+    shared_menu.write_bytes(b'Owners can preserve shared menus.')
     assert client.request('/settings/reset', form={'confirm':'autre'}, authorization=authorization)[0] == 422
     status, location, _ = client.request('/settings/reset', form={'confirm':'RESET'}, authorization=authorization)
     assert status == 303 and location.startswith('/jobs/'), (status, location)
@@ -406,8 +410,31 @@ def verify_device_removal(client, database, authorization, tftp):
         assert db.execute('SELECT COUNT(*) FROM machines').fetchone() == (0,)
         assert db.execute("SELECT COUNT(*) FROM presets WHERE name='Reset preserved'").fetchone() == (1,)
         assert db.execute('SELECT COUNT(*) FROM users').fetchone() == (1,)
-        status, = db.execute("SELECT job_type FROM init_jobs WHERE id=?", (int(location.rsplit('/',1)[1]),)).fetchone()
-        assert status == 'bootstrap:render_templates'
+        job = int(location.rsplit('/',1)[1])
+        kind, = db.execute("SELECT job_type FROM init_jobs WHERE id=?", (job,)).fetchone()
+        assert kind == 'bootstrap:cleanup_per_mac_files'
+    def wait_cleanup(job_id):
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            with closing(sqlite3.connect(database)) as db:
+                state, message = db.execute("SELECT status,message FROM init_jobs WHERE id=?", (job_id,)).fetchone()
+            if state == 'success':
+                return
+            assert state != 'failed', message
+            time.sleep(.2)
+        raise AssertionError('The Rust worker did not complete the fleet reset')
+
+    wait_cleanup(job)
+    assert not reset_menu.exists() and shared_menu.read_bytes() == b'Owners can preserve shared menus.'
+    retained = menus/'01-02-00-00-00-47-58'
+    retained.write_bytes(b'Current menu')
+    reset_menu.symlink_to(shared_menu)
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("INSERT INTO machines(mac) VALUES('02:00:00:00:47:58')")
+        legacy = db.execute("INSERT INTO init_jobs(job_type) VALUES('bootstrap:cleanup_per_mac_files')").lastrowid
+    wait_cleanup(legacy)
+    assert not reset_menu.is_symlink()
+    assert shared_menu.read_bytes() == b'Owners can preserve shared menus.' and retained.read_bytes() == b'Current menu'
     print('Rust device removal preserves menus on error, removes selected devices and resets only the disposable fleet', flush=True)
 
 

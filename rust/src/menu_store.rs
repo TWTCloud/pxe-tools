@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use std::{
+    collections::HashSet,
     env,
     fs::{self, File, OpenOptions},
     io,
@@ -92,6 +93,27 @@ impl Menus {
             return Err(invalid("Invalid MAC address"));
         }
         Ok(self.directory.join(format!("01-{hyphenated}")))
+    }
+
+    pub(crate) fn remove_obsolete<'a>(
+        &self,
+        retained_macs: impl IntoIterator<Item = &'a str>,
+    ) -> io::Result<usize> {
+        let retained: HashSet<_> = retained_macs
+            .into_iter()
+            .filter_map(|mac| self.path_for(mac).ok())
+            .collect();
+        let mut removed = 0;
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            if entry.file_name().as_encoded_bytes().starts_with(b"01-")
+                && !retained.contains(&entry.path())
+            {
+                fs::remove_file(entry.path())?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 }
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{ansible, bootstrap, download, postboot, power, schedule};
-use crate::{configured_database, connect, setting};
+use crate::{configured_database, connect, menu_store::Menus, setting};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{
     env,
@@ -206,6 +206,33 @@ fn fail_job(database: &Path, id: i64, message: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn cleanup_per_mac(database: &Path, id: i64, tftp: &Path) -> Result<(), ErrorBox> {
+    let menus = Menus::lock(tftp)?;
+    let mut db = open(database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if tx.execute(
+        "UPDATE init_jobs SET status='running',started_at=CURRENT_TIMESTAMP
+         WHERE id=?1 AND status='pending' AND job_type='bootstrap:cleanup_per_mac_files'",
+        [id],
+    )? != 1
+    {
+        return Ok(());
+    }
+    let macs = {
+        let mut devices = tx.prepare("SELECT mac FROM machines")?;
+        let rows = devices.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let removed = menus.remove_obsolete(macs.iter().map(String::as_str))?;
+    tx.execute(
+        "UPDATE init_jobs SET status='success',message=?2,progress_percent=100,
+             ended_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+        params![id, format!("{removed} menu(s) PXE obsolète(s) supprimé(s)")],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 impl Worker<'_> {
     fn dispatch(
         &self,
@@ -231,11 +258,9 @@ impl Worker<'_> {
             return power::run(database, id);
         } else if kind.starts_with("action:ansible_retry:") {
             return ansible::retry(database, id);
-        } else if matches!(
-            kind,
-            "bootstrap:cleanup_per_mac_files" | "system:factory_reset_wipe"
-        ) || kind.starts_with("image:delete:")
-        {
+        } else if kind == "bootstrap:cleanup_per_mac_files" {
+            return cleanup_per_mac(database, id, &self.tftp);
+        } else if kind == "system:factory_reset_wipe" || kind.starts_with("image:delete:") {
             return self.python("job", Some(database), Some(id));
         } else if matches!(
             kind,

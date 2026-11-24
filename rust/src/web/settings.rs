@@ -247,7 +247,7 @@ fn reset_devices(path: &Path) -> Result<Reply, ErrorBox> {
     tx.execute("DELETE FROM machines", [])?;
     tx.execute(
         "INSERT INTO init_jobs(job_type,status,message) VALUES
-         ('bootstrap:render_templates','pending','Reconstruction des menus PXE après réinitialisation du parc')",
+         ('bootstrap:cleanup_per_mac_files','pending','Nettoyage des menus PXE après réinitialisation du parc')",
         [],
     )?;
     let job = tx.last_insert_rowid();
