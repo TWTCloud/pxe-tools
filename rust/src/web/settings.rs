@@ -20,6 +20,7 @@ pub(super) enum Route {
     RebuildGrub,
     RegenerateMok,
     Apply,
+    ResetDevices,
 }
 
 impl Route {
@@ -33,6 +34,7 @@ impl Route {
             "/settings/rebuild-grub" => Self::RebuildGrub,
             "/settings/regenerate-mok" => Self::RegenerateMok,
             "/settings/apply-config" => Self::Apply,
+            "/settings/reset" => Self::ResetDevices,
             _ => return None,
         })
     }
@@ -65,10 +67,18 @@ impl Route {
             };
         };
         let input: Vec<_> = form_urlencoded::parse(&form).collect();
+        if matches!(self, Self::ResetDevices) {
+            if !matches!(input.as_slice(), [(name, value)] if name == "confirm" && value == "RESET")
+            {
+                return Ok(invalid());
+            }
+            return reset_devices(db_path);
+        }
         let mut database = connect(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let tx = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let target = match self {
             Self::Ansible | Self::VaultUnlock => unreachable!("handled above"),
+            Self::ResetDevices => unreachable!("handled above"),
             Self::General => {
                 let [(key, value)] = input.as_slice() else {
                     return Ok(invalid());
@@ -195,7 +205,10 @@ impl Route {
             "/settings/terminology",
             &setting(db, "ui_device_term")?,
         );
-        html.push_str("</section>");
+        html.push_str(r#"</section><details><summary>Réinitialiser le parc</summary>
+<form method="post" action="/settings/reset"><p>Les fiches d’appareils et leurs historiques seront supprimés. La configuration de l’appliance et les modèles sont conservés.</p>
+<p><label>Saisissez RESET <input name="confirm" required autocomplete="off"></label></p>
+<button>Réinitialiser le parc</button></form></details>"#);
         Ok(page("Paramètres PXE", &html))
     }
 
@@ -213,6 +226,33 @@ impl Route {
         add_jobs(&mut html, db, "ipxe_job_ids")?;
         Ok(page("Démarrage iPXE", &html))
     }
+}
+
+fn reset_devices(path: &Path) -> Result<Reply, ErrorBox> {
+    let _menus = match crate::menu_store::Menus::lock_configured() {
+        Ok(menus) => menus,
+        Err(error) => {
+            eprintln!("Rust PXE menu lock: {error}");
+            return Ok(plain(
+                StatusCode::CONFLICT,
+                "Menus PXE indisponibles. Réessayez la réinitialisation.\n",
+            ));
+        }
+    };
+    let mut db = connect(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute("DELETE FROM machines", [])?;
+    tx.execute(
+        "INSERT INTO init_jobs(job_type,status,message) VALUES
+         ('bootstrap:render_templates','pending','Reconstruction des menus PXE après réinitialisation du parc')",
+        [],
+    )?;
+    let job = tx.last_insert_rowid();
+    tx.commit()?;
+    Ok(redirect(StatusCode::SEE_OTHER, format!("/jobs/{job}")))
 }
 
 fn invalid() -> Reply {

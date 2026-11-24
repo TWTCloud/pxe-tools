@@ -3,6 +3,7 @@
 mod advanced;
 pub(super) mod bulk;
 mod diagnostics;
+mod removal;
 mod wipe;
 
 use super::{
@@ -134,6 +135,7 @@ impl DeviceRoute {
                 &hyper::Method::POST,
             ) => Some(2048),
             (Section::Detail, &hyper::Method::PUT | &hyper::Method::POST) => Some(64 * 1024),
+            (Section::Detail, &hyper::Method::DELETE) => Some(0),
             _ => None,
         }
     }
@@ -148,6 +150,9 @@ impl DeviceRoute {
     ) -> Result<Reply, ErrorBox> {
         if let Some(form) = form {
             return match &self.section {
+                Section::Detail if removal::requested(method, form) => {
+                    removal::remove(path, self.id, method, form)
+                }
                 Section::Install => schedule(path, self.id, form, username),
                 Section::Wipe => wipe::submit(path, self.id, form, username),
                 Section::Diagnostics(route) => {
@@ -309,6 +314,15 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
         )?;
     }
     super::device_settings::form(db, id, &mut output)?;
+    write!(
+        output,
+        r#"<details><summary>Supprimer cet appareil</summary>
+<form method="post" action="/machines/{id}">
+<input type="hidden" name="_method" value="DELETE">
+<p>La suppression efface la fiche et son historique. Une opération déjà lancée peut continuer sur l’appareil.</p>
+<label>Saisissez SUPPRIMER <input name="confirm" required autocomplete="off"></label>
+<button>Supprimer l’appareil</button></form></details>"#
+    )?;
     device_ansible::form(db, id, &mut output)?;
     write!(
         output,

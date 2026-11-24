@@ -591,9 +591,13 @@ async fn dispatch(
             if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
-            match read_form(&parts.headers, body, limit).await {
-                Ok(form) => Some(form),
-                Err(reply) => return reply,
+            if parts.method == Method::DELETE {
+                Some(Bytes::new())
+            } else {
+                match read_form(&parts.headers, body, limit).await {
+                    Ok(form) => Some(form),
+                    Err(reply) => return reply,
+                }
             }
         } else {
             return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");

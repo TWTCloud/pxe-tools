@@ -198,6 +198,10 @@ architecture, affiche les disques associés et exige une nouvelle
 vérification après tout changement du plan avant la programmation.
 Un modèle à adresse statique partagée doit être adapté individuellement.
 Les pré-effacements affichés demandent une confirmation explicite.
+La suppression d’une fiche verrouille les menus PXE et restaure le menu
+si la suppression SQLite échoue. La réinitialisation du parc supprime
+les fiches et leur historique puis demande au worker de reconstruire
+les menus à partir de la base à jour.
 
 La page `/settings` enregistre le protocole de découverte et les DNS IPv4
 proposés aux prochains déploiements. Elle permet de demander au worker

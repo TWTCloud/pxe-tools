@@ -340,6 +340,46 @@ def generate_tls_pair(directory, common_name):
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def verify_device_removal(client, database, authorization, tftp):
+    subprocess.run(['python3', '/opt/pxe-tools/scripts/atomic_publish.py',
+                    '--prepare-menu', str(tftp)], check=True)
+    menus = tftp/'pxelinux.cfg'
+    target = menus/'01-02-00-00-00-47-54'
+    target.write_text('fixture-owned-menu')
+    with closing(sqlite3.connect(database)) as db, db:
+        device = db.execute("INSERT INTO machines(mac,hostname) VALUES('02:00:00:00:47:54','remove-fixture')").lastrowid
+        db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES(?,'install_only','pending',?)",
+                   (device,secrets.token_hex(32)))
+        db.execute("CREATE TRIGGER fixture_refuse_device BEFORE DELETE ON machines "
+                   "WHEN OLD.mac='02:00:00:00:47:54' BEGIN SELECT RAISE(ABORT,'fixture refuses delete'); END")
+    path = f'/machines/{device}'
+    form = {'_method':'DELETE','confirm':'SUPPRIMER'}
+    assert client.request(path, form=form)[0] == 401
+    assert client.request(path, form=form, authorization=authorization, origin='https://outside.example')[0] == 403
+    assert client.request(path, form={**form,'confirm':'autre'}, authorization=authorization)[0] == 422
+    assert client.request(path, form=form, authorization=authorization)[0] == 409
+    assert target.read_text() == 'fixture-owned-menu'
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT COUNT(*) FROM machines WHERE id=?", (device,)).fetchone() == (1,)
+        db.execute('DROP TRIGGER fixture_refuse_device')
+    assert client.request(path, form=form, authorization=authorization)[:2] == (303, '/admin/devices')
+    assert not target.exists() and not list(menus.glob('01-02-00-00-00-47-54.pending-delete-*'))
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT COUNT(*) FROM actions WHERE machine_id=?", (device,)).fetchone() == (0,)
+        db.execute("INSERT INTO machines(mac,hostname) VALUES('02:00:00:00:47:55','reset-fixture')")
+        db.execute("INSERT INTO presets(name,distro,admin_user_login) VALUES('Reset preserved','debian','fixture')")
+    assert client.request('/settings/reset', form={'confirm':'autre'}, authorization=authorization)[0] == 422
+    status, location, _ = client.request('/settings/reset', form={'confirm':'RESET'}, authorization=authorization)
+    assert status == 303 and location.startswith('/jobs/'), (status, location)
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute('SELECT COUNT(*) FROM machines').fetchone() == (0,)
+        assert db.execute("SELECT COUNT(*) FROM presets WHERE name='Reset preserved'").fetchone() == (1,)
+        assert db.execute('SELECT COUNT(*) FROM users').fetchone() == (1,)
+        status, = db.execute("SELECT job_type FROM init_jobs WHERE id=?", (int(location.rsplit('/',1)[1]),)).fetchone()
+        assert status == 'bootstrap:render_templates'
+    print('Rust device removal restores the menu on SQL failure and resets only the disposable fleet', flush=True)
+
+
 def verify_tls_import(client, original, imported, persistent, authorization):
     generate_tls_pair(imported, 'fixture-import')
     endpoint = '/admin/certificates'
@@ -2502,6 +2542,8 @@ def main():
             parser.error('The activation probe requires the HTTP, TFTP and dnsmasq paths.')
         verify_configuration(client, database, authorization, packaged=True,
                              boot_fixture=boot_fixture if args.netboot_fixture else None)
+        if args.tftp_root:
+            verify_device_removal(client, database, authorization, Path(args.tftp_root))
         with tempfile.TemporaryDirectory(prefix='pxe-tls-test-') as temporary:
             verify_tls_import(client, credentials, Path(temporary),
                               database.parent/'tls-import', authorization)

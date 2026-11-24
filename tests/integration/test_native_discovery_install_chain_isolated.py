@@ -391,13 +391,13 @@ def verify_packaged_rust_setup(name, boot_tree=None):
     mount=('--mount',f'type=bind,src={script},dst={probe},readonly',
            '--mount',f'type=bind,src=/dev/null,dst={legacy_cli},readonly')
     http_root='/var/lib/pxe-tools-http' if native else '/srv/http'
+    tftp_root='/var/lib/pxe-tools-tftp' if native else '/srv/tftp'
     activation=()
     if boot_tree:
         input_dir='/fixture-images'
-        tftp_root='/var/lib/pxe-tools-tftp' if native else '/srv/tftp'
         dnsmasq_config='/var/lib/pxe-tools-native/rendered/dnsmasq.conf' if native else '/etc/dnsmasq.d/pxe.conf'
         mount+=('--mount',f'type=bind,src={boot_tree},dst={input_dir},readonly')
-        activation=('--netboot-fixture',input_dir,'--tftp-root',tftp_root,'--dnsmasq-config',dnsmasq_config)
+        activation=('--netboot-fixture',input_dir,'--dnsmasq-config',dnsmasq_config)
     try:
         if native:
             docker('run','-d','--name',name,'--network','none','--privileged','--cgroupns','private',
@@ -413,7 +413,7 @@ def verify_packaged_rust_setup(name, boot_tree=None):
         else:
             docker('run','-d','--name',name,'--network','none','--cap-add','NET_ADMIN',*mount,appliance_image)
         result=docker('exec','-e','PXE_DISPOSABLE_SETUP_TEST=1',name,'python3',probe,'--installed',
-                      '--http-root',http_root,*activation,check=False)
+                      '--http-root',http_root,'--tftp-root',tftp_root,*activation,check=False)
         print(result.stdout, end='', flush=True)
         if result.returncode:
             print(result.stderr, end='', flush=True)
