@@ -442,6 +442,13 @@ def run_bootstrap_job(job: dict) -> None:
     if job_type.startswith("action:render_postboot:"):
         run_render_postboot_job(job)
         return
+    if (job_type.startswith(("action:reboot:", "machine:reboot:", "machine:shutdown:"))
+            and os.environ.get("PXE_RUST_GUIDED") == "1"):
+        subprocess.run(
+            ["/usr/lib/pxe-tools/pxe-tools-rust", "--run-power-job", DB_PATH, str(job_id)],
+            check=True, timeout=20,
+        )
+        return
     if job_type.startswith("action:reboot:"):
         run_reboot_job(job)
         return

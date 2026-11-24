@@ -120,6 +120,10 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     if let [flag, config, path] = args.as_slice() {
+        if flag == "--run-power-job" {
+            let id = path.to_str().ok_or("Invalid power job ID")?.parse()?;
+            return worker::power::run(Path::new(config), id);
+        }
         if flag == "--adopt-existing-sqlite" && Path::new(config).is_absolute() {
             return web::adopt_existing_database(Path::new(config), Path::new(path));
         }

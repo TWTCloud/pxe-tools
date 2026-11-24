@@ -3,6 +3,7 @@
 pub(crate) mod bootstrap;
 pub(crate) mod download;
 pub(crate) mod postboot;
+pub(crate) mod power;
 pub(crate) mod schedule;
 
 use crate::connect;

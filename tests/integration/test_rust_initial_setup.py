@@ -1258,6 +1258,71 @@ def verify_worker_postboot(binary):
     print('Rust worker publishes complete private postboot files and refuses a closed action',flush=True)
 
 
+def verify_worker_power(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-power-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        calls = root/'ssh.calls'
+        ssh = root/'ssh'
+        ssh.write_text(
+            '#!/usr/bin/env bash\n'
+            'set -euo pipefail\n'
+            'printf "%s\\n" "$@" >> "$PXE_FIXTURE_SSH_CALLS"\n'
+            'if [[ "${@: -1}" == "sudo systemctl poweroff" ]]; then\n'
+            '    printf "%s\\n" "Connection closed by remote host" >&2\n'
+            '    exit 255\n'
+            'fi\n'
+        )
+        ssh.chmod(0o700)
+        schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+        network = {'network':{'primary':0,'interfaces':[
+            {'mode':'dhcp','bond':{'name':'bond0','role':'slave'}},
+            {'mode':'static','bond':{'name':'bond0','role':'master'},'static':{'ip':'192.0.2.170'}},
+        ]}}
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            db.executemany('INSERT INTO settings(key,value) VALUES (?,?)',[
+                ('pxe_subnet','192.0.2.5/32'),('ansible_target_user','fixture_ops'),
+            ])
+            machine = db.execute("INSERT INTO machines(mac,status,install_config_json,inventory_json) "
+                                 "VALUES ('02:00:00:00:09:93','installed',?,?)",
+                                 [json.dumps(network),json.dumps({'discovery_ip':'192.0.2.88'})]).lastrowid
+            active = db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES (?,'install_only','pending',?)",
+                                [machine,secrets.token_hex(32)]).lastrowid
+            cancelled = db.execute("INSERT INTO actions(machine_id,type,status,token) "
+                                   "VALUES (?,'install_only','cancelled',?)",
+                                   [machine,secrets.token_hex(32)]).lastrowid
+            db.execute("INSERT INTO machine_events(machine_id,message,checkpoint) VALUES(?,?,'dhcp_request_install')",
+                       [machine,'checkpoint:dhcp_request_install {"dhcp_ip":"192.0.2.171"}'])
+            jobs = [db.execute("INSERT INTO init_jobs(job_type,status) VALUES(?,'pending')",[kind]).lastrowid for kind in
+                    (f'action:reboot:{active}',f'machine:shutdown:{machine}',f'action:reboot:{cancelled}')]
+
+        environment = {**os.environ,'PATH':str(root)+os.pathsep+os.environ['PATH'],
+                       'PXE_FIXTURE_SSH_CALLS':str(calls),'PXE_ANSIBLE_HOME':str(root/'ansible')}
+
+        def run(job):
+            subprocess.run([str(binary),'--run-power-job',str(database),str(job)],env=environment,
+                           check=True,capture_output=True)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(run,[jobs[0],jobs[0]]))
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("DELETE FROM machine_events WHERE checkpoint='dhcp_request_install'")
+        run(jobs[1])
+        run(jobs[2])
+        arguments = calls.read_text().splitlines()
+        assert arguments.count('StrictHostKeyChecking=yes') == 2
+        assert 'fixture_ops@192.0.2.171' in arguments and 'fixture_ops@192.0.2.170' in arguments
+        assert 'fixture_ops@192.0.2.88' not in arguments
+        assert arguments.count('sudo systemctl reboot') == 1 and arguments.count('sudo systemctl poweroff') == 1
+        with closing(sqlite3.connect(database)) as db:
+            rows = db.execute('SELECT status,message FROM init_jobs ORDER BY id').fetchall()
+            assert [status for status,_ in rows] == ['success','failed','failed'] and 'non confirmé' in rows[1][1]
+            assert db.execute('SELECT action_id FROM machine_events WHERE level=\'action\'').fetchall() == [(active,)]
+    print('Rust power jobs preserve strict SSH, choose the recorded address, and reserve each command once',
+          flush=True)
+
+
 def verify_worker_download(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-download-') as directory:
         root = Path(directory).resolve()
@@ -1931,6 +1996,7 @@ def local(binary):
     verify_worker_bootstrap(binary)
     verify_worker_schedule(binary)
     verify_worker_postboot(binary)
+    verify_worker_power(binary)
     verify_worker_download(binary)
     verify_worker_recovery(binary)
     verify_schema_migration(binary)
