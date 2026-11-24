@@ -225,6 +225,38 @@ class NativeUpgrade(unittest.TestCase):
         self.assertTrue((snapshot / 'result.json').exists())
         self.assertFalse(any(call[0] in ('enable', 'disable', 'reset-failed') for call in self.systemd.calls))
 
+    def test_guided_upgrade_substitutes_the_rust_frontend_and_preserves_inactive_dhcp(self):
+        self.systemd.active -= {'pxe-tools.target', 'pxe-tools-dnsmasq.service',
+                                'pxe-tools-dnsmasq-tail.service', 'pxe-tools-pxe-http.service'}
+        self.subject.prepare('1.2.3')
+        snapshot = self.snapshot()
+        environment = self.root/'usr/lib/pxe-tools/native/default.env'
+        environment.parent.mkdir(parents=True)
+        environment.write_text('PXE_RUST_GUIDED=1\n')
+        self.systemd.fail_start.update({'pxe-tools-php.service', 'pxe-tools-nginx.service'})
+        self.subject.configure()
+        self.assertEqual(self.systemd.active, {'pxe-tools-init.service', 'pxe-tools-admin.target',
+                                              'pxe-tools-pxe-http.service', 'pxe-tools-worker.service'})
+        self.assertEqual((self.root/'etc/pxe-tools/master.key').read_bytes(), b'k'*32)
+        self.assertTrue((snapshot/'result.json').exists())
+        self.assertIsNone(self.subject.load())
+
+    def test_guided_upgrade_dhcp_failure_leaves_the_rust_frontend_active(self):
+        self.subject.prepare('1.2.3')
+        environment = self.root/'usr/lib/pxe-tools/native/default.env'
+        environment.parent.mkdir(parents=True)
+        environment.write_text('PXE_RUST_GUIDED=1\n')
+        self.systemd.fail_start.add('pxe-tools-dnsmasq.service')
+        with self.assertRaisesRegex(RuntimeError, 'boot network could not resume'):
+            self.subject.configure()
+        self.assertIn('pxe-tools-pxe-http.service',self.systemd.active)
+        self.assertNotIn('pxe-tools-nginx.service',self.systemd.active)
+        self.assertTrue(self.subject.state_file.exists())
+        self.systemd.fail_start.clear()
+        self.subject.configure()
+        self.assertEqual(self.systemd.active,set(lifecycle.UNITS) -
+                         {'pxe-tools-php.service','pxe-tools-nginx.service'})
+
     def test_db_write_barrier_is_held_before_worker_freeze(self):
         def contender():
             with database_connection(self.db, timeout=0) as connection:

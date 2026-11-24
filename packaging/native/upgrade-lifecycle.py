@@ -488,23 +488,32 @@ class Lifecycle:
         print('PXE Tools: stopped previous roles; private recovery snapshot prepared (boot payloads excluded).')
 
     def restore(self, state, *, old=False):
-        # Start only the previously active units. Ignore Wants/Requires during
-        # replay: the original dependency closure is represented in this list.
-        # Otherwise targets can activate roles that the operator had stopped.
+        # The guided package serves both HTTP roles through one Rust service.
+        # Preserve the previous operator choices when restoring or aborting.
+        active = {unit for unit, previous in state['units'].items() if previous['active']}
+        network = NETWORK
+        if not old and self.environments().get('PXE_RUST_GUIDED') == '1':
+            frontend = 'pxe-tools-pxe-http.service'
+            if 'pxe-tools-nginx.service' in active:
+                active.add(frontend)
+            active -= {'pxe-tools-php.service', 'pxe-tools-nginx.service'}
+            network = NETWORK - {frontend}
+        # The recorded dependency closure is represented by the active roles.
+        # Ignore Wants/Requires to avoid starting roles stopped by the operator.
         skipped = set()
         failures = []
         for unit in START_ORDER:
             if unit == 'pxe-tools-worker.service':
                 continue
-            if not state['units'][unit]['active']:
+            if unit not in active:
                 continue
-            if unit in NETWORK and not old and skipped:
+            if unit in network and not old and skipped:
                 continue
             result = self.systemctl('start', '--job-mode=ignore-dependencies', unit, check=False)
             if result.returncode:
-                if unit in NETWORK and not old:
-                    skipped.update(NETWORK)
-                    self.systemctl('stop', *sorted(NETWORK), check=False)
+                if unit in network and not old:
+                    skipped.update(network)
+                    self.systemctl('stop', *sorted(network), check=False)
                     print('PXE Tools: boot network stayed stopped; verify its configured interface/IP and systemd status.', file=sys.stderr)
                 else:
                     failures.append(unit)
@@ -513,16 +522,16 @@ class Lifecycle:
             enabled = self.systemctl('is-enabled', unit, check=False).stdout.strip()
             if enabled != state['units'][unit]['enabled']:
                 failures.append(unit + ' enablement changed')
-            if state['units'][unit]['active'] and unit not in skipped and unit != 'pxe-tools-worker.service':
+            if unit in active and unit not in skipped and unit != 'pxe-tools-worker.service':
                 if self.systemctl('is-active', '--quiet', unit, check=False).returncode:
                     failures.append(unit + ' not active')
-            if not state['units'][unit]['active']:
+            if unit not in active:
                 if self.systemctl('is-active', '--quiet', unit, check=False).returncode == 0:
                     failures.append(unit + ' unexpectedly active')
         if failures:
             raise RuntimeError('previous PXE Tools roles did not resume; inspect systemd status and retry sudo dpkg --configure pxe-tools')
         worker = 'pxe-tools-worker.service'
-        if state['units'][worker]['active']:
+        if worker in active:
             self.systemctl('start', '--job-mode=ignore-dependencies', worker)
             if self.systemctl('is-active', '--quiet', worker, check=False).returncode:
                 raise RuntimeError('worker did not resume; inspect systemd and retry sudo dpkg --configure pxe-tools')
