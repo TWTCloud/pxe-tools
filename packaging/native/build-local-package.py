@@ -162,15 +162,20 @@ def configure_guided_units(units: Path) -> None:
 def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-local-test',
           architecture: str = 'amd64',
           maintainer: str = 'PXE Tools local test <maintainers@example.invalid>',
-          rust_binary: Path | None = None, rust_guided: bool = False) -> None:
+          rust_binary: Path | None = None, rust_guided: bool = False,
+          upgrade_fixture: bool = False) -> None:
     if package_name not in ('pxe-tools-local-test', 'pxe-tools'):
         raise ValueError('unsupported package name')
     if architecture not in GRUB_DEPENDENCIES:
         raise ValueError('supported package architectures are amd64 and arm64')
     if rust_guided and rust_binary is None:
         raise ValueError('The guided variant requires a Rust binary')
+    # A real dpkg upgrade requires the original package name. Reserve a
+    # dedicated candidate version and keep this mode out of the release CLI.
+    if upgrade_fixture and (package_name != 'pxe-tools' or not rust_guided or version != '0.1.0~rust1'):
+        raise ValueError('Use the dedicated Rust upgrade fixture version and package name')
     if rust_binary is not None:
-        if package_name != 'pxe-tools-local-test':
+        if package_name != 'pxe-tools-local-test' and not upgrade_fixture:
             raise ValueError('The Rust variants are only available in the local test package')
         if rust_binary.is_symlink() or not rust_binary.is_file():
             raise ValueError('Use a regular file for the Rust binary')
@@ -194,7 +199,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         root = Path(temporary)/'root'; control = root/'DEBIAN'; control.mkdir(parents=True)
         description, details = (('PXE network installation management',
                                  'Web administration and PXE services for Debian installations.')
-                                if package_name == 'pxe-tools' else
+                                if package_name == 'pxe-tools' and not upgrade_fixture else
                                 ('experimental local test of PXE Tools',
                                  'This package is intended for isolated test environments.'))
         (control/'control').write_text(CONTROL.format(
