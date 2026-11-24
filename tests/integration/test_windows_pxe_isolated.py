@@ -288,7 +288,9 @@ def run_guest(client, lan, helper, root, media, case, accelerator, *, discovery)
         return not state['Running']
 
     try:
-        timeout = (2400 if discovery else 1800) if accelerator=='tcg' else 900
+        # Software emulation still wrote the Windows image at 40 minutes
+        # on a hosted runner. Keep each phase independently bounded.
+        timeout = (3900 if discovery else 1800) if accelerator=='tcg' else 900
         wait_for(completed, timeout, phase)
     except RuntimeError:
         diagnostic_screen(root)
@@ -338,10 +340,10 @@ def main():
                    helper,'create','-f','qcow2','/fixture-data/client.qcow2','72G')
             docker('run','--rm','--network','none',*fixture,'--entrypoint','cp',
                    helper,'/usr/share/OVMF/OVMF_VARS_4M.ms.fd','/fixture-data/vars.fd')
-            docker('run','-d','--name',lan,'--network','none','--entrypoint','sleep',helper,'3600')
+            docker('run','-d','--name',lan,'--network','none','--entrypoint','sleep',helper,'7200')
             docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
                    '--mount',f'type=bind,src={root/"tftp"},dst=/pxe,readonly',
-                   '--entrypoint','sleep',helper,'3600')
+                   '--entrypoint','sleep',helper,'7200')
             connect_fixture_lan(lan,dhcp)
             docker('exec','-d',dhcp,'dnsmasq','-k','--interface=veth-dhcp','--bind-interfaces',
                    '--no-resolv','--no-hosts','--dhcp-authoritative',
