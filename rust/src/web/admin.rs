@@ -49,7 +49,8 @@ pub(super) enum Action {
     PullPresets,
     Jobs(super::jobs::View),
     Activity(super::activity::View),
-    Terminology(&'static str),
+    Terminology(&'static str, &'static str),
+    Settings(super::settings::Route, Option<Bytes>),
     Setup(String, Option<Bytes>),
     Certificates(Arc<super::certificates::Certificates>, Option<Bytes>),
     Acme(Arc<super::certificates::Certificates>, Bytes),
@@ -262,112 +263,118 @@ impl Console {
         let method = request.method.clone();
         let query = request.uri.query().unwrap_or_default().to_owned();
         let reply = task::spawn_blocking(move || {
-            let db_path = configured_database(&config)?;
-            let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-            let username = match identity {
-                Identity::Basic(username, password) => {
-                    if !sessions::password_hash(&db, &username)
-                        .ok()?
-                        .is_some_and(|hash| bcrypt::verify(password, &hash).unwrap_or(false))
-                    {
-                        return Some(unauthorized());
+            let mut authenticated = false;
+            let reply = (|| {
+                let db_path = configured_database(&config)?;
+                let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+                let username = match identity {
+                    Identity::Basic(username, password) => {
+                        if !sessions::password_hash(&db, &username)
+                            .ok()?
+                            .is_some_and(|hash| bcrypt::verify(password, &hash).unwrap_or(false))
+                        {
+                            return Some(unauthorized());
+                        }
+                        username
                     }
-                    username
+                    Identity::Session(token) => {
+                        let Some(username) = sessions.user(&db, &token).ok()? else {
+                            return missing_session;
+                        };
+                        username
+                    }
+                    Identity::Forwarded(username) => username,
+                };
+                authenticated = true;
+                if let Action::Device(route, form) = &action {
+                    return route
+                        .serve(&db, &db_path, &method, form.as_deref(), &username)
+                        .ok();
                 }
-                Identity::Session(token) => {
-                    let Some(username) = sessions.user(&db, &token).ok()? else {
-                        return missing_session;
-                    };
-                    username
+                if let Action::Register(form) = &action {
+                    return super::devices::register(&db_path, form.as_deref()).ok();
                 }
-                Identity::Forwarded(username) => username,
-            };
-            if let Action::Device(route, form) = &action {
-                return route
-                    .serve(&db, &db_path, &method, form.as_deref(), &username)
-                    .ok();
-            }
-            if let Action::Register(form) = &action {
-                return super::devices::register(&db_path, form.as_deref()).ok();
-            }
-            if let Action::Activity(view) = &action {
-                return view.serve(&db, &path, &query, page).ok();
-            }
-            if let Action::Jobs(view) = &action {
-                return view.serve(&db, page).ok();
-            }
-            if let Action::Presets(form) = &action {
-                return super::presets::serve(&db, &db_path, form.as_deref(), page).ok();
-            }
-            if let Action::PullPresets = &action {
-                return super::presets::pull(&db_path).ok();
-            }
-            if let Action::Images(form) = &action {
-                return Some(super::images::serve(&db, &db_path, page, form.as_deref()));
-            }
-            if let Action::Setup(endpoint, form) = &action {
-                return Some(super::onboarding::serve(
-                    &db,
-                    &db_path,
-                    endpoint,
-                    form.as_deref(),
-                ));
-            }
-            if let Action::Acme(tls, form) = &action {
-                return Some(tls.configure_acme(form));
-            }
-            if let Action::Certificates(tls, form) = &action {
-                return Some(match form {
-                    Some(data) => tls.import(data),
-                    None => tls.page(),
-                });
-            }
-            if let Action::Terminology(label) = action {
-                let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
-                db.execute(
-                    "INSERT INTO settings(key, value) VALUES(?, ?)
+                if let Action::Activity(view) = &action {
+                    return view.serve(&db, &path, &query, page).ok();
+                }
+                if let Action::Jobs(view) = &action {
+                    return view.serve(&db, page).ok();
+                }
+                if let Action::Presets(form) = &action {
+                    return super::presets::serve(&db, &db_path, form.as_deref(), page).ok();
+                }
+                if let Action::PullPresets = &action {
+                    return super::presets::pull(&db_path).ok();
+                }
+                if let Action::Images(form) = &action {
+                    return Some(super::images::serve(&db, &db_path, page, form.as_deref()));
+                }
+                if let Action::Setup(endpoint, form) = &action {
+                    return Some(super::onboarding::serve(
+                        &db,
+                        &db_path,
+                        endpoint,
+                        form.as_deref(),
+                    ));
+                }
+                if let Action::Acme(tls, form) = &action {
+                    return Some(tls.configure_acme(form));
+                }
+                if let Action::Certificates(tls, form) = &action {
+                    return Some(match form {
+                        Some(data) => tls.import(data),
+                        None => tls.page(),
+                    });
+                }
+                if let Action::Settings(route, form) = action {
+                    return route.serve(&db, &db_path, form).ok();
+                }
+                if let Action::Terminology(label, target) = action {
+                    let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
+                    db.execute(
+                        "INSERT INTO settings(key, value) VALUES(?, ?)
                      ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    params!["ui_device_term", label],
-                )
-                .ok()?;
-                return Some(
-                    Response::builder()
-                        .status(StatusCode::SEE_OTHER)
-                        .header(LOCATION, "/admin/devices")
-                        .header("Cache-Control", "no-store")
-                        .body(bytes(""))
-                        .expect("valid settings redirect"),
-                );
-            }
-            let output = render_devices(&db, page).ok()?;
-            Some(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .header("Content-Type", "text/html; charset=utf-8")
-                    .header("Cache-Control", "no-store")
-                    .header("X-Content-Type-Options", "nosniff")
-                    .header(
-                        "Content-Security-Policy",
-                        "default-src 'none'; frame-ancestors 'none'; form-action 'self'",
+                        params!["ui_device_term", label],
                     )
-                    .body(bytes(output))
-                    .expect("valid console response"),
-            )
+                    .ok()?;
+                    return Some(
+                        Response::builder()
+                            .status(StatusCode::SEE_OTHER)
+                            .header(LOCATION, target)
+                            .header("Cache-Control", "no-store")
+                            .body(bytes(""))
+                            .expect("valid settings redirect"),
+                    );
+                }
+                let output = render_devices(&db, page).ok()?;
+                Some(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Content-Type", "text/html; charset=utf-8")
+                        .header("Cache-Control", "no-store")
+                        .header("X-Content-Type-Options", "nosniff")
+                        .header(
+                            "Content-Security-Policy",
+                            "default-src 'none'; frame-ancestors 'none'; form-action 'self'",
+                        )
+                        .body(bytes(output))
+                        .expect("valid console response"),
+                )
+            })();
+            (reply, authenticated)
         })
         .await;
-        if reply.as_ref().is_ok_and(|result| {
-            result
-                .as_ref()
-                .is_some_and(|response| response.status() != StatusCode::UNAUTHORIZED)
-        }) {
-            if let Some(window) = window {
-                self.refund_attempt(peer, window);
+        match reply {
+            Ok((reply, authenticated)) => {
+                if authenticated {
+                    if let Some(window) = window {
+                        self.refund_attempt(peer, window);
+                    }
+                }
+                reply.unwrap_or_else(console_unavailable)
             }
+            Err(_) => console_unavailable(),
         }
-        reply
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| plain(StatusCode::SERVICE_UNAVAILABLE, "Console unavailable\n"))
     }
 
     fn reserve_attempt(&self, ip: IpAddr) -> Option<Instant> {
@@ -398,6 +405,10 @@ impl Console {
             }
         }
     }
+}
+
+fn console_unavailable() -> Reply {
+    plain(StatusCode::SERVICE_UNAVAILABLE, "Console unavailable\n")
 }
 
 fn auth_unavailable() -> Reply {
@@ -449,6 +460,21 @@ pub(super) fn unauthorized() -> Reply {
         .expect("valid challenge response")
 }
 
+pub(super) fn terminology_form(html: &mut String, action: &str, term: &str) {
+    html.push_str(&format!(
+        r#"<form method="post" action="{action}">
+<label for="ui-device-term">Appellation dans la console</label>
+<select name="ui_device_term" id="ui-device-term">"#
+    ));
+    for (key, option, _) in DEVICE_TERMS {
+        let selected = if key == term { " selected" } else { "" };
+        html.push_str(&format!(
+            r#"<option value="{key}"{selected}>{option}</option>"#
+        ));
+    }
+    html.push_str("</select><button>Enregistrer</button></form>");
+}
+
 fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
     let term = crate::setting(db, "ui_device_term")?;
     let (term, _, label) = DEVICE_TERMS
@@ -462,19 +488,10 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
     let mut html = format!(
         r#"<!doctype html><html lang="fr"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>{label} · PXE Tools</title>
-<main><h1>{label}</h1>
-<form method="post" action="{DEVICE_SETTINGS}">
-<label for="ui-device-term">Appellation dans la console</label>
-<select name="ui_device_term" id="ui-device-term">"#
+<main><h1>{label}</h1>"#
     );
-    for (key, option, _) in DEVICE_TERMS {
-        let selected = if key == *term { " selected" } else { "" };
-        html.push_str(&format!(
-            r#"<option value="{key}"{selected}>{option}</option>"#
-        ));
-    }
-    html.push_str("</select><button>Enregistrer</button></form>");
-    html.push_str(r#"<nav><a href="/machines/new">Ajouter un appareil</a> · <a href="/activity">Activité</a> · <a href="/jobs">Tâches</a> · <a href="/presets">Modèles</a> · <a href="/settings/images">Images PXE</a> · <a href="/admin/certificates">Certificats TLS</a></nav>"#);
+    terminology_form(&mut html, DEVICE_SETTINGS, term);
+    html.push_str(r#"<nav><a href="/machines/new">Ajouter un appareil</a> · <a href="/activity">Activité</a> · <a href="/jobs">Tâches</a> · <a href="/presets">Modèles</a> · <a href="/settings/images">Images PXE</a> · <a href="/settings">Paramètres</a> · <a href="/admin/certificates">Certificats TLS</a></nav>"#);
     if matches!(
         std::env::var("AUTH_MODE").unwrap_or_default().as_str(),
         "" | "local"

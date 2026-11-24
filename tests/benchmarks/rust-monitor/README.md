@@ -182,6 +182,13 @@ par le worker. La vue `/jobs` ouvre les tâches du worker, leurs états et
 les dernières lignes du journal. Les URL de suivi par identifiant et l’API
 de statut par type restent accessibles à la console authentifiée.
 
+La page `/settings` enregistre le protocole de découverte et les DNS IPv4
+proposés aux prochains déploiements. Elle permet de demander au worker
+d’appliquer la configuration, de reconstruire GRUB ou de régénérer la clé
+MOK après confirmation. `/settings/ipxe` programme la régénération des
+menus après un changement d’option. Les pages affichent les liens des
+tâches enregistrées avec le changement.
+
 Les variantes guidées APT et Docker construisent leur environnement
 d’exécution sans Nginx ni PHP.
 Dans la variante guidée, Rust réserve la suppression d’une image en

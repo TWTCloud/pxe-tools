@@ -13,6 +13,7 @@ mod jobs;
 mod onboarding;
 mod presets;
 mod sessions;
+mod settings;
 mod setup;
 mod winpe;
 
@@ -593,7 +594,40 @@ async fn dispatch(
         };
         return site.admin.serve(&parts, peer, &site.database, action).await;
     }
-    if path == admin::DEVICE_SETTINGS && parts.method == Method::POST && secure {
+    if path == "/settings/https" && secure && readable {
+        return setup::redirect(StatusCode::FOUND, certificates::ROUTE);
+    }
+    if let Some(route) = settings::Route::for_path(path) {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        let form = if readable {
+            None
+        } else if parts.method == Method::POST {
+            if !admin_origin(&parts.headers, peer, site) {
+                return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+            }
+            match read_form(&parts.headers, body, 2048).await {
+                Ok(form) => Some(form),
+                Err(reply) => return reply,
+            }
+        } else {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        };
+        return site
+            .admin
+            .serve(
+                &parts,
+                peer,
+                &site.database,
+                admin::Action::Settings(route, form),
+            )
+            .await;
+    }
+    if matches!(path, admin::DEVICE_SETTINGS | "/settings/terminology")
+        && parts.method == Method::POST
+        && secure
+    {
         if !admin_origin(&parts.headers, peer, site) {
             return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
         }
@@ -615,7 +649,14 @@ async fn dispatch(
                 &parts,
                 peer,
                 &site.database,
-                admin::Action::Terminology(update),
+                admin::Action::Terminology(
+                    update,
+                    if path == admin::DEVICE_SETTINGS {
+                        "/admin/devices"
+                    } else {
+                        "/settings"
+                    },
+                ),
             )
             .await;
     }

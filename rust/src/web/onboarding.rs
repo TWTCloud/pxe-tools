@@ -278,7 +278,7 @@ fn change(
     Ok(redirect(StatusCode::SEE_OTHER, "/admin/devices"))
 }
 
-fn store(db: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+pub(super) fn store(db: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
     db.execute(
         "INSERT INTO settings(key,value) VALUES(?1,?2)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",

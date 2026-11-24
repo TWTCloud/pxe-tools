@@ -429,6 +429,53 @@ def verify_activity(client, database, authorization):
     print('Rust activity preserves action and legacy install links, authenticated filtering, and progress fragments', flush=True)
 
 
+def verify_appliance_settings(client, database, authorization):
+    def request(path, **kwargs):
+        return client.request(path, authorization=authorization, **kwargs)
+
+    assert client.request('/settings')[0] == 401
+    assert request('/settings', secure=False)[0] == 404
+    assert request('/settings/https')[:2] == (302, '/admin/certificates')
+    assert request('/settings/terminology', form={'ui_device_term':'ordinateur'})[:2] == (303, '/settings')
+    assert request('/settings', form={'discovery_boot_proto':'invalid'})[0] == 422
+    assert request('/settings', form={'discovery_boot_proto':'tftp'})[:2] == (303, '/settings')
+    page = request('/settings')
+    assert b'name="discovery_boot_proto"' in page[2] and b'value="tftp" selected' in page[2]
+    route = '/settings/default-dns'
+    valid = [('default_dns[]','192.0.2.5'), ('default_dns[]','192.0.2.5'), ('default_dns[]','192.0.2.6')]
+    assert request(route, form=valid, origin='https://outside.example')[0] == 403
+    assert request(route, form=valid)[:2] == (303, '/settings')
+    assert request(route, form={'default_dns[]':'192.0.2.500'})[0] == 422
+    assert request('/settings/ipxe', form={'ipxe_enabled':'on'})[:2] == (303, '/settings/ipxe')
+    assert request('/settings/regenerate-mok', form={})[0] == 422
+    assert request('/settings/apply-config', form={})[:2] == (303, '/settings')
+    with closing(sqlite3.connect(database)) as db, db:
+        settings = dict(db.execute('SELECT key,value FROM settings'))
+        assert json.loads(settings['default_dns']) == ['192.0.2.5','192.0.2.6']
+        assert settings['ipxe_enabled'] == 'on'
+        ids = json.loads(settings['appliance_last_job_ids'])
+        assert [db.execute('SELECT job_type,status FROM init_jobs WHERE id=?', [job]).fetchone() for job in ids] == [
+            ('bootstrap:build_grub','pending'), ('bootstrap:render_templates','pending'),
+            ('bootstrap:restart_dnsmasq','pending'),
+        ]
+        ipxe_job, = json.loads(settings['ipxe_job_ids'])
+        assert db.execute('SELECT job_type,status FROM init_jobs WHERE id=?', [ipxe_job]).fetchone() == (
+            'bootstrap:render_templates','pending',
+        )
+        assert f'href="/jobs/{ipxe_job}"'.encode() in request('/settings/ipxe')[2]
+        db.execute("""CREATE TRIGGER refuse_rust_settings_fixture_job BEFORE INSERT ON init_jobs
+                   WHEN NEW.job_type='bootstrap:render_templates'
+                   BEGIN SELECT RAISE(ABORT, 'test rollback'); END""")
+    assert request('/settings/ipxe', form={})[0] == 503
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT value FROM settings WHERE key='ipxe_enabled'").fetchone() == ('on',)
+        db.execute('DROP TRIGGER refuse_rust_settings_fixture_job')
+    assert request(route, form={'default_dns[]':''})[:2] == (303, '/settings')
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute("SELECT value FROM settings WHERE key='default_dns'").fetchone() == ('[]',)
+    print('Rust appliance settings validated DNS and boot options and rolled back failed worker scheduling', flush=True)
+
+
 def verify_device_settings(client, database, authorization):
     assert client.request('/machines',authorization=authorization)[:2]==(302,'/admin/devices')
     assert client.request('/machines/new')[0]==401
@@ -1132,6 +1179,7 @@ def local(binary):
         updated.ready(schedule_server)
         verify_device_settings(updated, database, authorization)
         verify_guided_install(updated, database, authorization)
+        verify_appliance_settings(updated, database, authorization)
         verify_admin_attempt_limit(updated, authorization)
         schedule_server.terminate()
         schedule_server.wait(timeout=5)
