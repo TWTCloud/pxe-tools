@@ -30,7 +30,8 @@ class Client:
         self.https_port = https_port
         self.origin = 'https://127.0.0.1' + (f':{https_port}' if https_port != 443 else '')
 
-    def request(self, path, *, form=None, authorization=None, secure=True, origin=None, extra_headers=None):
+    def request(self, path, *, form=None, authorization=None, secure=True, origin=None,
+                extra_headers=None, response_headers=None):
         if secure:
             conn = HTTPSConnection('127.0.0.1', self.https_port, timeout=5, context=self.context)
         else:
@@ -45,6 +46,8 @@ class Client:
             conn.request('GET' if form is None else 'POST', path,
                          body=None if form is None else urlencode(form), headers=headers)
             response = conn.getresponse()
+            if response_headers is not None:
+                response_headers.update((key.lower(), value) for key, value in response.getheaders())
             return response.status, response.getheader('Location'), response.read()
         finally:
             conn.close()
@@ -109,6 +112,48 @@ def setup(client, credentials, config, database):
     assert master_key.read_bytes() == original
     print('Rust first-run SQLite, single admin, HTTPS access, and inactive PXE verified', flush=True)
     return winner+':fixture-password'
+
+
+def verify_browser_login(client, authorization, *, first_run=False):
+    browser = {'Accept': 'text/html'}
+    result = client.request('/admin/devices?page=2', extra_headers=browser)
+    assert result[:2] == (302, '/login?next=%2Fadmin%2Fdevices%3Fpage%3D2'), result
+    form = client.request(result[1], extra_headers=browser)
+    assert form[0] == 200 and b'name="password"' in form[2]
+    assert client.request('/login', secure=False)[0] == 404
+    assert client.request('/logout')[0] == 405
+
+    username, password = authorization.split(':', 1)
+    credentials = {'username': username, 'password': password, 'next': '/admin/devices?page=2'}
+    assert client.request('/login', form=credentials, origin='https://other.example')[0] == 403
+    assert client.request('/login', form={**credentials, 'password': 'wrong'})[0] == 401
+
+    def sign_in(form, expected, current=None):
+        headers = {}
+        result = client.request('/login', form=form, extra_headers=current, response_headers=headers)
+        assert result[:2] == (303, expected), result
+        cookie = headers['set-cookie']
+        assert all(attribute in cookie for attribute in ('; Path=/', '; Secure', '; HttpOnly',
+                                                         '; SameSite=Strict', '; Max-Age=28800'))
+        assert cookie.startswith('__Host-pxe-session=')
+        return {**browser, 'Cookie': cookie.partition(';')[0]}
+
+    target = '/init/network' if first_run else credentials['next']
+    active = sign_in(credentials, target)
+    assert client.request(target, extra_headers=active)[0] == 200
+    target = '/init/network' if first_run else '/admin/'
+    previous = active
+    active = sign_in({**credentials, 'next': '/%2fevil.example'}, target, current=previous)
+    assert active['Cookie'] != previous['Cookie']
+    assert client.request('/admin/devices', extra_headers=previous)[0] == 302
+
+    assert client.request('/logout', form={}, extra_headers=active, origin='https://other.example')[0] == 403
+    assert client.request('/admin/devices', extra_headers=active)[0] == 200
+    headers = {}
+    assert client.request('/logout', form={}, extra_headers=active, response_headers=headers)[:2] == (303, '/login')
+    assert 'Max-Age=0' in headers['set-cookie']
+    assert client.request('/admin/devices', extra_headers=active)[0] == 302
+    print('Rust browser login, secure session, origin checks, token rotation and logout verified', flush=True)
 
 
 class ConfirmationInputs(HTMLParser):
@@ -1033,6 +1078,8 @@ def local(binary):
         data, credentials, public, conf = (root/name for name in ('data','credentials','public','conf'))
         for path in (data, credentials, public, conf):
             path.mkdir()
+        sessions = root/'sessions'
+        sessions.mkdir(mode=0o700)
         (conf/'master.key').write_bytes(secrets.token_bytes(32))
         (credentials/'setup-code').write_text(secrets.token_hex(24)+'\n')
         generate_tls_pair(credentials, 'localhost')
@@ -1049,7 +1096,7 @@ def local(binary):
                'HTTP_ROOT':str(public), 'PXE_DB_DRIVER':'sqlite', 'PXE_DB_PATH':str(database),
                'PXE_SETUP_DATA_ROOT':str(data), 'PXE_HTTP_PORT':str(ports[0]),
                'PXE_HTTPS_PORT':str(ports[1]), 'PXE_PUBLIC_HOST':'pxe.example.test',
-               'PXE_TLS_IMPORT_DIR':str(root/'tls-import')}
+               'PXE_TLS_IMPORT_DIR':str(root/'tls-import'), 'PXE_SESSION_DIR':str(sessions)}
         with closing(sqlite3.connect(database)) as db, db:
             db.execute('CREATE TABLE existing(data TEXT)')
             db.execute("INSERT INTO existing VALUES ('preserve')")
@@ -1062,7 +1109,9 @@ def local(binary):
         assert not config.exists() and database.read_bytes() == original
         database.unlink()
         authorization = setup(client, credentials, config, database)
+        verify_browser_login(client, authorization, first_run=True)
         verify_configuration(client, database, authorization, packaged=False)
+        verify_browser_login(client, authorization)
         imported = root/'imported'
         imported.mkdir()
         updated = verify_tls_import(client, credentials, imported, root/'tls-import', authorization)
@@ -1122,6 +1171,7 @@ def main():
         client.ready()
         database = Path('/var/lib/pxe-tools/pxe-tools.sqlite')
         authorization = setup(client, credentials, Path('/etc/pxe-tools/db.conf'), database)
+        verify_browser_login(client, authorization, first_run=True)
         if args.http_root:
             verify_worker_image_delete(database, args.http_root)
         boot_fixture = (args.http_root, args.tftp_root, args.netboot_fixture, args.dnsmasq_config)

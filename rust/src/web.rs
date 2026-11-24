@@ -12,6 +12,7 @@ mod images;
 mod jobs;
 mod onboarding;
 mod presets;
+mod sessions;
 mod setup;
 mod winpe;
 
@@ -406,6 +407,31 @@ async fn dispatch(
             return site.setup.submit(path, &site.database, &form).await;
         }
         return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+    }
+    if matches!(path, "/login" | "/logout") {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        if path == "/login" && readable {
+            return site.admin.login(&parts, peer, &site.database, None).await;
+        }
+        if parts.method != Method::POST {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        }
+        if !admin_origin(&parts.headers, peer, site) {
+            return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+        }
+        if path == "/logout" {
+            return site.admin.logout(&parts.headers).await;
+        }
+        let form = match read_form(&parts.headers, body, 2048).await {
+            Ok(form) => form,
+            Err(reply) => return reply,
+        };
+        return site
+            .admin
+            .login(&parts, peer, &site.database, Some(form))
+            .await;
     }
     if matches!(path, "/admin/" | "/admin/devices") && readable {
         if !secure {

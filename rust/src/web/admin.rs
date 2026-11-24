@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::{auth_proxy::TrustedProxies, bytes, plain, single, Reply};
+use super::{
+    auth_proxy::TrustedProxies,
+    bytes, plain,
+    sessions::{self, Sessions},
+    single, Reply,
+};
 use crate::{configured_database, connect};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hyper::{
@@ -9,7 +14,7 @@ use hyper::{
     http::request::Parts,
     Response, StatusCode,
 };
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags};
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -50,10 +55,17 @@ pub(super) enum Action {
     Acme(Arc<super::certificates::Certificates>, Bytes),
 }
 
+enum Identity {
+    Basic(String, Vec<u8>),
+    Session(String),
+    Forwarded(String),
+}
+
 pub(super) struct Console {
     attempts: Mutex<HashMap<IpAddr, (Instant, u8)>>,
     jobs: Semaphore,
     proxies: TrustedProxies,
+    sessions: Sessions,
 }
 
 impl Console {
@@ -62,11 +74,126 @@ impl Console {
             attempts: Mutex::new(HashMap::new()),
             jobs: Semaphore::new(2),
             proxies: TrustedProxies::from_environment(),
+            sessions: Sessions::from_environment(),
         }
     }
 
     pub(super) fn trusted_proxy(&self, peer: IpAddr) -> bool {
         self.proxies.contains(peer)
+    }
+
+    pub(super) async fn login(
+        &self,
+        request: &Parts,
+        peer: IpAddr,
+        config: &Path,
+        form: Option<Bytes>,
+    ) -> Reply {
+        let query = request.uri.query().unwrap_or_default();
+        let query_next = form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "next")
+            .map(|(_, value)| value);
+        let next = sessions::local_next(query_next.as_deref().unwrap_or_default());
+        match std::env::var("AUTH_MODE").unwrap_or_default().as_str() {
+            "" | "local" => {}
+            "authentik" => {
+                return if form.is_none() && self.proxies.identity(peer, &request.headers).is_some()
+                {
+                    super::setup::redirect(StatusCode::FOUND, next)
+                } else {
+                    sso_required()
+                };
+            }
+            _ => return auth_unavailable(),
+        }
+        let Some(form) = form else {
+            return sessions::login_page(next, None, StatusCode::OK);
+        };
+        let mut username = None;
+        let mut password = None;
+        let mut target = None;
+        for (key, value) in form_urlencoded::parse(&form) {
+            let field = match key.as_ref() {
+                "username" => &mut username,
+                "password" => &mut password,
+                "next" => &mut target,
+                _ => continue,
+            };
+            if field.replace(value).is_some() {
+                return plain(StatusCode::BAD_REQUEST, "Invalid login form\n");
+            }
+        }
+        let next = sessions::local_next(target.as_deref().unwrap_or(next));
+        let username = username.as_deref().map(str::trim).unwrap_or_default();
+        let password = password.as_deref().unwrap_or_default();
+        if username.is_empty() || username.len() > 256 || password.is_empty() {
+            return sessions::login_page(
+                next,
+                Some("Saisissez votre identifiant et votre mot de passe."),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            );
+        }
+        let Ok(_permit) = self.jobs.try_acquire() else {
+            return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
+        };
+        let Some(window) = self.reserve_attempt(peer) else {
+            return rate_limited();
+        };
+        let config = config.to_owned();
+        let sessions = self.sessions.clone();
+        let current_token = sessions::token(&request.headers);
+        let username = username.to_owned();
+        let password = password.to_owned();
+        let next = next.to_owned();
+        let result = task::spawn_blocking(move || {
+            let db_path = configured_database(&config)?;
+            let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+            let hash = sessions::password_hash(&db, &username).ok()?;
+            let Some(hash) = hash.filter(|hash| bcrypt::verify(password, hash).unwrap_or(false))
+            else {
+                return Some(sessions::login_page(
+                    &next,
+                    Some("Identifiants incorrects."),
+                    StatusCode::UNAUTHORIZED,
+                ));
+            };
+            let next = if crate::setting(&db, "wizard_completed").ok()? == "1" {
+                &next
+            } else {
+                "/init/network"
+            };
+            let token = sessions
+                .issue(username, &hash, current_token.as_deref())
+                .ok()?;
+            Some(sessions::cookie(&token, next))
+        })
+        .await;
+        if result.as_ref().is_ok_and(|result| {
+            result
+                .as_ref()
+                .is_some_and(|reply| reply.status() == StatusCode::SEE_OTHER)
+        }) {
+            self.refund_attempt(peer, window);
+        }
+        result.ok().flatten().unwrap_or_else(auth_unavailable)
+    }
+
+    pub(super) async fn logout(&self, headers: &hyper::HeaderMap) -> Reply {
+        match std::env::var("AUTH_MODE").unwrap_or_default().as_str() {
+            "" | "local" => {}
+            "authentik" => return sso_required(),
+            _ => return auth_unavailable(),
+        }
+        if let Some(token) = sessions::token(headers) {
+            let sessions = self.sessions.clone();
+            if !task::spawn_blocking(move || sessions.remove(&token))
+                .await
+                .is_ok_and(|result| result.is_ok())
+            {
+                return auth_unavailable();
+            }
+        }
+        sessions::cookie("", "/login")
     }
 
     pub(super) async fn serve(
@@ -83,46 +210,43 @@ impl Console {
                 .body(bytes(""))
                 .expect("valid admin redirect");
         }
-        let (username, password) = match std::env::var("AUTH_MODE").unwrap_or_default().as_str() {
+        let identity = match std::env::var("AUTH_MODE").unwrap_or_default().as_str() {
             "" | "local" => {
-                let Some((username, password)) =
-                    single(&request.headers, AUTHORIZATION.as_str()).and_then(credentials)
-                else {
-                    return unauthorized();
-                };
-                (username, Some(password))
+                if request.headers.contains_key(AUTHORIZATION) {
+                    let Some((username, password)) =
+                        single(&request.headers, AUTHORIZATION.as_str()).and_then(credentials)
+                    else {
+                        return unauthorized();
+                    };
+                    Identity::Basic(username, password)
+                } else if let Some(token) = sessions::token(&request.headers) {
+                    Identity::Session(token)
+                } else {
+                    return sessions::login_required(request);
+                }
             }
             "authentik" => {
                 let Some(user) = self.proxies.identity(peer, &request.headers) else {
-                    return plain(
-                        StatusCode::UNAUTHORIZED,
-                        "Authentik authentication required\n",
-                    );
+                    return sso_required();
                 };
-                (user.to_owned(), None)
+                Identity::Forwarded(user.to_owned())
             }
-            _ => {
-                return plain(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Authentication is unavailable\n",
-                )
-            }
+            _ => return auth_unavailable(),
         };
         let Ok(_permit) = self.jobs.try_acquire() else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
         };
-        let window = if password.is_some() {
+        let window = if matches!(identity, Identity::Basic(..)) {
             let Some(window) = self.reserve_attempt(peer) else {
-                return Response::builder()
-                    .status(StatusCode::TOO_MANY_REQUESTS)
-                    .header("Retry-After", "60")
-                    .body(bytes("Try again later\n"))
-                    .expect("valid rate limit response");
+                return rate_limited();
             };
             Some(window)
         } else {
             None
         };
+        let sessions = self.sessions.clone();
+        let missing_session =
+            matches!(identity, Identity::Session(_)).then(|| sessions::login_required(request));
         let page = request
             .uri
             .query()
@@ -140,22 +264,24 @@ impl Console {
         let reply = task::spawn_blocking(move || {
             let db_path = configured_database(&config)?;
             let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-            if let Some(password) = password {
-                let hash: Option<String> = db
-                    .query_row(
-                        "SELECT password_hash FROM users WHERE username = ?",
-                        [&username],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .ok()?;
-                if !hash
-                    .as_deref()
-                    .is_some_and(|hash| bcrypt::verify(password, hash).unwrap_or(false))
-                {
-                    return Some(unauthorized());
+            let username = match identity {
+                Identity::Basic(username, password) => {
+                    if !sessions::password_hash(&db, &username)
+                        .ok()?
+                        .is_some_and(|hash| bcrypt::verify(password, &hash).unwrap_or(false))
+                    {
+                        return Some(unauthorized());
+                    }
+                    username
                 }
-            }
+                Identity::Session(token) => {
+                    let Some(username) = sessions.user(&db, &token).ok()? else {
+                        return missing_session;
+                    };
+                    username
+                }
+                Identity::Forwarded(username) => username,
+            };
             if let Action::Device(route, form) = &action {
                 return route
                     .serve(&db, &db_path, &method, form.as_deref(), &username)
@@ -274,6 +400,28 @@ impl Console {
     }
 }
 
+fn auth_unavailable() -> Reply {
+    plain(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Authentication is unavailable\n",
+    )
+}
+
+fn sso_required() -> Reply {
+    plain(
+        StatusCode::UNAUTHORIZED,
+        "Authentik authentication required\n",
+    )
+}
+
+fn rate_limited() -> Reply {
+    Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header("Retry-After", "60")
+        .body(bytes("Try again later\n"))
+        .expect("valid rate limit response")
+}
+
 fn credentials(value: &str) -> Option<(String, Vec<u8>)> {
     let (scheme, payload) = value.split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("basic") || payload.len() > 1024 {
@@ -289,7 +437,7 @@ fn credentials(value: &str) -> Option<(String, Vec<u8>)> {
     Some((username.to_owned(), password[1..].to_vec()))
 }
 
-fn unauthorized() -> Reply {
+pub(super) fn unauthorized() -> Reply {
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header(
@@ -327,6 +475,14 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
     }
     html.push_str("</select><button>Enregistrer</button></form>");
     html.push_str(r#"<nav><a href="/machines/new">Ajouter un appareil</a> · <a href="/activity">Activité</a> · <a href="/jobs">Tâches</a> · <a href="/presets">Modèles</a> · <a href="/settings/images">Images PXE</a> · <a href="/admin/certificates">Certificats TLS</a></nav>"#);
+    if matches!(
+        std::env::var("AUTH_MODE").unwrap_or_default().as_str(),
+        "" | "local"
+    ) {
+        html.push_str(
+            r#"<form method="post" action="/logout"><button>Se déconnecter</button></form>"#,
+        );
+    }
     if crate::setting(db, "wizard_completed")? != "1" {
         html.push_str(r#"<p><a href="/init/network">Poursuivre la configuration initiale</a></p>"#);
     }

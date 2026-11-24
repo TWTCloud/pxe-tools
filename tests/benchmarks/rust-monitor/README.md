@@ -135,6 +135,11 @@ l’état de l’appareil et les travaux concurrents avant de programmer le
 prochain boot PXE. Le mot de passe du compte installé est stocké sous forme
 de hash SHA-512 crypt.
 
+En mode local, la console ouvre `/login` dans le navigateur et conserve la
+session HTTPS pendant huit heures. La déconnexion révoque la session.
+L’authentification HTTP Basic reste disponible pour les clients en ligne
+de commande.
+
 Le mode facultatif `AUTH_MODE=authentik` reprend l’identité transmise par
 un reverse proxy qui authentifie le navigateur. Dans Docker, définir
 les variables d’environnement du service. En APT, les fournir dans une
