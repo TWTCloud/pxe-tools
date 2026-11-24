@@ -192,7 +192,8 @@ def main():
         instrument=(ROOT/'docker/worker/templates/preseed-base.cfg.j2').read_text()
         needle="{{ '{{ADMIN_USER_BLOCK}}' }}"
         if instrument.count(needle)!=1: raise RuntimeError('unexpected preseed template')
-        serial=(" ; in-target /bin/sh -c 'printf \"\\nGRUB_CMDLINE_LINUX=\\\"console=tty0 console=ttyS0,115200n8\\\"\\n\" >> /etc/default/grub; update-grub' ; printf 'PXE_FULL_LATE_DONE\\n' >/dev/ttyS0")
+        # Keep the same interface names as the installer in this fixture.
+        serial=(" ; in-target /bin/sh -c 'printf \"\\nGRUB_CMDLINE_LINUX=\\\"console=tty0 console=ttyS0,115200n8 net.ifnames=0\\\"\\n\" >> /etc/default/grub; update-grub' ; printf 'PXE_FULL_LATE_DONE\\n' >/dev/ttyS0")
         serial+=r""" ; printf 'PXE_HOST_PUBLIC ' >/dev/ttyS0 ; cat /target/etc/ssh/ssh_host_ed25519_key.pub >/dev/ttyS0 ; if [ -e /target/etc/systemd/system-generators/pxe-first-boot ]; then printf 'PXE_LAUNCHER ' >/dev/ttyS0; stat -c '%a' /target/etc/systemd/system-generators/pxe-first-boot >/dev/ttyS0; fi"""
         instrument=instrument.replace(needle,needle+serial)+"\nd-i mirror/udeb/suite string trixie\n"
         template=root/'preseed-base.cfg.j2';template.write_text(instrument)
@@ -501,14 +502,21 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                        '-device','e1000,netdev=lan,mac=02:00:00:00:00:01',
                        '-drive','file=/fixture-data/fixture.qcow2,if=none,id=disk,format=qcow2',
                        '-device','virtio-blk-pci,drive=disk,serial=PXE-TEST-ONE')
+                ssh_error=''
                 def ssh_ready():
+                    nonlocal ssh_error
                     if not inspect(client)['State']['Running']:
                         raise RuntimeError('The installed guest stopped before reaching SSH')
                     attempt=guest_command(app,app_ns,ssh_fixture,user,'true')
                     if 'Host key verification failed' in attempt.stderr:
                         raise RuntimeError('The pinned installed guest key was refused')
+                    ssh_error=attempt.stderr.strip()
                     return attempt.returncode==0
-                wait_for(ssh_ready,600,'installed Debian reached strict SSH after network boot')
+                try:
+                    wait_for(ssh_ready,600,'installed Debian reached strict SSH after network boot')
+                except RuntimeError:
+                    print(f'Last isolated SSH error: {ssh_error}',flush=True)
+                    raise
                 if boot==1:
                     def completed():
                         with sqlite3.connect(data/'chosen.sqlite') as db:
