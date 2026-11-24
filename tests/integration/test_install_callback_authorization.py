@@ -14,9 +14,10 @@ OTHER_TOKEN = 'b' * 64
 FOREIGN_TOKEN = 'c' * 64
 STALE_TOKEN = 'd' * 64
 MAC = '02:00:00:00:00:01'
+FINGERPRINT = 'SHA256:' + 'A' * 43
 
 
-def request(database, directory, operation, address, token=''):
+def request(database, directory, operation, address, token='', fingerprint=''):
     status = Path(directory) / 'status'
     bootstrap = r'''spl_autoload_register(function($c) {
         if (str_starts_with($c, 'Admin\\')) {
@@ -28,12 +29,13 @@ def request(database, directory, operation, address, token=''):
     $_GET['mac'] = $argv[3];
     $_GET['status'] = 'success';
     $status_path = $argv[4];
+    $_POST['ssh_host_fingerprint'] = $argv[5];
     register_shutdown_function(static function() use ($status_path) {
         file_put_contents($status_path, (string)http_response_code());
     });
     (new Admin\Controllers\PxeController())->{$OPERATION}([]);'''.replace('{$OPERATION}', operation)
     env = dict(os.environ, PXE_APP_DIR=str(ROOT / 'app'), PXE_DB_DRIVER='sqlite', PXE_DB_PATH=str(database))
-    result = subprocess.run(['php', '-r', bootstrap, address, token, MAC, str(status)],
+    result = subprocess.run(['php', '-r', bootstrap, address, token, MAC, str(status), fingerprint],
                             env=env, capture_output=True, text=True)
     if result.returncode != 0:
         raise AssertionError(result.stderr[:500])
@@ -67,18 +69,20 @@ with tempfile.TemporaryDirectory(prefix='pxe-callback-auth-') as tmp:
 
     for address, token in [('192.0.2.2', ''), ('192.0.2.2', OTHER_TOKEN),
                            ('192.0.2.2', FOREIGN_TOKEN), ('198.51.100.2', TOKEN)]:
-        assert request(database, tmp, 'installEnd', address, token)[0] == 404
+        assert request(database, tmp, 'installEnd', address, token, FINGERPRINT)[0] == 404
     assert request(database, tmp, 'installEnd', '192.0.2.2', STALE_TOKEN)[0] == 409
     with sqlite3.connect(database) as db:
         assert db.execute('SELECT install_status FROM installations WHERE id=?', (start['installation_id'],)).fetchone()[0] == 'in_progress'
         assert db.execute('SELECT local_boot_source FROM machines WHERE id=1').fetchone()[0] == 'none'
 
-    finish_status, finish = request(database, tmp, 'installEnd', '192.0.2.2', TOKEN)
+    finish_status, finish = request(database, tmp, 'installEnd', '192.0.2.2', TOKEN, FINGERPRINT)
     assert finish_status == 200 and finish['machine_status'] == 'installed'
-    assert request(database, tmp, 'installEnd', '192.0.2.2', TOKEN)[0] == 200
+    assert request(database, tmp, 'installEnd', '192.0.2.2', TOKEN, FINGERPRINT)[0] == 200
     with sqlite3.connect(database) as db:
         assert db.execute('SELECT install_status FROM installations WHERE id=?', (start['installation_id'],)).fetchone()[0] == 'success'
         assert db.execute('SELECT local_boot_source FROM machines WHERE id=1').fetchone()[0] == 'pxe'
+        assert db.execute('SELECT action_id FROM machine_events WHERE message LIKE ?',
+                          ('%' + FINGERPRINT,)).fetchall() == [(1,)]
     assert request(database, tmp, 'installStart', '127.0.0.1')[0] == 409
     with sqlite3.connect(database) as db:
         assert db.execute('SELECT count(*) FROM installations WHERE machine_id=1').fetchone()[0] == 1

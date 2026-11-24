@@ -455,6 +455,11 @@ final class PxeController
             Machine::setStatus((int)$m['id'], $machineStatus);
             if ($statusParam === 'success' && $installId !== null) {
                 Machine::setLocalBootSource((int)$m['id'], 'pxe');
+                $fingerprint = $_POST['ssh_host_fingerprint'] ?? null;
+                if (is_string($fingerprint) && preg_match('/\ASHA256:[A-Za-z0-9+\/]{43}\z/', $fingerprint)) {
+                    MachineEvent::log((int)$m['id'], MachineEvent::LEVEL_INFO,
+                        "Empreinte SSH déclarée par Debian Installer : $fingerprint", null, (int)$action['id']);
+                }
             }
             $pdo->commit();
         } catch (\Throwable $e) {
