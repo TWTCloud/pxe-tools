@@ -501,8 +501,10 @@ def compare_install(ports, paths):
     assert re.search(guard, decoded[0]).group(1) == re.search(guard, decoded[1]).group(1)
     for seed in decoded:
         assert "d-i pkgsel/include string openssh-server curl iproute2" in seed
-        assert "in-target /usr/bin/curl -fsS --connect-timeout 5 --max-time 20 --retry 3" in seed
-        assert "systemctl enable pxe-postboot.service || exit 1" in seed
+        assert "--data 'first_boot=1'" in seed
+        assert '--data-urlencode "ssh_host_fingerprint=$ssh_fingerprint"' in seed
+    assert "/etc/systemd/system-generators/pxe-first-boot" in decoded[0]
+    assert "systemctl enable pxe-postboot.service || exit 1" in decoded[1]
     dependency = re.search(r"echo ([A-Za-z0-9+/=]+) \| base64 -d > /etc/systemd/system/pxe-postboot.service.d/ready.conf", decoded[1])
     assert base64.b64decode(dependency.group(1)) == (
         b"[Unit]\nRequires=pxe-machine-ready.service\nAfter=pxe-machine-ready.service\n"
@@ -750,8 +752,17 @@ def compare_install(ports, paths):
     assert result == {"status": "ok", "bytes": len(chunk), "appended": len(chunk), "seq": 42}
     assert compare(ports, CHECKPOINT + query + "&code=late_command_started&ack=1", 200,
                    method="POST", peer="lan", token=token) == b""
-    assert compare(ports, END, 200, method="POST", peer="lan", token=token,
-                   content_type="application/x-www-form-urlencoded", body=urlencode({"mac": mac}))["machine_status"] == "installed"
+    fingerprint = "SHA256:" + "A" * 43
+    completion = urlencode({"mac": mac, "first_boot":"1", "ssh_host_fingerprint":fingerprint})
+    for _ in range(2):
+        assert compare(ports, END, 200, method="POST", peer="lan", token=token,
+                       content_type="application/x-www-form-urlencoded", body=completion)["machine_status"] == "installed"
+    expected = compare_states(paths, [
+        "SELECT checkpoint,message FROM machine_events WHERE action_id=162 AND "
+        "(checkpoint='os_first_boot_expected' OR message LIKE 'Empreinte SSH déclarée par Debian Installer%') ORDER BY id",
+    ])
+    assert expected == [[("os_first_boot_expected", "Confirmation du premier démarrage attendue"),
+                         (None, f"Empreinte SSH déclarée par Debian Installer : {fingerprint}")]]
     compare(ports, END + query, 200, peer="lan", token=token)  # Replay is idempotent.
     compare(ports, PRESEED + query, 404, peer="lan")
     compare(ports, START + query, 409)

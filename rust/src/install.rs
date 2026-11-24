@@ -231,6 +231,8 @@ pub fn end(
     raw_mac: &str,
     token: &str,
     status: &str,
+    expect_first_boot: bool,
+    ssh_fingerprint: Option<&str>,
 ) -> ApiResult {
     if normalize_mac(raw_mac).is_none() {
         return failure(400, "mac required");
@@ -282,12 +284,41 @@ pub fn end(
         params![status, ansible_status, id],
     )?;
     set_machine_status(&tx, machine.id, &machine.status, machine_status)?;
-    if status == "success" && tx.execute(
-        "UPDATE machines SET local_boot_source = 'pxe' WHERE id = ? AND local_boot_source != 'pxe'",
-        [machine.id],
-    )? != 0 {
-        log_event(&tx, machine.id, "action", "Démarrage local : activé après installation PXE réussie", None, None)?;
-        enqueue_menus(&tx)?;
+    if status == "success" {
+        if tx.execute(
+            "UPDATE machines SET local_boot_source = 'pxe' WHERE id = ? AND local_boot_source != 'pxe'",
+            [machine.id],
+        )? != 0 {
+            log_event(&tx, machine.id, "action", "Démarrage local : activé après installation PXE réussie", None, None)?;
+            enqueue_menus(&tx)?;
+        }
+        if expect_first_boot {
+            log_event(
+                &tx,
+                machine.id,
+                "info",
+                "Confirmation du premier démarrage attendue",
+                Some("os_first_boot_expected"),
+                Some(action.id),
+            )?;
+        }
+        if let Some(fingerprint) = ssh_fingerprint.filter(|value| {
+            value.strip_prefix("SHA256:").is_some_and(|digest| {
+                digest.len() == 43
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"+/".contains(&byte))
+            })
+        }) {
+            log_event(
+                &tx,
+                machine.id,
+                "info",
+                &format!("Empreinte SSH déclarée par Debian Installer : {fingerprint}"),
+                None,
+                Some(action.id),
+            )?;
+        }
     }
     tx.commit()?;
     Ok((

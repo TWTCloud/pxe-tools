@@ -391,7 +391,10 @@ impl Profile {
                 "/bin/sh /tmp/pxe-dilog.sh flush '{log_url}' '{token}' || true"
             ));
             late.push("kill $(cat /tmp/pxe-dilog.pid 2>/dev/null) 2>/dev/null || true".into());
-            late.push(format!("in-target /usr/bin/curl -fsS -X POST -H 'Authorization: Bearer {token}' '{base_url}/api/install-end?mac={mac}&status=success' || true"));
+            late.push("ssh_fingerprint='' ; if [ -r /target/etc/ssh/ssh_host_ed25519_key.pub ]; then ssh_fingerprint=$(in-target --pass-stdout /usr/bin/ssh-keygen -E sha256 -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}'); fi".into());
+            late.push(format!(
+                "http_status=$(in-target --pass-stdout /usr/bin/curl -fsS --connect-timeout 5 --max-time 15 --retry 3 --retry-connrefused --output /dev/null --write-out '%{{http_code}}' --data 'first_boot=1' --data-urlencode \"ssh_host_fingerprint=$ssh_fingerprint\" -H 'Authorization: Bearer {token}' '{base_url}/api/install-end?mac={mac}&status=success') || exit 1 ; [ \"$http_status\" = 200 ] || exit 1"
+            ));
         }
         let mut early = commands("preseed/early_command", &early);
         if !early.is_empty() {

@@ -253,9 +253,16 @@ def schedule(machine, report):
 
 def successful_install(action):
     with closing(sqlite3.connect(DATABASE)) as db:
-        return db.execute("""SELECT i.install_status,m.status,m.local_boot_source
-                             FROM installations i JOIN machines m ON m.id=i.machine_id
-                             WHERE i.action_id=?""", (action,)).fetchone() == ("success", "installed", "pxe")
+        state = db.execute("""SELECT i.install_status,m.status,m.local_boot_source
+                              FROM installations i JOIN machines m ON m.id=i.machine_id
+                              WHERE i.action_id=?""", (action,)).fetchone()
+        if state != ("success", "installed", "pxe"):
+            return False
+        expected = db.execute("""SELECT COUNT(*) FROM machine_events
+                                 WHERE action_id=? AND checkpoint='os_first_boot_expected'""", (action,)).fetchone()
+        if expected != (1,):
+            raise RuntimeError("The action did not record exactly one expected first boot")
+        return True
 
 
 def first_boot(action):

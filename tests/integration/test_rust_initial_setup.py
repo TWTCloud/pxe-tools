@@ -1814,7 +1814,9 @@ def verify_worker_service(binary):
             action = db.execute("INSERT INTO actions(machine_id,type,status,token) "
                                 "VALUES(?,'install_only','running',?)",(machine, secrets.token_hex(32))).lastrowid
             install = db.execute("INSERT INTO installations(machine_id,install_status,ansible_status,action_id,ended_at) "
-                                 "VALUES(?,'success','pending',?,CURRENT_TIMESTAMP)",(machine,action)).lastrowid
+                                 "VALUES(?,'success','pending',?,'2000-01-01 00:00:00')",(machine,action)).lastrowid
+            db.execute("INSERT INTO machine_events(machine_id,action_id,checkpoint,message) "
+                       "VALUES(?,?,'os_first_boot_expected','awaiting boot')",(machine,action))
             db.executemany("INSERT INTO init_jobs(job_type,status) VALUES(?,'pending')", [
                 ('bootstrap:build_grub',),('bootstrap:generate_mok',),('system:nginx_reload',),
             ])
@@ -1849,6 +1851,7 @@ def verify_worker_service(binary):
                 temporary.replace(config)
                 wait_for('SELECT status FROM init_jobs ORDER BY id', [('success',),('success',),('failed',)])
                 assert calls.read_text().splitlines() == ['generate-mok','build-grub']
+                time.sleep(1.2)
                 with closing(sqlite3.connect(database)) as db, db:
                     assert db.execute('SELECT status FROM actions').fetchone() == ('running',)
                     assert db.execute('SELECT id,ansible_status FROM installations').fetchone() == (install,'pending')
