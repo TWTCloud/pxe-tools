@@ -205,8 +205,10 @@ def installer_bootloader_log(container):
     data=docker('exec',container,'cat','/tmp/fixture-installer.log',check=False).stdout
     messages=re.split(r'(?=<\d{1,3}>)|\n',data)
     return '\n'.join(message for message in messages if re.search(
-        r'grub-(?:installer|install|efi)|efibootmgr|efivarfs',message,re.IGNORECASE,
-    ))[-9000:]
+        r'grub-(?:installer|install|efi|probe)|shim-signed|efibootmgr|efivarfs|'
+        r'mapdevfs|mountvirtfs|partmap|/target/(?:proc|run)|oom-kill|out of memory|killed process',
+        message,re.IGNORECASE,
+    ))[-12000:]
 
 
 def run_rust_guests(lan,client,root,log, *, screen_login=False, access_log=None, uefi_image=None,
