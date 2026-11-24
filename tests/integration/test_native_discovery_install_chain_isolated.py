@@ -136,12 +136,13 @@ chown pxe-tools-ansible:pxe-tools-ansible "$work/ansible.cfg" "$work/inventory.i
 def guest_command(app, identity, fixture, user, command):
     if endpoint(app)!=identity:
         raise RuntimeError('fixture namespace changed during the SSH check')
+    # Once connected, sudo and the disk checks still run under TCG.
     return run('nsenter','-t',str(identity[0]),'-n',
                'ssh','-F','/dev/null','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes',
                '-o','HostKeyAlgorithms=ssh-ed25519',
                '-o','IdentitiesOnly=yes','-o','ConnectTimeout=3','-o','GlobalKnownHostsFile=/dev/null',
                '-o',f'UserKnownHostsFile={fixture/"known_hosts"}','-i',str(fixture/'client-key'),
-               user+'@192.0.2.100',command,check=False,timeout=15)
+               user+'@192.0.2.100',command,check=False,timeout=90)
 
 
 def main():
