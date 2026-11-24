@@ -315,7 +315,7 @@ impl Console {
                     return view.serve(&db, &db_path, &path, &query, page, catalog).ok();
                 }
                 if let Action::Jobs(view) = &action {
-                    return view.serve(&db, page).ok();
+                    return view.serve(&db, &db_path, page).ok();
                 }
                 if let Action::Presets(form) = &action {
                     return super::presets::serve(&db, &db_path, form.as_deref(), page).ok();

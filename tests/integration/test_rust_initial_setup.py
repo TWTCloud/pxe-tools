@@ -661,6 +661,41 @@ def verify_job_console(client, database, authorization):
     assert latest[0] == 200 and json.loads(latest[2]) == json.loads(status[2])
     missing = client.request('/jobs/9223372036854775807/status', authorization=authorization)
     assert missing[0] == 404 and json.loads(missing[2]) == {'found':False}
+    with closing(sqlite3.connect(database)) as db, db:
+        failed = [
+            db.execute(
+                """INSERT INTO init_jobs(job_type,status,progress_percent,message,log,
+                                         started_at,ended_at,updated_at)
+                   VALUES(?,'failed',30,'Fixture failure','previous log',
+                          CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""",
+                (kind,),
+            ).lastrowid
+            for kind in ('bootstrap:restart_dnsmasq', 'bootstrap:rebuild_grub', 'image:delete:98765')
+        ]
+    retry = f'/api/init-retry-job/{failed[1]}'
+    page = client.request(f'/jobs/{failed[1]}', authorization=authorization)
+    assert retry.encode() in page[2]
+    assert client.request(retry, form={})[0] == 401
+    assert client.request(retry, form={}, authorization=authorization, secure=False)[0] == 404
+    assert client.request(retry, form={}, authorization=authorization, origin='https://outside.example')[0] == 403
+    assert client.request(retry, authorization=authorization)[0] == 405
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute('SELECT status FROM init_jobs WHERE id=?', (failed[1],)).fetchone() == ('failed',)
+    for identifier in [job, *failed, failed[1]]:
+        reply = client.request(f'/api/init-retry-job/{identifier}', form={}, authorization=authorization)
+        assert reply[:2] == (303, f'/jobs/{identifier}'), reply
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute('SELECT status FROM init_jobs WHERE id=?', (job,)).fetchone() == ('running',)
+        assert db.execute('SELECT status FROM init_jobs WHERE id=?', (failed[0],)).fetchone() == ('failed',)
+        assert db.execute(
+            """SELECT status,progress_percent,message,log,started_at,ended_at,updated_at
+               FROM init_jobs WHERE id IN (?,?) ORDER BY id""", failed[1:],
+        ).fetchall() == [
+            ('pending', 0, None, '', None, None, None),
+            ('pending', 0, None, 'previous log', None, None, None),
+        ]
+        db.executemany('DELETE FROM init_jobs WHERE id=?', ((identifier,) for identifier in failed))
+    print('Rust job console retries failed jobs once and retains image deletion metadata', flush=True)
     print('Rust job console preserves authenticated job status and escapes rendered logs', flush=True)
 
 

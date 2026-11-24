@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::{admin::escape, bytes, plain, setup::page, ErrorBox, Reply};
-use hyper::{Response, StatusCode};
-use rusqlite::{Connection, OptionalExtension, Row};
+use super::{
+    admin::escape,
+    bytes, plain,
+    setup::{page, redirect},
+    ErrorBox, Reply,
+};
+use crate::connect;
+use hyper::{Method, Response, StatusCode};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::json;
-use std::fmt::Write;
+use std::{fmt::Write, path::Path};
 
 const PAGE_SIZE: u32 = 50;
 
@@ -15,6 +21,7 @@ pub(super) enum View {
     Poll(i64),
     Status(i64),
     Latest(String),
+    Retry(i64),
 }
 
 impl View {
@@ -29,6 +36,9 @@ impl View {
                 .unwrap_or_default();
             return Some(Self::Latest(kind));
         }
+        if let Some(id) = path.strip_prefix("/api/init-retry-job/") {
+            return Some(Self::Retry(id.parse().unwrap_or(0)));
+        }
         let rest = path.strip_prefix("/jobs/")?;
         let (id, view) = rest.split_once('/').unwrap_or((rest, ""));
         let id = id.parse::<i64>().ok().filter(|id| *id > 0)?;
@@ -40,7 +50,19 @@ impl View {
         }
     }
 
-    pub(super) fn serve(&self, db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
+    pub(super) fn allows(&self, method: &Method) -> bool {
+        match self {
+            Self::Retry(_) => *method == Method::POST,
+            _ => matches!(*method, Method::GET | Method::HEAD),
+        }
+    }
+
+    pub(super) fn serve(
+        &self,
+        db: &Connection,
+        db_path: &Path,
+        number: u32,
+    ) -> Result<Reply, ErrorBox> {
         const STATUS: &str =
             "SELECT id,job_type,status,progress_percent,message,started_at,ended_at,updated_at FROM init_jobs";
         match self {
@@ -66,6 +88,7 @@ impl View {
                     .optional()?;
                 status(job, StatusCode::OK)
             }
+            Self::Retry(id) => retry(db_path, *id),
         }
     }
 }
@@ -108,6 +131,28 @@ fn status(job: Option<Job>, absent: StatusCode) -> Result<Reply, ErrorBox> {
         job: Job,
     }
     json_reply(StatusCode::OK, Found { found: true, job })
+}
+
+fn retry(db_path: &Path, id: i64) -> Result<Reply, ErrorBox> {
+    if id <= 0 {
+        return json_reply(StatusCode::BAD_REQUEST, json!({"error":"id invalide"}));
+    }
+    let db = connect(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    db.execute(
+        "UPDATE init_jobs SET status='pending', started_at=NULL, ended_at=NULL,
+           updated_at=NULL, progress_percent=0, message=NULL,
+           log=CASE WHEN job_type LIKE 'image:delete:%' THEN log ELSE '' END
+         WHERE id=?1 AND status='failed'
+           AND NOT EXISTS (
+             SELECT 1 FROM init_jobs AS active
+             WHERE active.job_type=init_jobs.job_type AND active.status IN ('pending','running')
+           )",
+        [id],
+    )?;
+    Ok(redirect(StatusCode::SEE_OTHER, format!("/jobs/{id}")))
 }
 
 pub(super) fn json_reply(code: StatusCode, value: impl Serialize) -> Result<Reply, ErrorBox> {
@@ -176,6 +221,12 @@ fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
     html.push_str("</p><pre>");
     escape(&mut html, &log);
     html.push_str("</pre>");
+    if job.status == "failed" {
+        write!(
+            html,
+            r#"<form method="post" action="/api/init-retry-job/{id}"><button>Relancer la tâche</button></form>"#
+        )?;
+    }
     if fragment {
         return Ok(Response::builder()
             .status(StatusCode::OK)
