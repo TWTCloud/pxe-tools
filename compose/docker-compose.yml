@@ -30,6 +30,8 @@ services:
       # Configuration persistante et secrets chiffrants : db.conf, master.key
       # et future clé privée du worker. À sauvegarder avec pxe_data.
       - pxe_conf:/etc/pxe-tools
+      # Certificat d’instance des images Rust guidées.
+      - pxe_tls:/var/lib/pxe-tools-tls
       # MOK keypair (cert signature GRUB EFI). Volume séparé pour pouvoir
       # regénérer/restaurer indépendamment de pxe_data.
       - pxe_mok:/etc/pxe-tools/mok
@@ -52,9 +54,15 @@ services:
       BIOS_BOOTLOADER: ${BIOS_BOOTLOADER:-lpxelinux.0}
       UEFI_BOOTLOADER: ${UEFI_BOOTLOADER:-grubnetx64.efi}
       UEFI_ENABLED: ${UEFI_ENABLED:-true}
+      PXE_ARM64_SECURE_BOOT: ${PXE_ARM64_SECURE_BOOT:-}
 
       # === TLS (Spec A) ===
       TLS_CN: ${TLS_CN:-pxe-tools.local}
+      PXE_PUBLIC_HOST: ${PXE_PUBLIC_HOST:-}
+      PXE_ACME: ${PXE_ACME:-}
+      PXE_ACME_EMAIL: ${PXE_ACME_EMAIL:-}
+      PXE_ACME_DIRECTORY_URL: ${PXE_ACME_DIRECTORY_URL:-}
+      PXE_ACME_CA_FILE: ${PXE_ACME_CA_FILE:-}
 
       # === Auth (Lot 3 Spec B) ===
       # 'local' (default) : login form + bcrypt + sessions PHP via wizard d'init.
@@ -109,6 +117,7 @@ services:
 volumes:
   pxe_data: {}
   pxe_conf: {}
+  pxe_tls: {}
   pxe_mok: {}
   pxe_http: {}
   pxe_tftp: {}

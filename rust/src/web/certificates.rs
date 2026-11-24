@@ -66,7 +66,7 @@ impl Certificates {
         if !directory.is_absolute() {
             return Err("TLS import directory must have an absolute path".into());
         }
-        let acme_from_env = env::var_os("PXE_ACME").is_some();
+        let acme_from_env = env::var_os("PXE_ACME").is_some_and(|mode| !mode.is_empty());
         let acme = if acme_from_env {
             acme::Config::from_env(public_host.as_deref())?
         } else {

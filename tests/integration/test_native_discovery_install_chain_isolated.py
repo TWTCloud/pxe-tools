@@ -347,8 +347,9 @@ def verify_arm64_signed_loaders(root=None, *, native=False):
             mounts.extend(('--mount',f'type=bind,src={root/source},dst={target}'))
     source_image=image if native else appliance_image
     defaults=('set -a; source /usr/lib/pxe-tools/native/default.env; set +a; ' if native else '')
+    arm64_on_amd64='' if client_arch=='arm64' else 'export PXE_ARM64_SECURE_BOOT=1; '
     result=docker('run','--rm','--network','bridge',*mounts,'--entrypoint','/bin/bash',source_image,'-ec',
-                  defaults+f'export PXE_ARM64_SECURE_BOOT=1 PXE_IP=192.0.2.1 MOK_DIR={mok_path} '
+                  defaults+arm64_on_amd64+f'export PXE_IP=192.0.2.1 MOK_DIR={mok_path} '
                   f'HTTP_ROOT={http_path} TFTP_ROOT=/run/fixture-tftp; '
                   'install -d "$HTTP_ROOT" "$TFTP_ROOT"; '
                   'bash /opt/pxe-tools/scripts/bootstrap-generate-mok.sh; '
@@ -448,10 +449,8 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     forbidden_migration.write_text('<?php exit(89);\n')
     mounts.extend(('--mount',f'type=bind,src={forbidden_migration},dst={legacy_migration},readonly'))
 
-    if client_arch=='arm64':
-        env.append('PXE_ARM64_SECURE_BOOT=1')
-        if native:
-            mounts.extend(('--mount',f'type=bind,src={root/"native-certs/mok"},dst={mok_root}'))
+    if client_arch=='arm64' and native:
+        mounts.extend(('--mount',f'type=bind,src={root/"native-certs/mok"},dst={mok_root}'))
     if amd64:
         windows=root/'http/winpe/amd64'
         windows.mkdir(parents=True)

@@ -165,7 +165,9 @@ certificat de l’instance. Le certificat externe importé est prioritaire.
 Les exploitants peuvent imposer un mode en définissant `PXE_ACME`
 (`off`, `staging`, `production` ou `private`) et un contact facultatif
 `PXE_ACME_EMAIL`. Sur APT, placer ces variables dans
-`/etc/pxe-tools/acme.env`. Pour Docker, utiliser l’environnement du conteneur.
+`/etc/pxe-tools/acme.env`. Pour Docker, utiliser l’environnement du conteneur. Le fichier Compose
+transmet ces variables et conserve la paire d’instance dans le volume
+nommé `pxe_tls`.
 Pour une autorité privée, fournir son URL HTTPS dans
 `PXE_ACME_DIRECTORY_URL` et un chemin absolu lisible vers son autorité de
 confiance dans `PXE_ACME_CA_FILE`. Ces deux valeurs rendent également
@@ -399,9 +401,10 @@ variables du firmware et demande une preuve d’activation dans
 l’inventaire de découverte puis dans le premier démarrage installé.
 L’architecture du serveur et celle du client sont distinctes. Le démarrage
 d’un client ARM64 avec Secure Boot utilise une chaîne en qualification.
-L’option `PXE_ARM64_SECURE_BOOT=1` du worker prépare le shim et le
+Le worker des distributions Rust sur ARM64 prépare par défaut le shim et le
 MokManager ARM64 authentifiés depuis Debian, puis publie un GRUB ARM64
-signé par la MOK de l’instance. Le preseed trixie demande les paquets
+signé par la MOK de l’instance. L’option `PXE_ARM64_SECURE_BOOT=1` active
+cette chaîne sur un serveur amd64. Le preseed trixie demande les paquets
 signés adaptés à l’architecture du client UEFI. Le banc Docker ARM64
 lance un invité AArch64 avec AAVMF sur le runner ARM64. Sur `b08d7e6`,
 le banc a vérifié Secure Boot dans l’inventaire et au premier démarrage

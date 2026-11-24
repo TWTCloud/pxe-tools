@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build GRUB EFI custom : http builtin + grub-early.cfg embedded.
-# x86_64-efi signé MOK. La chaîne arm64 signée est optionnelle pendant sa qualification.
+# Chargeurs x86_64 et ARM64 signés MOK selon la configuration.
 # Idempotent : skip si binaire existe ET grub-early.cfg pas plus récent.
 # REBUILD=1 force la régénération.
 set -euo pipefail
@@ -142,7 +142,8 @@ cleanup() {
 }
 trap cleanup EXIT
 sbat_source_args=()
-if [ "$(dpkg --print-architecture)" = arm64 ]; then
+host_arch=$(dpkg --print-architecture)
+if [ "$host_arch" = arm64 ]; then
     : "${DEBIAN_ARCHIVE_KEYRING=/usr/share/keyrings/debian-archive-keyring.gpg}"
     grub_stage=$(mktemp -d /run/pxe-grub-amd64.XXXXXXXX)
     python3 "$BOOTSTRAP_SCRIPTS_DIR/prepare-debian-shim.py" "$grub_stage" "$DEBIAN_ARCHIVE_KEYRING" --with-grub
@@ -181,7 +182,11 @@ else
     tmp_shim=''
 fi
 
-if [[ "${PXE_ARM64_SECURE_BOOT:-0}" == 1 ]]; then
+arm_secure_boot="${PXE_ARM64_SECURE_BOOT:-}"
+if [[ -z "$arm_secure_boot" && "${PXE_RUST_GUIDED:-0}" == 1 && "$host_arch" == arm64 ]]; then
+    arm_secure_boot=1
+fi
+if [[ "$arm_secure_boot" == 1 ]]; then
     : "${DEBIAN_ARCHIVE_KEYRING=/usr/share/keyrings/debian-archive-keyring.gpg}"
     arm_stage=$(mktemp -d /run/pxe-grub-arm64.XXXXXXXX)
     python3 "$BOOTSTRAP_SCRIPTS_DIR/prepare-debian-shim.py" "$arm_stage" "$DEBIAN_ARCHIVE_KEYRING" \

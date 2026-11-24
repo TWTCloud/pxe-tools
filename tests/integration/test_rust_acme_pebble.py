@@ -95,13 +95,16 @@ def check(binary, pebble, resolver):
             directory.mkdir()
         generate_authority_endpoint(ca)
         generate_tls_pair(default, 'fixture-instance')
-        start(stack, [resolver, '-dns01', f'127.0.0.1:{dns_port}', '-management', f'127.0.0.1:{dns_admin}',
+        help_text = subprocess.run([resolver, '-h'], text=True, capture_output=True, check=True)
+        dns_flag = '-dnsserver' if '-dnsserver' in help_text.stderr + help_text.stdout else '-dns01'
+        start(stack, [resolver, dns_flag, f'127.0.0.1:{dns_port}', '-management', f'127.0.0.1:{dns_admin}',
                       '-http01', '', '-https01', '', '-tlsalpn01', '', '-doh', '', '-defaultIPv6', ''])
         settings = root/'pebble.json'
         settings.write_text(json.dumps({'pebble': {
             'listenAddress':f'127.0.0.1:{ca_port}', 'managementListenAddress':f'127.0.0.1:{admin_port}',
             'certificate':str(ca/'cert.pem'), 'privateKey':str(ca/'key.pem'),
             'httpPort':http_port, 'tlsPort':https_port, 'certificateValidityPeriod':45,
+            'profiles':{'default':{'validityPeriod':45}},
             'retryAfter':{'authz':1, 'order':1},
         }}))
         authority = start(stack, [pebble, '-config', str(settings), '-dnsserver', f'127.0.0.1:{dns_port}'],
@@ -129,7 +132,7 @@ def check(binary, pebble, resolver):
                'PXE_PUBLIC_HOST':HOST, 'AUTH_MODE':'local', 'PXE_DB_PATH':str(database),
                'PXE_DB_DRIVER':'sqlite', 'PXE_SETUP_DATA_ROOT':str(data),
                'PXE_ACME_DIRECTORY_URL':f'https://127.0.0.1:{ca_port}/dir', 'PXE_ACME_CA_FILE':str(ca/'ca.pem')}
-        env.pop('PXE_ACME', None)
+        env['PXE_ACME'] = ''
         service = start(stack, command, env)
         client = Client(default, http_port, https_port)
         client.ready(service)
