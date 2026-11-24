@@ -6,6 +6,7 @@ mod admin;
 mod assets;
 mod auth_proxy;
 mod certificates;
+mod device_operations;
 mod device_settings;
 mod devices;
 mod images;

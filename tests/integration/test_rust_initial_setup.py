@@ -525,6 +525,53 @@ def verify_device_settings(client, database, authorization):
     print('Rust device settings preserve fields and close administrative tracking without a remote command', flush=True)
 
 
+def verify_device_operations(client, database, authorization):
+    def request(path, **kwargs):
+        return client.request(path, authorization=authorization, **kwargs)
+
+    with closing(sqlite3.connect(database)) as db, db:
+        device = db.execute(
+            """INSERT INTO machines(mac,hostname,status,awaiting_action_until)
+               VALUES('02:00:00:00:09:20','fixture-rescue','discovered',datetime('now','+1 hour'))"""
+        ).lastrowid
+        db.execute("INSERT INTO disk_tests(machine_id,jobs_json,job_status) VALUES (?,'[]','running')", [device])
+    path = f'/machines/{device}'
+    rescue, rediscover = path+'/rescue', path+'/rediscover'
+    assert client.request(rescue, form={})[0] == 401
+    assert request(rescue, form={}, secure=False)[0] == 404
+    assert request(rescue, form={}, origin='https://outside.example')[0] == 403
+    assert request(rescue)[0] == 405
+    assert request(rescue, form={})[0] == 409
+    assert request(rediscover, form={})[0] == 409
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute('SELECT status,rescue_mode,next_action FROM machines WHERE id=?', [device]).fetchone() == (
+            'discovered',0,None,
+        )
+        assert db.execute('SELECT id FROM init_jobs WHERE job_type=?', [f'machine:reboot:{device}']).fetchone() is None
+        db.execute("UPDATE disk_tests SET job_status='success' WHERE machine_id=?", [device])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: request(rescue, form={})[0], range(2)))
+    assert sorted(results) == [303,409], results
+    assert b'Quitter le mode' in request(path)[2]
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute('SELECT status,rescue_mode,next_action,awaiting_action_until FROM machines WHERE id=?',
+                          [device]).fetchone() == ('discovered',1,'reboot',None)
+        assert db.execute('SELECT status FROM init_jobs WHERE job_type=?', [f'machine:reboot:{device}']).fetchall() == [
+            ('pending',),
+        ]
+        db.execute("UPDATE init_jobs SET status='success' WHERE job_type=?", [f'machine:reboot:{device}'])
+    assert request(rescue+'/exit', form={})[:2] == (303,path)
+    assert request(rediscover, form={})[:2] == (303,path)
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute('SELECT status,rescue_mode,next_action FROM machines WHERE id=?', [device]).fetchone() == (
+            'inventorying',0,'reboot',
+        )
+        assert db.execute('SELECT status FROM init_jobs WHERE job_type=? ORDER BY id',
+                          [f'machine:reboot:{device}']).fetchall() == [('success',),('pending',)]
+    print('Rust recovery and inventory operations reject legacy conflicts and serialize reboot scheduling', flush=True)
+
+
 def verify_admin_attempt_limit(client, authorization):
     path = '/admin/devices'
     for _ in range(21):
@@ -1179,6 +1226,7 @@ def local(binary):
         updated.ready(schedule_server)
         verify_device_settings(updated, database, authorization)
         verify_guided_install(updated, database, authorization)
+        verify_device_operations(updated, database, authorization)
         verify_appliance_settings(updated, database, authorization)
         verify_admin_attempt_limit(updated, authorization)
         schedule_server.terminate()

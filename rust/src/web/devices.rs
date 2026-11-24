@@ -2,6 +2,7 @@
 
 use super::{
     admin::escape,
+    device_operations::{self, Operation},
     plain,
     presets::GUIDED,
     setup::{page, redirect},
@@ -72,6 +73,7 @@ enum Section {
     Detail,
     Install,
     Status,
+    Command(Operation),
 }
 
 pub(super) fn route(path: &str) -> Option<DeviceRoute> {
@@ -82,6 +84,9 @@ pub(super) fn route(path: &str) -> Option<DeviceRoute> {
         "" => Section::Detail,
         "install" => Section::Install,
         "status" => Section::Status,
+        "rediscover" => Section::Command(Operation::Rediscover),
+        "rescue" => Section::Command(Operation::Rescue),
+        "rescue/exit" => Section::Command(Operation::ExitRescue),
         _ => return None,
     };
     Some(DeviceRoute { id, section })
@@ -90,7 +95,9 @@ pub(super) fn route(path: &str) -> Option<DeviceRoute> {
 impl DeviceRoute {
     pub(super) fn form_limit(&self, method: &hyper::Method) -> Option<usize> {
         match (&self.section, method) {
-            (Section::Install | Section::Status, &hyper::Method::POST) => Some(2048),
+            (Section::Install | Section::Status | Section::Command(_), &hyper::Method::POST) => {
+                Some(2048)
+            }
             (Section::Detail, &hyper::Method::PUT | &hyper::Method::POST) => Some(64 * 1024),
             _ => None,
         }
@@ -105,8 +112,9 @@ impl DeviceRoute {
         username: &str,
     ) -> Result<Reply, ErrorBox> {
         if let Some(form) = form {
-            return match self.section {
+            return match &self.section {
                 Section::Install => schedule(path, self.id, form, username),
+                Section::Command(operation) => operation.run(path, self.id, form),
                 Section::Detail | Section::Status => super::device_settings::update(
                     path,
                     self.id,
@@ -123,6 +131,10 @@ impl DeviceRoute {
             Section::Install => install_form(db, self.id, &device),
             Section::Detail => detail(db, self.id, &device),
             Section::Status => super::device_settings::badge(db, self.id, &device.status),
+            Section::Command(_) => Ok(plain(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "Method not allowed\n",
+            )),
         }
     }
 }
@@ -133,18 +145,20 @@ struct Device {
     domain: Option<String>,
     status: String,
     arch: Option<String>,
+    rescue: bool,
     inventory: Value,
 }
 
 impl Device {
     fn get(db: &Connection, id: i64) -> rusqlite::Result<Option<Self>> {
         db.query_row(
-            "SELECT mac,COALESCE(hostname,''),domain,status,boot_arch,inventory_json FROM machines WHERE id=?",
+            "SELECT mac,COALESCE(hostname,''),domain,status,boot_arch,rescue_mode=1,inventory_json FROM machines WHERE id=?",
             [id],
             |row| Ok(Self {
                 mac: row.get(0)?, hostname: row.get(1)?, domain: row.get(2)?,
                 status: row.get(3)?, arch: row.get(4)?,
-                inventory: row.get::<_, Option<String>>(5)?
+                rescue: row.get(5)?,
+                inventory: row.get::<_, Option<String>>(6)?
                     .and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default(),
             }),
         ).optional()
@@ -184,6 +198,19 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
         output.push_str("</li>");
     }
     write!(output, "</ul><nav><a href=\"/machines/{id}/install\">Programmer une installation Debian</a> · <a href=\"/activity?machine={id}\">Activité</a> · <a href=\"/admin/devices\">Appareils</a></nav>")?;
+    output.push_str("<h2>Opérations PXE</h2>");
+    if device.rescue {
+        write!(
+            output,
+            r#"<form method="post" action="/machines/{id}/rescue/exit"><button>Quitter le mode récupération</button></form>"#
+        )?;
+    } else {
+        write!(
+            output,
+            r#"<form method="post" action="/machines/{id}/rediscover"><button>Redémarrer pour refaire l’inventaire</button></form>
+<form method="post" action="/machines/{id}/rescue"><button>Redémarrer en mode récupération</button></form>"#
+        )?;
+    }
     super::device_settings::form(db, id, &mut output)?;
     output.push_str("<h2>Derniers événements</h2><ul>");
     let mut events = db.prepare(
@@ -296,13 +323,14 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
     let Some(arch @ ("amd64" | "arm64")) = device.arch.as_deref() else {
         return Ok(plain(StatusCode::CONFLICT, "Inventaire PXE requis\n"));
     };
-    let blocked: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM actions WHERE machine_id=? AND status IN ('pending','running'))
-         OR EXISTS(SELECT 1 FROM init_jobs WHERE job_type='bootstrap:auto_refresh_catalog_v2' AND status='running')",
-        [id], |row| row.get(0),
+    let refreshing: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM init_jobs WHERE job_type='bootstrap:auto_refresh_catalog_v2' AND status='running')",
+        [], |row| row.get(0),
     )?;
     if setting(&tx, "pxe_enabled")? != "on"
-        || blocked
+        || refreshing
+        || device.rescue
+        || device_operations::busy(&tx, id)?
         || !matches!(
             device.status.as_str(),
             "discovered" | "tested" | "wiped" | "installed" | "provisioned"
