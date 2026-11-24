@@ -14,7 +14,7 @@ import tempfile
 import uuid
 
 from test_native_discovery_install_chain_isolated import (
-    ROOT, appliance_image, backend, connect_fixture_lan, docker, image, inspect, wait_for,
+    ROOT, appliance_image, backend, connect_fixture_lan, diagnostic_screen, docker, image, inspect, wait_for,
 )
 from verify_windows_pxe_deployment import (
     PREFIX, check_boot_assets, check_fingerprint, check_media, load_json, verify,
@@ -102,6 +102,17 @@ def start_appliance(app, lan, probe, root, boot_assets):
 
 
 def preflight():
+
+    # Probe the VM ioctl through QEMU. A visible /dev/kvm alone does not prove
+    # the Windows runner can run a nested KVM guest under WSL.
+    qmp = '\n'.join(json.dumps({'execute':command}) for command in ('qmp_capabilities','quit'))+'\n'
+    result = docker('run','--rm','-i','--network','none','--device','/dev/kvm',
+                    '--entrypoint','qemu-system-x86_64',image,
+                    '-machine','q35,accel=kvm','-cpu','host','-nodefaults','-display','none',
+                    '-S','-m','256','-qmp','stdio',input=qmp,check=False)
+    if result.returncode or '"QMP"' not in result.stdout or '"return"' not in result.stdout:
+        raise RuntimeError(f'The isolated runner could not start a KVM guest: {result.stderr.strip()}')
+    print('QEMU opened a disposable nested KVM guest.',flush=True)
     suffix = secrets.token_hex(5)
     app, lan, probe = (f'pxe-win-preflight-{name}-{suffix}' for name in ('app','lan','probe'))
     with tempfile.TemporaryDirectory(prefix='pxe-windows-preflight-',dir='/var/tmp') as temporary:
@@ -135,6 +146,7 @@ def run_guest(client, lan, helper, root, media, case, *, discovery):
             '-device','ide-cd,drive=windows_iso,bus=ide.1',
         )
         mount += ('--mount', f'type=bind,src={media/"windows.iso"},dst=/approved.iso,readonly')
+    (root/'qemu-monitor.sock').unlink(missing_ok=True)
     serial = 'winpe.log' if discovery else 'windows.log'
     network_order, disk_order = (1, 2) if discovery else (2, 1)
     restart = ('-no-reboot',) if discovery else ()
@@ -147,7 +159,8 @@ def run_guest(client, lan, helper, root, media, case, *, discovery):
            '-drive','if=pflash,unit=1,format=raw,file=/fixture-data/vars.fd',
            '-chardev','socket,id=chrtpm,path=/fixture-data/tpm.sock',
            '-tpmdev','emulator,id=tpm0,chardev=chrtpm','-device','tpm-tis,tpmdev=tpm0',
-           '-uuid',case['guest_id'],*restart,'-monitor','none','-serial','file:/fixture-data/'+serial,
+           '-uuid',case['guest_id'],*restart,'-serial','file:/fixture-data/'+serial,
+           '-monitor','unix:/fixture-data/qemu-monitor.sock,server=on,wait=off',
            '-fw_cfg','name=opt/org.tianocore/IPv6Support,string=no',
            '-drive','file=/fixture-data/client.qcow2,format=qcow2,if=none,id=disk',
            '-device',f'ide-hd,drive=disk,bus=ide.0,serial={case["disk_serial"]},bootindex={disk_order}',
@@ -170,7 +183,14 @@ def run_guest(client, lan, helper, root, media, case, *, discovery):
             return not state['Running'] and receipts == 1
         return receipts == 1
 
-    wait_for(completed, 900, phase)
+    try:
+        wait_for(completed, 900, phase)
+    except RuntimeError:
+        diagnostic_screen(root)
+        console = docker('logs','--tail','12',client,check=False)
+        if console.stderr:
+            print(console.stderr[-1600:],end='',flush=True)
+        raise
     docker('rm','-f',client)
 
 
