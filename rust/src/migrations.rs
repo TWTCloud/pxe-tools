@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod snapshots;
+
+pub(super) use snapshots::assigned_presets;
+
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use serde_json::Value;
 use std::{

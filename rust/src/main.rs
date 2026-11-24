@@ -90,6 +90,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         if flag == "--migrate-image-metadata" && Path::new(config).is_absolute() {
             return migrations::image_metadata(Path::new(config));
         }
+        if flag == "--migrate-assigned-presets" && Path::new(config).is_absolute() {
+            return migrations::assigned_presets(Path::new(config));
+        }
         if flag == "--migrate-network-settings" && Path::new(config).is_absolute() {
             return migrations::network_settings(Path::new(config));
         }

@@ -697,6 +697,78 @@ def verify_image_metadata_migration(binary):
     print('Rust migrated Debian catalog metadata and preserved explicitly selected releases', flush=True)
 
 
+def verify_assigned_preset_migration(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-preset-snapshots-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        config = root/'db.conf'
+        config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
+        app = Path(__file__).resolve().parents[2]/'app'
+        command = [str(binary),'--migrate-assigned-presets',str(config)]
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript((app/'db/schema.sqlite.sql').read_text())
+            layout = json.dumps({
+                'target_disks':[' /dev/sda ','/dev/sda'],
+                'target_disk_identities':{'/dev/sda':{'serial':'old-inventory'}},
+                'disks':[{'path':'/dev/sda','partitions':[{
+                    'id':' p1 ','fs':'lvm','fill':True,'reserved_pct':57,'mount_options':['noatime',' '],
+                }]}],
+                'vgs':[{'name':'vg0','pvs':['p1']}],
+                'logical_volumes':[{'vg':'vg0','name':'root','fs':'ext4','size_mb':'2e3','mount':'/'}],
+            })
+            advanced = json.dumps({
+                'network':{'interfaces':[
+                    {'mode':'dhcp'},
+                    {'match_by':'mac','match':{'mac':' 02:00:00:AB:00:01 '},'index':2,
+                     'mode':'static','static':{'ip':'192.0.2.3','dns':'192.0.2.53, 2001:db8::53'},
+                     'vlan':{'id':'42'},'bond':{'role':'slave','name':' bond0 '}},
+                ],'primary':4},
+                'localization':{'locale':'en_US.UTF-8','keymap':None},
+                'apt':{'non_free':True,'unknown':'ignored'},
+                'disk_target_constraints':{'/dev/sda':'fixture-serial'},
+            })
+            db.execute("""INSERT INTO presets(id,name,distro,admin_user_login)
+                          VALUES(1,'default','debian','fixture')""")
+            db.execute("""INSERT INTO presets(id,name,distro,admin_user_login,static_dns,partition_mode,
+                           partition_custom_json,advanced_config_json,admin_user_password_cipher,
+                           ansible_role,root_login_mode,hostname_random)
+                          VALUES(2,'advanced','debian','fixture','192.0.2.54','custom',?,?,'opaque',
+                                 'fixture-role','disabled',1)""", (layout,advanced))
+            db.executemany(
+                'INSERT INTO machines(id,mac,preset_id,install_config_json) VALUES(?,?,?,?)',
+                [
+                    (101,'02:00:00:00:00:01',1,None),
+                    (102,'02:00:00:00:00:02',2,''),
+                    (103,'02:00:00:00:00:03',2,'{"keep":true}'),
+                    (104,'02:00:00:00:00:04',None,None),
+                ],
+            )
+        reference = r'''
+require $argv[1] . '/src/Models/Preset.php';
+require $argv[1] . '/src/Util/DiskIdentity.php';
+$presets = json_decode(stream_get_contents(STDIN), true, 512, JSON_THROW_ON_ERROR);
+echo json_encode(array_map([Admin\Models\Preset::class, 'toInstallConfig'], $presets), JSON_THROW_ON_ERROR);
+'''
+        with closing(sqlite3.connect(database)) as db:
+            db.row_factory = sqlite3.Row
+            presets = [dict(row) for row in db.execute('SELECT * FROM presets ORDER BY id')]
+        expected = json.loads(subprocess.check_output(
+            ['php','-r',reference,str(app)], input=json.dumps(presets), text=True,
+        ))
+        for _ in range(2):
+            subprocess.run(command, check=True, capture_output=True)
+            with closing(sqlite3.connect(database)) as db:
+                records = [item[0] for item in db.execute('SELECT install_config_json FROM machines ORDER BY id')]
+            actual = [json.loads(item) for item in records[:2]]
+            for values in (expected,actual):
+                if isinstance(values[1]['partition_custom_json'],str):
+                    values[1]['partition_custom_json'] = json.loads(values[1]['partition_custom_json'])
+            assert actual==expected
+            assert records[2:]==['{"keep":true}',None]
+            assert 'target_disk_identities' not in actual[1]['partition_custom_json']
+    print('Rust restored assigned preset snapshots with PHP parity and preserved existing machine snapshots', flush=True)
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -758,6 +830,7 @@ def local(binary):
     verify_preset_network_migration(binary)
     verify_preset_distribution_migration(binary)
     verify_image_metadata_migration(binary)
+    verify_assigned_preset_migration(binary)
 
 
 def main():

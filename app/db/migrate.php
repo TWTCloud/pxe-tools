@@ -233,24 +233,28 @@ if ($rustGuided) {
 // nouveaux champs avancés, créant des snapshots legacy qui fallback bait au
 // mode 'enabled' même si le preset était 'disabled'.
 
-$snapshotsCreated = 0;
-$machineRowsToSnapshot = $pdo->query(
-    'SELECT m.id, m.preset_id, m.install_config_json, p.* '
-  . 'FROM machines m LEFT JOIN presets p ON m.preset_id = p.id '
-  . 'WHERE m.preset_id IS NOT NULL '
-  . 'AND (m.install_config_json IS NULL OR m.install_config_json = "")'
-)->fetchAll(PDO::FETCH_ASSOC);
+if ($rustGuided) {
+    $runsRustMigration('--migrate-assigned-presets');
+} else {
+    $snapshotsCreated = 0;
+    $machineRowsToSnapshot = $pdo->query(
+        'SELECT m.id, m.preset_id, m.install_config_json, p.* '
+      . 'FROM machines m LEFT JOIN presets p ON m.preset_id = p.id '
+      . 'WHERE m.preset_id IS NOT NULL '
+      . 'AND (m.install_config_json IS NULL OR m.install_config_json = "")'
+    )->fetchAll(PDO::FETCH_ASSOC);
 
-foreach ($machineRowsToSnapshot as $mrow) {
-    if (empty($mrow['preset_id']) || empty($mrow['name'])) continue;
-    $config = Preset::toInstallConfig($mrow);
-    $json = json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    $pdo->prepare('UPDATE machines SET install_config_json = ? WHERE id = ?')
-        ->execute([$json, $mrow['id']]);
-    $snapshotsCreated++;
+    foreach ($machineRowsToSnapshot as $mrow) {
+        if (empty($mrow['preset_id']) || empty($mrow['name'])) continue;
+        $config = Preset::toInstallConfig($mrow);
+        $json = json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $pdo->prepare('UPDATE machines SET install_config_json = ? WHERE id = ?')
+            ->execute([$json, $mrow['id']]);
+        $snapshotsCreated++;
+    }
+
+    echo "migrate-machines: $snapshotsCreated snapshot(s) créé(s) depuis preset assigné\n";
 }
-
-echo "migrate-machines: $snapshotsCreated snapshot(s) créé(s) depuis preset assigné\n";
 
 // ---------------------------------------------------------------------------
 // 5. ALTER TABLE idempotents — back-compat upgrades SQLite legacy
