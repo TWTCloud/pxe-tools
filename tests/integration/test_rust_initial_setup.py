@@ -339,7 +339,7 @@ def verify_tls_import(client, original, imported, persistent, authorization):
     return updated
 
 
-def verify_image_console(client, database, authorization):
+def verify_image_console(client, database, authorization, http_root):
     endpoint = '/settings/images'
 
     def submit(form, **kwargs):
@@ -365,13 +365,56 @@ def verify_image_console(client, database, authorization):
     with closing(sqlite3.connect(database)) as db, db:
         job, = db.execute("SELECT id FROM init_jobs WHERE job_type='bootstrap:refresh_catalog_v2'").fetchall()
         assert json.loads(db.execute("SELECT value FROM settings WHERE key='catalog_job_ids'").fetchone()[0]) == list(job)
-        db.execute("UPDATE os_images SET status='downloading', progress_percent=61 WHERE version_full='13.0-console'")
+        image, = db.execute("UPDATE os_images SET status='downloading',progress_percent=61 "
+                            "WHERE version_full='13.0-console' RETURNING id").fetchone()
     assert submit({'image':'9001'})[:2] == (303, endpoint)
     status, _, page = client.request(endpoint, authorization=authorization)
     assert status == 200 and b'Debian 13.0-console' in page
     assert b'&lt;trixie&gt;' in page and b'1.0-console' not in page
     assert b'<td>downloading</td><td>61 %</td>' in page
-    print('Rust image console displays legacy and live state and queues guided downloads and refreshes once', flush=True)
+    def action(suffix, form=None, **kwargs):
+        return client.request(endpoint+suffix,form=form,authorization=authorization,**kwargs)
+
+    auto = {'catalog_auto_refresh_enabled':'on','catalog_auto_refresh_interval_hours':'24'}
+    assert action('/auto-refresh',form={**auto,'catalog_auto_refresh_interval_hours':'48'})[0] == 422
+    assert action('/auto-refresh',form=auto,origin='https://other.example')[0] == 403
+    assert action('/auto-refresh',form=auto)[0] == 303
+    with closing(sqlite3.connect(database)) as db:
+        assert dict(db.execute("SELECT key,value FROM settings WHERE key LIKE 'catalog_auto_refresh_%'")) == {
+            'catalog_auto_refresh_enabled':'on','catalog_auto_refresh_interval_hours':'24',
+        }
+    assert action('/auto-refresh',form={})[0] == 303
+    assert action(f'/{image}/toggle',form={'enabled':'0'})[0] == 409
+    assert action(f'/{image}/download',form={})[0] == 409
+    assert action(f'/{image}',form={'_method':'DELETE'})[0] == 409
+
+    def fixture(version):
+        root = http_root/f'netboot/debian/{version}/arm64'
+        root.mkdir(parents=True)
+        for name in ('linux','initrd.gz'):
+            (root/name).write_bytes(b'fixture')
+        return root
+
+    original_files = fixture('13.0-console')
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE os_images SET status='downloaded' WHERE id=?",[image])
+    assert action(f'/{image}/toggle',form={'enabled':'0'})[0] == 409
+    assert action(f'/{image}/download',form={})[0] == 409
+    fixture('13.1-console')
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("INSERT INTO os_images(distro,version,version_full,arch,status,enabled) "
+                   "VALUES('debian','13.1-console','13.1-console','arm64','downloaded',1)")
+    assert action(f'/{image}/toggle', form={'enabled':'0'})[0] == 303
+    queued = action(f'/{image}',form={'_method':'DELETE'})
+    assert queued[0] == 303 and queued[1].startswith('/jobs/'),queued
+    assert action(f'/{image}',form={'_method':'DELETE'})[:2] == queued[:2]
+    assert action(f'/{image}/toggle',form={'enabled':'1'})[0] == 409
+    assert (original_files/'linux').read_bytes() == b'fixture'
+    with closing(sqlite3.connect(database)) as db:
+        record, = db.execute("SELECT log FROM init_jobs WHERE job_type=?",[f'image:delete:{image}']).fetchone()
+        assert json.loads(record) == {'id':image,'distro':'debian','version':'13.0-console',
+                                      'version_full':'13.0-console','arch':'arm64'}
+    print('Rust image console protects active downloads and the rescue image and reserves deletion once',flush=True)
 
 
 def verify_job_console(client, database, authorization):
@@ -1970,7 +2013,7 @@ def local(binary):
         updated.ready(replacement)
         assert b'Certificat externe' in updated.request('/admin/certificates', authorization=authorization)[2]
         print('The imported TLS pair survived a restart', flush=True)
-        verify_image_console(updated, database, authorization)
+        verify_image_console(updated, database, authorization, public)
         verify_job_console(updated, database, authorization)
         verify_activity(updated, database, authorization)
         replacement.terminate()

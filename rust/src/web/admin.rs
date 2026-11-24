@@ -44,7 +44,7 @@ pub(super) enum Action {
     Devices,
     Device(super::devices::DeviceRoute, Option<Bytes>),
     Register(Option<Bytes>),
-    Images(Option<Bytes>),
+    Images(super::images::Route, Option<Bytes>),
     Presets(Option<Bytes>),
     PullPresets,
     Jobs(super::jobs::View),
@@ -316,8 +316,15 @@ impl Console {
                 if let Action::PullPresets = &action {
                     return super::presets::pull(&db_path).ok();
                 }
-                if let Action::Images(form) = &action {
-                    return Some(super::images::serve(&db, &db_path, page, form.as_deref()));
+                if let Action::Images(route, form) = &action {
+                    return Some(super::images::serve(
+                        *route,
+                        &method,
+                        &db,
+                        &db_path,
+                        page,
+                        form.as_deref(),
+                    ));
                 }
                 if let Action::Setup(endpoint, form) = &action {
                     return Some(super::onboarding::serve(

@@ -585,9 +585,41 @@ async fn dispatch(
             )
             .await;
     }
+    if let Some(route) = images::Route::for_path(path) {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        if !route.allows(&parts.method) {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        }
+        let form = if readable {
+            None
+        } else {
+            if !admin_origin(&parts.headers, peer, site) {
+                return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+            }
+            if parts.method == Method::DELETE {
+                Some(Bytes::new())
+            } else {
+                match read_form(&parts.headers, body, 8192).await {
+                    Ok(form) => Some(form),
+                    Err(reply) => return reply,
+                }
+            }
+        };
+        return site
+            .admin
+            .serve(
+                &parts,
+                peer,
+                &site.database,
+                admin::Action::Images(route, form),
+            )
+            .await;
+    }
     if matches!(
         path,
-        certificates::ROUTE | certificates::ACME_ROUTE | images::ROUTE | presets::ROUTE
+        certificates::ROUTE | certificates::ACME_ROUTE | presets::ROUTE
     ) {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
@@ -619,7 +651,7 @@ async fn dispatch(
                 return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n")
             }
             (presets::ROUTE, form) => admin::Action::Presets(form),
-            (_, form) => admin::Action::Images(form),
+            _ => unreachable!("matched settings path"),
         };
         return site.admin.serve(&parts, peer, &site.database, action).await;
     }

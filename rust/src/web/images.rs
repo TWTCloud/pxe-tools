@@ -6,18 +6,92 @@ use super::{
     setup::{page, redirect},
     ErrorBox, Reply,
 };
-use crate::connect;
-use hyper::StatusCode;
+use crate::{
+    connect,
+    images::{Change, Changed},
+    setting,
+};
+use hyper::{Method, StatusCode};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{fmt::Write, path::Path};
 
 pub(super) const ROUTE: &str = "/settings/images";
 const PAGE_SIZE: u64 = 100;
 
-pub(super) fn serve(db: &Connection, path: &Path, number: u32, form: Option<&[u8]>) -> Reply {
-    let result = match form {
-        Some(form) => update(path, form),
-        None => list(db, number),
+#[derive(Clone, Copy)]
+pub(super) enum Route {
+    List,
+    Add,
+    Refresh,
+    RefreshStatus,
+    AutoRefresh,
+    Status,
+    Toggle(i64),
+    Download(i64),
+    Delete(i64),
+}
+
+impl Route {
+    pub(super) fn for_path(path: &str) -> Option<Self> {
+        Some(match path {
+            ROUTE => Self::List,
+            "/settings/images/add" => Self::Add,
+            "/settings/images/refresh" => Self::Refresh,
+            "/settings/images/refresh-button" => Self::RefreshStatus,
+            "/settings/images/auto-refresh" => Self::AutoRefresh,
+            "/api/images-status" => Self::Status,
+            _ => {
+                let route = path.strip_prefix("/settings/images/")?;
+                let (id, operation) = route.split_once('/').unwrap_or((route, ""));
+                let id = id.parse::<i64>().ok().filter(|id| *id > 0)?;
+                match operation {
+                    "toggle" => Self::Toggle(id),
+                    "download" => Self::Download(id),
+                    "" => Self::Delete(id),
+                    _ => return None,
+                }
+            }
+        })
+    }
+
+    pub(super) fn allows(self, method: &Method) -> bool {
+        match *method {
+            Method::GET | Method::HEAD => matches!(
+                self,
+                Self::List | Self::Add | Self::RefreshStatus | Self::Status
+            ),
+            Method::POST => !matches!(self, Self::RefreshStatus | Self::Status),
+            Method::DELETE => matches!(self, Self::Delete(_)),
+            _ => false,
+        }
+    }
+}
+
+pub(super) fn serve(
+    route: Route,
+    method: &Method,
+    db: &Connection,
+    path: &Path,
+    number: u32,
+    form: Option<&[u8]>,
+) -> Reply {
+    let result = match (route, form) {
+        (Route::List, None) => list(db, number),
+        (Route::Add, None) => catalog_form(db, ROUTE)
+            .map(|form| {
+                page(
+                    "Ajouter une image",
+                    &format!("{form}<p><a href=\"{ROUTE}\">Images PXE</a></p>"),
+                )
+            })
+            .map_err(Into::into),
+        (Route::Status, None) => table(db, number).map(|html| page("Images PXE", &html)),
+        (Route::RefreshStatus, None) => refresh_button(db).map(|html| page("Catalogue PXE", &html)),
+        (_, Some(form)) => update(route, method, path, form),
+        _ => Ok(plain(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Method not allowed\n",
+        )),
     };
     result.unwrap_or_else(|error| {
         eprintln!("Rust images: {error}");
@@ -25,34 +99,153 @@ pub(super) fn serve(db: &Connection, path: &Path, number: u32, form: Option<&[u8
     })
 }
 
-fn update(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
-    let mut image = None;
-    let mut refresh = false;
-    for (name, value) in form_urlencoded::parse(form) {
-        match name.as_ref() {
-            "image" if image.is_none() => image = Some(value.parse::<i64>()),
-            "action" if !refresh && value == "refresh" => refresh = true,
-            _ => return Ok(plain(StatusCode::BAD_REQUEST, "Formulaire invalide\n")),
-        }
-    }
+fn update(route: Route, method: &Method, path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
     let mut db = connect(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if refresh {
-        refresh_catalog(&tx)?;
-    } else {
-        let available = match image {
-            Some(Ok(id)) if id > 0 => queue_image(&tx, id, false)?.is_some(),
-            _ => false,
-        };
-        if !available {
-            return Ok(plain(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Image Debian indisponible\n",
-            ));
+    let mut input = form_urlencoded::parse(form);
+    let operation = match route {
+        Route::Toggle(id) => {
+            let enabled = match (input.next(), input.next()) {
+                (None, None) => None,
+                (Some((key, value)), None)
+                    if key == "enabled" && matches!(value.as_ref(), "0" | "1") =>
+                {
+                    Some(value == "1")
+                }
+                _ => return Ok(invalid()),
+            };
+            Some((id, Change::Enable(enabled)))
+        }
+        Route::Download(id) if form.is_empty() => Some((id, Change::Download)),
+        Route::Delete(id)
+            if *method == Method::DELETE && form.is_empty() || form == b"_method=DELETE" =>
+        {
+            Some((id, Change::Delete))
+        }
+        Route::Refresh if form.is_empty() => {
+            refresh_catalog(&tx)?;
+            None
+        }
+        Route::AutoRefresh => {
+            if !auto_refresh(&tx, input)? {
+                return Ok(invalid());
+            }
+            None
+        }
+        Route::List | Route::Add => {
+            if let Some(reply) = queue_form(&tx, input)? {
+                return Ok(reply);
+            }
+            None
+        }
+        _ => return Ok(invalid()),
+    };
+    if let Some((id, operation)) = operation {
+        match crate::images::change(&tx,id,operation)? {
+            Changed::Unavailable => return Ok(plain(StatusCode::NOT_FOUND,"Image introuvable\n")),
+            Changed::Blocked => return Ok(plain(StatusCode::CONFLICT,
+                "Image en cours de transfert, utilisée par une opération, ou requise pour le secours PXE\n")),
+            Changed::Queued(job) => {
+                tx.commit()?;
+                return Ok(redirect(StatusCode::SEE_OTHER,format!("/jobs/{job}")));
+            }
+            Changed::Updated => {}
         }
     }
     tx.commit()?;
     Ok(redirect(StatusCode::SEE_OTHER, ROUTE))
+}
+
+fn invalid() -> Reply {
+    plain(StatusCode::UNPROCESSABLE_ENTITY, "Formulaire invalide\n")
+}
+
+fn queue_form(
+    db: &Connection,
+    fields: form_urlencoded::Parse<'_>,
+) -> Result<Option<Reply>, ErrorBox> {
+    let mut image = None;
+    let mut refresh = false;
+    let mut rows = Vec::new();
+    for (name, value) in fields {
+        match name.as_ref() {
+            "image" if image.is_none() => image = Some(value.parse::<i64>()),
+            "action" if !refresh && value == "refresh" => refresh = true,
+            "rows[]" if rows.len() < 100 => rows.push(value),
+            _ => {
+                return Ok(Some(plain(
+                    StatusCode::BAD_REQUEST,
+                    "Formulaire invalide\n",
+                )))
+            }
+        }
+    }
+    if refresh {
+        refresh_catalog(db)?;
+    } else if !rows.is_empty() && image.is_none() {
+        let mut matched = false;
+        for display in rows {
+            let mut fields = display.split(':');
+            let (Some(distro), Some(version), Some(arch), None) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            if let Some(id) = db.query_row(
+                "SELECT id FROM catalog_entries WHERE distro=?1 AND version_full=?2 AND arch=?3",
+                rusqlite::params![distro,version,arch], |row| row.get::<_,i64>(0),
+            ).optional()? {
+                matched |= queue_image(db,id,false)?.is_some();
+            }
+        }
+        if !matched {
+            return Ok(Some(plain(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Images Debian indisponibles\n",
+            )));
+        }
+    } else {
+        let available = match image {
+            Some(Ok(id)) if id > 0 => queue_image(db, id, false)?.is_some(),
+            _ => false,
+        };
+        if !available {
+            return Ok(Some(plain(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Image Debian indisponible\n",
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn auto_refresh(db: &Connection, fields: form_urlencoded::Parse<'_>) -> rusqlite::Result<bool> {
+    let mut enabled = false;
+    let mut interval = None;
+    for (name, value) in fields {
+        match name.as_ref() {
+            "catalog_auto_refresh_enabled" if !enabled && matches!(value.as_ref(), "on" | "1") => {
+                enabled = true
+            }
+            "catalog_auto_refresh_interval_hours"
+                if interval.is_none() && matches!(value.as_ref(), "24" | "168" | "720") =>
+            {
+                interval = Some(value);
+            }
+            _ => return Ok(false),
+        }
+    }
+    super::onboarding::store(
+        db,
+        "catalog_auto_refresh_enabled",
+        if enabled { "on" } else { "off" },
+    )?;
+    super::onboarding::store(
+        db,
+        "catalog_auto_refresh_interval_hours",
+        interval.as_deref().unwrap_or("168"),
+    )?;
+    Ok(true)
 }
 
 pub(super) fn refresh_catalog(db: &Connection) -> rusqlite::Result<()> {
@@ -83,10 +276,46 @@ pub(super) fn refresh_catalog(db: &Connection) -> rusqlite::Result<()> {
 fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     let mut html = String::from(r#"<p><a href="/admin/devices">Retour à la console</a></p>"#);
     html.push_str(&catalog_form(db, ROUTE)?);
+    let enabled = if setting(db, "catalog_auto_refresh_enabled")? == "on" {
+        " checked"
+    } else {
+        ""
+    };
+    let interval = setting(db, "catalog_auto_refresh_interval_hours")?;
+    let interval = if matches!(interval.as_str(), "24" | "168" | "720") {
+        interval.as_str()
+    } else {
+        "168"
+    };
+    write!(
+        html,
+        r#"<form method="post" action="{ROUTE}/auto-refresh"><label>
+<input type="checkbox" name="catalog_auto_refresh_enabled" value="on"{enabled}> Actualiser automatiquement le catalogue</label>
+<label>Fréquence <select name="catalog_auto_refresh_interval_hours">"#
+    )?;
+    for (hours, label) in [
+        ("24", "Chaque jour"),
+        ("168", "Chaque semaine"),
+        ("720", "Tous les 30 jours"),
+    ] {
+        let selected = if interval == hours { " selected" } else { "" };
+        write!(
+            html,
+            r#"<option value="{hours}"{selected}>{label}</option>"#
+        )?;
+    }
+    html.push_str("</select></label><button>Enregistrer</button></form>");
+    html.push_str(&refresh_button(db)?);
+    html.push_str(&table(db, number)?);
+    Ok(page("Images PXE", &html))
+}
+
+fn refresh_button(db: &Connection) -> Result<String, ErrorBox> {
+    let mut html = String::new();
     if let Some(status) = db
         .query_row(
             "SELECT status FROM init_jobs
-         WHERE job_type IN ('bootstrap:refresh_catalog','bootstrap:refresh_catalog_v2')
+         WHERE job_type IN ('bootstrap:refresh_catalog','bootstrap:refresh_catalog_v2','bootstrap:auto_refresh_catalog_v2')
          ORDER BY id DESC LIMIT 1",
             [],
             |row| row.get::<_, String>(0),
@@ -97,9 +326,13 @@ fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
         escape(&mut html, &status);
         html.push_str("</p>");
     }
-    html.push_str("<table><thead><tr><th>Distribution</th><th>Version</th><th>Architecture</th><th>État</th><th>Progression</th><th>Activée</th></tr></thead><tbody>");
+    Ok(html)
+}
+
+fn table(db: &Connection, number: u32) -> Result<String, ErrorBox> {
+    let mut html = String::from("<table><thead><tr><th>Distribution</th><th>Version</th><th>Architecture</th><th>État</th><th>Progression</th><th>Activée</th><th>Actions</th></tr></thead><tbody>");
     let mut query = db.prepare(
-        "SELECT distro, COALESCE(version_full,version), arch, status, progress_percent, enabled
+        "SELECT distro, COALESCE(version_full,version), arch, status, progress_percent, enabled,id
          FROM os_images ORDER BY distro,major DESC,version_full DESC,arch,id LIMIT ? OFFSET ?",
     )?;
     let mut rows = query.query([PAGE_SIZE + 1, u64::from(number - 1) * PAGE_SIZE])?;
@@ -112,8 +345,20 @@ fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
             html.push_str("</td>");
         }
         let percent = row.get::<_, i64>(4)?.clamp(0, 100);
-        let active = if row.get::<_, bool>(5)? { "Oui" } else { "Non" };
-        write!(html, "<td>{percent} %</td><td>{active}</td></tr>")?;
+        let id: i64 = row.get(6)?;
+        let (active, next, label) = if row.get::<_, bool>(5)? {
+            ("Oui", 0, "Désactiver")
+        } else {
+            ("Non", 1, "Activer")
+        };
+        write!(
+            html,
+            r#"<td>{percent} %</td><td>{active}</td><td>
+<form method="post" action="{ROUTE}/{id}/toggle"><button name="enabled" value="{next}">{label}</button></form>
+<form method="post" action="{ROUTE}/{id}/download"><button>Relancer le téléchargement</button></form>
+<details><summary>Suppression</summary><form method="post" action="{ROUTE}/{id}"><button name="_method" value="DELETE">Supprimer cette image</button></form></details>
+</td></tr>"#
+        )?;
     }
     html.push_str("</tbody></table><nav aria-label=\"Pagination\">");
     if number > 1 {
@@ -131,7 +376,7 @@ fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
         )?;
     }
     html.push_str("</nav>");
-    Ok(page("Images PXE", &html))
+    Ok(html)
 }
 
 pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::Result<Option<i64>> {
