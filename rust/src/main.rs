@@ -120,6 +120,13 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     if let [flag, config, path] = args.as_slice() {
+        if flag == "--run-ansible-retry" {
+            let id = path
+                .to_str()
+                .ok_or("Invalid Ansible retry job ID")?
+                .parse()?;
+            return worker::ansible::retry(Path::new(config), id);
+        }
         if flag == "--run-power-job" {
             let id = path.to_str().ok_or("Invalid power job ID")?.parse()?;
             return worker::power::run(Path::new(config), id);

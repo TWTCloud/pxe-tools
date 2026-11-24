@@ -1416,6 +1416,66 @@ def verify_worker_schedule(binary):
           flush=True)
 
 
+def verify_worker_ansible_retry(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-ansible-retry-') as directory:
+        database = Path(directory).resolve()/'fixture.sqlite'
+        schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            machine = db.execute("INSERT INTO machines(mac,status) VALUES('02:00:00:00:03:02','failed')").lastrowid
+            action = db.execute(
+                "INSERT INTO actions(machine_id,type,status,token,ended_at) "
+                "VALUES(?,'install_only','failed',?,CURRENT_TIMESTAMP)",
+                (machine, secrets.token_hex(32)),
+            ).lastrowid
+            older, latest, new_install = [
+                db.execute(
+                    "INSERT INTO installations(machine_id,install_status,ansible_status,action_id,ended_at) "
+                    "VALUES(?,?,?,?,CURRENT_TIMESTAMP)",
+                    (machine, install_status, ansible_status, action),
+                ).lastrowid
+                for install_status, ansible_status in (
+                    ('success', 'failed'), ('success', 'aborted'), ('in_progress', None),
+                )
+            ]
+            job = f'action:ansible_retry:{action}'
+            db.executemany("INSERT INTO init_jobs(id,job_type,status) VALUES(?,?,'pending')",
+                           [(job_id, job) for job_id in (81, 82, 83, 84)])
+
+        def retry(job_id):
+            subprocess.run([str(binary),'--run-ansible-retry',str(database),str(job_id)],
+                           check=True,capture_output=True)
+
+        retry(81)
+        with closing(sqlite3.connect(database)) as db, db:
+            assert db.execute("SELECT status,message FROM init_jobs WHERE id=81").fetchone() == (
+                'failed', 'Module Ansible désactivé ; aucune synchronisation ou exécution.',
+            )
+            db.execute("INSERT INTO settings(key,value) VALUES('ansible_enabled','on') "
+                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(retry, [82,83]))
+        with closing(sqlite3.connect(database)) as db, db:
+            assert db.execute("SELECT status,ended_at FROM actions WHERE id=?", (action,)).fetchone() == ('running', None)
+            assert db.execute("SELECT status FROM machines WHERE id=?", (machine,)).fetchone() == ('installed',)
+            assert db.execute("SELECT id,ansible_status,ended_at IS NULL FROM installations ORDER BY id").fetchall() == [
+                (older, 'failed', 0), (latest, 'pending', 1), (new_install, None, 0),
+            ]
+            assert [row[0] for row in db.execute("SELECT status FROM init_jobs WHERE id IN (82,83) ORDER BY status")] == [
+                'failed', 'success',
+            ]
+            assert db.execute("SELECT COUNT(*) FROM machine_events WHERE action_id=?", (action,)).fetchone() == (1,)
+            db.execute("UPDATE actions SET status='cancelled' WHERE id=?", (action,))
+            db.execute("UPDATE installations SET ansible_status='aborted' WHERE id=?", (latest,))
+        retry(84)
+        with closing(sqlite3.connect(database)) as db:
+            assert db.execute("SELECT status,message FROM init_jobs WHERE id=84").fetchone() == (
+                'failed', f'Action #{action} déjà clôturée.',
+            )
+            assert db.execute("SELECT ansible_status FROM installations WHERE id=?", (latest,)).fetchone() == ('aborted',)
+    print('Rust worker queues a single Ansible retry, preserves other installs and refuses closed actions', flush=True)
+
+
 def verify_worker_postboot(binary):
     project = Path(__file__).resolve().parents[2]
     templates = project/'docker/worker/templates'
@@ -2202,6 +2262,7 @@ def local(binary):
     verify_worker_commands(binary)
     verify_worker_bootstrap(binary)
     verify_worker_schedule(binary)
+    verify_worker_ansible_retry(binary)
     verify_worker_postboot(binary)
     verify_worker_power(binary)
     verify_worker_download(binary)

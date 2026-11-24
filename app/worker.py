@@ -458,6 +458,12 @@ def run_bootstrap_job(job: dict) -> None:
         run_reboot_job(job)
         return
     if job_type.startswith("action:ansible_retry:"):
+        if os.environ.get("PXE_RUST_GUIDED") == "1":
+            subprocess.run(
+                ["/usr/lib/pxe-tools/pxe-tools-rust", "--run-ansible-retry", DB_PATH, str(job_id)],
+                check=True, timeout=15,
+            )
+            return
         run_ansible_retry_job(job)
         return
     if job_type.startswith("machine:reboot:"):
