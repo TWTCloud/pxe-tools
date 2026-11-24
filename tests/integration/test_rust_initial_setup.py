@@ -918,7 +918,10 @@ def verify_custom_partition_review(client, database, authorization):
         return client.request(path, authorization=authorization, **kwargs)
 
     disks = ['/dev/vda','/dev/vdb']
-    inventory = {'inventory':{'boot_mode':'BIOS'}, 'disks':[
+    boot_mac = '02:00:00:00:09:24'
+    second_nic = '02:00:00:00:09:74'
+    inventory = {'inventory':{'boot_mode':'BIOS'}, 'boot_mac':boot_mac,
+                 'interfaces':[{'mac':boot_mac},{'mac':second_nic}], 'disks':[
         {'name':path.removeprefix('/dev/'), 'serial':f'FIXTURE-RAID-{index}', 'size_bytes':12_000_000_000}
         for index,path in enumerate(disks)
     ]}
@@ -929,6 +932,12 @@ def verify_custom_partition_review(client, database, authorization):
         ]}
         for index,path in enumerate(disks)
     ],'raid_arrays':[{'name':'md0','level':1,'members':['raid0','raid1']}]}
+    static = {'ip':'192.0.2.160','cidr':24,'gateway':'192.0.2.254','dns':['192.0.2.53']}
+    network = {'primary':0,'interfaces':[
+        {'mode':'static','match_by':'primary','static':static},
+        {'mode':'static','match_by':'index','index':1,'vlan':{'id':20},
+         'static':{**static,'ip':'192.0.3.160','gateway':'192.0.3.254'}},
+    ]}
     with closing(sqlite3.connect(database)) as db, db:
         db.execute("UPDATE settings SET value='on' WHERE key='pxe_enabled'")
         image = db.execute("""INSERT INTO os_images(distro,version,arch,codename,version_full,enabled,status)
@@ -938,9 +947,10 @@ def verify_custom_partition_review(client, database, authorization):
                             VALUES('02:00:00:00:09:24','fixture-raid','discovered','amd64',?)""",
                             [json.dumps(inventory)]).lastrowid
         preset = db.execute("""INSERT INTO presets(name,distro,variant,codename,partition_mode,partition_custom_json,
-                            network_mode,root_login_mode,admin_user_login,admin_user_pwhash)
+                            network_mode,root_login_mode,admin_user_login,admin_user_pwhash,advanced_config_json)
                             VALUES('RAID1 <fixture>','debian','debian','trixie','custom',?,
-                                   'dhcp','disabled','fixture',?)""", [json.dumps(plan),password]).lastrowid
+                                   'dhcp','disabled','fixture',?,?)""",
+                            [json.dumps(plan),password,json.dumps({'network':network})]).lastrowid
     preview = f'/machines/{device}/install-preview'
     target = f'/machines/{device}/install/advanced'
     form = {'hostname':'fixture-raid','image':image,'preset':preset}
@@ -948,9 +958,17 @@ def verify_custom_partition_review(client, database, authorization):
     assert client.request(preview,form=form)[0] == 401
     assert request(preview,form=form,origin='https://outside.example')[0] == 403
     assert request(target,form={**form,'confirm':'yes'})[0] == 422
+    with closing(sqlite3.connect(database)) as db, db:
+        static.update(ip='203.0.113.160',gateway='203.0.113.254')
+        db.execute('UPDATE presets SET advanced_config_json=? WHERE id=?',[json.dumps({'network':network}),preset])
+    assert request(preview,form=form)[0] == 422
+    with closing(sqlite3.connect(database)) as db, db:
+        static.update(ip='192.0.2.160',gateway='192.0.2.254')
+        db.execute('UPDATE presets SET advanced_config_json=? WHERE id=?',[json.dumps({'network':network}),preset])
     first = request(preview,form=form)
     assert first[0] == 200 and all(d.encode() in first[2] for d in disks), first
     assert b'FIXTURE-RAID-0' in first[2] and b'FIXTURE-RAID-1' in first[2]
+    assert b'192.0.2.160/24' in first[2] and b'192.0.3.160/24' in first[2] and b'VLAN 20' in first[2]
     assert password.encode() not in first[2]
     commit = {**ConfirmationInputs(first[2]).values,'confirm':'yes'}
     with closing(sqlite3.connect(database)) as db, db:
@@ -972,9 +990,13 @@ def verify_custom_partition_review(client, database, authorization):
         assert bound['target_disk_identities']['/dev/vdb']['value'] == 'REPLACED'
         assert config['review_boot_mode'] == 'BIOS' and config['version_full'] == '13.7.0'
         assert config['admin_user_pwhash'] == password
+        assert [interface['match']['mac'] for interface in config['network']['interfaces']] == [boot_mac,second_nic]
+        wipe_mac = '02:00:00:00:09:70'
+        wipe_inventory = {**inventory,'boot_mac':wipe_mac,
+                          'interfaces':[{'mac':wipe_mac},{'mac':'02:00:00:00:09:71'}]}
         wipe_device = db.execute("""INSERT INTO machines(mac,hostname,status,boot_arch,inventory_json)
                                    VALUES('02:00:00:00:09:70','fixture-wipe','discovered','amd64',?)""",
-                                 [json.dumps(inventory)]).lastrowid
+                                 [json.dumps(wipe_inventory)]).lastrowid
         db.execute('UPDATE presets SET pre_wipe_mode=? WHERE id=?',
                    [json.dumps({'/dev/vdc':'partial'}),preset])
     wipe_preview = f'/machines/{wipe_device}/install-preview'
@@ -1008,7 +1030,7 @@ def verify_custom_partition_review(client, database, authorization):
         assert after == 'reboot' and config['_pending_action_id'] == action
         assert json.loads(config['partition_custom_json'])['target_disks'] == disks
         db.execute("UPDATE settings SET value='off' WHERE key='pxe_enabled'")
-    print('Rust reviewed RAID and pre-wipe targets, refused stale or incomplete confirmations and armed the plan',
+    print('Rust reviewed RAID, pre-wipe and static NIC targets, refused stale or incomplete plans and armed the install',
           flush=True)
 
 

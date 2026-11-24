@@ -429,29 +429,7 @@ impl Selection {
         if dns.iter().any(|value| value.parse::<Ipv4Addr>().is_err()) {
             return Ok(None);
         }
-        let Some((pxe_network, mask)) = crate::pxe::parse_subnet(&setting(db, "pxe_subnet")?)
-        else {
-            return Ok(None);
-        };
-        let Ok(server) = setting(db, "pxe_ip")?.parse::<Ipv4Addr>() else {
-            return Ok(None);
-        };
-        let ip = u32::from(address);
-        let static_mask = u32::MAX << (32 - cidr);
-        let static_network = ip & static_mask;
-        let is_host = |ip: u32| {
-            ip & static_mask == static_network
-                && (cidr > 30 || (ip != static_network && ip != (static_network | !static_mask)))
-        };
-        if ip & mask != pxe_network
-            || (mask.count_ones() < 31 && (ip == pxe_network || ip == (pxe_network | !mask)))
-            || address == server
-            || !is_host(ip)
-            || match gateway {
-                Some(gateway) => gateway == address || !is_host(u32::from(gateway)),
-                None => !is_host(u32::from(server)),
-            }
-        {
+        if !static_pxe_address(db, address, cidr, gateway)? {
             return Ok(None);
         }
         Ok(Some(
@@ -459,6 +437,36 @@ impl Selection {
             "static_gateway":gateway,"static_dns":dns}),
         ))
     }
+}
+
+fn static_ipv4_host(ip: Ipv4Addr, address: Ipv4Addr, cidr: u8) -> bool {
+    let ip = u32::from(ip);
+    let mask = u32::MAX.checked_shl(32 - u32::from(cidr)).unwrap_or(0);
+    let network = u32::from(address) & mask;
+    ip & mask == network && (cidr > 30 || (ip != network && ip != (network | !mask)))
+}
+
+fn static_pxe_address(
+    db: &Connection,
+    address: Ipv4Addr,
+    cidr: u8,
+    gateway: Option<Ipv4Addr>,
+) -> rusqlite::Result<bool> {
+    let Some((network, mask)) = pxe::parse_subnet(&setting(db, "pxe_subnet")?) else {
+        return Ok(false);
+    };
+    let Ok(server) = setting(db, "pxe_ip")?.parse::<Ipv4Addr>() else {
+        return Ok(false);
+    };
+    Ok(
+        static_ipv4_host(address, Ipv4Addr::from(network), mask.count_ones() as u8)
+            && address != server
+            && static_ipv4_host(address, address, cidr)
+            && match gateway {
+                Some(gateway) => gateway != address && static_ipv4_host(gateway, address, cidr),
+                None => static_ipv4_host(server, address, cidr),
+            },
+    )
 }
 
 fn selection(form: &[u8]) -> Option<Selection> {

@@ -6,7 +6,12 @@ use hyper::StatusCode;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, fmt::Write, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write,
+    net::Ipv4Addr,
+    path::Path,
+};
 
 pub(super) enum Route {
     Form,
@@ -143,10 +148,10 @@ pub(super) fn submit(
             "Les disques, leur capacité ou le firmware ne correspondent pas au modèle",
         ));
     };
-    if !bind_network(&device, &mut snapshot["network"]) {
+    if !bind_network(&tx, &device, &mut snapshot["network"])? {
         return Ok(rejected(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "Vérifiez le mode DHCP et la correspondance des interfaces réseau du modèle",
+            "Vérifiez le plan IPv4 et la correspondance des interfaces réseau du modèle",
         ));
     }
     if !snapshot["admin_user_login"]
@@ -196,6 +201,7 @@ pub(super) fn submit(
                 write!(html, " · {capacity} Mo</li>")?;
             }
             html.push_str("</ul>");
+            network_review(&snapshot["network"], &mut html);
             if !wipe.is_empty() {
                 html.push_str("<h2>Disques à effacer avant l’installation</h2><ul>");
                 for target in &wipe {
@@ -423,31 +429,71 @@ fn wipe_targets(device: &Device, snapshot: &Value) -> Option<Vec<Value>> {
     Some(targets)
 }
 
-fn bind_network(device: &Device, plan: &mut Value) -> bool {
+fn bind_network(db: &Connection, device: &Device, plan: &mut Value) -> rusqlite::Result<bool> {
     let Some(primary) = plan["primary"]
         .as_u64()
         .and_then(|index| usize::try_from(index).ok())
     else {
-        return false;
+        return Ok(false);
     };
     let Some(interfaces) = plan["interfaces"].as_array_mut() else {
-        return false;
+        return Ok(false);
     };
-    if primary >= interfaces.len() || interfaces[primary]["mode"] != "dhcp" {
-        return false;
+    if primary >= interfaces.len()
+        || !matches!(
+            interfaces[primary]["mode"].as_str(),
+            Some("dhcp" | "static")
+        )
+    {
+        return Ok(false);
     }
     let inventory: Vec<_> = pxe::array_values(&device.inventory["interfaces"])
         .map(|nic| nic["mac"].as_str().and_then(pxe::normalize_mac))
         .collect();
+    let boot_mac = device.inventory["boot_mac"]
+        .as_str()
+        .and_then(pxe::normalize_mac)
+        .unwrap_or_else(|| device.mac.clone());
+    let bond = &interfaces[primary]["bond"];
+    let installer = if let Some(group) = bond["name"].as_str() {
+        let Some(master) = interfaces
+            .iter()
+            .position(|iface| iface["bond"]["name"] == group && iface["bond"]["role"] == "master")
+        else {
+            return Ok(false);
+        };
+        master
+    } else {
+        primary
+    };
+    let mut addresses = HashSet::new();
     for (index, interface) in interfaces.iter_mut().enumerate() {
         if interface["mode"] == "disabled" && interface["bond"].is_null() {
             continue;
         }
         if interface["mode"] == "static" {
-            return false;
+            let settings = &interface["static"];
+            let Some((address, cidr, gateway)) = static_network(settings) else {
+                return Ok(false);
+            };
+            if !addresses.insert(address)
+                || index == installer
+                    && !super::static_pxe_address(db, address, cidr, Some(gateway))?
+            {
+                return Ok(false);
+            }
         }
         let expected = match interface["match_by"].as_str() {
-            Some("primary") if index == primary => continue,
+            Some("primary") if index == primary => {
+                // Legacy DHCP profiles without interface inventory allow d-i auto selection.
+                if inventory.is_empty()
+                    && interface["mode"] == "dhcp"
+                    && interface["bond"].is_null()
+                {
+                    continue;
+                }
+                Some(boot_mac.clone())
+            }
             Some("mac") => interface["match"]["mac"]
                 .as_str()
                 .and_then(pxe::normalize_mac),
@@ -457,16 +503,66 @@ fn bind_network(device: &Device, plan: &mut Value) -> bool {
                 .and_then(|index| inventory.get(index))
                 .cloned()
                 .flatten(),
-            _ => return false,
+            _ => return Ok(false),
         };
-        let Some(mac) = expected.filter(|mac| inventory.iter().flatten().any(|known| known == mac))
-        else {
-            return false;
+        let Some(mac) = expected.filter(|mac| {
+            inventory
+                .iter()
+                .flatten()
+                .filter(|known| *known == mac)
+                .count()
+                == 1
+        }) else {
+            return Ok(false);
         };
         interface["match_by"] = json!("mac");
         interface["match"] = json!({"mac":mac});
     }
-    true
+    Ok(true)
+}
+
+fn static_network(settings: &Value) -> Option<(Ipv4Addr, u8, Ipv4Addr)> {
+    let address = settings["ip"].as_str()?.parse().ok()?;
+    let prefix = migrations::integer(&settings["cidr"])
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| (1..=32).contains(value))?;
+    let gateway = settings["gateway"].as_str()?.parse().ok()?;
+    let dns = migrations::dns_list(&settings["dns"]);
+    if !super::static_ipv4_host(address, address, prefix)
+        || gateway == address
+        || !super::static_ipv4_host(gateway, address, prefix)
+        || dns.is_empty()
+        || dns.iter().any(|value| value.parse::<Ipv4Addr>().is_err())
+    {
+        return None;
+    }
+    Some((address, prefix, gateway))
+}
+
+fn network_review(plan: &Value, html: &mut String) {
+    html.push_str("<h2>Réseau de l’appareil</h2><ul>");
+    for interface in pxe::array_values(&plan["interfaces"]) {
+        html.push_str("<li>");
+        let nic = interface["match"]["mac"]
+            .as_str()
+            .unwrap_or("Interface PXE");
+        escape(html, nic);
+        html.push_str(" · ");
+        match interface["mode"].as_str() {
+            Some("static") => {
+                if let Some((address, prefix, gateway)) = static_network(&interface["static"]) {
+                    escape(html, &format!("{address}/{prefix} · Passerelle {gateway}"));
+                }
+            }
+            Some("disabled") => html.push_str("Désactivée"),
+            _ => html.push_str("DHCP"),
+        }
+        if let Some(vlan) = interface["vlan"]["id"].as_u64() {
+            let _ = write!(html, " · VLAN {vlan}");
+        }
+        html.push_str("</li>");
+    }
+    html.push_str("</ul>");
 }
 
 fn rejected(status: StatusCode, message: &'static str) -> Reply {
