@@ -58,42 +58,6 @@ class PreseedInvariants(unittest.TestCase):
             self.assertEqual(int((data / 'http.status').read_text()), expected_status)
             return result.stdout
 
-    def test_machine_ready_retries_only_connection_failures_and_stops(self):
-        output = self.render({'distro': 'debian'})
-        def decoded(path):
-            matches = re.findall(r'echo "([A-Za-z0-9+/=]+)" \| base64 -d > ' + re.escape(path), output)
-            self.assertEqual(len(matches), 1)
-            return base64.b64decode(matches[0]).decode()
-        script = decoded('/usr/local/sbin/pxe-machine-ready')
-        unit = decoded('/etc/systemd/system/pxe-machine-ready.service')
-        self.assertIn('ExecStart=/usr/local/sbin/pxe-machine-ready\n', unit)
-        self.assertIn('TimeoutStartSec=250\n', unit)
-        self.assertIn('http://192.0.2.1/api/machine-ready?mac=02:00:00:00:00:01', script)
-        with tempfile.TemporaryDirectory(prefix='pxe-ready-') as tmp:
-            root = Path(tmp)
-            curl = root / 'curl'
-            curl.write_text('''#!/bin/bash
-n=$(cat "$COUNT")
-n=$((n + 1))
-printf '%s' "$n" > "$COUNT"
-if [ "$n" -le "$FAILURES" ]; then exit "$CODE"; fi
-''')
-            sleep = root / 'sleep'
-            sleep.write_text('#!/bin/bash\nexit 0\n')
-            curl.chmod(0o755)
-            sleep.chmod(0o755)
-            runnable = root / 'ready'
-            runnable.write_text(script.replace('/usr/bin/curl', str(curl)).replace('/bin/sleep', str(sleep)))
-            for failures, code, expected_status, expected_calls in [(2, 7, 0, 3), (100, 7, 7, 24),
-                                                                    (100, 22, 22, 1), (100, 28, 28, 1)]:
-                with self.subTest(code=code, failures=failures):
-                    count = root / 'count'
-                    count.write_text('0')
-                    env = dict(os.environ, COUNT=str(count), FAILURES=str(failures), CODE=str(code))
-                    result = subprocess.run(['/bin/bash', str(runnable)], env=env, capture_output=True)
-                    self.assertEqual(result.returncode, expected_status)
-                    self.assertEqual(int(count.read_text()), expected_calls)
-
     def test_install_completion_carries_current_action_token(self):
         token = 'a' * 64
         output = self.render({'distro': 'debian'}, running_action_token=token)
@@ -119,16 +83,68 @@ if [ "$n" -le "$FAILURES" ]; then exit "$CODE"; fi
                 self.assertNotIn('d-i ', result)
                 self.assertNotIn(token, result)
 
-    def test_postboot_dependencies_are_added_to_minimal_install(self):
+    def test_plain_install_has_completion_callback_and_no_first_boot_files(self):
         config = {'distro': 'debian', 'codename': 'trixie',
+                  'advanced': {'packages': {'pkgsel_include': []}}}
+        for role, enabled in (('', 'on'), ('base', 'off')):
+            with self.subTest(role=role, enabled=enabled):
+                output = self.render(dict(config, ansible_role=role), running_action_token='a' * 64,
+                                     module_enabled=enabled, module_key='ssh-ed25519 AAAA test')
+                self.assertIn('d-i pkgsel/include string curl\n', output)
+                self.assertIn('/api/install-end?mac=', output)
+                self.assertIn('ssh_host_ed25519_key.pub', output)
+                self.assertIn('--data-urlencode "ssh_host_fingerprint=$ssh_fingerprint"', output)
+                self.assertNotIn('system-generators', output)
+                self.assertNotIn('pxe-machine-ready', output)
+                self.assertNotIn('pxe-postboot.service', output)
+                self.assertNotIn('NOPASSWD', output)
+
+    def test_first_boot_generator_runs_once_and_cleans_up(self):
+        config = {'distro': 'debian', 'codename': 'trixie', 'ansible_role': 'base',
                   'advanced': {'packages': {'pkgsel_include': ['curl']}}}
         output = self.render(config, running_action_token='a' * 64,
                              module_enabled='on', module_key='ssh-ed25519 AAAA test')
         self.assertIn('d-i pkgsel/include string curl iproute2 sudo openssh-server python3\n', output)
-        self.assertIn("'http://192.0.2.1/pxe/postboot/7/postboot.sh'", output)
-        self.assertIn('in-target /usr/bin/curl -fsS', output)
-        self.assertNotIn('in-target /usr/bin/wget', output)
-        self.assertIn('systemctl enable pxe-postboot.service || exit 1', output)
+        self.assertNotIn('systemctl enable pxe-', output)
+        match = re.search(r'echo ([A-Za-z0-9+/=]+) \| base64 -d > /target/etc/systemd/system-generators/pxe-first-boot', output)
+        self.assertIsNotNone(match)
+        script = base64.b64decode(match[1])
+        with tempfile.TemporaryDirectory(prefix='pxe-first-boot-') as tmp:
+            root = Path(tmp)
+            generator = root / 'pxe-first-boot'
+            generator.write_bytes(script)
+            generated = root / 'generator'
+            subprocess.run(['sh', str(generator), str(generated)], check=True)
+            unit = generated / 'pxe-first-boot.service'
+            self.assertIn('After=network-online.target ssh.service', unit.read_text())
+            self.assertIn('Type=oneshot', unit.read_text())
+            self.assertEqual((generated / 'multi-user.target.wants' / unit.name).resolve(), unit.resolve())
+            self.assertNotIn('Authorization', unit.read_text())
+            self.assertTrue(generator.exists())
+
+            (root / 'ip').write_text('#!/bin/sh\necho "192.0.2.1 dev eth0 src 192.0.2.2"\n')
+            (root / 'sleep').write_text('#!/bin/sh\nexit 0\n')
+            (root / 'curl').write_text('''#!/bin/sh
+n=$(wc -l < "$CALLS")
+echo 'call' >> "$CALLS"
+if [ "$n" -lt "$FAILURES" ]; then exit 7; fi
+printf '%s\n' "$RECEIPT"
+''')
+            for name in ('ip', 'sleep', 'curl'):
+                (root / name).chmod(0o755)
+            for receipt, failures, expected_status, expected_calls in (
+                ('accepted', 2, 0, 3), ('closed', 0, 0, 1), ('', 100, 1, 12),
+            ):
+                with self.subTest(receipt=receipt):
+                    generator.write_bytes(script)
+                    calls = root / 'calls'
+                    calls.write_text('')
+                    env = dict(os.environ, PATH=f'{tmp}:{os.environ["PATH"]}',
+                               CALLS=str(calls), FAILURES=str(failures), RECEIPT=receipt)
+                    result = subprocess.run(['sh', str(generator), '--notify'], env=env, capture_output=True)
+                    self.assertEqual(result.returncode, expected_status)
+                    self.assertEqual(len(calls.read_text().splitlines()), expected_calls)
+                    self.assertFalse(generator.exists())
 
     def test_postboot_marks_completion_only_after_a_receipt(self):
         templates = ROOT / 'docker/worker/templates'
@@ -291,7 +307,7 @@ $_GET = ['mac' => '02:00:00:00:00:01', 'code' => 'os_first_boot', 'ack' => $argv
 
     def test_automation_account_requires_enabled_module_and_current_valid_key(self):
         template = '{{ACCOUNTS_BLOCK}}\n{{ADMIN_USER_BLOCK}}\n{{ANSIBLE_PUBKEY}}\n'
-        config = {'distro':'debian', 'admin_user_login':'operator', 'admin_user_pwhash':'fixture-hash'}
+        config = {'distro':'debian', 'ansible_role':'base', 'admin_user_login':'operator', 'admin_user_pwhash':'fixture-hash'}
         current = 'ssh-ed25519 AAAA fixture@example.test'
         stale = 'ssh-ed25519 AAAA stale@example.test'
         for state in (None, 'off'):
@@ -312,7 +328,7 @@ $_GET = ['mac' => '02:00:00:00:00:01', 'code' => 'os_first_boot', 'ack' => $argv
 
     def test_technical_account_name_follows_the_setting(self):
         template = '{{ACCOUNTS_BLOCK}}\n{{ADMIN_USER_BLOCK}}\n'
-        config = {'distro':'debian', 'admin_user_login':'operator', 'admin_user_pwhash':'fixture-hash'}
+        config = {'distro':'debian', 'ansible_role':'base', 'admin_user_login':'operator', 'admin_user_pwhash':'fixture-hash'}
         key = 'ssh-ed25519 AAAA fixture@example.test'
         custom = self.render(config, template=template, module_enabled='on', module_key=key, module_user='automation')
         self.assertIn('useradd -m -s /bin/bash -g automation -G sudo automation', custom)
