@@ -113,7 +113,7 @@ impl Plan {
                      cmdline\nreboot\nignoredisk --only-use={disk}\n\
                      clearpart --all --initlabel --drives={disk}\nautopart --type=lvm --nohome\n\
                      %pre --erroronfail --log=/tmp/pxe-tools-guard.log\n{guard}\n%end\n\
-                     %packages\n@^minimal-environment\ncurl-minimal\n%end\n\
+                     %packages\n@^minimal-environment\ncurl\n%end\n\
                      %post --erroronfail\nset -eu\n{save}\nrestorecon {target}\n{end}\n%end\n",
                     self.hostname, repo, self.login, self.password_hash
                 ))

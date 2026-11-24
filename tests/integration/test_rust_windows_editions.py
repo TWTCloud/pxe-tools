@@ -155,6 +155,7 @@ def check_automatic_linux(database, tls, auth, form_headers):
             assert b'inst.ks=' in chain and b'inst.nosave=all_ks' in chain
             assert b'ignoredisk --only-use=vda\nclearpart --all --initlabel --drives=vda' in config
             assert b'%pre --erroronfail' in config and serial.encode() in config
+            assert b'%packages\n@^minimal-environment\ncurl\n%end' in config
             assert b'%post --erroronfail' in config and b'/api/install-end' in config
         with sqlite3.connect(database) as db:
             assert db.execute('SELECT install_status FROM installations WHERE action_id=?', (action,)).fetchall() == [('in_progress',)]
