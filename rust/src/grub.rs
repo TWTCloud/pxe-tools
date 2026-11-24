@@ -12,6 +12,7 @@ const INSTALL: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-install.cfg")
 const LOCAL: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-local.cfg"));
 const RESCUE: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-rescue.cfg"));
 const DISK_TEST: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-disktest.cfg"));
+const WIPE: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-wipe.cfg"));
 
 struct Machine {
     mac: String,
@@ -97,12 +98,7 @@ pub fn serve(
     let menu = match machine.as_ref() {
         Some(machine) if machine.rescue => "rescue",
         Some(machine) if machine.status == "testing" => "disktest",
-        Some(machine) if machine.status == "wiping" => {
-            return Ok(reply(
-                422,
-                "# Cette opération sort du parcours Debian guidé\n",
-            ));
-        }
+        Some(machine) if machine.status == "wiping" => "wipe",
         Some(machine) if machine.status == "configured" => "install",
         Some(machine)
             if !matches!(
@@ -146,6 +142,7 @@ pub fn serve(
         let code = match action.as_ref().map(|(_, kind)| (menu, kind.as_str())) {
             Some(("install", "install_only" | "reinstall")) => Some("grub_config_served_install"),
             Some(("disktest", "disktest")) => Some("grub_config_served_disktest"),
+            Some(("wipe", "wipe_only" | "reinstall")) => Some("grub_config_served_wipe"),
             _ => None,
         };
         if let Some(code) = code {
@@ -209,6 +206,7 @@ pub fn serve(
                     "discovery" => "Identification du matériel",
                     "rescue" => "Mode de récupération (rescue)",
                     "disktest" => "Tests de disque (SMART + badblocks)",
+                    "wipe" => "Effacement sécurisé des disques",
                     _ => "Installation automatique : $hostname (Debian $distro)",
                 },
             )
@@ -221,10 +219,9 @@ pub fn serve(
                 "$preseedUrl",
                 &format!(
                     "http://{server}/{}-preseed.cfg",
-                    if selected == "disktest" {
-                        "disktest"
-                    } else {
-                        "discovery"
+                    match selected {
+                        "disktest" | "wipe" => selected,
+                        _ => "discovery",
                     }
                 ),
             )
@@ -237,6 +234,7 @@ pub fn serve(
         "install" => body.push_str(&render(INSTALL, menu, machine.as_ref())),
         "rescue" => body.push_str(&render(RESCUE, menu, machine.as_ref())),
         "disktest" => body.push_str(&render(DISK_TEST, menu, machine.as_ref())),
+        "wipe" => body.push_str(&render(WIPE, menu, machine.as_ref())),
         "local" => {
             let local = render(LOCAL, menu, machine.as_ref());
             if arch == "arm64" {

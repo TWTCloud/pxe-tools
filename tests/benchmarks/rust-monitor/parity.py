@@ -37,11 +37,14 @@ DISK_PROGRESS = "/api/disktest-disk-progress"
 DISK_RESULT = "/api/disktest-result"
 DISK_SMART = "/api/disktest-smart"
 DISK_END = "/api/disktest-end"
+WIPE_SCRIPT = "/wipe.sh"
+WIPE_LOG = "/api/wipe-progress"
+WIPE_END = "/api/wipe-end"
 PRESEED = "/preseed.php"
 GRUB = "/grub.php"
 ARTIFACT = "/pxe/postboot/162/postboot.sh"
 ROUTES = (ROUTE, BOOT, DISCOVERY, POLL, START, END, READY, CHECKPOINT, LOG, PHASE, PRESEED, GRUB, ARTIFACT, DHCP, DNSMASQ, DISK_JOB, DISK_LOG,
-          DISK_PROGRESS, DISK_RESULT, DISK_SMART, DISK_END)
+          DISK_PROGRESS, DISK_RESULT, DISK_SMART, DISK_END, WIPE_SCRIPT, WIPE_LOG, WIPE_END)
 LAN = "192.0.2.24"
 
 
@@ -343,6 +346,55 @@ def compare_disk_diagnostics(ports, paths):
             assert json.loads(progress)[disk]["pct"]==100
             assert db.execute("SELECT status FROM actions WHERE id=?",[action]).fetchone()==("success",)
             assert db.execute("SELECT serial FROM disk_smart_snapshots WHERE test_id=?",[test]).fetchall()==[(serial,)]
+
+
+def compare_wipe(ports, paths):
+    mac = "02:00:00:77:00:02"
+    disk, number, action_token = "/dev/vda", "WIPE-DISPOSABLE", "8"*64
+    proof = {"kind":"serial","source":"sysfs","value":number,"status":"valid"}
+    disks = [{"name":disk,"mode":"partial","identity":proof}]
+    chain = {"hostname":"fixture-after-wipe","domain":"example.test","install_config":{
+        "distro":"debian","codename":"trixie","partition_mode":"default","network_mode":"dhcp",
+        "root_login_mode":"disabled","admin_user_login":"qa","admin_user_pwhash":"$6$fixture",
+        "system_disk_path":disk,"system_disk_identity":proof,
+    }}
+    for path in paths:
+        with closing(sqlite3.connect(path)) as db, db:
+            machine = db.execute("INSERT INTO machines(mac,status,local_boot_source) VALUES(?,'wiping','none')",[mac]).lastrowid
+            action = db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES (?,'reinstall','pending',?)",
+                                [machine,action_token]).lastrowid
+            wipe = db.execute("""INSERT INTO wipes(machine_id,action_id,disks_json,wipe_mode,post_action,
+                                 chain_install_config_json) VALUES (?,?,?,'partial','reboot',?)""",
+                              [machine,action,json.dumps(disks),json.dumps(chain)]).lastrowid
+    script = WIPE_SCRIPT + "?" + urlencode({"mac":mac})
+    query = urlencode({"mac":mac,"wipe_id":wipe})
+    compare(ports,DHCP+"?"+urlencode({"mac":mac,"ip":LAN}),200,method="POST")
+    for port in ports:
+        assert response(port,script,peer="outside",spoof=True)[0] == 404
+        assert response(port,WIPE_SCRIPT,peer="lan")[0] == 400
+        menu = response(port,GRUB+"?"+urlencode({"mac":mac,"arch":"amd64"}),peer="lan")
+        assert menu[0]==200 and b"wipe-preseed.cfg" in menu[3]
+        def fetch():
+            status, kind, cache, body = response(port,script,peer="lan")
+            assert status == 200 and kind.startswith("text/x-shellscript") and cache == "no-store"
+            assert f'ACTION_TOKEN="{action_token}"'.encode() in body
+            line = f"{disk}|partial|{base64.b64encode(number.encode()).decode()}".encode()
+            assert line in body
+            return re.search(rb'BOOT_TOKEN="([a-f0-9]{64})"',body).group(1).decode()
+        obsolete, issued = fetch(), fetch()
+        assert obsolete != issued
+        for peer, token in (("outside",issued),("other_lan",issued),("lan",obsolete),("lan",action_token)):
+            assert response(port,WIPE_LOG+"?"+query,peer=peer,token=token,spoof=True)[0]==404
+        assert response(port,WIPE_LOG+"?"+query+"&line=fixture",peer="lan",token=issued)[3]=={"status":"ok"}
+        assert response(port,WIPE_END+"?"+query,peer="lan",token=issued)[3]=={
+            "status":"ok","wipe_id":wipe,"machine_status":"configured","chain":"consumed",
+        }
+        assert response(port,WIPE_END+"?"+query,peer="lan",token=issued)[0]==404
+    assert compare_states(paths, [
+        f"SELECT wipe_status,log FROM wipes WHERE id={wipe}",
+        f"SELECT status,hostname,next_action FROM machines WHERE id={machine}",
+        f"SELECT status FROM actions WHERE id={action}",
+    ]) == [[("success","fixture\n")],[("configured","fixture-after-wipe","reboot")],[("running",)]]
 
 
 def compare_install(ports, paths):
@@ -743,7 +795,8 @@ def main():
         compare_grub(ports, paths)
         compare_boot_events(ports, paths)
         compare_disk_diagnostics(ports, paths)
-    print("Parity OK: 69 summaries, GRUB menus and selection, DHCP/TFTP events, discovery inventory, preseed with advanced networking and single- and multi-disk recipes, installation callbacks, and disk diagnostics")
+        compare_wipe(ports, paths)
+    print("Parity OK: 69 summaries, GRUB menus and selection, DHCP/TFTP events, discovery inventory, preseed with advanced networking and single- and multi-disk recipes, installation callbacks, disk diagnostics, and disk wipe")
 
 
 if __name__ == "__main__":

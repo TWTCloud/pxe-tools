@@ -685,7 +685,7 @@ async fn dispatch(
             return reply;
         }
     }
-    let dynamic = matches!(path, "/preseed.php" | "/grub.php")
+    let dynamic = matches!(path, "/preseed.php" | "/grub.php" | "/wipe.sh")
         || path.starts_with("/api/")
         || path.starts_with("/pxe/postboot/");
     if !dynamic {

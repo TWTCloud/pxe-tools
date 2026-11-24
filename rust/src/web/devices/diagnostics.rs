@@ -3,14 +3,11 @@
 use super::{
     connect, device_operations, escape, page, plain, redirect, setting, Device, ErrorBox, Reply,
 };
-use crate::{
-    disk_identity::serial,
-    pxe::{log_event, set_machine_status},
-};
+use crate::pxe::{log_event, set_machine_status};
 use hyper::StatusCode;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
-use std::{fmt::Write, io::Read, path::Path};
+use std::{fmt::Write, path::Path};
 
 pub(super) enum Route {
     Start,
@@ -111,29 +108,9 @@ pub(super) fn submit(
             {
                 return Ok(busy());
             }
-            let mut candidates = device.disks().filter(|(path, value, proof)| {
-                field("disk") == format!("{path}:{value}") && proof["kind"] == "serial"
-            });
-            let Some((disk, _, proof)) = candidates.next() else {
+            let Some((report, proof)) = device.serial_target(field("disk")) else {
                 return Ok(busy());
             };
-            if candidates.next().is_some() || serial(&proof["value"]).is_none() {
-                return Ok(busy());
-            }
-            // The legacy agent keeps the name exposed in inventory, with or
-            // without /dev, and revalidates the serial before touching a disk.
-            let mut reports =
-                crate::pxe::array_values(&device.inventory["disks"]).filter_map(|entry| {
-                    entry["name"]
-                        .as_str()
-                        .filter(|name| *name == disk || disk.strip_prefix("/dev/") == Some(*name))
-                });
-            let Some(report) = reports.next() else {
-                return Ok(busy());
-            };
-            if reports.next().is_some() {
-                return Ok(busy());
-            }
             let in_session: bool = tx.query_row(
                 "SELECT COALESCE(julianday(awaiting_action_until)>julianday('now','+60 seconds'),0)
                  FROM machines WHERE id=?1",
@@ -156,9 +133,7 @@ pub(super) fn submit(
                 }
                 value => value,
             };
-            let mut key = [0_u8; 32];
-            std::fs::File::open("/dev/urandom")?.read_exact(&mut key)?;
-            let token: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+            let token = crate::random_hex::<32>()?;
             tx.execute(
                 "INSERT INTO actions(machine_id,type,status,token,created_by)
                         VALUES(?1,'disktest','pending',?2,?3)",

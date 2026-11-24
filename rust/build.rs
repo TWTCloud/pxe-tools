@@ -26,7 +26,14 @@ fn main() {
     let path = "../docker/worker/templates/grub.php.j2";
     println!("cargo:rerun-if-changed={path}");
     let source = fs::read_to_string(path).expect("read the PHP GRUB template");
-    for menu in ["discovery", "install", "local", "rescue", "disktest"] {
+    for menu in [
+        "discovery",
+        "install",
+        "local",
+        "rescue",
+        "disktest",
+        "wipe",
+    ] {
         let (_, function) = source
             .split_once(&format!("function menuentry_{menu}("))
             .expect("find shared GRUB menu");
@@ -40,4 +47,32 @@ fn main() {
         fs::write(output.join(format!("grub-{menu}.cfg")), menuentry)
             .expect("write shared GRUB menu");
     }
+
+    let path = "../app/src/Views/pxe/wipe.sh.php";
+    println!("cargo:rerun-if-changed={path}");
+    let mut wipe = fs::read_to_string(path).expect("read the shared wipe script");
+    for (field, marker) in [
+        ("$pxe_ip", "__PXE_IP__"),
+        ("$mac", "__MAC__"),
+        ("$wipe_id", "__WIPE_ID__"),
+        ("$action_token ?? ''", "__ACTION_TOKEN__"),
+        ("$boot_token", "__BOOT_TOKEN__"),
+        ("$action_id ?? ''", "__ACTION_ID__"),
+        ("$action_type ?? ''", "__ACTION_TYPE__"),
+        ("$post_action", "__POST_ACTION__"),
+        ("$disks_parsed", "__DISK_LIST__"),
+    ] {
+        let pattern = format!("<?= {field} ?>");
+        assert_eq!(
+            wipe.matches(&pattern).count(),
+            1,
+            "expected each wipe field once"
+        );
+        wipe = wipe.replace(&pattern, marker);
+    }
+    assert!(
+        !wipe.contains("<?"),
+        "unexpected PHP block in the shared wipe script"
+    );
+    fs::write(output.join("wipe.sh"), wipe).expect("write shared wipe script");
 }

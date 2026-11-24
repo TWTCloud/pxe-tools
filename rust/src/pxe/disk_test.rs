@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{
-    agent::Session, array_values, client_in_subnet, is_php_array, log_event, machine_for_mac,
-    normalize_mac, set_machine_status,
+    agent::{Input, Session},
+    array_values, client_in_subnet, is_php_array, log_event, machine_for_mac, normalize_mac,
+    set_machine_status,
 };
 use crate::{
     arg, bearer, decimal, disk_identity::serial, failure, header, install, json_response,
-    parse_query, php_string, read_body, request_header, setting, ApiResult, HttpResponse, Params,
-    PxeRequest,
+    php_string, read_body, request_header, setting, ApiResult, HttpResponse, PxeRequest,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -35,15 +35,7 @@ pub(crate) fn serve(
         Ok(body) => body,
         Err(_) => return json_response(failure(400, "invalid request body")),
     };
-    let values = Input {
-        query: parse_query(query.as_bytes()),
-        form: if is_form {
-            parse_query(&body)
-        } else {
-            Params::new()
-        },
-        body: &body,
-    };
+    let values = Input::new(query, &body, is_form);
     let test = decimal(values.get("test_id"));
     let peer = match ip {
         Some(IpAddr::V4(peer)) if client_in_subnet(peer, &setting(db, "pxe_subnet")?) => Some(peer),
@@ -94,19 +86,6 @@ pub(crate) fn serve(
     }?;
     tx.commit()?;
     json_response(Ok(result))
-}
-
-struct Input<'a> {
-    query: Params,
-    form: Params,
-    body: &'a [u8],
-}
-impl Input<'_> {
-    fn get(&self, key: &str) -> &str {
-        arg(&self.query, key)
-            .or_else(|| arg(&self.form, key))
-            .unwrap_or_default()
-    }
 }
 
 struct Job {
@@ -223,31 +202,8 @@ fn start(db: &mut Connection, ip: Ipv4Addr, raw_mac: &str) -> rusqlite::Result<A
 }
 
 fn progress(db: &Connection, job: &Job, input: &Input<'_>) -> ApiResult {
-    let mut line = String::from_utf8_lossy(input.body).into_owned();
-    if line.is_empty() {
-        let base = crate::param(&input.query, "b64");
-        if !base.is_empty() {
-            let raw = base.replace('-', "+").replace('_', "/");
-            let len = raw.len();
-            let padded = if len % 4 == 2 {
-                format!("{raw}==")
-            } else if len % 4 == 3 {
-                format!("{raw}=")
-            } else {
-                raw
-            };
-            if let Ok(data) = STANDARD.decode(padded) {
-                line = String::from_utf8_lossy(&data).into_owned();
-            }
-        }
-    }
-    if line.is_empty() {
-        line = crate::param(&input.query, "line").to_owned();
-    }
+    let line = input.log_line();
     if !line.is_empty() {
-        if !line.ends_with('\n') {
-            line.push('\n');
-        }
         db.execute(
             "UPDATE disk_tests SET log=COALESCE(log,'') || ?2 WHERE id=?1",
             params![job.id, line],

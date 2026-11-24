@@ -2,6 +2,7 @@
 
 mod advanced;
 mod diagnostics;
+mod wipe;
 
 use super::{
     admin::escape,
@@ -18,7 +19,7 @@ use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
 use serde_json::{json, Value};
-use std::{fmt::Write, io::Read, net::Ipv4Addr, path::Path};
+use std::{fmt::Write, net::Ipv4Addr, path::Path};
 
 pub(super) fn register(path: &Path, form: Option<&[u8]>) -> Result<Reply, ErrorBox> {
     let Some(form) = form else {
@@ -84,6 +85,7 @@ enum Section {
     Ansible(device_ansible::Action),
     Advanced(advanced::Route),
     Diagnostics(diagnostics::Route),
+    Wipe,
 }
 
 pub(super) fn route(path: &str) -> Option<DeviceRoute> {
@@ -96,6 +98,7 @@ pub(super) fn route(path: &str) -> Option<DeviceRoute> {
         "install/advanced" => Section::Advanced(advanced::Route::Form),
         "install-preview" => Section::Advanced(advanced::Route::Review),
         "disktest" => Section::Diagnostics(diagnostics::Route::Start),
+        "wipe" | "wipe-disks" => Section::Wipe,
         "disktest-cancel" => Section::Diagnostics(diagnostics::Route::Cancel),
         "disktest-post-action" => Section::Diagnostics(diagnostics::Route::After),
         "status" => Section::Status,
@@ -123,7 +126,8 @@ impl DeviceRoute {
                 | Section::Command(_)
                 | Section::Ansible(_)
                 | Section::Advanced(_)
-                | Section::Diagnostics(_),
+                | Section::Diagnostics(_)
+                | Section::Wipe,
                 &hyper::Method::POST,
             ) => Some(2048),
             (Section::Detail, &hyper::Method::PUT | &hyper::Method::POST) => Some(64 * 1024),
@@ -142,6 +146,7 @@ impl DeviceRoute {
         if let Some(form) = form {
             return match &self.section {
                 Section::Install => schedule(path, self.id, form, username),
+                Section::Wipe => wipe::submit(path, self.id, form, username),
                 Section::Diagnostics(route) => {
                     diagnostics::submit(route, path, self.id, form, username)
                 }
@@ -174,6 +179,7 @@ impl DeviceRoute {
         };
         match self.section {
             Section::Install => install_form(db, self.id, &device),
+            Section::Wipe => wipe::form(&device, self.id),
             Section::Diagnostics(diagnostics::Route::Start) => diagnostics::form(&device, self.id),
             Section::Advanced(advanced::Route::Form) => advanced::form(db, self.id, &device),
             Section::Detail => detail(db, self.id, &device),
@@ -231,6 +237,23 @@ impl Device {
                     .then_some((path, value, identity))
             })
     }
+
+    fn serial_target(&self, selected: &str) -> Option<(&str, Value)> {
+        let mut candidates = self.disks().filter(|(path, value, proof)| {
+            selected == format!("{path}:{value}") && proof["kind"] == "serial"
+        });
+        let (disk, _, proof) = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
+        let mut reports = crate::pxe::array_values(&self.inventory["disks"]).filter_map(|entry| {
+            entry["name"]
+                .as_str()
+                .filter(|name| *name == disk || disk.strip_prefix("/dev/") == Some(*name))
+        });
+        let report = reports.next()?;
+        reports.next().is_none().then_some((report, proof))
+    }
 }
 
 fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> {
@@ -250,6 +273,10 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
     }
     write!(output, "</ul><nav><a href=\"/machines/{id}/install\">Programmer une installation Debian</a> · <a href=\"/activity?machine={id}\">Activité</a> · <a href=\"/admin/devices\">Appareils</a></nav>")?;
     output.push_str("<h2>Opérations PXE</h2>");
+    write!(
+        output,
+        r#"<p><a href="/machines/{id}/wipe-disks">Effacer des disques</a></p>"#
+    )?;
     if device.status == "testing" {
         write!(
             output,
@@ -572,12 +599,7 @@ fn record_plan(
     preset: i64,
     mut snapshot: Value,
 ) -> Result<i64, ErrorBox> {
-    let mut random = [0; 32];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
-    let token = random
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let token = crate::random_hex::<32>()?;
     tx.execute("INSERT INTO actions(machine_id,type,status,token,created_by) VALUES(?,'install_only','pending',?,?)",
                params![id, token, username])?;
     let action = tx.last_insert_rowid();

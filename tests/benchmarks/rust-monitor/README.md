@@ -247,6 +247,10 @@ l’action de fin ou d’annuler le suivi. Le test de parité vérifie la
 rotation du jeton de session, sa liaison à l’adresse DHCP observée, la
 progression et les instantanés SMART. L’enchaînement automatique vers une
 installation attend le portage de la qualification du disque.
+La console peut aussi programmer un effacement de plusieurs disques après
+confirmation explicite. Le script vérifie à nouveau leur identité et
+utilise un jeton propre à l’opération. Le test de parité couvre aussi
+l’enchaînement d’un effacement déjà planifié vers son installation.
 Le renderer prend en charge les interfaces
 secondaires DHCP ou statiques, les VLAN secondaires et les bonds. Ces
 profils réseau sont vérifiés par comparaison de leur preseed et de leurs

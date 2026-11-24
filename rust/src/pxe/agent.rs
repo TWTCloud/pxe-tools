@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use crate::{install, pxe::machine_for_mac};
+use crate::{arg, install, param, parse_query, pxe::machine_for_mac, Params};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{params, Connection};
-use std::{io::Read, net::Ipv4Addr};
+use std::net::Ipv4Addr;
 use subtle::ConstantTimeEq;
 
 pub(super) struct Session<'a> {
@@ -15,11 +16,8 @@ pub(super) struct Session<'a> {
 
 impl Session<'_> {
     pub(super) fn issue(&self, db: &Connection) -> rusqlite::Result<String> {
-        let mut random = [0; 32];
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut source| source.read_exact(&mut random))
+        let token = crate::random_hex::<32>()
             .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
-        let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         let message = format!(
             r#"PXE DHCP observed {{"mac":"{}","ip":"{}"}}"#,
             self.mac, self.ip
@@ -68,5 +66,51 @@ impl Session<'_> {
             "UPDATE boot_sessions SET selected_at=CURRENT_TIMESTAMP WHERE token=?1",
             [token],
         )? == 1)
+    }
+}
+
+pub(super) struct Input<'a> {
+    pub query: Params,
+    pub form: Params,
+    pub body: &'a [u8],
+}
+impl<'a> Input<'a> {
+    pub(super) fn new(query: &str, body: &'a [u8], is_form: bool) -> Self {
+        Self {
+            query: parse_query(query.as_bytes()),
+            body,
+            form: if is_form {
+                parse_query(body)
+            } else {
+                Params::new()
+            },
+        }
+    }
+    pub(super) fn get(&self, key: &str) -> &str {
+        arg(&self.query, key)
+            .or_else(|| arg(&self.form, key))
+            .unwrap_or_default()
+    }
+    pub(super) fn log_line(&self) -> String {
+        let mut line = String::from_utf8_lossy(self.body).into_owned();
+        if line.is_empty() {
+            let base = param(&self.query, "b64");
+            if !base.is_empty() {
+                let mut raw = base.replace('-', "+").replace('_', "/");
+                if matches!(raw.len() % 4, 2 | 3) {
+                    raw.push_str(if raw.len() % 4 == 2 { "==" } else { "=" });
+                }
+                if let Ok(data) = STANDARD.decode(raw) {
+                    line = String::from_utf8_lossy(&data).into_owned();
+                }
+            }
+        }
+        if line.is_empty() {
+            line = param(&self.query, "line").to_owned();
+        }
+        if !line.is_empty() && !line.ends_with('\n') {
+            line.push('\n');
+        }
+        line
     }
 }

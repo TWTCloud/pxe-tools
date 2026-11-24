@@ -854,6 +854,40 @@ def verify_disk_diagnostics(client, database, authorization):
     print('Rust console scheduled an in-session disk diagnostic with a bound serial and cancelled it safely', flush=True)
 
 
+def verify_disk_wipe(client, database, authorization):
+    def request(path, **kwargs):
+        return client.request(path, authorization=authorization, **kwargs)
+    inventory = {'disks':[{'name':'vda','serial':'FIXTURE-WIPE-A'}, {'name':'/dev/vdb','serial':'FIXTURE-WIPE-B'}]}
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE settings SET value='on' WHERE key='pxe_enabled'")
+        device = db.execute("""INSERT INTO machines(mac,hostname,status,inventory_json,awaiting_action_until,local_boot_source)
+                            VALUES('02:00:00:00:09:26','fixture-wipe','discovered',?,datetime('now','+1 hour'),'manual')""",
+                            [json.dumps(inventory)]).lastrowid
+    path = f'/machines/{device}/wipe-disks'
+    form = [('targets[]','/dev/vda:FIXTURE-WIPE-A'),('targets[]','/dev/vdb:FIXTURE-WIPE-B'),
+            ('mode[/dev/vda]','partial'),('mode[/dev/vdb]','full'),('post_action','poweroff')]
+    assert b'FIXTURE-WIPE-A' in request(path)[2]
+    assert request(path,form=form)[0] == 422
+    assert request(path,form=form+[('confirm','EFFACER')],origin='https://outside.example')[0] == 403
+    old = [('targets[]','/dev/vda:STALE'),*form[1:],('confirm','EFFACER')]
+    assert request(path,form=old)[0] == 409
+    saved = request(path,form=form+[('confirm','EFFACER')])
+    assert saved[0] == 303 and saved[1].startswith('/tasks/')
+    assert request(path,form=form+[('confirm','EFFACER')])[0] == 409
+    with closing(sqlite3.connect(database)) as db, db:
+        status, planned, local = db.execute(
+            'SELECT status,next_action,local_boot_source FROM machines WHERE id=?',[device],
+        ).fetchone()
+        assert (status,planned,local) == ('wiping','reboot','none')
+        kind, raw = db.execute("SELECT wipe_mode,disks_json FROM wipes WHERE machine_id=?", [device]).fetchone()
+        assert kind=='mixed'
+        assert [(entry['name'],entry['mode'],entry['identity']['value']) for entry in json.loads(raw)] == [
+            ('vda','partial','FIXTURE-WIPE-A'),('/dev/vdb','full','FIXTURE-WIPE-B'),
+        ]
+        db.execute("UPDATE settings SET value='off' WHERE key='pxe_enabled'")
+    print('Rust console required explicit wipe confirmation and bound both disk identities in one operation', flush=True)
+
+
 def verify_custom_partition_review(client, database, authorization):
     def request(path, **kwargs):
         return client.request(path, authorization=authorization, **kwargs)
@@ -1574,6 +1608,7 @@ def local(binary):
         verify_guided_install(updated, database, authorization)
         verify_custom_partition_review(updated, database, authorization)
         verify_disk_diagnostics(updated, database, authorization)
+        verify_disk_wipe(updated, database, authorization)
         verify_device_operations(updated, database, authorization)
         verify_device_ansible(updated, database, authorization)
         verify_hardware_context(updated, database, authorization)

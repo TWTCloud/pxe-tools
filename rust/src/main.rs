@@ -56,7 +56,11 @@ struct DatabaseConfig {
 }
 
 fn random_token() -> std::io::Result<String> {
-    let mut random = [0; 16];
+    random_hex::<16>()
+}
+
+fn random_hex<const N: usize>() -> std::io::Result<String> {
+    let mut random = [0; N];
     fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
     Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
 }
@@ -386,6 +390,11 @@ fn handle(
         | (Method::Post, "/api/disktest-result" | "/api/disktest-smart") => {
             let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
             pxe::disk_test::serve(&mut db, ip, path, query, request)
+        }
+        (Method::Get, "/wipe.sh")
+        | (Method::Get | Method::Post, "/api/wipe-progress" | "/api/wipe-end") => {
+            let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            pxe::wipe::serve(&mut db, ip, path, query, request)
         }
         (Method::Post, "/api/internal/dhcp-event" | "/api/internal/dnsmasq-event") => {
             let result = (|| -> rusqlite::Result<()> {
