@@ -16,7 +16,7 @@ type ErrorBox = Box<dyn Error + Send + Sync>;
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct ImageKey {
+pub(crate) struct ImageKey {
     id: i64,
     distro: String,
     version: String,
@@ -146,8 +146,12 @@ fn http_root() -> Result<PathBuf, ErrorBox> {
 }
 
 pub(super) fn reserve_deletion(path: &Path, image_id: i64, job_id: i64) -> Result<(), ErrorBox> {
-    // geteuid() reads the identity of this process and has no pointer arguments.
-    if unsafe { libc::geteuid() } == 0 || image_id <= 0 || job_id <= 0 || !path.is_absolute() {
+    // These calls read the identity of this process.
+    if unsafe { libc::geteuid() == 0 || libc::getegid() == 0 }
+        || image_id <= 0
+        || job_id <= 0
+        || !path.is_absolute()
+    {
         return Err("Invalid image deletion request".into());
     }
     let http = http_root()?;
@@ -309,7 +313,19 @@ impl Image {
 }
 
 impl ImageKey {
-    fn path(&self, root: &Path) -> Result<PathBuf, ErrorBox> {
+    pub(crate) fn from_deletion(raw: &str, id: i64) -> Result<Self, ErrorBox> {
+        let key: Self = serde_json::from_str(raw)?;
+        if id <= 0 || key.id != id {
+            return Err("Identifiant d’image invalide".into());
+        }
+        Ok(key)
+    }
+
+    pub(crate) fn current(&self, db: &Connection) -> rusqlite::Result<Option<bool>> {
+        Ok(Image::get(db, self.id)?.map(|image| image.key == *self))
+    }
+
+    pub(crate) fn path(&self, root: &Path) -> Result<PathBuf, ErrorBox> {
         let mut path = root.join("netboot");
         let mut push = |component: &str| -> Result<(), ErrorBox> {
             if !safe_netboot_component(component) {

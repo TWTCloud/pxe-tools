@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::{ansible, bootstrap, download, factory_reset, postboot, power, schedule};
+use super::{ansible, bootstrap, download, factory_reset, image_delete, postboot, power, schedule};
 use crate::{configured_database, connect, menu_store::Menus, setting};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{
@@ -312,7 +312,15 @@ impl Worker<'_> {
         } else if kind == factory_reset::JOB {
             return self.factory_reset(database, id);
         } else if kind.starts_with("image:delete:") {
-            return self.python("job", Some(database), Some(id));
+            let http = directory("HTTP_ROOT", "/srv/http");
+            if let Err(error) = image_delete::run(database, id, kind, &http) {
+                fail_job(
+                    database,
+                    id,
+                    "Suppression refusée ou interrompue ; fichiers conservés pour vérification.",
+                )?;
+                return Err(error);
+            }
         } else if matches!(
             kind,
             "ansible_repo:pull" | "preset:pull_github" | "preset:pull_github:autoseed"

@@ -322,25 +322,47 @@ def verify_worker_image_delete(database, http_root):
     files = ('linux', 'initrd.gz', 'firmware.cpio.gz')
     for asset in (*files, 'unrelated'):
         (material/asset).write_bytes(b'Disposable fixture')
+
+    def enqueue(db):
+        return db.execute("INSERT INTO init_jobs(job_type,status,log) VALUES('image:delete:1','pending',?)",
+                          (json.dumps(image),)).lastrowid
+
+    def outcome(job):
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            with closing(sqlite3.connect(database)) as db:
+                status, message = db.execute('SELECT status,message FROM init_jobs WHERE id=?', (job,)).fetchone()
+                exists = db.execute('SELECT EXISTS(SELECT 1 FROM os_images WHERE id=1)').fetchone()[0]
+            if status in ('failed','success'):
+                return status, bool(exists), message
+            time.sleep(.3)
+        raise RuntimeError('The packaged worker did not finish the image deletion job')
+
     with closing(sqlite3.connect(database)) as db, db:
         db.execute("""INSERT INTO os_images(id,distro,version,version_full,arch,enabled,status)
                        VALUES(:id,:distro,:version,:version_full,:arch,0,'downloaded')""", image)
-        job = db.execute("INSERT INTO init_jobs(job_type,status,log) VALUES('image:delete:1','pending',?)",
-                         (json.dumps(image),)).lastrowid
-    deadline = time.monotonic() + 90
-    while time.monotonic() < deadline:
-        with closing(sqlite3.connect(database)) as db:
-            status, message = db.execute('SELECT status,message FROM init_jobs WHERE id=?', (job,)).fetchone()
-            exists = db.execute('SELECT EXISTS(SELECT 1 FROM os_images WHERE id=1)').fetchone()[0]
-        if status == 'failed':
-            raise RuntimeError(f'The packaged image deletion job failed: {message}')
-        if status == 'success':
-            assert not exists
-            assert sorted(path.name for path in material.iterdir()) == ['unrelated']
-            print('Packaged worker committed the Rust image reservation and preserved the unrelated file', flush=True)
-            return
-        time.sleep(.3)
-    raise RuntimeError('The packaged worker did not finish the image deletion job')
+        db.execute("CREATE TRIGGER fixture_refuse_image BEFORE DELETE ON os_images "
+                   "BEGIN SELECT RAISE(ABORT,'fixture refuses deletion'); END")
+        rejected = enqueue(db)
+    result = outcome(rejected)
+    assert result[:2] == ('failed', True), result
+    assert {path.name for path in material.iterdir()} == {*files, 'unrelated'}
+    target = material/'linux'
+    target.unlink()
+    target.symlink_to(material/'unrelated')
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute('DROP TRIGGER fixture_refuse_image')
+        linked = enqueue(db)
+    result = outcome(linked)
+    assert result[:2] == ('failed', True) and target.is_symlink(), result
+    target.unlink()
+    with closing(sqlite3.connect(database)) as db, db:
+        final = enqueue(db)
+        (material/f'linux.pxe-delete-{final}').write_bytes(b'Recovered fixture file')
+    result = outcome(final)
+    assert result[:2] == ('success', False), result
+    assert sorted(path.name for path in material.iterdir()) == ['unrelated']
+    print('Packaged Rust image deletion restored uncommitted files, rejected links and preserved an unrelated file', flush=True)
 
 
 def generate_tls_pair(directory, common_name):

@@ -222,8 +222,10 @@ Les variantes guidées APT et Docker construisent leur environnement
 d’exécution sans Nginx ni PHP.
 Dans la variante guidée, Rust réserve la suppression d’une image en
 contrôlant ses dépendances et en gardant le verrou SQLite pendant que
-le worker déplace les fichiers protégés. Le worker conserve son protocole
-de confirmation et de reprise. Rust rend aussi le script et l’unité postboot
+le worker Rust déplace les trois fichiers autorisés dans le stockage
+protégé. La réservation SQLite utilise le compte web. Le worker vérifie
+la validation de la transaction avant d’effacer les fichiers mis de côté
+et les restaure si la transaction échoue. Rust rend aussi le script et l’unité postboot
 par action à partir des variables du worker. Ce rendu accepte les variables
 `pxe_ip`, `mac` et `token` des templates livrés. Rust reprend les anciens
 réglages réseau SQLite en gardant les choix explicites et le mode PXE

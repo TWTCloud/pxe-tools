@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+use super::storage::{descriptor_path, directory, invalid};
 use crate::menu_store::Menus;
 use rusqlite::Connection;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io,
-    os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
-    },
-    path::{Component, Path, PathBuf},
+    path::Path,
     process::Command,
 };
 
@@ -38,11 +35,11 @@ pub(super) fn wipe(http: &Path, tftp: &Path, mok: &Path, scripts: &Path) -> io::
     }
     let netboot = http.join("netboot");
     let _menus = Menus::lock(tftp)?;
-    let transfer = protected(tftp)?.ok_or_else(|| invalid("Racine TFTP indisponible"))?;
-    let bios_menus = protected(&tftp.join("pxelinux.cfg"))?
+    let transfer = directory(tftp, true)?.ok_or_else(|| invalid("Racine TFTP indisponible"))?;
+    let bios_menus = directory(&tftp.join("pxelinux.cfg"), true)?
         .ok_or_else(|| invalid("Répertoire des menus PXE indisponible"))?;
-    let images = protected(&netboot)?;
-    let keys = protected(mok)?;
+    let images = directory(&netboot, true)?;
+    let keys = directory(mok, true)?;
     for root in [tftp, &netboot, mok] {
         refuse_submounts(root)?;
     }
@@ -63,37 +60,6 @@ pub(super) fn wipe(http: &Path, tftp: &Path, mok: &Path, scripts: &Path) -> io::
         clear_directory(&keys, &[])?;
     }
     Ok(())
-}
-
-fn descriptor_path(directory: &File) -> PathBuf {
-    PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
-}
-
-fn protected(path: &Path) -> io::Result<Option<File>> {
-    let mut directory = File::open("/")?;
-    let mut walked = PathBuf::from("/");
-    for component in path.components().skip(1) {
-        let Component::Normal(name) = component else {
-            return Err(invalid("Composant de chemin PXE invalide"));
-        };
-        walked.push(name);
-        directory = match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(descriptor_path(&directory).join(name))
-        {
-            Ok(child) => child,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let info = directory.metadata()?;
-        let shared_config = walked == Path::new("/etc/pxe-tools") && info.mode() & 0o002 == 0;
-        let shared_menus = name == "pxelinux.cfg" && walked == path && info.mode() & 0o002 == 0;
-        if info.uid() != 0 || (info.mode() & 0o022 != 0 && !shared_config && !shared_menus) {
-            return Err(invalid("Répertoire PXE insuffisamment protégé"));
-        }
-    }
-    Ok(Some(directory))
 }
 
 fn refuse_submounts(path: &Path) -> io::Result<()> {
@@ -128,8 +94,4 @@ fn clear_directory(directory: &File, keep: &[&str]) -> io::Result<()> {
     }
     directory.sync_all()?;
     Ok(())
-}
-
-fn invalid(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
 }

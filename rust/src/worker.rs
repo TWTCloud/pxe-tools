@@ -4,10 +4,12 @@ pub(crate) mod ansible;
 pub(crate) mod bootstrap;
 pub(crate) mod download;
 pub(crate) mod factory_reset;
+mod image_delete;
 pub(crate) mod postboot;
 pub(crate) mod power;
 pub(crate) mod schedule;
 pub(crate) mod service;
+mod storage;
 
 use crate::connect;
 use rusqlite::{OpenFlags, TransactionBehavior};
