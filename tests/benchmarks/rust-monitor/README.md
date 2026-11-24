@@ -135,6 +135,17 @@ l’état de l’appareil et les travaux concurrents avant de programmer le
 prochain boot PXE. Le mot de passe du compte installé est stocké sous forme
 de hash SHA-512 crypt.
 
+Le mode facultatif `AUTH_MODE=authentik` reprend l’identité transmise par
+un reverse proxy qui authentifie le navigateur. Dans Docker, définir
+les variables d’environnement du service. En APT, les fournir dans une
+surcharge systemd de `pxe-tools-pxe-http.service`. Le proxy établit une
+connexion HTTPS à la console et remplace les en-têtes
+`X-Forwarded-User` et `X-Forwarded-Host` par les valeurs vérifiées.
+`AUTHENTIK_TRUSTED_PROXY_CIDRS` contient les adresses réelles des proxys,
+et `PXE_PUBLIC_HOST` accepte le nom DNS public. Rust vérifie le pair
+réseau, l’unicité de l’en-tête d’identité et l’origine HTTPS du formulaire.
+Le test isolé simule les en-têtes pour les pairs autorisés et refusés.
+
 Pour activer ACME, définir `PXE_PUBLIC_HOST` avec le nom DNS, puis ouvrir
 `/admin/certificates` et choisir le mode de test ou de production de
 Let’s Encrypt. Le formulaire enregistre le consentement et peut renseigner

@@ -30,13 +30,13 @@ class Client:
         self.https_port = https_port
         self.origin = 'https://127.0.0.1' + (f':{https_port}' if https_port != 443 else '')
 
-    def request(self, path, *, form=None, authorization=None, secure=True, origin=None):
+    def request(self, path, *, form=None, authorization=None, secure=True, origin=None, extra_headers=None):
         if secure:
             conn = HTTPSConnection('127.0.0.1', self.https_port, timeout=5, context=self.context)
         else:
             conn = HTTPConnection('127.0.0.1', self.http_port, timeout=5)
         try:
-            headers = {}
+            headers = dict(extra_headers or {})
             if authorization:
                 headers['Authorization'] = 'Basic ' + base64.b64encode(authorization.encode()).decode()
             if form is not None:
@@ -443,6 +443,38 @@ def verify_admin_attempt_limit(client, authorization):
     print('Rust kept failed admin attempts rate-limited while serving a signed-in operator', flush=True)
 
 
+def verify_authentik_proxy(server, client, env, registry, authorization):
+    mode = {**env,'AUTH_MODE':'authentik'}
+    headers = {'X-Forwarded-User':'authentik-fixture','X-Forwarded-Host':'pxe.example.test'}
+    path = '/admin/settings/device-terminology'
+    for name,cidrs in (
+        ('untrusted','192.0.2.7/32'),('invalid','127.0.0.1/32,invalid'),('trusted','127.0.0.1/32'),
+    ):
+        with subprocess.Popen(server, env={**mode,'AUTHENTIK_TRUSTED_PROXY_CIDRS':cidrs}) as proxy:
+            try:
+                client.ready(proxy)
+                assert client.request('/admin/devices',authorization=authorization)[0]==401
+                if name!='trusted':
+                    forged = {**headers,'X-Forwarded-For':'192.0.2.7'}
+                    assert client.request('/admin/devices',extra_headers=forged)[0]==401
+                    assert client.request(path,form={'ui_device_term':'serveur'},origin='https://pxe.example.test',
+                                          extra_headers=forged)[0]==403
+                    continue
+                assert client.request('/admin/devices',extra_headers=headers)[0]==200
+                assert client.request('/admin/devices',extra_headers={**headers,'X-Forwarded-User':'a,b'})[0]==401
+                assert client.request(path,form={'ui_device_term':'serveur'},origin='https://outside.example',
+                                      extra_headers=headers)[0]==403
+                assert client.request(path,form={'ui_device_term':'serveur'},origin='https://pxe.example.test',
+                                      extra_headers=headers)[:2]==(303,'/admin/devices')
+                assert b'<h1>Serveurs</h1>' in client.request('/admin/devices',extra_headers=headers)[2]
+                with closing(sqlite3.connect(registry)) as db:
+                    assert not db.execute("SELECT 1 FROM users WHERE username='authentik-fixture'").fetchone()
+            finally:
+                proxy.terminate()
+                proxy.wait(timeout=5)
+    print('Rust accepted Authentik only from a trusted peer and verified forwarded HTTPS origin', flush=True)
+
+
 def verify_guided_install(client, database, authorization):
     pull = '/presets/pull-github'
     assert client.request(pull,form={},authorization=authorization)[0]==409
@@ -501,6 +533,7 @@ def verify_guided_install(client, database, authorization):
         assert snapshot['version_full'] == '13.7.0' and snapshot['_pending_action_id'] == action
         assert db.execute("SELECT length(token),status FROM actions WHERE id=?",(action,)).fetchone()==(64,'pending')
         assert db.execute("SELECT status FROM init_jobs WHERE job_type=?",(f'action:render_postboot:{action}',)).fetchone() == ('pending',)
+        db.execute("UPDATE settings SET value='off' WHERE key='pxe_enabled'")
     print('Rust guided scheduling rejected stale identity and replay, and atomically queued the selected install', flush=True)
 
 
@@ -1051,6 +1084,9 @@ def local(binary):
         verify_device_settings(updated, database, authorization)
         verify_guided_install(updated, database, authorization)
         verify_admin_attempt_limit(updated, authorization)
+        schedule_server.terminate()
+        schedule_server.wait(timeout=5)
+        verify_authentik_proxy([str(binary),'--serve-guided',str(config)],updated,env,database,authorization)
     verify_worker_commands(binary)
     verify_worker_recovery(binary)
     verify_schema_migration(binary)

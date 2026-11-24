@@ -4,6 +4,7 @@ mod acme;
 mod activity;
 mod admin;
 mod assets;
+mod auth_proxy;
 mod certificates;
 mod device_settings;
 mod devices;
@@ -395,7 +396,7 @@ async fn dispatch(
             return site.setup.page(path, &site.database).await;
         }
         if parts.method == Method::POST && matches!(path, "/init/db" | "/init/admin") {
-            if !admin_origin(&parts.headers, site) {
+            if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
             let form = match read_form(&parts.headers, body, 2048).await {
@@ -425,7 +426,7 @@ async fn dispatch(
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
-        if !admin_origin(&parts.headers, site) {
+        if !admin_origin(&parts.headers, peer, site) {
             return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
         }
         return site
@@ -442,7 +443,7 @@ async fn dispatch(
         let form = if readable {
             None
         } else {
-            if !admin_origin(&parts.headers, site) {
+            if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
             match read_form(&parts.headers, body, 1024).await {
@@ -471,7 +472,7 @@ async fn dispatch(
         let form = if readable {
             None
         } else if let Some(limit) = route.form_limit(&parts.method) {
-            if !admin_origin(&parts.headers, site) {
+            if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
             match read_form(&parts.headers, body, limit).await {
@@ -506,7 +507,7 @@ async fn dispatch(
         }
         let endpoint = path.to_owned();
         let form = if parts.method == Method::POST {
-            if !admin_origin(&parts.headers, site) {
+            if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
             match read_form(&parts.headers, body, 2048).await {
@@ -536,7 +537,7 @@ async fn dispatch(
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
         let form = if parts.method == Method::POST {
-            if !admin_origin(&parts.headers, site) {
+            if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
             let limit = if path == certificates::ROUTE {
@@ -567,7 +568,7 @@ async fn dispatch(
         return site.admin.serve(&parts, peer, &site.database, action).await;
     }
     if path == admin::DEVICE_SETTINGS && parts.method == Method::POST && secure {
-        if !admin_origin(&parts.headers, site) {
+        if !admin_origin(&parts.headers, peer, site) {
             return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
         }
         let data = match read_form(&parts.headers, body, 256).await {
@@ -728,13 +729,22 @@ async fn read_form(headers: &HeaderMap, body: Incoming, max: usize) -> Result<By
     }
 }
 
-fn admin_origin(headers: &HeaderMap, site: &Site) -> bool {
-    let Some(host) = single(headers, HOST.as_str()).and_then(|raw| raw.parse::<Authority>().ok())
+fn admin_origin(headers: &HeaderMap, peer: IpAddr, site: &Site) -> bool {
+    let forwarded = site.admin.trusted_proxy(peer) && headers.contains_key("x-forwarded-host");
+    let header = if forwarded {
+        "x-forwarded-host"
+    } else {
+        HOST.as_str()
+    };
+    let Some(host) = single(headers, header)
+        .filter(|raw| !raw.contains('@'))
+        .and_then(|raw| raw.parse::<Authority>().ok())
     else {
         return false;
     };
     let name = host.host();
-    if host.port_u16().unwrap_or(443) != site.https_port
+    let external_port = host.port_u16().unwrap_or(443);
+    if (!forwarded && external_port != site.https_port)
         || !(site.pxe_ip.is_some_and(|ip| name == ip.to_string())
             || name.eq_ignore_ascii_case("localhost")
             || name == "127.0.0.1"
@@ -745,7 +755,7 @@ fn admin_origin(headers: &HeaderMap, site: &Site) -> bool {
     {
         return false;
     }
-    let expected = if site.https_port == 443 {
+    let expected = if external_port == 443 {
         format!("https://{name}")
     } else {
         format!("https://{host}")

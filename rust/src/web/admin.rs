@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::{bytes, plain, single, Reply};
+use super::{auth_proxy::TrustedProxies, bytes, plain, single, Reply};
 use crate::{configured_database, connect};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hyper::{
@@ -53,6 +53,7 @@ pub(super) enum Action {
 pub(super) struct Console {
     attempts: Mutex<HashMap<IpAddr, (Instant, u8)>>,
     jobs: Semaphore,
+    proxies: TrustedProxies,
 }
 
 impl Console {
@@ -60,7 +61,12 @@ impl Console {
         Self {
             attempts: Mutex::new(HashMap::new()),
             jobs: Semaphore::new(2),
+            proxies: TrustedProxies::from_environment(),
         }
+    }
+
+    pub(super) fn trusted_proxy(&self, peer: IpAddr) -> bool {
+        self.proxies.contains(peer)
     }
 
     pub(super) async fn serve(
@@ -77,29 +83,45 @@ impl Console {
                 .body(bytes(""))
                 .expect("valid admin redirect");
         }
-        if !matches!(
-            std::env::var("AUTH_MODE").unwrap_or_default().as_str(),
-            "" | "local"
-        ) {
-            return plain(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Local authentication is unavailable\n",
-            );
-        }
-        let Some((username, password)) =
-            single(&request.headers, AUTHORIZATION.as_str()).and_then(credentials)
-        else {
-            return unauthorized();
+        let (username, password) = match std::env::var("AUTH_MODE").unwrap_or_default().as_str() {
+            "" | "local" => {
+                let Some((username, password)) =
+                    single(&request.headers, AUTHORIZATION.as_str()).and_then(credentials)
+                else {
+                    return unauthorized();
+                };
+                (username, Some(password))
+            }
+            "authentik" => {
+                let Some(user) = self.proxies.identity(peer, &request.headers) else {
+                    return plain(
+                        StatusCode::UNAUTHORIZED,
+                        "Authentik authentication required\n",
+                    );
+                };
+                (user.to_owned(), None)
+            }
+            _ => {
+                return plain(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Authentication is unavailable\n",
+                )
+            }
         };
         let Ok(_permit) = self.jobs.try_acquire() else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
         };
-        let Some(window) = self.reserve_attempt(peer) else {
-            return Response::builder()
-                .status(StatusCode::TOO_MANY_REQUESTS)
-                .header("Retry-After", "60")
-                .body(bytes("Try again later\n"))
-                .expect("valid rate limit response");
+        let window = if password.is_some() {
+            let Some(window) = self.reserve_attempt(peer) else {
+                return Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .header("Retry-After", "60")
+                    .body(bytes("Try again later\n"))
+                    .expect("valid rate limit response");
+            };
+            Some(window)
+        } else {
+            None
         };
         let page = request
             .uri
@@ -118,19 +140,21 @@ impl Console {
         let reply = task::spawn_blocking(move || {
             let db_path = configured_database(&config)?;
             let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-            let hash: Option<String> = db
-                .query_row(
-                    "SELECT password_hash FROM users WHERE username = ?",
-                    [&username],
-                    |row| row.get(0),
-                )
-                .optional()
-                .ok()?;
-            let authenticated = hash
-                .as_deref()
-                .is_some_and(|hash| bcrypt::verify(password, hash).unwrap_or(false));
-            if !authenticated {
-                return Some(unauthorized());
+            if let Some(password) = password {
+                let hash: Option<String> = db
+                    .query_row(
+                        "SELECT password_hash FROM users WHERE username = ?",
+                        [&username],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .ok()?;
+                if !hash
+                    .as_deref()
+                    .is_some_and(|hash| bcrypt::verify(password, hash).unwrap_or(false))
+                {
+                    return Some(unauthorized());
+                }
             }
             if let Action::Device(route, form) = &action {
                 return route
@@ -210,7 +234,9 @@ impl Console {
                 .as_ref()
                 .is_some_and(|response| response.status() != StatusCode::UNAUTHORIZED)
         }) {
-            self.refund_attempt(peer, window);
+            if let Some(window) = window {
+                self.refund_attempt(peer, window);
+            }
         }
         reply
             .ok()
