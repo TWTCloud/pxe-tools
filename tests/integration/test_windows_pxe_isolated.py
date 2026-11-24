@@ -7,7 +7,9 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import uuid
 
@@ -49,7 +51,7 @@ RUN apt-get update && apt-get install --yes --no-install-recommends ovmf swtpm \
 """)
 
 
-def configure_instance(root):
+def configure_instance(root, media):
     for name in ('data', 'configuration', 'tftp', 'tpm'):
         (root/name).mkdir(mode=0o700 if name in ('configuration', 'tpm') else 0o755)
     data, configuration = root/'data', root/'configuration'
@@ -70,6 +72,9 @@ def configure_instance(root):
     (root/'tftp/autoexec.ipxe').write_text(
         f'#!ipxe\ndhcp || exit\nchain http://{SERVER}/boot.ipxe || exit\n'
     )
+    for name in SIGNED_IPXE:
+        shutil.copyfile(media/'ipxe'/name,root/'tftp'/name)
+        (root/'tftp'/name).chmod(0o644)
 
 
 def count_receipts(transcript):
@@ -141,10 +146,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='pxe-windows-fixture-', dir='/var/tmp') as temporary:
         root = Path(temporary)
         root.chmod(0o755)
-        configure_instance(root)
-        boot_mounts = tuple(arg for name in SIGNED_IPXE for arg in (
-            '--mount',f'type=bind,src={media/"ipxe"/name},dst=/pxe/{name},readonly',
-        ))
+        configure_instance(root,media)
         fixture = ('--mount',f'type=bind,src={root},dst=/fixture-data')
         try:
             build_windows_runner(helper)
@@ -157,7 +159,7 @@ def main():
                    '--ctrl','type=unixio,path=/fixture-data/tpm.sock')
             docker('run','-d','--name',lan,'--network','none','--entrypoint','sleep',helper,'2400')
             docker('run','-d','--name',dhcp,'--network','none','--cap-add','NET_ADMIN','--cap-add','NET_RAW',
-                   '--mount',f'type=bind,src={root/"tftp"},dst=/pxe,readonly',*boot_mounts,
+                   '--mount',f'type=bind,src={root/"tftp"},dst=/pxe,readonly',
                    '--entrypoint','sleep',helper,'2400')
             connect_fixture_lan(lan,dhcp)
             docker('exec','-d',dhcp,'dnsmasq','-k','--interface=veth-dhcp','--bind-interfaces',
@@ -190,6 +192,10 @@ def main():
                 'efi_boot_manager_transferred':observed, 'winpe_sha256':case['winpe_sha256'],
             }, transcript)
             print('Windows 11 first boot verified after isolated WinPE PXE with Secure Boot and TPM 2.0.',flush=True)
+        except subprocess.CalledProcessError as error:
+            if error.stderr:
+                print(error.stderr[-2000:],end='',flush=True)
+            raise
         finally:
             summary = docker('exec',dhcp,'tail','-n','25','/tmp/windows-dhcp.log',check=False).stdout
             if summary:
