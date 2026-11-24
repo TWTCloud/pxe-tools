@@ -20,23 +20,34 @@ pub(super) fn busy(
     id: i64,
     pending_install_allowed: bool,
 ) -> rusqlite::Result<bool> {
+    busy_except_diagnostic(db, id, pending_install_allowed, None)
+}
+
+pub(super) fn busy_except_diagnostic(
+    db: &Connection,
+    id: i64,
+    pending_install_allowed: bool,
+    diagnostic: Option<(i64, i64)>,
+) -> rusqlite::Result<bool> {
     db.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM actions WHERE machine_id=?1 AND status IN ('pending','running')
                 AND NOT (?2 AND type='install_only' AND status='pending')
+                AND id IS NOT ?3
             UNION ALL SELECT 1 FROM wipes WHERE machine_id=?1 AND wipe_status IN ('pending','running')
             UNION ALL SELECT 1 FROM installations WHERE machine_id=?1 AND (
                 install_status IN ('pending','running','installing','in_progress')
                 OR ansible_status IN ('pending','running','in_progress'))
             UNION ALL SELECT 1 FROM discoveries WHERE machine_id=?1 AND discovery_status IN ('pending','running','in_progress')
-            UNION ALL SELECT 1 FROM disk_tests WHERE machine_id=?1 AND job_status IN ('pending','running')
+            UNION ALL SELECT 1 FROM disk_tests WHERE machine_id=?1 AND job_status IN ('pending','running') AND id IS NOT ?4
             UNION ALL SELECT 1 FROM init_jobs WHERE status IN ('pending','running') AND job_type IN (
                 'machine:reboot:' || ?1, 'machine:shutdown:' || ?1, 'machine:ansible_redeploy:' || ?1)
             UNION ALL SELECT 1 FROM init_jobs j JOIN actions a
                 ON j.job_type IN ('action:reboot:' || a.id, 'action:ansible_retry:' || a.id)
                 WHERE a.machine_id=?1 AND j.status IN ('pending','running')
         )",
-        params![id, pending_install_allowed],
+        params![id, pending_install_allowed, diagnostic.map(|(_, action)| action),
+                diagnostic.map(|(test, _)| test)],
         |row| row.get(0),
     )
 }

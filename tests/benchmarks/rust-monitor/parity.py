@@ -348,6 +348,76 @@ def compare_disk_diagnostics(ports, paths):
             assert db.execute("SELECT serial FROM disk_smart_snapshots WHERE test_id=?",[test]).fetchall()==[(serial,)]
 
 
+def compare_disk_qualification(ports, paths):
+    disk, serial = "/dev/vda", "QUALIFICATION-FIXTURE"
+    proof = {"kind":"serial","source":"sysfs","value":serial,"status":"valid"}
+    jobs = [{"disk":disk,"mode":"smart_short","identity":proof}]
+    evidence = {"schema":1,"tool":"smartctl","type":"short","status":"completed",
+                "start_exit_code":0,"seen_running":True,"passed":True}
+    smart = {"serial_number":serial,"rotation_rate":7200,"smart_status":{"passed":True}}
+    stable = {**smart,"ata_smart_attributes":{"table":[{"id":5,"raw":{"value":12}}]}}
+    grown = {**smart,"ata_smart_attributes":{"table":[{"id":5,"raw":{"value":13}}]}}
+    degraded = {**smart,"nvme_smart_health_information_log":{"available_spare":5,"available_spare_threshold":5}}
+    malformed = {**smart,"ata_smart_attributes":{"table":[{"id":5,"raw":{"value":"0"}}]}}
+    cases = [
+        (stable,stable,True,True,"configured","poweroff",None,"pending"),
+        (smart,smart,False,True,"configured","reboot","reboot","pending"),
+        (stable,grown,False,True,"tested","poweroff",None,"cancelled"),
+        (smart,degraded,False,True,"tested","poweroff",None,"cancelled"),
+        (smart,malformed,False,True,"tested","poweroff",None,"cancelled"),
+        (smart,None,False,True,"tested","poweroff",None,"cancelled"),
+        (smart,smart,False,False,"failed","poweroff",None,"cancelled"),
+    ]
+    for host, (before,after,deferred,completed,state,post_action,next_action,status) in enumerate(cases, 16):
+        mac = f"02:00:00:77:00:{host:02x}"
+        for path in paths:
+            with closing(sqlite3.connect(path)) as db, db:
+                machine = db.execute("INSERT INTO machines(mac,status) VALUES(?,'testing')",[mac]).lastrowid
+                diagnostic = db.execute(
+                    "INSERT INTO actions(machine_id,type,status,token) VALUES (?,'disktest','pending',?)",
+                    [machine, f"{host:02x}" * 32],
+                ).lastrowid
+                pending = db.execute(
+                    "INSERT INTO actions(machine_id,type,status,token) VALUES (?,'install_only','pending',?)",
+                    [machine, f"{host+32:02x}" * 32],
+                ).lastrowid
+                config = json.dumps({"_pending_action_id":pending,"wake_now":deferred})
+                db.execute("UPDATE machines SET install_config_json=? WHERE id=?",[config,machine])
+                db.execute("INSERT INTO init_jobs(job_type,status) VALUES (?,'pending')",
+                           [f"action:render_postboot:{pending}"])
+                test = db.execute(
+                    "INSERT INTO disk_tests(machine_id,action_id,jobs_json,post_action) VALUES (?,?,?,'poweroff')",
+                    [machine,diagnostic,json.dumps(jobs)],
+                ).lastrowid
+        compare(ports,DHCP+"?"+urlencode({"mac":mac,"ip":LAN}),200,method="POST")
+        query = urlencode({"mac":mac,"test_id":test})
+        for port in ports:
+            issued = response(port,DISK_JOB+"?"+urlencode({"mac":mac}),peer="lan")
+            assert issued[0] == 200, issued
+            token = issued[3]["boot_token"]
+            for phase, snapshot in (("before",before),("after",after)):
+                if snapshot is not None:
+                    url = DISK_SMART+"?"+query+"&"+urlencode({"disk":disk,"phase":phase})
+                    assert response(port,url,method="POST",peer="lan",token=token,
+                                    body=json.dumps(snapshot).encode())[3] == {"status":"ok"}
+            result = {"disk":disk,"mode":"smart_short","verdict":"passed"}
+            if completed:
+                result["evidence"] = evidence
+            assert response(port,DISK_RESULT+"?"+query,method="POST",peer="lan",token=token,
+                            body=json.dumps(result).encode())[3] == {"status":"ok","test_id":test}
+            done = response(port,DISK_END+"?"+query,peer="lan",token=token)
+            assert done[3] == {"status":"ok","test_id":test,"machine_status":state,
+                               "post_action":post_action}, (host,port,done)
+        for path in paths:
+            with closing(sqlite3.connect(path)) as db:
+                assert db.execute("SELECT status,next_action FROM machines WHERE id=?",
+                                  [machine]).fetchone() == (state,next_action)
+                assert db.execute("SELECT status FROM actions WHERE id=?",[pending]).fetchone() == (status,)
+                render = db.execute("SELECT status FROM init_jobs WHERE job_type=?",
+                                    [f"action:render_postboot:{pending}"]).fetchone()
+                assert render == (("pending",) if status=="pending" else ("failed",))
+
+
 def compare_wipe(ports, paths):
     mac = "02:00:00:77:00:02"
     disk, number, action_token = "/dev/vda", "WIPE-DISPOSABLE", "8"*64
@@ -795,8 +865,9 @@ def main():
         compare_grub(ports, paths)
         compare_boot_events(ports, paths)
         compare_disk_diagnostics(ports, paths)
+        compare_disk_qualification(ports, paths)
         compare_wipe(ports, paths)
-    print("Parity OK: 69 summaries, GRUB menus and selection, DHCP/TFTP events, discovery inventory, preseed with advanced networking and single- and multi-disk recipes, installation callbacks, disk diagnostics, and disk wipe")
+    print("Parity OK: 69 summaries, GRUB menus and selection, DHCP/TFTP events, discovery inventory, preseed with advanced networking and single- and multi-disk recipes, installation callbacks, disk diagnostics and qualification, and disk wipe")
 
 
 if __name__ == "__main__":

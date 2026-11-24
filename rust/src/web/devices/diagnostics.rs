@@ -6,7 +6,7 @@ use super::{
 use crate::pxe::{log_event, set_machine_status};
 use hyper::StatusCode;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::{fmt::Write, path::Path};
 
 pub(super) enum Route {
@@ -214,20 +214,8 @@ fn cancel(
         db.execute("UPDATE init_jobs SET status='failed',ended_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
                    WHERE job_type=?1 AND status='pending'",[format!("action:reboot:{action}")])?;
     }
-    let raw: Option<String> = db.query_row(
-        "SELECT install_config_json FROM machines WHERE id=?1",
-        [id],
-        |row| row.get(0),
-    )?;
-    let config: Value = raw
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    if let Some(pending) = crate::migrations::integer(&config["_pending_action_id"]) {
-        db.execute(
-            "UPDATE actions SET status='cancelled',ended_at=CURRENT_TIMESTAMP
-                   WHERE id=?1 AND machine_id=?2 AND status='pending' AND type='install_only'",
-            params![pending, id],
-        )?;
+    if let Some((pending, _)) = crate::pxe::disk_test::deferred_installation(db, id)? {
+        crate::install::cancel_pending(db, pending)?;
     }
     set_machine_status(db, id, &device.status, "discovered")?;
     db.execute(

@@ -105,7 +105,7 @@ pub(super) fn submit(
     let Some(device) = Device::get(&tx, id)? else {
         return Ok(rejected(StatusCode::NOT_FOUND, "Appareil introuvable"));
     };
-    if !super::schedule_allowed(&tx, id, &device)? {
+    if !super::schedule_allowed(&tx, id, &device, None)? {
         return Ok(rejected(
             StatusCode::CONFLICT,
             "L’appareil ou le serveur PXE est occupé ou indisponible",
@@ -237,7 +237,7 @@ pub(super) fn submit(
                 ));
             }
             let action = if wipe.is_empty() {
-                record_plan(&tx, id, username, selection.preset, snapshot)?
+                record_plan(&tx, id, username, selection.preset, snapshot, None)?
             } else {
                 if selection.erase != "EFFACER" {
                     return Ok(rejected(

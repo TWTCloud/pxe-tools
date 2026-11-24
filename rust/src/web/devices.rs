@@ -13,7 +13,7 @@ use super::{
     setup::{page, redirect},
     ErrorBox, Reply,
 };
-use crate::{connect, disk_identity, preseed, setting};
+use crate::{connect, disk_identity, preseed, pxe, setting};
 use hyper::StatusCode;
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
@@ -368,8 +368,11 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
 <p><label>DNS IPv4 <input name="static_dns" value=""#);
     let defaults = crate::migrations::dns_list(&Value::String(setting(db, "default_dns")?));
     escape(&mut output, &defaults.join(" "));
-    output.push_str(r#""></label></p></details>
-<p><label><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE</label></p><button>Programmer</button></form>"#);
+    output.push_str(r#""></label></p></details>"#);
+    if device.status == "testing" {
+        output.push_str(r#"<p><label><input type="checkbox" name="after_diagnostic" value="yes" required> Attendre la qualification du disque avant d’autoriser le prochain démarrage PXE</label></p>"#);
+    }
+    output.push_str(r#"<p><label><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE</label></p><button>Programmer</button></form>"#);
     write!(
         output,
         r#"<p><a href="/machines/{id}/install/advanced">Utiliser un modèle de partition personnalisée</a></p>"#
@@ -384,6 +387,8 @@ struct Selection {
     image: i64,
     preset: i64,
     confirm: String,
+    #[serde(default)]
+    after_diagnostic: String,
     #[serde(default)]
     network_mode: String,
     #[serde(default)]
@@ -460,8 +465,8 @@ fn selection(form: &[u8]) -> Option<Selection> {
     for (key, value) in form_urlencoded::parse(form) {
         let value = match key.as_ref() {
             "image" | "preset" => json!(value.parse::<i64>().ok().filter(|id| *id > 0)?),
-            "hostname" | "disk" | "confirm" | "network_mode" | "static_ip" | "static_cidr"
-            | "static_dns" | "static_gateway" => json!(value),
+            "hostname" | "disk" | "confirm" | "after_diagnostic" | "network_mode" | "static_ip"
+            | "static_cidr" | "static_dns" | "static_gateway" => json!(value),
             _ => return None,
         };
         if fields.insert(key.into_owned(), value).is_some() {
@@ -479,7 +484,10 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
         ));
     };
     let hostname = selection.hostname.trim().to_ascii_lowercase();
-    if selection.confirm != "yes" || !valid_hostname(&hostname) {
+    if selection.confirm != "yes"
+        || !matches!(selection.after_diagnostic.as_str(), "" | "yes")
+        || !valid_hostname(&hostname)
+    {
         return Ok(plain(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Nom ou confirmation invalide\n",
@@ -494,13 +502,7 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
     let Some(arch @ ("amd64" | "arm64")) = device.arch.as_deref() else {
         return Ok(plain(StatusCode::CONFLICT, "Inventaire PXE requis\n"));
     };
-    if !schedule_allowed(&tx, id, &device)? {
-        return Ok(plain(
-            StatusCode::CONFLICT,
-            "L’appareil ou le serveur PXE est occupé ou indisponible\n",
-        ));
-    }
-    let Some((disk, _, proof)) = device
+    let Some((disk, serial, proof)) = device
         .disks()
         .find(|(path, serial, _)| selection.disk == format!("{path}:{serial}"))
     else {
@@ -509,6 +511,19 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
             "Le disque sélectionné ne correspond plus à l’inventaire\n",
         ));
     };
+    let diagnostic = if selection.after_diagnostic == "yes" && device.status == "testing" {
+        active_disk_diagnostic(&tx, id, &disk, &serial, &proof)?
+    } else {
+        None
+    };
+    if (selection.after_diagnostic == "yes" && diagnostic.is_none())
+        || !schedule_allowed(&tx, id, &device, diagnostic)?
+    {
+        return Ok(plain(
+            StatusCode::CONFLICT,
+            "Appareil ou PXE indisponible, ou le disque sélectionné n’est pas couvert par le diagnostic actif\n",
+        ));
+    }
     let Some(version) = image_version(&tx, selection.image, arch)? else {
         return Ok(plain(
             StatusCode::CONFLICT,
@@ -551,7 +566,7 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
         .as_object_mut()
         .expect("installation object")
         .extend(network);
-    let action = record_plan(&tx, id, username, selection.preset, snapshot)?;
+    let action = record_plan(&tx, id, username, selection.preset, snapshot, diagnostic)?;
     tx.commit()?;
     Ok(redirect(StatusCode::SEE_OTHER, format!("/tasks/{action}")))
 }
@@ -577,7 +592,46 @@ fn image_version(db: &Connection, id: i64, arch: &str) -> rusqlite::Result<Optio
     .optional()
 }
 
-fn schedule_allowed(db: &Connection, id: i64, device: &Device) -> rusqlite::Result<bool> {
+fn active_disk_diagnostic(
+    db: &Connection,
+    id: i64,
+    path: &str,
+    serial: &str,
+    proof: &Value,
+) -> rusqlite::Result<Option<(i64, i64)>> {
+    if proof["kind"] != "serial" {
+        return Ok(None);
+    }
+    let active: Option<(i64, i64, String)> = db
+        .query_row(
+            "SELECT t.id,a.id,t.jobs_json FROM disk_tests t
+             JOIN actions a ON a.id=t.action_id AND a.machine_id=t.machine_id
+             WHERE t.machine_id=?1 AND t.job_status IN ('pending','running')
+             AND a.type='disktest' AND a.status IN ('pending','running')
+             ORDER BY t.id DESC LIMIT 1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((test, action, raw)) = active else {
+        return Ok(None);
+    };
+    let jobs: Value = serde_json::from_str(&raw).unwrap_or_default();
+    let matches_disk = pxe::array_values(&jobs).any(|job| {
+        job["disk"]
+            .as_str()
+            .is_some_and(|disk| disk == path || path.strip_prefix("/dev/") == Some(disk))
+            && pxe::disk_test::job_serial(job).as_deref() == Some(serial)
+    });
+    Ok(matches_disk.then_some((test, action)))
+}
+
+fn schedule_allowed(
+    db: &Connection,
+    id: i64,
+    device: &Device,
+    diagnostic: Option<(i64, i64)>,
+) -> rusqlite::Result<bool> {
     let refreshing: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM init_jobs WHERE job_type='bootstrap:auto_refresh_catalog_v2' AND status='running')",
         [], |row| row.get(0),
@@ -585,11 +639,12 @@ fn schedule_allowed(db: &Connection, id: i64, device: &Device) -> rusqlite::Resu
     Ok(setting(db, "pxe_enabled")? == "on"
         && !refreshing
         && !device.rescue
-        && !device_operations::busy(db, id, false)?
-        && matches!(
-            device.status.as_str(),
-            "discovered" | "tested" | "wiped" | "installed" | "provisioned"
-        ))
+        && !device_operations::busy_except_diagnostic(db, id, false, diagnostic)?
+        && (diagnostic.is_some()
+            || matches!(
+                device.status.as_str(),
+                "discovered" | "tested" | "wiped" | "installed" | "provisioned"
+            )))
 }
 
 fn record_plan(
@@ -598,25 +653,41 @@ fn record_plan(
     username: &str,
     preset: i64,
     mut snapshot: Value,
+    diagnostic: Option<(i64, i64)>,
 ) -> Result<i64, ErrorBox> {
     let token = crate::random_hex::<32>()?;
     tx.execute("INSERT INTO actions(machine_id,type,status,token,created_by) VALUES(?,'install_only','pending',?,?)",
                params![id, token, username])?;
     let action = tx.last_insert_rowid();
     snapshot["_pending_action_id"] = json!(action);
+    if let Some((test, _)) = diagnostic {
+        snapshot["wake_now"] = json!(true);
+        tx.execute(
+            "UPDATE disk_tests SET post_action=CASE WHEN in_session=1 THEN 'wait' ELSE 'poweroff' END WHERE id=?1",
+            [test],
+        )?;
+    }
     let hostname = snapshot["hostname"]
         .as_str()
         .ok_or("A validated hostname is required")?;
-    tx.execute("UPDATE machines SET status='configured',hostname=?,install_config_json=?,preset_id=?,next_action=NULL WHERE id=?",
-               params![hostname, snapshot.to_string(), preset, id])?;
+    let state = if diagnostic.is_some() {
+        "testing"
+    } else {
+        "configured"
+    };
+    tx.execute("UPDATE machines SET status=?1,hostname=?2,install_config_json=?3,preset_id=?4,next_action=NULL WHERE id=?5",
+               params![state, hostname, snapshot.to_string(), preset, id])?;
     tx.execute(
         "INSERT INTO init_jobs(job_type,status) VALUES(?,'pending'),('bootstrap:render_templates','pending')",
         [format!("action:render_postboot:{action}")],
     )?;
     tx.execute(
-        "INSERT INTO machine_events(machine_id,level,message,action_id)
-                VALUES(?,'action','Installation programmée au prochain démarrage PXE.',?)",
-        params![id, action],
+        "INSERT INTO machine_events(machine_id,level,message,action_id) VALUES(?1,'action',?2,?3)",
+        params![id, if diagnostic.is_some() {
+            "Installation programmée après qualification du disque, au prochain démarrage PXE manuel."
+        } else {
+            "Installation programmée au prochain démarrage PXE."
+        }, action],
     )?;
     Ok(action)
 }

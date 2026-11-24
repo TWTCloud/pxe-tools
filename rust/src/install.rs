@@ -320,6 +320,46 @@ pub fn machine_ready(db: &mut Connection, raw_mac: &str) -> ApiResult {
     Ok((200, json!({"status":"ok"})))
 }
 
+pub(crate) fn cancel_pending(db: &Connection, id: i64) -> rusqlite::Result<()> {
+    if db.execute(
+        "UPDATE actions SET status='cancelled',ended_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='pending'",
+        [id],
+    )? == 0 {
+        return Ok(());
+    }
+    for (table, column, states) in [
+        ("wipes", "wipe_status", "'pending','running'"),
+        (
+            "installations",
+            "install_status",
+            "'pending','running','installing','in_progress'",
+        ),
+        (
+            "discoveries",
+            "discovery_status",
+            "'pending','running','in_progress'",
+        ),
+        ("disk_tests", "job_status", "'pending','running'"),
+    ] {
+        db.execute(
+            &format!("UPDATE {table} SET {column}='aborted',ended_at=CURRENT_TIMESTAMP WHERE action_id=?1 AND {column} IN ({states})"),
+            [id],
+        )?;
+    }
+    db.execute(
+        "UPDATE installations SET ansible_status='aborted' WHERE action_id=?1
+         AND ansible_status IN ('pending','running','in_progress')",
+        [id],
+    )?;
+    db.execute(
+        "UPDATE init_jobs SET status='failed',message='Clôture administrative : demande en attente annulée.'
+         WHERE status='pending'
+         AND job_type IN ('action:reboot:'||?1,'action:ansible_retry:'||?1,'action:render_postboot:'||?1)",
+        [id],
+    )?;
+    Ok(())
+}
+
 pub fn recompute(db: &Connection, id: i64) -> rusqlite::Result<()> {
     db.execute(
         "WITH subjobs(status) AS (

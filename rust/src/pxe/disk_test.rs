@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod qualification;
+
 use super::{
     agent::{Input, Session},
     array_values, client_in_subnet, is_php_array, log_event, machine_for_mac, normalize_mac,
@@ -10,6 +12,7 @@ use crate::{
     php_string, read_body, request_header, setting, ApiResult, HttpResponse, PxeRequest,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
+use qualification::Qualification;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::net::{IpAddr, Ipv4Addr};
@@ -160,12 +163,6 @@ fn start(db: &mut Connection, ip: Ipv4Addr, raw_mac: &str) -> rusqlite::Result<A
     let Some(session) = job.session(&tx, ip, &mac)? else {
         return Ok(failure(404, "not found"));
     };
-    if deferred_installation(&tx, job.machine)? {
-        return Ok(failure(
-            409,
-            "automatic installation after disk qualification unavailable",
-        ));
-    }
     let token = session.issue(&tx)?;
     if job.status == "pending" {
         tx.execute(
@@ -377,12 +374,6 @@ fn smart(db: &Connection, job: &Job, input: &Input<'_>) -> ApiResult {
 }
 
 fn end(db: &Connection, job: &Job, reported: &str) -> ApiResult {
-    if deferred_installation(db, job.machine)? {
-        return failure(
-            409,
-            "automatic installation after disk qualification unavailable",
-        );
-    }
     let old: String = db.query_row(
         "SELECT status FROM machines WHERE id=?1",
         [job.machine],
@@ -396,7 +387,7 @@ fn end(db: &Connection, job: &Job, reported: &str) -> ApiResult {
     let expected: Vec<_> = array_values(&job.jobs).collect();
     let mut failed = false;
     let mut incomplete = expected.is_empty();
-    for entry in expected {
+    for entry in &expected {
         let mut matching = array_values(&results)
             .filter(|result| result["disk"] == entry["disk"] && result["mode"] == entry["mode"]);
         if let Some(result) = matching.next() {
@@ -414,7 +405,7 @@ fn end(db: &Connection, job: &Job, reported: &str) -> ApiResult {
     }
     let ok_result = !failed && !incomplete && reported != "failed";
     let status = if ok_result { "success" } else { "failed" };
-    let state = if ok_result { "tested" } else { "failed" };
+    let mut state = if ok_result { "tested" } else { "failed" };
     db.execute(
         "UPDATE disk_tests SET job_status=?2,ended_at=CURRENT_TIMESTAMP WHERE id=?1",
         params![job.id, status],
@@ -443,8 +434,69 @@ fn end(db: &Connection, job: &Job, reported: &str) -> ApiResult {
         Some("disktest_results_posted"),
         job.action,
     )?;
+    let mut after = job.after.as_str();
+    if let Some((pending, deferred)) = deferred_installation(db, job.machine)? {
+        let mut blocked = None;
+        if ok_result {
+            for entry in expected {
+                let verdict = match job_serial(entry).zip(entry["mode"].as_str()) {
+                    Some((serial, mode)) => qualification::check(db, job.id, &serial, mode)?,
+                    None => Qualification::Incomplete,
+                };
+                match verdict {
+                    Qualification::Accepted => {}
+                    Qualification::Incomplete => blocked = Some(verdict),
+                    Qualification::Rejected => {
+                        blocked = Some(verdict);
+                        break;
+                    }
+                }
+            }
+        }
+        if ok_result && blocked.is_none() {
+            state = "configured";
+            let next = (!deferred).then_some("reboot");
+            db.execute(
+                "UPDATE machines SET next_action=?2 WHERE id=?1",
+                params![job.machine, next],
+            )?;
+            after = match (job.in_session, deferred) {
+                (true, _) => "wait",
+                (false, true) => "poweroff",
+                (false, false) => "reboot",
+            };
+            log_event(
+                db,
+                job.machine,
+                "action",
+                if deferred {
+                    "Tests réussis — installation au prochain démarrage PXE manuel."
+                } else {
+                    "Tests réussis — redémarrage vers l’installation demandé."
+                },
+                None,
+                Some(pending),
+            )?;
+        } else {
+            install::cancel_pending(db, pending)?;
+            db.execute(
+                "UPDATE machines SET next_action=NULL WHERE id=?1",
+                [job.machine],
+            )?;
+            let reason = match blocked {
+                Some(Qualification::Rejected) =>
+                    "Installation programmée annulée : un disque est classé D. Choisissez une autre cible après revue du classement.",
+                Some(Qualification::Incomplete) =>
+                    "Installation programmée annulée : la qualification d’un disque est incomplète. Vérifiez les relevés et relancez les tests.",
+                _ if incomplete =>
+                    "Installation programmée annulée : un test disque est incomplet ou indéterminé. Relancez les vérifications avant d’installer.",
+                _ => "Installation programmée annulée : le test disque a échoué. Réparez ou remplacez le disque.",
+            };
+            log_event(db, job.machine, "warning", reason, None, Some(pending))?;
+        }
+    }
     set_machine_status(db, job.machine, &old, state)?;
-    if job.after == "wait" && job.in_session {
+    if after == "wait" && job.in_session {
         db.execute(
             "UPDATE machines SET awaiting_action_until=datetime('now','+1 hour') WHERE id=?1",
             [job.machine],
@@ -452,11 +504,14 @@ fn end(db: &Connection, job: &Job, reported: &str) -> ApiResult {
     }
     Ok((
         200,
-        json!({"status":"ok","test_id":job.id,"machine_status":state,"post_action":job.after}),
+        json!({"status":"ok","test_id":job.id,"machine_status":state,"post_action":after}),
     ))
 }
 
-fn deferred_installation(db: &Connection, machine: i64) -> rusqlite::Result<bool> {
+pub(crate) fn deferred_installation(
+    db: &Connection,
+    machine: i64,
+) -> rusqlite::Result<Option<(i64, bool)>> {
     let config: Option<String> = db.query_row(
         "SELECT install_config_json FROM machines WHERE id=?1",
         [machine],
@@ -467,10 +522,11 @@ fn deferred_installation(db: &Connection, machine: i64) -> rusqlite::Result<bool
         .and_then(|raw| serde_json::from_str(raw).ok())
         .unwrap_or_default();
     let deferred = crate::migrations::integer(&config["_pending_action_id"]).unwrap_or_default();
-    db.query_row(
+    let pending: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM actions WHERE id=?1 AND machine_id=?2 AND type='install_only' AND status='pending')",
         params![deferred,machine],|row|row.get(0),
-    )
+    )?;
+    Ok(pending.then(|| (deferred, crate::php_truthy(&config["wake_now"]))))
 }
 
 fn completed(mode: &str, result: &Value) -> bool {
@@ -527,7 +583,7 @@ fn evidence(value: &Value) -> bool {
         && matches!(value["tool"].as_str(), Some("badblocks" | "smartctl"))
         && serde_json::to_vec(value).is_ok_and(|data| data.len() <= 16_384)
 }
-fn job_serial(value: &Value) -> Option<String> {
+pub(crate) fn job_serial(value: &Value) -> Option<String> {
     let identity = &value["identity"];
     (identity["kind"] == "serial" && identity["status"].as_str().unwrap_or("valid") == "valid")
         .then(|| serial(&identity["value"]))

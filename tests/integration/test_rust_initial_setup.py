@@ -822,9 +822,13 @@ def verify_disk_diagnostics(client, database, authorization):
     with closing(sqlite3.connect(database)) as db, db:
         db.execute("UPDATE settings SET value='on' WHERE key='pxe_enabled'")
         disk = {'name':'/dev/vda','serial':'FIXTURE-DISK-TEST','size_bytes':12_000_000_000}
+        other = {'name':'vdb','serial':'UNTESTED-FIXTURE','size_bytes':12_000_000_000}
         device = db.execute("""INSERT INTO machines(mac,hostname,status,boot_arch,inventory_json,awaiting_action_until)
                             VALUES('02:00:00:00:09:25','fixture-diagnostics','discovered','amd64',?,datetime('now','+30 minutes'))""",
-                            [json.dumps({'disks':[disk]})]).lastrowid
+                            [json.dumps({'disks':[disk,other]})]).lastrowid
+        preset, = db.execute("SELECT id FROM presets WHERE name='Debian <test>'").fetchone()
+        image, = db.execute("SELECT id FROM os_images WHERE arch='amd64' AND version_full='13.7.0' "
+                            "AND status='downloaded' AND enabled=1 LIMIT 1").fetchone()
     path = f'/machines/{device}/disktest'
     fields = {'disk':'/dev/vda:FIXTURE-DISK-TEST','mode':'smart_short'}
     assert b'FIXTURE-DISK-TEST' in request(path)[2]
@@ -843,15 +847,35 @@ def verify_disk_diagnostics(client, database, authorization):
         assert jobs[0]['identity']['value'] == 'FIXTURE-DISK-TEST'
         assert db.execute("SELECT id FROM init_jobs WHERE job_type=?",[f'action:reboot:{action}']).fetchone() is None
     assert request(path+'-post-action',form={'post_action':'poweroff'})[:2] == (303,f'/machines/{device}')
+    install = f'/machines/{device}/install'
+    form = {'hostname':'fixture-diagnostics','disk':fields['disk'],'image':image,'preset':preset,'confirm':'yes'}
+    assert b'name="after_diagnostic"' in request(install)[2]
+    assert request(install,form=form)[0] == 409
+    deferred = {**form,'after_diagnostic':'yes'}
+    assert request(install,form={**deferred,'disk':'/dev/vdb:UNTESTED-FIXTURE'})[0] == 409
+    scheduled = request(install,form=deferred)
+    assert scheduled[0] == 303 and scheduled[1].startswith('/tasks/'), scheduled
+    pending = int(scheduled[1].rsplit('/',1)[1])
+    assert request(install,form=deferred)[0] == 409
+    with closing(sqlite3.connect(database)) as db:
+        state, next_action, snapshot = db.execute('SELECT status,next_action,install_config_json FROM machines '
+                                                 'WHERE id=?',[device]).fetchone()
+        assert state == 'testing' and next_action is None
+        assert json.loads(snapshot)['wake_now'] is True
+        assert db.execute('SELECT post_action FROM disk_tests WHERE action_id=?',[action]).fetchone() == ('wait',)
+        assert db.execute('SELECT status FROM actions WHERE id=?',[pending]).fetchone() == ('pending',)
     assert request(path+'-cancel',form={})[:2] == (303,f'/machines/{device}')
     with closing(sqlite3.connect(database)) as db, db:
         assert db.execute("SELECT job_status,post_action FROM disk_tests WHERE action_id=?",[action]).fetchone()==(
-            'aborted','poweroff',
+            'aborted','wait',
         )
         assert db.execute("SELECT status FROM actions WHERE id=?",[action]).fetchone()==('cancelled',)
+        assert db.execute("SELECT status FROM actions WHERE id=?",[pending]).fetchone()==('cancelled',)
+        assert db.execute("SELECT status FROM init_jobs WHERE job_type=?",
+                          [f'action:render_postboot:{pending}']).fetchone() == ('failed',)
         assert db.execute("SELECT status FROM machines WHERE id=?",[device]).fetchone()==('discovered',)
         db.execute("UPDATE settings SET value='off' WHERE key='pxe_enabled'")
-    print('Rust console scheduled an in-session disk diagnostic with a bound serial and cancelled it safely', flush=True)
+    print('Rust scheduled Debian after qualification of the selected disk and cancelled both linked actions', flush=True)
 
 
 def verify_disk_wipe(client, database, authorization):
