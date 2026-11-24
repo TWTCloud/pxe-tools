@@ -469,8 +469,7 @@ def run_bootstrap_job(job: dict) -> None:
         update_init_job(job_id, status="failed", message="Type de tâche inconnu ou non disponible.", ended_at=now(), updated_at=now())
         return
     script_name, env_override = entry
-    if (os.environ.get("PXE_RUST_GUIDED") == "1" and job_type.startswith("bootstrap:")
-            and job_type != AUTO_REFRESH_JOB_TYPE):
+    if os.environ.get("PXE_RUST_GUIDED") == "1" and job_type.startswith("bootstrap:"):
         subprocess.run([
             "/usr/lib/pxe-tools/pxe-tools-rust", "--run-bootstrap-job",
             DB_PATH, str(job_id), SCRIPTS_DIR,

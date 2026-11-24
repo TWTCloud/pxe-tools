@@ -965,12 +965,19 @@ def verify_worker_bootstrap(binary):
         (scripts/'bootstrap-generate-mok.sh').write_text(
             '#!/usr/bin/env bash\nprintf "failure fixture\\n" >&2\nexit 19\n'
         )
+        (scripts/'bootstrap-refresh-catalog-v2.sh').write_text(
+            '#!/usr/bin/env bash\nprintf "refresh fixture\\n"\n'
+        )
         with closing(sqlite3.connect(database)) as db, db:
             schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
             db.executescript(schema.read_text())
+            machine = db.execute("INSERT INTO machines(mac,status) VALUES('02:00:00:00:09:44','configured')").lastrowid
+            db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES (?,'install_only','pending',?)",
+                       [machine,secrets.token_hex(32)])
             db.executemany("INSERT INTO init_jobs(id,job_type,status) VALUES(?,?,'pending')",[
                 (81,'bootstrap:rebuild_grub'),(82,'bootstrap:generate_mok'),
                 (83,'bootstrap:restart_dnsmasq'),(84,'system:factory_reset_wipe'),
+                (85,'bootstrap:auto_refresh_catalog_v2'),
             ])
 
         def execute(job, check=True):
@@ -982,6 +989,11 @@ def verify_worker_bootstrap(binary):
         execute(82)
         execute(83)
         assert execute(84,check=False).returncode != 0
+        assert execute(85).stdout == b''
+        with closing(sqlite3.connect(database)) as db, db:
+            assert db.execute("SELECT status FROM init_jobs WHERE id=85").fetchone() == ('pending',)
+            db.execute("UPDATE actions SET status='cancelled' WHERE machine_id=?",[machine])
+        execute(85)
         with closing(sqlite3.connect(database)) as db:
             rows = db.execute("""SELECT status,progress_percent,log,message FROM init_jobs ORDER BY id""").fetchall()
             assert rows[0][:2] == ('success',100)
@@ -989,6 +1001,9 @@ def verify_worker_bootstrap(binary):
             assert rows[1][:2] == ('failed',0) and 'exit code = 19' in rows[1][2]
             assert rows[2][0] == 'failed' and 'Script introuvable' in rows[2][3]
             assert rows[3][0] == 'pending'
+            assert rows[4][:2] == ('success',100)
+            last, = db.execute("SELECT value FROM settings WHERE key='catalog_auto_refresh_last_at'").fetchone()
+            assert abs(time.time()-int(last)) < 10
     print('Rust worker serializes bootstrap claims and records output, exit status and missing scripts', flush=True)
 
 

@@ -16,6 +16,8 @@ use std::{
 
 type ErrorBox = Box<dyn Error + Send + Sync>;
 
+const AUTOMATIC_REFRESH: &str = "bootstrap:auto_refresh_catalog_v2";
+
 const JOBS: &[(&str, &str, Option<&str>)] = &[
     (
         "bootstrap:install_pxe_bins",
@@ -59,6 +61,7 @@ const JOBS: &[(&str, &str, Option<&str>)] = &[
         "bootstrap-refresh-catalog-v2.sh",
         None,
     ),
+    (AUTOMATIC_REFRESH, "bootstrap-refresh-catalog-v2.sh", None),
 ];
 
 pub(crate) fn run(database: &Path, id: i64, scripts: &Path) -> Result<(), ErrorBox> {
@@ -84,6 +87,16 @@ pub(crate) fn run(database: &Path, id: i64, scripts: &Path) -> Result<(), ErrorB
         .iter()
         .find(|(job, _, _)| *job == kind)
         .ok_or("Unsupported bootstrap job")?;
+    let automatic = kind == AUTOMATIC_REFRESH;
+    if automatic && tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM machines WHERE status IN ('installing','wiping','testing'))
+         OR EXISTS(SELECT 1 FROM actions WHERE status IN ('pending','running'))
+         OR EXISTS(SELECT 1 FROM init_jobs WHERE status IN ('pending','running')
+                   AND job_type IN ('bootstrap:refresh_catalog','bootstrap:refresh_catalog_v2'))",
+        [], |row|row.get::<_,bool>(0),
+    )? {
+        return Ok(());
+    }
     let path = scripts.join(script);
     if !path.is_file() {
         tx.execute(
@@ -117,9 +130,10 @@ pub(crate) fn run(database: &Path, id: i64, scripts: &Path) -> Result<(), ErrorB
         Ok(child) => child,
         Err(error) => {
             finish(
-                &db,
+                &mut db,
                 id,
                 false,
+                automatic,
                 &format!("[worker] Échec lancement : {error}\n"),
             )?;
             return Ok(());
@@ -136,9 +150,10 @@ pub(crate) fn run(database: &Path, id: i64, scripts: &Path) -> Result<(), ErrorB
         .code()
         .map_or_else(|| status.to_string(), |code| code.to_string());
     finish(
-        &db,
+        &mut db,
         id,
         status.success(),
+        automatic,
         &format!("\n[worker] exit code = {code}\n"),
     )?;
     let state = if status.success() {
@@ -183,10 +198,22 @@ fn append(db: &Connection, id: i64, text: &[u8]) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn finish(db: &Connection, id: i64, ok: bool, log: &str) -> rusqlite::Result<()> {
+fn finish(
+    db: &mut Connection,
+    id: i64,
+    ok: bool,
+    automatic: bool,
+    log: &str,
+) -> rusqlite::Result<()> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (status, percent) = if ok { ("success", 100) } else { ("failed", 0) };
-    db.execute("UPDATE init_jobs SET log=COALESCE(log,'') || ?2, status=?3, progress_percent=?4,
+    let updated=tx.execute("UPDATE init_jobs SET log=COALESCE(log,'') || ?2, status=?3, progress_percent=?4,
                 ended_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='running'",
                params![id,log,status,percent])?;
-    Ok(())
+    if updated == 1 && ok && automatic {
+        tx.execute("INSERT INTO settings(key,value) VALUES('catalog_auto_refresh_last_at',?1)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
+                   [crate::now().to_string()])?;
+    }
+    tx.commit()
 }
