@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod catalog;
 mod discovery;
 mod disk_identity;
 mod grub;
@@ -95,6 +96,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
         if flag == "--migrate-network-settings" && Path::new(config).is_absolute() {
             return migrations::network_settings(Path::new(config));
+        }
+        if flag == "--refresh-catalog" && Path::new(config).is_absolute() {
+            return catalog::refresh(Path::new(config));
         }
         if flag == "--recover-interrupted-jobs" && Path::new(config).is_absolute() {
             return worker::recover(Path::new(config));

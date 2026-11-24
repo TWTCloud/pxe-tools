@@ -11,6 +11,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+if [ "${PXE_RUST_GUIDED:-0}" = 1 ]; then
+    exec /usr/lib/pxe-tools/pxe-tools-rust --refresh-catalog /etc/pxe-tools/db.conf
+fi
 PHP_SCRIPT="$SCRIPT_DIR/refresh-catalog.php"
 
 if [ ! -f "$PHP_SCRIPT" ]; then

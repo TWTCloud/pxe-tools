@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::DEBIAN_RELEASES;
+use crate::catalog::{
+    current_debian_release, debian_firmware, debian_installer, fetch_text, DebianRelease,
+    DEBIAN_RELEASES,
+};
 use crate::{configured_database, connect, images::safe_netboot_component};
 use rusqlite::{params, OpenFlags, TransactionBehavior};
 use std::{
@@ -9,12 +12,10 @@ use std::{
     fs::{self, Metadata},
     io::{self, ErrorKind},
     path::Path,
-    process::Command,
 };
 
 type ErrorBox = Box<dyn Error + Send + Sync>;
 const IMAGE_FILES: &[&str] = &["initrd.gz", "firmware.cpio.gz", "linux"];
-const DEBIAN_MIRROR: &str = "https://deb.debian.org/debian";
 const CANDIDATES: &str =
     "distro='debian' AND (extract_method='iso_extract' OR COALESCE(kernel_url,'')='')";
 
@@ -24,12 +25,14 @@ pub(crate) fn current_debian_images(config: &Path) -> Result<(), ErrorBox> {
         &path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    normalize_current_images(&mut db, current_release)
+    normalize_current_images(&mut db, |release| {
+        current_debian_release(release, |url| fetch_text(url, "5"))
+    })
 }
 
 fn normalize_current_images(
     db: &mut rusqlite::Connection,
-    current: impl Fn(u32, &'static str, Option<&'static str>) -> Option<String>,
+    current: impl Fn(&DebianRelease) -> Option<String>,
 ) -> Result<(), ErrorBox> {
     let images = {
         let mut read = db.prepare(&format!(
@@ -55,19 +58,22 @@ fn normalize_current_images(
         if !matches!(arch, "amd64" | "arm64") {
             continue;
         }
-        let Some(major) = version.split('.').next().and_then(|part| part.parse().ok()) else {
-            continue;
-        };
-        let Some(&(_, codename, _, default)) =
-            DEBIAN_RELEASES.iter().find(|release| release.0 == major)
+        let Some(major) = version
+            .split('.')
+            .next()
+            .and_then(|part| part.parse::<u32>().ok())
         else {
             continue;
         };
-        let release = cache
-            .entry(major)
-            .or_insert_with(|| current(major, codename, default));
+        let Some(distribution) = DEBIAN_RELEASES
+            .iter()
+            .find(|release| release.major == major)
+        else {
+            continue;
+        };
+        let release = cache.entry(major).or_insert_with(|| current(distribution));
         if release.as_deref() == Some(version.as_str()) {
-            updates.push((id, arch.to_owned(), version, codename));
+            updates.push((id, arch.to_owned(), version, distribution.codename));
         }
     }
     if updates.is_empty() {
@@ -76,10 +82,8 @@ fn normalize_current_images(
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut changed = 0;
     for (id, arch, version, codename) in updates {
-        let installer = format!("{DEBIAN_MIRROR}/dists/{codename}/main/installer-{arch}/current/images/netboot/debian-installer/{arch}");
-        let firmware = format!(
-            "https://cdimage.debian.org/cdimage/firmware/{codename}/current/firmware.cpio.gz"
-        );
+        let installer = debian_installer(codename, &arch);
+        let firmware = debian_firmware(codename);
         changed += tx.execute(
             &format!(
                 "UPDATE os_images SET extract_method='direct',kernel_url=?1,initrd_url=?2,firmware_url=?3,
@@ -101,53 +105,6 @@ fn normalize_current_images(
     tx.commit()?;
     println!("Rust converted {changed} current Debian image(s) to direct netboot");
     Ok(())
-}
-
-fn current_release(major: u32, codename: &str, default: Option<&str>) -> Option<String> {
-    let response = Command::new("curl")
-        .args([
-            "--disable",
-            "--fail",
-            "--silent",
-            "--proto",
-            "=https",
-            "--max-time",
-            "5",
-            "--max-filesize",
-            "2097152",
-            &format!("{DEBIAN_MIRROR}/dists/{codename}/Release"),
-        ])
-        .output()
-        .ok()
-        .filter(|response| response.status.success());
-    response
-        .as_ref()
-        .and_then(|output| std::str::from_utf8(&output.stdout).ok())
-        .and_then(|release| release_version(release, major))
-        .or_else(|| default.map(str::to_owned))
-}
-
-fn release_version(release: &str, major: u32) -> Option<String> {
-    for line in release.lines() {
-        let Some(version) = line.strip_prefix("Version:").map(str::trim) else {
-            continue;
-        };
-        let fields: Vec<_> = version.split('.').collect();
-        if matches!(fields.len(), 2 | 3)
-            && fields
-                .iter()
-                .all(|field| !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit()))
-        {
-            return (fields[0].parse() == Ok(major)).then(|| {
-                if fields.len() == 2 {
-                    format!("{version}.0")
-                } else {
-                    version.to_owned()
-                }
-            });
-        }
-    }
-    None
 }
 
 pub(crate) fn legacy_image_files(config: &Path, http: &Path) -> Result<(), ErrorBox> {
@@ -292,6 +249,7 @@ fn asset_size(root: &Path, path: &Path) -> io::Result<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::release_version;
 
     #[test]
     fn converts_only_current_images_and_queues_catalog_once() {
@@ -306,7 +264,8 @@ mod tests {
         )
         .unwrap();
         for _ in 0..2 {
-            normalize_current_images(&mut db, |_, _, version| version.map(str::to_owned)).unwrap();
+            normalize_current_images(&mut db, |release| release.fallback.map(str::to_owned))
+                .unwrap();
         }
         let direct: i64 = db.query_row(
             "SELECT COUNT(*) FROM os_images WHERE extract_method='direct' AND status='pending'

@@ -175,13 +175,15 @@ par action à partir des variables du worker. Ce rendu accepte les variables
 `pxe_ip`, `mac` et `token` des templates livrés. Rust reprend les anciens
 réglages réseau SQLite en gardant les choix explicites et le mode PXE
 existant. La variante guidée peut recréer la configuration d’accès à une
-base existante détectée par l’installateur. Elle applique les évolutions
-de colonnes et d’index SQLite après les contrôles de compatibilité en Rust,
-et reprend les réglages des anciens modèles et du module Ansible facultatif.
+base existante détectée par l’installateur. Son démarrage exécute en Rust
+les contrôles de compatibilité et les migrations SQLite, dont les anciens
+modèles, leurs snapshots d’installation, le netboot et les réglages du module
+Ansible facultatif.
 La reprise du worker remet en file les téléchargements
 et suppressions interrompus et conserve le journal de suppression.
-Les transformations historiques restantes et l’import des modèles
-utilisent encore PHP CLI. Le renderer couvre les recettes de partition
+Rust actualise les six catalogues d’images et planifie le téléchargement
+des remplacements Debian. Le worker vérifie leur intégrité avant de les
+publier. L’import des modèles utilise encore PHP CLI. Le renderer couvre les recettes de partition
 sur un disque identifié, avec partitions physiques BIOS ou UEFI. Un plan
 LVM sur ce disque peut définir ses groupes de volumes et volumes logiques.
 La vérification compare le rendu à PHP et refuse les volumes qui désignent
@@ -373,8 +375,10 @@ L’option `PXE_ARM64_SECURE_BOOT=1` du worker prépare le shim et le
 MokManager ARM64 authentifiés depuis Debian, puis publie un GRUB ARM64
 signé par la MOK de l’instance. Le preseed trixie demande les paquets
 signés adaptés à l’architecture du client UEFI. Le banc Docker ARM64
-lance un invité AArch64 avec AAVMF sur le runner ARM64. Il exige la preuve
-de Secure Boot dans l’inventaire et au premier démarrage du disque.
+lance un invité AArch64 avec AAVMF sur le runner ARM64. Sur `b08d7e6`,
+le banc a vérifié Secure Boot dans l’inventaire et au premier démarrage
+du disque. Le serveur a accepté le checkpoint `os_first_boot` avec PHP-FPM
+arrêté. [Journal du runner ARM64](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45289644613/job/138094818244)
 [GRUB signé ARM64 de Debian](https://packages.debian.org/trixie/arm64/grub-efi-arm64-signed/filelist)
 
 Le banc Windows utilise Windows 11 Enterprise Evaluation amd64. L’instance de

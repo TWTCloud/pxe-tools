@@ -807,6 +807,61 @@ def verify_legacy_netboot_migration(binary):
     print('Rust resumed a legacy image move and kept external paths and other architectures untouched', flush=True)
 
 
+def verify_catalog_refresh(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-catalog-') as temporary:
+        root = Path(temporary).resolve()
+        database = root/'fixture.sqlite'
+        config = root/'db.conf'
+        config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
+        fetch = root/'curl'
+        fetch.write_text('''#!/usr/bin/env python3
+import sys
+from hashlib import sha256
+url = sys.argv[-1]
+if url.endswith('/trixie/Release'):
+    print('Version: 13.8')
+elif url.endswith('/cdimage/archive/'):
+    print('<a href="13.8.0/"> <a href="13.5.0/"> <a href="13.5.0/"> <a href="13.7.0-live/">')
+elif url == 'https://releases.ubuntu.com/24.04/':
+    print('ubuntu-24.04.6-live-server-amd64.iso')
+elif url.endswith('/current/images/SHA256SUMS'):
+    print(sha256(b'verified replacement').hexdigest(), './netboot/debian-installer/amd64/initrd.gz')
+else:
+    sys.exit(22)
+''')
+        fetch.chmod(0o700)
+        http = root/'http'
+        image = http/'netboot/debian/13.8.0/amd64'
+        image.mkdir(parents=True)
+        (image/'linux').write_bytes(b'published kernel')
+        (image/'initrd.gz').write_bytes(b'outdated initramfs')
+        schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+        initrd = ('https://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/'
+                  'images/netboot/debian-installer/amd64/initrd.gz')
+        with closing(sqlite3.connect(database)) as db, db:
+            db.executescript(schema.read_text())
+            db.execute("INSERT INTO init_jobs(id,job_type,status) VALUES(7,'bootstrap:refresh_catalog_v2','running')")
+            db.execute("""INSERT INTO os_images(distro,version,arch,version_full,status,initrd_url)
+                          VALUES('debian','trixie','amd64','13.8.0','downloaded',?)""",(initrd,))
+        env = {**os.environ,'HTTP_ROOT':str(http),'PATH':str(root)+os.pathsep+os.environ['PATH'],'WORKER_JOB_ID':'7'}
+        for _ in range(2):
+            subprocess.run([str(binary),'--refresh-catalog',str(config)], env=env, check=True, capture_output=True)
+            with closing(sqlite3.connect(database)) as db:
+                assert db.execute("""SELECT version_full,extract_method FROM catalog_entries
+                                     WHERE distro='debian' AND codename='trixie' AND arch='amd64'
+                                     ORDER BY version_full""").fetchall()==[('13.5.0','iso_extract'),('13.8.0','direct')]
+                assert db.execute("""SELECT iso_url FROM catalog_entries
+                                     WHERE distro='ubuntu' AND version_full='24.04.6' AND arch='arm64'""").fetchone()==(
+                    'https://cdimage.ubuntu.com/releases/24.04/release/ubuntu-24.04.6-live-server-arm64.iso',
+                )
+                assert db.execute("SELECT COUNT(DISTINCT distro) FROM catalog_entries").fetchone()==(6,)
+                assert db.execute("SELECT status FROM os_images").fetchone()==('pending',)
+                assert db.execute("SELECT progress_percent FROM init_jobs WHERE id=7").fetchone()==(100,)
+        assert (image/'linux').read_bytes()==b'published kernel'
+        assert (image/'initrd.gz').read_bytes()==b'outdated initramfs'
+    print('Rust refreshed the six catalogs and queued an authenticated replacement while keeping published files', flush=True)
+
+
 def local(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-setup-') as temp, ExitStack() as stack:
         root = Path(temp).resolve()
@@ -870,6 +925,7 @@ def local(binary):
     verify_image_metadata_migration(binary)
     verify_assigned_preset_migration(binary)
     verify_legacy_netboot_migration(binary)
+    verify_catalog_refresh(binary)
 
 
 def main():

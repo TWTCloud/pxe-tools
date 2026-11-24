@@ -63,12 +63,6 @@ pub fn network_settings(config: &Path) -> Result<(), Box<dyn Error + Send + Sync
 }
 
 const SCHEMA: &str = include_str!("../../app/db/schema.sqlite.sql");
-const DEBIAN_RELEASES: &[(u32, &str, &str, Option<&str>)] = &[
-    (12, "bookworm", "oldstable", Some("12.14.0")),
-    (13, "trixie", "stable", Some("13.5.0")),
-    (14, "forky", "testing", None),
-];
-
 pub fn upgrade(config: &Path, http: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     schema(config)?;
     let path = crate::configured_database(config).ok_or("Existing SQLite database required")?;
@@ -468,7 +462,8 @@ pub fn image_metadata(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>>
     )?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Classify the codenames assigned to Debian images in the pre-v2 catalog.
-    for &(major, codename, channel, _) in DEBIAN_RELEASES {
+    for release in crate::catalog::DEBIAN_RELEASES {
+        let (major, codename, channel) = (release.major, release.codename, release.channel);
         tx.execute(
             "UPDATE os_images SET codename=?1,major=?2
              WHERE distro='debian' AND version=?1 AND (codename IS NULL OR codename='')",
