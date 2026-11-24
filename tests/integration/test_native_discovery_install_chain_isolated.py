@@ -375,6 +375,12 @@ token=re.search(r'name="csrf_token" value="([^"]+)"',page).group(1)
 def post(path,values):
     return opener.open(base+path,urllib.parse.urlencode(values).encode(),timeout=20)
 post('/login',{'username':'fixture-admin','password':'fixture-login-password','csrf_token':token}).read()
+if sys.argv[1]=='checklist':
+    page=opener.open(base+'/tasks/'+str(int(sys.argv[2])),timeout=10).read().decode()
+    if 'Démarrage du système installé' not in page:
+        raise RuntimeError('The completed action did not show the confirmed first boot')
+    print('The task page shows the confirmed first boot')
+    sys.exit(0)
 page=opener.open(base+'/machines/1/install',timeout=10).read().decode()
 token=re.search(r'name="csrf_token" value="([^"]+)"',page).group(1)
 values={'csrf_token':token,'hostname':'pxe-fixture','domain':'example.test','distro':'debian',
@@ -567,6 +573,7 @@ uname -r
                     reboot='sudo -n systemctl reboot' if provision else "printf '%s\\n' fixture-password | sudo -S systemctl reboot"
                     guest_command(app,app_ns,ssh_fixture,user,reboot)
                     wait_for(lambda:not inspect(client)['State']['Running'],120,'isolated Debian reboot')
+            print(docker('exec',app,'python3','-c',ui,'checklist',str(installation[0])).stdout.strip(),flush=True)
             print(f'OK {scenario}: PXE local boot, strict SSH, cleanup and one-time provisioning policy',flush=True)
             print('Only the disposable qcow2 disk and isolated bridge were used.',flush=True)
         except Exception:
