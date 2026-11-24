@@ -14,6 +14,9 @@ CN="${TLS_CN:-pxe-tools.local}"
 DAYS="${TLS_DAYS:-3650}"
 
 if [ "${PXE_RUST_DIRECT_HTTP:-}" = 1 ]; then
+    if [ "${PXE_SERVICE_MANAGER:-}" = s6 ] && [ "$TLS_DIR" = /var/lib/pxe-tools-tls ]; then
+        python3 /opt/pxe-tools/scripts/validate-native-runtime.py docker-tls "$TLS_DIR"
+    fi
     python3 /opt/pxe-tools/scripts/validate-native-runtime.py tls "$TLS_DIR"
 else
     mkdir -p "$TLS_DIR"

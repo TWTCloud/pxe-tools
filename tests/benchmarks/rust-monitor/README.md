@@ -440,6 +440,14 @@ PHP et Nginx de PXE Tools. Le module Ansible conserve son identité et son
 runtime. [Socle](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45318129101/job/138189845916) ·
 [Module Ansible et proxy DHCP](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45318129101/job/138189846255)
 
+Pour une reprise Docker depuis la bêta 12, conserver les volumes de la
+configuration et des données, puis ajouter le volume privé monté dans
+`/var/lib/pxe-tools-tls`. Au premier démarrage, l’image guidée y reprend
+la paire TLS historique depuis le volume de données après vérification
+des chemins, des permissions et de la correspondance entre la clé et le
+certificat. Le même démarrage peut reprendre une copie interrompue si la
+partie déjà copiée correspond à la paire existante.
+
 Les deux livrables amd64 sur `69fbe8a` vérifient aussi que l’arrêt du
 PXE ferme l’écoute sur l’interface de test et garde la console HTTPS
 sur la boucle locale. Un client distinct installe ensuite Debian sur un
