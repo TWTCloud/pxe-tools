@@ -1849,7 +1849,15 @@ def fetch_pending_ansible() -> dict | None:
         JOIN machines m ON i.machine_id = m.id
         LEFT JOIN actions a ON i.action_id = a.id
         WHERE i.ansible_status = 'pending'
-        ORDER BY i.created_at LIMIT 1
+          AND NOT EXISTS (
+              SELECT 1 FROM machine_events e
+              WHERE e.action_id = i.action_id AND e.checkpoint = 'os_first_boot_expected'
+                AND NOT EXISTS (
+                    SELECT 1 FROM machine_events b
+                    WHERE b.action_id = e.action_id AND b.checkpoint = 'os_first_boot'
+                )
+          )
+        ORDER BY i.created_at, i.id LIMIT 1
     """
     with db_connect() as db:
         row = db.execute(sql).fetchone()

@@ -1498,8 +1498,7 @@ if (!empty($partitions_for_tune2fs)) {
 // Le générateur écrit uniquement dans /run au démarrage. Le signal réseau est
 // émis plus tard par l'unité volatile, qui retire ensuite son lanceur et le jeton.
 $trackedInstall = $action_token !== null && $action_id !== null;
-$installPostboot = $trackedInstall && $ansible_requested && $ansible_enabled;
-if ($installPostboot) {
+if ($trackedInstall) {
     $firstBoot = <<<'SH'
 #!/bin/sh
 set -eu
@@ -1594,7 +1593,7 @@ if ($trackedInstall) {
                   .  "    if [ -r /target/etc/ssh/ssh_host_ed25519_key.pub ]; then ssh_fingerprint=\$(in-target --pass-stdout /usr/bin/ssh-keygen -E sha256 -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print \$2}'); fi ; \\\n"
                   .  "    http_status=\$(in-target --pass-stdout /usr/bin/curl -fsS --connect-timeout 5 --max-time 15 --retry 3 --retry-connrefused "
                   .  "--output /dev/null --write-out '%{http_code}' "
-                  .  "--data-urlencode \"ssh_host_fingerprint=\$ssh_fingerprint\" -H 'Authorization: Bearer " . $action_token
+                  .  "--data 'first_boot=1' --data-urlencode \"ssh_host_fingerprint=\$ssh_fingerprint\" -H 'Authorization: Bearer " . $action_token
                   .  "' 'http://" . $pxe_ip_local . "/api/install-end?mac=$mac&status=success') || exit 1 ; \\\n"
                   .  "    [ \"\$http_status\" = 200 ] || exit 1";
 }
@@ -1693,8 +1692,7 @@ if (is_array($pkg['tasksel']) && !empty($pkg['tasksel'])) {
 $pkg_include_combined = array_unique(array_merge(
     is_array($pkg['pkgsel_include'] ?? null) ? $pkg['pkgsel_include'] : [],
     $network_extra_pkgs,
-    $trackedInstall ? ['curl'] : [],
-    $installPostboot ? ['iproute2'] : [],
+    $trackedInstall ? ['curl', 'iproute2'] : [],
     $ansible_pubkey !== '' ? ['sudo', 'openssh-server', 'python3'] : []
 ));
 if (!empty($pkg_include_combined)) {

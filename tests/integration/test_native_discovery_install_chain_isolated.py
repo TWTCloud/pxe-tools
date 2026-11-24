@@ -465,16 +465,16 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                 time.sleep(5)
             else: raise RuntimeError('installer timed out')
             with sqlite3.connect(data/'chosen.sqlite') as db:
-                installation=db.execute('SELECT action_id,install_status FROM installations ORDER BY id DESC LIMIT 1').fetchone()
+                installation=db.execute('SELECT action_id,install_status,ansible_status FROM installations ORDER BY id DESC LIMIT 1').fetchone()
                 machine=db.execute('SELECT status,local_boot_source FROM machines WHERE id=1').fetchone()
                 receipt=db.execute("SELECT message FROM machine_events WHERE action_id=? AND message LIKE 'Empreinte SSH%'",
                                    (installation[0],)).fetchone()
                 premature=db.execute("SELECT checkpoint FROM machine_events WHERE checkpoint IN ('os_first_boot','ansible_started')").fetchall()
-            if installation[1]!='success' or machine!=('installed','pxe') or premature:
+            if installation[1:]!=('success','pending') or machine!=('installed','pxe') or premature:
                 raise RuntimeError('Unexpected installation or provisioning state before first boot')
             output=docker('logs',client).stdout
             public=re.search(r'PXE_HOST_PUBLIC (ssh-ed25519 [A-Za-z0-9+/=]+)',output)
-            if public is None or ('PXE_LAUNCHER 700' in output)!=provision:
+            if public is None or 'PXE_LAUNCHER 700' not in output:
                 raise RuntimeError('Installer SSH key or launcher mode missing or unexpected')
             (ssh_fixture/'host.pub').write_text(public[1]+'\n')
             fingerprint=run('ssh-keygen','-E','sha256','-lf',str(ssh_fixture/'host.pub')).stdout.split()[1]
@@ -485,6 +485,12 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                 write_ansible_ssh_file(app,'known_hosts',(ssh_fixture/'known_hosts').read_text())
                 docker('exec',app,'/bin/sh','-ec',
                        'install -d -m 0700 /dev/shm/pxe-vault; umask 077; printf "%s" fixture-vault-password > /dev/shm/pxe-vault/unlock')
+            # Keep the guest powered off while the worker polls, with the Vault already open.
+            time.sleep(3)
+            with sqlite3.connect(data/'chosen.sqlite') as db:
+                if db.execute('SELECT ansible_status FROM installations WHERE action_id=?',
+                              (installation[0],)).fetchone()!=('pending',):
+                    raise RuntimeError('The worker handled the installation before the installed OS reported boot')
             wait_for(lambda:menu.is_file() and 'DEFAULT localboot' in menu.read_text(),120,'worker switched the per-MAC menu to local boot')
             print('Verified action-bound install-end and public SSH fingerprint before first boot',flush=True)
             with sqlite3.connect(data/'stale.sqlite') as db:
@@ -542,8 +548,8 @@ uname -r
 """
                 sudo='sudo -n /bin/sh -c ' if provision else "printf '%s\\n' fixture-password | sudo -S /bin/sh -c "
                 checked=guest_command(app,app_ns,ssh_fixture,user,sudo+shlex.quote(command))
-                expected_fragment='FragmentPath=/run/systemd/generator/pxe-first-boot.service' if provision and boot==1 else 'LoadState=not-found'
-                if provision and boot==1 and 'Result=success' not in checked.stdout:
+                expected_fragment='FragmentPath=/run/systemd/generator/pxe-first-boot.service' if boot==1 else 'LoadState=not-found'
+                if boot==1 and 'Result=success' not in checked.stdout:
                     raise RuntimeError('The first-boot unit did not report success')
                 if checked.returncode or checked.stdout.splitlines()[:1] != ['1' if provision else '0'] or expected_fragment not in checked.stdout:
                     raise RuntimeError('Unexpected installed guest state: '+checked.stdout+checked.stderr)
@@ -551,7 +557,9 @@ uname -r
                     events=db.execute("SELECT checkpoint FROM machine_events WHERE action_id=? AND checkpoint IN "
                                       "('os_first_boot','os_first_boot_assumed','ansible_started','ansible_finished') ORDER BY id",
                                       (installation[0],)).fetchall()
-                expected=[('os_first_boot',),('ansible_started',),('ansible_finished',)] if provision else []
+                expected=[('os_first_boot',)]
+                if provision:
+                    expected.extend([('ansible_started',),('ansible_finished',)])
                 if events!=expected:
                     raise RuntimeError('Unexpected provisioning checkpoints: '+str(events))
                 print(f'{scenario} boot {boot}: {checked.stdout.strip()}',flush=True)
