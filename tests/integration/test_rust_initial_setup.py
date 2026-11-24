@@ -573,7 +573,39 @@ def verify_device_operations(client, database, authorization):
         )
         assert db.execute('SELECT status FROM init_jobs WHERE job_type=? ORDER BY id',
                           [f'machine:reboot:{device}']).fetchall() == [('success',),('pending',)]
-    print('Rust recovery and inventory operations reject legacy conflicts and serialize reboot scheduling', flush=True)
+    with closing(sqlite3.connect(database)) as db, db:
+        power = db.execute("""INSERT INTO machines(mac,hostname,status,awaiting_action_until)
+                            VALUES('02:00:00:00:09:21','fixture-power','discovered',datetime('now','+1 hour'))"""
+                           ).lastrowid
+    path = f'/machines/{power}'
+    assert request(path+'/shutdown',form={})[:2] == (303,path)
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT next_action,awaiting_action_until IS NOT NULL FROM machines WHERE id=?",
+                          [power]).fetchone() == ('poweroff',1)
+        assert db.execute("SELECT id FROM init_jobs WHERE job_type=?", [f'machine:shutdown:{power}']).fetchone() is None
+    assert request(path+'/power',form={'action':'cancel'})[:2] == (303,path)
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT next_action FROM machines WHERE id=?", [power]).fetchone() == (None,)
+        db.execute("UPDATE machines SET status='configured',awaiting_action_until=NULL WHERE id=?", [power])
+        action = db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES(?,'install_only','pending',?)",
+                            [power,secrets.token_hex(32)]).lastrowid
+    assert request(path+'/wake',form={})[:2] == (303,path)
+    assert request(path+'/reboot',form={})[0] == 409
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT status FROM init_jobs WHERE job_type=?", [f'machine:reboot:{power}']).fetchall() == [
+            ('pending',),
+        ]
+        db.execute("UPDATE init_jobs SET status='success' WHERE job_type=?", [f'machine:reboot:{power}'])
+        db.execute("UPDATE actions SET status='running' WHERE id=?", [action])
+    assert request(path+'/shutdown',form={})[0] == 409
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE actions SET status='success' WHERE id=?", [action])
+    assert request(path+'/shutdown',form={})[:2] == (303,path)
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute("SELECT status FROM init_jobs WHERE job_type=?", [f'machine:shutdown:{power}']).fetchall() == [
+            ('pending',),
+        ]
+    print('Rust recovery, inventory and power helpers reject conflicts and select the existing poll or worker channel', flush=True)
 
 
 def verify_admin_attempt_limit(client, authorization):

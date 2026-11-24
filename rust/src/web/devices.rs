@@ -87,6 +87,9 @@ pub(super) fn route(path: &str) -> Option<DeviceRoute> {
         "rediscover" => Section::Command(Operation::Rediscover),
         "rescue" => Section::Command(Operation::Rescue),
         "rescue/exit" => Section::Command(Operation::ExitRescue),
+        "wake" | "reboot" => Section::Command(Operation::Reboot),
+        "shutdown" => Section::Command(Operation::Shutdown),
+        "power" => Section::Command(Operation::SchedulePower),
         _ => return None,
     };
     Some(DeviceRoute { id, section })
@@ -199,6 +202,11 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
     }
     write!(output, "</ul><nav><a href=\"/machines/{id}/install\">Programmer une installation Debian</a> · <a href=\"/activity?machine={id}\">Activité</a> · <a href=\"/admin/devices\">Appareils</a></nav>")?;
     output.push_str("<h2>Opérations PXE</h2>");
+    write!(
+        output,
+        r#"<form method="post" action="/machines/{id}/reboot"><button>Redémarrer</button></form>
+<form method="post" action="/machines/{id}/shutdown"><button>Arrêter</button></form>"#
+    )?;
     if device.rescue {
         write!(
             output,
@@ -410,7 +418,7 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
     if setting(&tx, "pxe_enabled")? != "on"
         || refreshing
         || device.rescue
-        || device_operations::busy(&tx, id)?
+        || device_operations::busy(&tx, id, false)?
         || !matches!(
             device.status.as_str(),
             "discovered" | "tested" | "wiped" | "installed" | "provisioned"
