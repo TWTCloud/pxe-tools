@@ -146,7 +146,7 @@ def guest_command(app, identity, fixture, user, command):
 
 
 def main():
-    scenario = os.environ.get('PXE_NATIVE_PXE_SCENARIO','plain')
+    scenario = os.environ.get('PXE_NATIVE_PXE_SCENARIO','ansible')
     if scenario not in ('plain','ansible'):
         raise SystemExit('Choose the plain or ansible disposable fixture.')
     provision = scenario == 'ansible'
