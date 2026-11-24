@@ -216,6 +216,8 @@ modèles, leurs snapshots d’installation, le netboot et les réglages du modul
 Ansible facultatif.
 Pour les tâches de préparation PXE, Rust réserve chaque tâche SQLite,
 lance l’outil système correspondant et enregistre la sortie et le résultat.
+Rust revendique aussi chaque téléchargement une seule fois et vérifie
+que le script a publié un état terminé pour l’image.
 La reprise du worker remet en file les téléchargements
 et suppressions interrompus et conserve le journal de suppression.
 Rust actualise les six catalogues d’images et planifie le téléchargement

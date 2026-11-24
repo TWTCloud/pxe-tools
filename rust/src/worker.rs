@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 pub(crate) mod bootstrap;
+pub(crate) mod download;
 
 use crate::connect;
 use rusqlite::{OpenFlags, TransactionBehavior};

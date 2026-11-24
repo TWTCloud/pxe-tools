@@ -992,6 +992,52 @@ def verify_worker_bootstrap(binary):
     print('Rust worker serializes bootstrap claims and records output, exit status and missing scripts', flush=True)
 
 
+def verify_worker_download(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-download-') as directory:
+        root = Path(directory).resolve()
+        database, scripts = root/'fixture.sqlite', root/'scripts'
+        scripts.mkdir()
+        with closing(sqlite3.connect(database)) as db, db:
+            schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+            db.executescript(schema.read_text())
+            db.executemany("""INSERT INTO os_images(id,distro,version,arch,enabled,status,extract_method)
+                           VALUES(?,'debian',?,'amd64',1,'pending',?)""", [
+                (91,'fixture-direct','direct'),(92,'fixture-iso','iso_extract'),
+                (93,'fixture-missing-publication','direct'),(94,'fixture-missing-script','iso_extract'),
+            ])
+        (scripts/'bootstrap-download-image.sh').write_text(
+            '#!/usr/bin/env bash\n'
+            'set -euo pipefail\n'
+            'if [[ "$IMAGE_ID" == 93 ]]; then exit 0; fi\n'
+            'python3 - "$PXE_DOWNLOAD_FIXTURE_DB" "$IMAGE_ID" <<\'PYTHON\'\n'
+            'import sqlite3, sys\n'
+            'with sqlite3.connect(sys.argv[1]) as db:\n'
+            '    assert db.execute("SELECT status FROM os_images WHERE id=?", [sys.argv[2]]).fetchone() == ("downloading",)\n'
+            '    db.execute("UPDATE os_images SET status=\'downloaded\', size_bytes=42 WHERE id=?", [sys.argv[2]])\n'
+            'PYTHON\n'
+        )
+        iso = scripts/'bootstrap-download-image-iso.sh'
+        iso.write_text('#!/usr/bin/env bash\nexit 19\n')
+
+        def execute(image):
+            return subprocess.run([str(binary),'--run-image-download',str(database),str(image),str(scripts)],
+                                  check=True,capture_output=True,
+                                  env={**os.environ,'PXE_DOWNLOAD_FIXTURE_DB':str(database)})
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(execute, [91,91]))
+        assert sum(b'downloaded' in completed.stdout for completed in results) == 1
+        execute(92)
+        execute(93)
+        iso.unlink()
+        execute(94)
+        with closing(sqlite3.connect(database)) as db:
+            rows = db.execute("SELECT status,size_bytes,error_msg FROM os_images ORDER BY id").fetchall()
+            assert rows[0] == ('downloaded',42,None)
+            assert rows[1][0] == 'failed' and rows[1][2] == 'Script exit code 19'
+            assert rows[2][0] == 'failed' and 'publié' in rows[2][2]
+            assert rows[3][0] == 'failed' and 'Script introuvable' in rows[3][2]
+    print('Rust worker claims a download once and checks that its helper actually published an image', flush=True)
+
 def verify_worker_recovery(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-recovery-') as temporary:
         database = Path(temporary).resolve()/'fixture.sqlite'
@@ -1484,6 +1530,7 @@ def local(binary):
         verify_authentik_proxy([str(binary),'--serve-guided',str(config)],updated,env,database,authorization)
     verify_worker_commands(binary)
     verify_worker_bootstrap(binary)
+    verify_worker_download(binary)
     verify_worker_recovery(binary)
     verify_schema_migration(binary)
     verify_preset_network_migration(binary)

@@ -1358,6 +1358,12 @@ def run_image_download(image: dict) -> None:
     Le script publie son own progress dans os_images.message + progress_percent
     + updated_at via side-channel SQLite."""
     image_id = image["id"]
+    if os.environ.get("PXE_RUST_GUIDED") == "1":
+        subprocess.run([
+            "/usr/lib/pxe-tools/pxe-tools-rust", "--run-image-download",
+            DB_PATH, str(image_id), SCRIPTS_DIR,
+        ], check=True)
+        return
     label = f"{image['distro']} {image['version']} {image['arch']}"
     script = script_for_image(image)
 
