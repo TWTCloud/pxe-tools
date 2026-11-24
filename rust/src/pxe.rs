@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod agent;
 pub(crate) mod boot_events;
+pub(crate) mod disk_test;
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};

@@ -816,6 +816,44 @@ def verify_guided_install(client, database, authorization):
     print('Rust guided scheduling rejected stale identity and replay, and atomically queued the selected install', flush=True)
 
 
+def verify_disk_diagnostics(client, database, authorization):
+    def request(path, **kwargs):
+        return client.request(path, authorization=authorization, **kwargs)
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE settings SET value='on' WHERE key='pxe_enabled'")
+        disk = {'name':'/dev/vda','serial':'FIXTURE-DISK-TEST','size_bytes':12_000_000_000}
+        device = db.execute("""INSERT INTO machines(mac,hostname,status,boot_arch,inventory_json,awaiting_action_until)
+                            VALUES('02:00:00:00:09:25','fixture-diagnostics','discovered','amd64',?,datetime('now','+30 minutes'))""",
+                            [json.dumps({'disks':[disk]})]).lastrowid
+    path = f'/machines/{device}/disktest'
+    fields = {'disk':'/dev/vda:FIXTURE-DISK-TEST','mode':'smart_short'}
+    assert b'FIXTURE-DISK-TEST' in request(path)[2]
+    assert request(path,form={**fields,'mode':'badblocks_fixed_rw'})[0] == 422
+    assert request(path,form={**fields,'disk':'/dev/vda:STALE'})[0] == 409
+    assert request(path,form=fields,origin='https://outside.example')[0] == 403
+    scheduled = request(path,form=fields)
+    assert scheduled[0] == 303 and scheduled[1].startswith('/tasks/')
+    action = int(scheduled[1].split('/')[-1])
+    assert request(path,form=fields)[0] == 409
+    with closing(sqlite3.connect(database)) as db:
+        state, commands, linked = db.execute("SELECT job_status,jobs_json,in_session FROM disk_tests WHERE action_id=?",
+                                             [action]).fetchone()
+        assert state=='pending' and linked==1
+        jobs = json.loads(commands)
+        assert jobs[0]['identity']['value'] == 'FIXTURE-DISK-TEST'
+        assert db.execute("SELECT id FROM init_jobs WHERE job_type=?",[f'action:reboot:{action}']).fetchone() is None
+    assert request(path+'-post-action',form={'post_action':'poweroff'})[:2] == (303,f'/machines/{device}')
+    assert request(path+'-cancel',form={})[:2] == (303,f'/machines/{device}')
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT job_status,post_action FROM disk_tests WHERE action_id=?",[action]).fetchone()==(
+            'aborted','poweroff',
+        )
+        assert db.execute("SELECT status FROM actions WHERE id=?",[action]).fetchone()==('cancelled',)
+        assert db.execute("SELECT status FROM machines WHERE id=?",[device]).fetchone()==('discovered',)
+        db.execute("UPDATE settings SET value='off' WHERE key='pxe_enabled'")
+    print('Rust console scheduled an in-session disk diagnostic with a bound serial and cancelled it safely', flush=True)
+
+
 def verify_custom_partition_review(client, database, authorization):
     def request(path, **kwargs):
         return client.request(path, authorization=authorization, **kwargs)
@@ -1535,6 +1573,7 @@ def local(binary):
         verify_device_settings(updated, database, authorization)
         verify_guided_install(updated, database, authorization)
         verify_custom_partition_review(updated, database, authorization)
+        verify_disk_diagnostics(updated, database, authorization)
         verify_device_operations(updated, database, authorization)
         verify_device_ansible(updated, database, authorization)
         verify_hardware_context(updated, database, authorization)

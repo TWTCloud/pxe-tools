@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 mod advanced;
+mod diagnostics;
 
 use super::{
     admin::escape,
@@ -82,6 +83,7 @@ enum Section {
     Command(Operation),
     Ansible(device_ansible::Action),
     Advanced(advanced::Route),
+    Diagnostics(diagnostics::Route),
 }
 
 pub(super) fn route(path: &str) -> Option<DeviceRoute> {
@@ -93,6 +95,9 @@ pub(super) fn route(path: &str) -> Option<DeviceRoute> {
         "install" => Section::Install,
         "install/advanced" => Section::Advanced(advanced::Route::Form),
         "install-preview" => Section::Advanced(advanced::Route::Review),
+        "disktest" => Section::Diagnostics(diagnostics::Route::Start),
+        "disktest-cancel" => Section::Diagnostics(diagnostics::Route::Cancel),
+        "disktest-post-action" => Section::Diagnostics(diagnostics::Route::After),
         "status" => Section::Status,
         "hardware-context.json" => Section::HardwareContext,
         "rediscover" => Section::Command(Operation::Rediscover),
@@ -117,7 +122,8 @@ impl DeviceRoute {
                 | Section::Status
                 | Section::Command(_)
                 | Section::Ansible(_)
-                | Section::Advanced(_),
+                | Section::Advanced(_)
+                | Section::Diagnostics(_),
                 &hyper::Method::POST,
             ) => Some(2048),
             (Section::Detail, &hyper::Method::PUT | &hyper::Method::POST) => Some(64 * 1024),
@@ -136,6 +142,9 @@ impl DeviceRoute {
         if let Some(form) = form {
             return match &self.section {
                 Section::Install => schedule(path, self.id, form, username),
+                Section::Diagnostics(route) => {
+                    diagnostics::submit(route, path, self.id, form, username)
+                }
                 Section::Advanced(route) => advanced::submit(route, path, self.id, form, username),
                 Section::Command(operation) => operation.run(path, self.id, form),
                 Section::Ansible(action) => action.run(path, self.id, form),
@@ -165,12 +174,14 @@ impl DeviceRoute {
         };
         match self.section {
             Section::Install => install_form(db, self.id, &device),
+            Section::Diagnostics(diagnostics::Route::Start) => diagnostics::form(&device, self.id),
             Section::Advanced(advanced::Route::Form) => advanced::form(db, self.id, &device),
             Section::Detail => detail(db, self.id, &device),
             Section::Status => super::device_settings::badge(db, self.id, &device.status),
             Section::HardwareContext
             | Section::Command(_)
             | Section::Ansible(_)
+            | Section::Diagnostics(_)
             | Section::Advanced(advanced::Route::Review) => Ok(plain(
                 StatusCode::METHOD_NOT_ALLOWED,
                 "Method not allowed\n",
@@ -239,6 +250,17 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
     }
     write!(output, "</ul><nav><a href=\"/machines/{id}/install\">Programmer une installation Debian</a> · <a href=\"/activity?machine={id}\">Activité</a> · <a href=\"/admin/devices\">Appareils</a></nav>")?;
     output.push_str("<h2>Opérations PXE</h2>");
+    if device.status == "testing" {
+        write!(
+            output,
+            r#"<form method="post" action="/machines/{id}/disktest-cancel"><button>Annuler le diagnostic</button></form>"#
+        )?;
+    } else {
+        write!(
+            output,
+            r#"<p><a href="/machines/{id}/disktest">Programmer un diagnostic de disque</a></p>"#
+        )?;
+    }
     write!(
         output,
         r#"<form method="post" action="/machines/{id}/reboot"><button>Redémarrer</button></form>

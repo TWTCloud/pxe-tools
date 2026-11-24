@@ -26,7 +26,7 @@ fn main() {
     let path = "../docker/worker/templates/grub.php.j2";
     println!("cargo:rerun-if-changed={path}");
     let source = fs::read_to_string(path).expect("read the PHP GRUB template");
-    for menu in ["discovery", "install", "local", "rescue"] {
+    for menu in ["discovery", "install", "local", "rescue", "disktest"] {
         let (_, function) = source
             .split_once(&format!("function menuentry_{menu}("))
             .expect("find shared GRUB menu");

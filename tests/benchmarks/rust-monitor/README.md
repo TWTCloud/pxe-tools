@@ -241,8 +241,13 @@ référencer des PV supplémentaires sur des disques identifiés. Le profil
 RAID utilise deux ou plusieurs disques identifiés avec une recette BIOS
 GPT symétrique et la racine sur RAID1. Rust refuse les plans avec des
 membres ambigus ou réutilisés, les recettes RAID asymétriques et les
-recettes multi-disques en mode régulier. Le wipe et les tests de
-disques restent à porter. Le renderer prend en charge les interfaces
+recettes multi-disques en mode régulier. La console programme des tests
+SMART ou de surface, collecte leurs résultats et permet de modifier
+l’action de fin ou d’annuler le suivi. Le test de parité vérifie la
+rotation du jeton de session, sa liaison à l’adresse DHCP observée, la
+progression et les instantanés SMART. L’enchaînement automatique vers une
+installation attend le portage de la qualification du disque.
+Le renderer prend en charge les interfaces
 secondaires DHCP ou statiques, les VLAN secondaires et les bonds. Ces
 profils réseau sont vérifiés par comparaison de leur preseed et de leurs
 scripts générés. Le parcours de bout en bout utilise une seule interface.

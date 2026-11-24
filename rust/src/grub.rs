@@ -11,6 +11,7 @@ const DISCOVERY: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-discovery.c
 const INSTALL: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-install.cfg"));
 const LOCAL: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-local.cfg"));
 const RESCUE: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-rescue.cfg"));
+const DISK_TEST: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-disktest.cfg"));
 
 struct Machine {
     mac: String,
@@ -95,7 +96,8 @@ pub fn serve(
 
     let menu = match machine.as_ref() {
         Some(machine) if machine.rescue => "rescue",
-        Some(machine) if matches!(machine.status.as_str(), "wiping" | "testing") => {
+        Some(machine) if machine.status == "testing" => "disktest",
+        Some(machine) if machine.status == "wiping" => {
             return Ok(reply(
                 422,
                 "# Cette opération sort du parcours Debian guidé\n",
@@ -141,12 +143,12 @@ pub fn serve(
             None,
             action_id,
         )?;
-        if menu == "install"
-            && action
-                .as_ref()
-                .is_some_and(|(_, kind)| matches!(kind.as_str(), "install_only" | "reinstall"))
-        {
-            let code = "grub_config_served_install";
+        let code = match action.as_ref().map(|(_, kind)| (menu, kind.as_str())) {
+            Some(("install", "install_only" | "reinstall")) => Some("grub_config_served_install"),
+            Some(("disktest", "disktest")) => Some("grub_config_served_disktest"),
+            _ => None,
+        };
+        if let Some(code) = code {
             let fields = json!({"mac": mac, "ip": peer.to_string(), "src": "grub.php"});
             log_event(
                 &tx,
@@ -206,6 +208,7 @@ pub fn serve(
                 match selected {
                     "discovery" => "Identification du matériel",
                     "rescue" => "Mode de récupération (rescue)",
+                    "disktest" => "Tests de disque (SMART + badblocks)",
                     _ => "Installation automatique : $hostname (Debian $distro)",
                 },
             )
@@ -216,7 +219,14 @@ pub fn serve(
             .replace("$proto", proto)
             .replace(
                 "$preseedUrl",
-                &format!("http://{server}/discovery-preseed.cfg"),
+                &format!(
+                    "http://{server}/{}-preseed.cfg",
+                    if selected == "disktest" {
+                        "disktest"
+                    } else {
+                        "discovery"
+                    }
+                ),
             )
             .replace("$orch_ip", &server.to_string())
             .replace("$mac", &mac)
@@ -226,6 +236,7 @@ pub fn serve(
     match menu {
         "install" => body.push_str(&render(INSTALL, menu, machine.as_ref())),
         "rescue" => body.push_str(&render(RESCUE, menu, machine.as_ref())),
+        "disktest" => body.push_str(&render(DISK_TEST, menu, machine.as_ref())),
         "local" => {
             let local = render(LOCAL, menu, machine.as_ref());
             if arch == "arm64" {

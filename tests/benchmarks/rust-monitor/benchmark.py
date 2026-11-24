@@ -260,6 +260,7 @@ def write_nginx(root, name, upstream, backend, routes=(ROUTE,)):
                 outside 198.51.100.24;
                 ipv6 ::1;
                 alternate_loopback 127.1.2.3;
+                other_lan 192.0.2.25;
             }}
             server {{
                 listen 127.0.0.1:{port};

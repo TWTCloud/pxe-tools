@@ -31,10 +31,17 @@ LOG = "/api/internal/install-log"
 PHASE = "/api/task-phase"
 DHCP = "/api/internal/dhcp-event"
 DNSMASQ = "/api/internal/dnsmasq-event"
+DISK_JOB = "/api/disktest-job"
+DISK_LOG = "/api/disktest-progress"
+DISK_PROGRESS = "/api/disktest-disk-progress"
+DISK_RESULT = "/api/disktest-result"
+DISK_SMART = "/api/disktest-smart"
+DISK_END = "/api/disktest-end"
 PRESEED = "/preseed.php"
 GRUB = "/grub.php"
 ARTIFACT = "/pxe/postboot/162/postboot.sh"
-ROUTES = (ROUTE, BOOT, DISCOVERY, POLL, START, END, READY, CHECKPOINT, LOG, PHASE, PRESEED, GRUB, ARTIFACT, DHCP, DNSMASQ)
+ROUTES = (ROUTE, BOOT, DISCOVERY, POLL, START, END, READY, CHECKPOINT, LOG, PHASE, PRESEED, GRUB, ARTIFACT, DHCP, DNSMASQ, DISK_JOB, DISK_LOG,
+          DISK_PROGRESS, DISK_RESULT, DISK_SMART, DISK_END)
 LAN = "192.0.2.24"
 
 
@@ -274,6 +281,68 @@ def compare_boot_events(ports, paths):
     assert compare(ports, proxy, 200, method="POST") == b""
     rows, = compare_states(paths, [f"SELECT checkpoint FROM machine_events WHERE action_id={action} ORDER BY id"])
     assert rows[-1] == ("install_reboot_done",)
+
+
+def compare_disk_diagnostics(ports, paths):
+    mac, disk, serial = "02:00:00:77:00:01", "/dev/vda", "DIAGNOSTIC-FIXTURE"
+    fixture = [{"disk":disk,"mode":"smart_short","identity":{"kind":"serial","source":"sysfs",
+                "value":serial,"status":"valid"}}]
+    for path in paths:
+        with closing(sqlite3.connect(path)) as db, db:
+            machine = db.execute("INSERT INTO machines(mac,status) VALUES(?,'testing')",[mac]).lastrowid
+            action = db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES (?,'disktest','pending',?)",
+                                [machine, "a"*64]).lastrowid
+            test = db.execute("""INSERT INTO disk_tests(machine_id,action_id,jobs_json,post_action,in_session)
+                                 VALUES (?,?,?,'wait',1)""", [machine,action,json.dumps(fixture)]).lastrowid
+    query = urlencode({"mac":mac,"test_id":test})
+    job = DISK_JOB + "?" + urlencode({"mac":mac})
+    compare(ports,job,404,peer="outside",spoof=True)
+    compare(ports,DISK_PROGRESS,200)
+    compare(ports,DHCP+"?"+urlencode({"mac":mac,"ip":LAN}),200,method="POST")
+    tokens = []
+    for port in ports:
+        menu = response(port,GRUB+"?"+urlencode({"mac":mac,"arch":"amd64"}),peer="lan")
+        assert menu[0]==200 and b"disktest-preseed.cfg" in menu[3]
+        def fetch():
+            status, _, cache, payload = response(port,job,peer="lan")
+            assert (status,cache)==(200,"no-store")
+            token = payload.pop("boot_token")
+            assert re.fullmatch("[a-f0-9]{64}",token)
+            assert payload=={"test_id":test,"action_id":action,"parallel":False,"post_action":"wait",
+                             "jobs":[{"disk":disk,"mode":"smart_short",
+                                      "serial_b64":base64.b64encode(serial.encode()).decode()}]}
+            return token
+        obsolete, current = fetch(), fetch()
+        assert obsolete != current
+        for peer,token in (("outside",current),("other_lan",current),("lan",obsolete)):
+            assert response(port,DISK_LOG+"?"+query,peer=peer,token=token,spoof=True)[0]==404
+        assert response(port,DISK_LOG+"?"+query+"&line=fixture",peer="lan",token=current)[3]=={"status":"ok"}
+        progress = DISK_PROGRESS+"?"+query+"&"+urlencode({"disk":disk,"pct":130,"phase":"smart"})
+        assert response(port,progress,peer="lan",token=current)[3]=={"status":"ok"}
+        smart = DISK_SMART+"?"+query+"&"+urlencode({"disk":disk,"phase":"before"})
+        assert response(port,smart,method="POST",peer="lan",token=current,
+                        body=b'{"serial_number":"WRONG"}')[0]==409
+        assert response(port,smart,method="POST",peer="lan",token=current,
+                        body=json.dumps({"serial_number":serial}).encode())[3]=={"status":"ok"}
+        result = {"disk":disk,"mode":"smart_short","verdict":"passed",
+                  "evidence":{"schema":1,"tool":"smartctl","type":"short","status":"completed",
+                              "start_exit_code":0,"seen_running":True,"passed":True}}
+        assert response(port,DISK_RESULT+"?"+query,method="POST",peer="lan",token=current,
+                        body=json.dumps(result).encode())[3]=={"status":"ok","test_id":test}
+        done = response(port,DISK_END+"?"+query,peer="lan",token=current)
+        assert done[3]=={"status":"ok","test_id":test,"machine_status":"tested","post_action":"wait"}
+        assert response(port,progress,peer="lan",token=current)[3]=={"status":"ignored"}
+        tokens.append(current)
+    assert tokens[0]!=tokens[1]
+    for path in paths:
+        with closing(sqlite3.connect(path)) as db:
+            status, log, progress = db.execute(
+                "SELECT job_status,log,progress_json FROM disk_tests WHERE id=?",[test],
+            ).fetchone()
+            assert (status,log)==("success","fixture\n")
+            assert json.loads(progress)[disk]["pct"]==100
+            assert db.execute("SELECT status FROM actions WHERE id=?",[action]).fetchone()==("success",)
+            assert db.execute("SELECT serial FROM disk_smart_snapshots WHERE test_id=?",[test]).fetchall()==[(serial,)]
 
 
 def compare_install(ports, paths):
@@ -673,7 +742,8 @@ def main():
         assert response(ports[1], retry, peer="lan")[0] == 200
         compare_grub(ports, paths)
         compare_boot_events(ports, paths)
-    print("Parity OK: 69 summaries, GRUB menus and selection, DHCP/TFTP events, discovery inventory, preseed with advanced networking and single- and multi-disk recipes, and installation callbacks")
+        compare_disk_diagnostics(ports, paths)
+    print("Parity OK: 69 summaries, GRUB menus and selection, DHCP/TFTP events, discovery inventory, preseed with advanced networking and single- and multi-disk recipes, installation callbacks, and disk diagnostics")
 
 
 if __name__ == "__main__":

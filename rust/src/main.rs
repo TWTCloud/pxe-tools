@@ -376,6 +376,17 @@ fn handle(
             };
             json_response(result)
         }
+        (
+            Method::Get | Method::Post,
+            "/api/disktest-job"
+            | "/api/disktest-progress"
+            | "/api/disktest-disk-progress"
+            | "/api/disktest-end",
+        )
+        | (Method::Post, "/api/disktest-result" | "/api/disktest-smart") => {
+            let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            pxe::disk_test::serve(&mut db, ip, path, query, request)
+        }
         (Method::Post, "/api/internal/dhcp-event" | "/api/internal/dnsmasq-event") => {
             let result = (|| -> rusqlite::Result<()> {
                 let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
