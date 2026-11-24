@@ -49,11 +49,12 @@ if [ -x "$BOOTSTRAP_SCRIPTS_DIR/render-per-mac-pxelinux.sh" ]; then
     }
 fi
 
-# Endpoints PHP runtime (executés par php-fpm via nginx)
-render preseed.php.j2          "$HTTP_ROOT/preseed.php"
-render grub.php.j2             "$HTTP_ROOT/grub.php"
+if [ "${PXE_RUST_GUIDED:-0}" != 1 ]; then
+    render preseed.php.j2      "$HTTP_ROOT/preseed.php"
+    render grub.php.j2         "$HTTP_ROOT/grub.php"
+fi
 
-# Squelette + données partagées (lus par preseed.php au runtime)
+# Squelette et données partagées avec le serveur PXE.
 render preseed-base.cfg.j2     "$PXE_TOOLS_DATA_DIR/preseed-base.cfg"
 render data.json.j2            "$PXE_TOOLS_DATA_DIR/data.json"
 

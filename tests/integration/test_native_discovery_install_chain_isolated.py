@@ -626,6 +626,9 @@ PAYLOAD="$(printf '{"ip":"%s","kernel":"%s","fixture_secure_boot":%s,"fixture_ar
     tftp=root/'tftp'
     wait_for(lambda:(tftp/'lpxelinux.0').is_file() and (tftp/'pxelinux.cfg/default').is_file(),
              120,'worker rendering and bootloaders')
+    for name in ('preseed.php','grub.php'):
+        if docker('exec',app,'test','-e',f'{http_root}/{name}',check=False).returncode == 0:
+            raise RuntimeError(f'The guided worker rendered the legacy PHP file {name}')
     check_env=('set -a; source /usr/lib/pxe-tools/native/default.env; '
                'source /var/lib/pxe-tools-native/runtime.env; set +a; ') if native else (
                'export PXE_APP_DIR=/app; ')
@@ -697,10 +700,8 @@ def main():
         (conf/'master.key').write_bytes(os.urandom(32));(conf/'master.key').chmod(0o600)
         (conf/'db.conf').write_text(json.dumps({'driver':'sqlite','path':'/var/lib/pxe-tools/chosen.sqlite'}))
         (conf/'db.conf').chmod(0o600)
-        if not rust_lab or packaged:
-            php_image=appliance_image if backend=='rust-docker' else image
-            login_hash=docker('run','--rm','--network','none','--entrypoint','php',php_image,'-r',
-                              'echo password_hash("fixture-login-password", PASSWORD_DEFAULT);').stdout
+        # Static bcrypt hash of the public test password fixture-login-password.
+        login_hash='$2y$12$zGZhsSwt3AHDHVbliUPl5eMV46SsqfpLUsIOAcZiq1frkQPqxaEcK'
         with sqlite3.connect(data/'chosen.sqlite') as db:
             db.executescript((ROOT/'app/db/schema.sqlite.sql').read_text())
             db.executemany('INSERT INTO settings(key,value) VALUES(?,?)',[
