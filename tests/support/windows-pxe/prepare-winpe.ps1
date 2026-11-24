@@ -12,6 +12,7 @@ param(
     [Parameter(Mandatory)][guid]$GuestId,
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]{1,40}$')][string]$DiskSerial,
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{1,40}$')][string]$Edition,
+    [ValidateSet('10', '11')][int]$WindowsVersion = 11,
     [ValidateRange(0, 128)][int]$InstallImageIndex = 0,
     [switch]$UseUniqueId,
     [string]$InstallImageUri = '',
@@ -200,6 +201,7 @@ $case = [ordered]@{
     guest_id = $GuestId.ToString()
     disk_serial = $DiskSerial
     edition = $Edition
+    windows_version = $WindowsVersion
     iso_sha256 = $WindowsIsoSha256.ToLowerInvariant()
     wimboot_sha256 = Get-BootHash 'wimboot'
     winpe_sha256 = Get-BootHash 'boot.wim'

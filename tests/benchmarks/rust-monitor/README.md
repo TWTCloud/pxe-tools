@@ -624,6 +624,44 @@ WinPE télécharge le fichier autorisé au démarrage et vérifie son empreinte
 avant d’appliquer l’index avec DISM. Le vérificateur du banc conserve
 l’association au client, au disque jetable et à l’édition installée.
 
+### Banc Hyper-V avec le chargeur UEFI Microsoft
+
+Pour une VM de génération 2 avec TPM 2.0, utiliser le profil Secure Boot
+`MicrosoftWindows`. Le firmware de ce banc associe un profil à la VM.
+La chaîne iPXE/wimboot et le chargeur Windows peuvent demander des
+autorités différentes. Sur le banc Hyper-V, le profil tiers a accepté
+iPXE et wimboot, puis refusé le chargeur de Windows. Préparer le profil
+Windows de la VM de test avant l’initialisation du TPM. Le firmware lance
+alors directement le chargeur signé Microsoft depuis le proxy TFTP du banc.
+[Profils Hyper-V](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/generation-2-virtual-machine-security-features) ·
+[Analyse iPXE/wimboot](https://github.com/ipxe/wimboot/discussions/64)
+
+Sur le serveur Linux de préparation, créer l’arborescence à partir d’un
+WinPE approuvé. Fournir l’empreinte du `bootmgfw.efi` Microsoft vérifié lors
+de la préparation du média. Le firmware valide sa signature avec le profil
+Secure Boot Windows de la VM. Le script vérifie les quatre fichiers du
+répertoire client et écrit le manifeste à côté de la racine TFTP.
+
+```bash
+python3 tests/integration/prepare_windows_native_tftp.py \
+  --case "$winpe/case.json" --boot-root "$winpe/boot" --output "$bundle" \
+  --mac "$mac_jetable" --boot-manager-sha256 "$boot_manager_sha256"
+```
+
+Dans le proxy dnsmasq du banc, utiliser `$bundle/tftp` comme racine,
+activer `tftp-unique-root=mac` et `tftp-lowercase`, puis annoncer
+`bootmgfw.efi` uniquement à la MAC de test en UEFI x86-64. La VM conserve
+le disque vierge, la carte réservée et son profil Secure Boot. Les images
+d’installation continuent d’être servies par Rust sur le réseau isolé.
+[Options dnsmasq](https://thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html)
+
+Pour Windows 10, passer `-WindowsVersion 10` lors de la préparation de
+WinPE. Le manifeste historique garde Windows 11 par défaut. Avec un
+fichier en cache, passer `--install-image` à `verify_windows_pxe_deployment.py`
+et sélectionner l’arborescence du client avec `--boot-root`. La preuve
+réseau indique `boot_chain=native-uefi` et le reçu du premier démarrage
+vérifie la version, l’édition, le disque GPT, Secure Boot et le TPM.
+
 Le manifeste du cas contient `guest_id` (UUID), `disk_serial`,
 `edition` (par exemple `Professional`), `iso_sha256` et
 `winpe_sha256`. La preuve réseau produite côté serveur contient

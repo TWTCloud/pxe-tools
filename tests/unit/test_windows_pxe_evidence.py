@@ -19,11 +19,18 @@ class WindowsEvidenceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             iso = Path(directory) / 'fixture.iso'
             winpe = Path(directory) / 'boot.wim'
+            image = Path(directory) / 'install.wim'
             iso.write_bytes(b'iso fixture')
             winpe.write_bytes(b'winpe fixture')
+            image.write_bytes(b'install fixture')
             case = {'iso_sha256': hashlib.sha256(iso.read_bytes()).hexdigest(),
                     'winpe_sha256': hashlib.sha256(winpe.read_bytes()).hexdigest()}
             evidence.check_media(case, iso, winpe)
+            cached = {**case, 'install_image': image.name,
+                      'install_sha256': hashlib.sha256(image.read_bytes()).hexdigest()}
+            evidence.check_media(cached, image, winpe, cached=True)
+            with self.assertRaisesRegex(ValueError, 'case manifest'):
+                evidence.check_media(cached, iso, winpe, cached=True)
             winpe.write_bytes(b'changed')
             with self.assertRaisesRegex(ValueError, 'fingerprint'):
                 evidence.check_media(case, iso, winpe)
@@ -44,6 +51,19 @@ class WindowsEvidenceTest(unittest.TestCase):
             (root/'boot.sdi').symlink_to('BCD')
             with self.assertRaisesRegex(ValueError, 'regular media file'):
                 evidence.check_boot_assets(manifest, root)
+
+            native = root / 'native'
+            manifest = {'boot_chain': 'native-uefi'}
+            for name, checksum in evidence.NATIVE_BOOT_FILES.items():
+                content = name.encode()
+                asset = native / name
+                asset.parent.mkdir(parents=True, exist_ok=True)
+                asset.write_bytes(content)
+                manifest[checksum] = hashlib.sha256(content).hexdigest()
+            evidence.check_boot_assets(manifest, native)
+            (native/'bootmgfw.efi').write_bytes(b'wrong loader')
+            with self.assertRaisesRegex(ValueError, 'bootmgfw.efi'):
+                evidence.check_boot_assets(manifest, native)
 
     def test_guest_contract(self):
         guest = 'b9c4c7c8-c599-446b-b540-69915fbb9a39'
@@ -76,6 +96,16 @@ class WindowsEvidenceTest(unittest.TestCase):
                 evidence.verify(case, network, path)
             transcript(windows, winpe)
             with self.assertRaisesRegex(ValueError, 'followed'):
+                evidence.verify(case, network, path)
+
+            windows10 = {**windows, 'build': 19045}
+            transcript(winpe, windows10)
+            evidence.verify({**case, 'windows_version': 10}, network, path)
+            native = {**case, 'windows_version': 10, 'boot_chain': 'native-uefi'}
+            evidence.verify(native, {**network, 'boot_chain': 'native-uefi'}, path)
+            with self.assertRaisesRegex(ValueError, 'network evidence'):
+                evidence.verify(native, network, path)
+            with self.assertRaisesRegex(ValueError, 'Windows 11'):
                 evidence.verify(case, network, path)
 
             identifier = {'disk_serial': '60022480' + 'A' * 24, 'disk_identity': 'unique_id'}
