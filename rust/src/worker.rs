@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+pub(crate) mod bootstrap;
+
 use crate::connect;
 use rusqlite::{OpenFlags, TransactionBehavior};
 use serde_json::json;

@@ -214,6 +214,8 @@ base existante détectée par l’installateur. Son démarrage exécute en Rust
 les contrôles de compatibilité et les migrations SQLite, dont les anciens
 modèles, leurs snapshots d’installation, le netboot et les réglages du module
 Ansible facultatif.
+Pour les tâches de préparation PXE, Rust réserve chaque tâche SQLite,
+lance l’outil système correspondant et enregistre la sortie et le résultat.
 La reprise du worker remet en file les téléchargements
 et suppressions interrompus et conserve le journal de suppression.
 Rust actualise les six catalogues d’images et planifie le téléchargement

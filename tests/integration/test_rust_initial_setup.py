@@ -948,6 +948,50 @@ def verify_worker_commands(binary):
     print('Rust settings migration preserves explicit choices, DHCP fallback and optional Ansible bootstrap', flush=True)
 
 
+def verify_worker_bootstrap(binary):
+    with tempfile.TemporaryDirectory(prefix='pxe-rust-bootstrap-') as directory:
+        root = Path(directory).resolve()
+        database = root/'fixture.sqlite'
+        scripts = root/'scripts'
+        scripts.mkdir()
+        (scripts/'bootstrap-build-grub.sh').write_text(
+            '#!/usr/bin/env bash\n'
+            'set -euo pipefail\n'
+            'test "$REBUILD" = 1\n'
+            'printf "BOOT:%s\\n" "$WORKER_JOB_ID"\n'
+            'printf "diagnostic\\n" >&2\n'
+            'sleep 0.2\n'
+        )
+        (scripts/'bootstrap-generate-mok.sh').write_text(
+            '#!/usr/bin/env bash\nprintf "failure fixture\\n" >&2\nexit 19\n'
+        )
+        with closing(sqlite3.connect(database)) as db, db:
+            schema = Path(__file__).resolve().parents[2]/'app/db/schema.sqlite.sql'
+            db.executescript(schema.read_text())
+            db.executemany("INSERT INTO init_jobs(id,job_type,status) VALUES(?,?,'pending')",[
+                (81,'bootstrap:rebuild_grub'),(82,'bootstrap:generate_mok'),
+                (83,'bootstrap:restart_dnsmasq'),(84,'system:factory_reset_wipe'),
+            ])
+
+        def execute(job, check=True):
+            return subprocess.run([str(binary),'--run-bootstrap-job',str(database),str(job),str(scripts)],
+                                  check=check,capture_output=True)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(execute, [81,81]))
+        assert sum(b'rebuild_grub' in completed.stdout for completed in results) == 1
+        execute(82)
+        execute(83)
+        assert execute(84,check=False).returncode != 0
+        with closing(sqlite3.connect(database)) as db:
+            rows = db.execute("""SELECT status,progress_percent,log,message FROM init_jobs ORDER BY id""").fetchall()
+            assert rows[0][:2] == ('success',100)
+            assert rows[0][2].count('BOOT:81') == 1 and 'diagnostic' in rows[0][2]
+            assert rows[1][:2] == ('failed',0) and 'exit code = 19' in rows[1][2]
+            assert rows[2][0] == 'failed' and 'Script introuvable' in rows[2][3]
+            assert rows[3][0] == 'pending'
+    print('Rust worker serializes bootstrap claims and records output, exit status and missing scripts', flush=True)
+
+
 def verify_worker_recovery(binary):
     with tempfile.TemporaryDirectory(prefix='pxe-rust-recovery-') as temporary:
         database = Path(temporary).resolve()/'fixture.sqlite'
@@ -1439,6 +1483,7 @@ def local(binary):
         schedule_server.wait(timeout=5)
         verify_authentik_proxy([str(binary),'--serve-guided',str(config)],updated,env,database,authorization)
     verify_worker_commands(binary)
+    verify_worker_bootstrap(binary)
     verify_worker_recovery(binary)
     verify_schema_migration(binary)
     verify_preset_network_migration(binary)

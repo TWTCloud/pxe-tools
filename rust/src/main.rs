@@ -127,6 +127,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             }
         }
     }
+    if let [flag, database, id, scripts] = args.as_slice() {
+        if flag == "--run-bootstrap-job" {
+            let id = id.to_str().ok_or("Invalid bootstrap job ID")?.parse()?;
+            return worker::bootstrap::run(Path::new(database), id, Path::new(scripts));
+        }
+    }
     if let [flag, id, job, db] = args.as_slice() {
         if flag == "--reserve-image-deletion" {
             let id = id.to_str().ok_or("Invalid image ID")?.parse()?;
