@@ -198,10 +198,18 @@ architecture, affiche les disques associés et exige une nouvelle
 vérification après tout changement du plan avant la programmation.
 Un modèle à adresse statique partagée doit être adapté individuellement.
 Les pré-effacements affichés demandent une confirmation explicite.
-La suppression d’une fiche verrouille les menus PXE et restaure le menu
-si la suppression SQLite échoue. La réinitialisation du parc supprime
-les fiches et leur historique puis demande au worker de reconstruire
-les menus à partir de la base à jour.
+La suppression d’une fiche ou d’un lot verrouille les menus PXE. Si une
+suppression échoue, la transaction et les menus sont restaurés. La
+réinitialisation du parc supprime les fiches et leur historique. Le worker
+efface les menus propres aux anciennes fiches en préservant les menus
+partagés et ceux des appareils découverts entre-temps.
+
+La réinitialisation de l’appliance supprime aussi les comptes, les
+paramètres, les modèles et les artefacts de démarrage. Le worker désactive
+le PXE, efface les fichiers dans les répertoires PXE de l’instance, puis
+relance la préparation des chargeurs et de la clé MOK. Le certificat HTTPS
+et la clé maître sont conservés. L’assistant local rouvre la création du
+compte après le traitement avec le code de configuration.
 
 La page `/settings` enregistre le protocole de découverte et les DNS IPv4
 proposés aux prochains déploiements. Elle permet de demander au worker
@@ -229,7 +237,8 @@ lance l’outil système correspondant et enregistre la sortie et le résultat.
 Le socle APT et Docker lance la boucle du worker en Rust. Elle attend la
 configuration SQLite, respecte l’ordre des tâches de préparation MOK et
 GRUB et clôture la phase post-installation sans rôle après le retour de
-premier démarrage ou son délai. Les opérations qui utilisent encore du
+premier démarrage ou son délai. Rust efface au lancement les mots de passe
+Vault temporaires d’une exécution interrompue. Les opérations qui utilisent encore du
 code Python, dont l’exécution des playbooks et la synchronisation des
 dépôts Ansible, le démarrent à la demande.
 Rust réserve aussi chaque téléchargement une seule fois et vérifie
@@ -269,8 +278,9 @@ recettes multi-disques en mode régulier. La console programme des tests
 SMART ou de surface, collecte leurs résultats et permet de modifier
 l’action de fin ou d’annuler le suivi. Le test de parité vérifie la
 rotation du jeton de session, sa liaison à l’adresse DHCP observée, la
-progression et les instantanés SMART. L’enchaînement automatique vers une
-installation attend le portage de la qualification du disque.
+progression et les instantanés SMART. Le parcours d’installation peut
+enchaîner la qualification du disque et l’installation avec leurs actions
+et jetons propres.
 La console peut aussi programmer un effacement de plusieurs disques après
 confirmation explicite. Le script vérifie à nouveau leur identité et
 utilise un jeton propre à l’opération. Le test de parité couvre aussi
@@ -476,7 +486,8 @@ second banc et remet le retour de premier démarrage `os_first_boot`.
 Les qualifications PXE tournent dans GitHub Actions sur le dépôt PXE Tools.
 Sur une PR issue du dépôt, l’ajout du label `ci:pxe-debian` lance la matrice
 APT et Docker amd64/ARM64. Le label `ci:pxe-windows` lance le banc Windows
-avec les médias Microsoft sur le runner Windows. Chaque workflow récupère
+avec les médias Microsoft sur le runner Windows. Le label `ci:pxe-raid-lvm`
+exerce le profil LVM sur RAID1 avec APT amd64. Chaque workflow récupère
 le SHA exact de la PR. Le déclenchement manuel est aussi disponible
 depuis Actions une fois les workflows présents sur la branche par défaut.
 

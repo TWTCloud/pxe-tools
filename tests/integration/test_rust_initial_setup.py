@@ -1765,8 +1765,16 @@ def verify_worker_service(binary):
             'import os, sys\n'
             'with open(os.environ["PXE_FIXTURE_HELPER_CALLS"], "a") as calls:\n'
             '    calls.write(sys.argv[2] + "\\n")\n'
-            'assert sys.argv[1:3] == ["--rust-worker-step", "clean-vault"]\n'
+            'raise AssertionError("The base worker must not call Python")\n'
         )
+        vault = root/'vault'
+        vault.mkdir(mode=0o700)
+        unlocked = vault/'unlock'
+        claimed = vault/'claim-interrupted'
+        preserved = root/'vault-sentinel'
+        preserved.touch()
+        unlocked.write_text('fixture')
+        claimed.symlink_to(preserved)
         scripts = root/'scripts'
         scripts.mkdir()
         for name in ('generate-mok','build-grub'):
@@ -1792,6 +1800,7 @@ def verify_worker_service(binary):
         environment = dict(os.environ, PXE_RUST_GUIDED='1', WORKER_POLL_S='1',
                            BOOTSTRAP_SCRIPTS_DIR=str(scripts), TFTP_ROOT=str(tftp),
                            ANSIBLE_WORKDIR=str(root), PXE_ANSIBLE_MODE='volume', PXE_ANSIBLE_RUNTIME='',
+                           PXE_VAULT_UNLOCK_DIR=str(vault),
                            PXE_FIXTURE_BOOT_CALLS=str(calls), PXE_FIXTURE_HELPER_CALLS=str(helper_calls))
         command = [str(binary),'--work-guided',str(config),str(helper)]
         with (root/'worker.log').open('w+') as log, subprocess.Popen(
@@ -1808,9 +1817,10 @@ def verify_worker_service(binary):
 
             try:
                 deadline = time.monotonic() + 10
-                while not helper_calls.is_file() and time.monotonic() < deadline:
+                while (unlocked.exists() or claimed.is_symlink()) and time.monotonic() < deadline:
                     time.sleep(.1)
-                assert helper_calls.read_text() == 'clean-vault\n'
+                assert preserved.exists() and not unlocked.exists() and not claimed.is_symlink()
+                assert not helper_calls.exists()
                 assert not calls.exists()
                 temporary = root/'db.conf.new'
                 temporary.write_text(json.dumps({'driver':'sqlite','path': str(database)}))
@@ -1826,7 +1836,7 @@ def verify_worker_service(binary):
                 with closing(sqlite3.connect(database)) as db:
                     assert db.execute('SELECT status FROM machines').fetchone() == ('installed',)
                     assert db.execute('SELECT ansible_status FROM installations').fetchone() == ('no_role',)
-                assert helper_calls.read_text() == 'clean-vault\n'
+                assert not helper_calls.exists()
             finally:
                 worker.terminate()
                 try:

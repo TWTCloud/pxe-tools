@@ -6,7 +6,10 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBeha
 use std::{
     env,
     error::Error,
-    fs,
+    ffi::CString,
+    fs::{self, OpenOptions},
+    io,
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -51,7 +54,7 @@ pub(crate) fn run(config: &Path, helper: &Path) -> Result<(), ErrorBox> {
             .filter(|seconds| *seconds > 0)
             .unwrap_or(5),
     );
-    worker.python("clean-vault", None, None)?;
+    wipe_unclaimed_vault(&worker.unlock)?;
     println!("[worker] Rust attend la base SQLite et son schéma");
     let database = loop {
         if let Some(database) = configured_database(config).filter(|path| schema_ready(path)) {
@@ -136,6 +139,47 @@ pub(crate) fn run(config: &Path, helper: &Path) -> Result<(), ErrorBox> {
 
 fn open(path: &Path, mode: OpenFlags) -> rusqlite::Result<Connection> {
     connect(path, mode | OpenFlags::SQLITE_OPEN_NOFOLLOW)
+}
+
+fn wipe_unclaimed_vault(unlock: &Path) -> io::Result<()> {
+    let path = unlock
+        .parent()
+        .filter(|parent| parent.is_absolute() && parent.parent().is_some())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Chemin Vault invalide"))?;
+    let directory = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    #[cfg(target_os = "linux")]
+    let path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.as_encoded_bytes();
+        if name == b"unlock"
+            || [b"unlock-".as_slice(), b"claim-", b"run-"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        {
+            let name = CString::new(name)?;
+            // unlinkat acts on the open directory and removes the entry itself.
+            if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::NotFound {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn schema_ready(path: &Path) -> bool {
@@ -312,6 +356,7 @@ impl Worker<'_> {
             return Ok(());
         }
         tx.commit()?;
+        wipe_unclaimed_vault(&self.unlock)?;
         let http = directory("HTTP_ROOT", "/srv/http");
         let mok = directory("MOK_DIR", "/etc/pxe-tools/mok");
         if let Err(error) = factory_reset::wipe(&http, &self.tftp, &mok, &self.scripts) {
