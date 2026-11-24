@@ -321,11 +321,22 @@ pub fn machine_ready(db: &mut Connection, raw_mac: &str) -> ApiResult {
 }
 
 pub(crate) fn cancel_pending(db: &Connection, id: i64) -> rusqlite::Result<()> {
+    close_action(db, id, true)?;
+    Ok(())
+}
+
+pub(crate) fn force_complete(db: &Connection, id: i64) -> rusqlite::Result<bool> {
+    close_action(db, id, false)
+}
+
+fn close_action(db: &Connection, id: i64, pending_only: bool) -> rusqlite::Result<bool> {
     if db.execute(
-        "UPDATE actions SET status='cancelled',ended_at=CURRENT_TIMESTAMP WHERE id=?1 AND status='pending'",
-        [id],
-    )? == 0 {
-        return Ok(());
+        "UPDATE actions SET status='cancelled',ended_at=CURRENT_TIMESTAMP WHERE id=?1
+         AND (status='pending' OR (NOT ?2 AND status NOT IN ('success','failed','cancelled')))",
+        params![id, pending_only],
+    )? == 0
+    {
+        return Ok(false);
     }
     for (table, column, states) in [
         ("wipes", "wipe_status", "'pending','running'"),
@@ -357,7 +368,7 @@ pub(crate) fn cancel_pending(db: &Connection, id: i64) -> rusqlite::Result<()> {
          AND job_type IN ('action:reboot:'||?1,'action:ansible_retry:'||?1,'action:render_postboot:'||?1)",
         [id],
     )?;
-    Ok(())
+    Ok(true)
 }
 
 pub fn recompute(db: &Connection, id: i64) -> rusqlite::Result<()> {

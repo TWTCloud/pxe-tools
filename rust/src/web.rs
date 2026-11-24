@@ -581,8 +581,14 @@ async fn dispatch(
             .await;
     }
     if let Some(view) = activity::View::for_route(path) {
-        if !secure || !readable {
+        if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        if !view.allows(&parts.method) {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        }
+        if !readable && !admin_origin(&parts.headers, peer, site) {
+            return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
         }
         return site
             .admin

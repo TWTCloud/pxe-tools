@@ -1,11 +1,18 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::{admin::escape, bytes, plain, setup::page, ErrorBox, Reply};
-use hyper::{Response, StatusCode};
-use rusqlite::{params, Connection, OptionalExtension};
+use super::{
+    admin::escape,
+    bytes, plain,
+    setup::{page, redirect},
+    ErrorBox, Reply,
+};
+use crate::connect;
+use hyper::{Method, Response, StatusCode};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{
     fmt::Write,
     hash::{DefaultHasher, Hash, Hasher},
+    path::Path,
 };
 
 const PAGE_SIZE: i64 = 30;
@@ -66,6 +73,14 @@ pub(super) enum View {
     Installation(i64),
     Wipe(i64),
     DiskTest(i64),
+    ForceComplete(i64),
+    CancelInstallation(i64),
+    Download(i64, Journal),
+}
+
+pub(super) enum Journal {
+    Install,
+    Ansible,
 }
 
 impl View {
@@ -75,20 +90,33 @@ impl View {
             "/activity/list" => return Some(Self::Fragment),
             _ => {}
         }
-        let (section, id) = path.strip_prefix('/')?.split_once('/')?;
+        let (section, rest) = path.strip_prefix('/')?.split_once('/')?;
+        let (id, endpoint) = rest.split_once('/').unwrap_or((rest, ""));
         let id = id.parse().ok().filter(|id| *id > 0)?;
-        match section {
-            "tasks" => Some(Self::Task(id)),
-            "installations" => Some(Self::Installation(id)),
-            "wipes" => Some(Self::Wipe(id)),
-            "disktests" => Some(Self::DiskTest(id)),
+        match (section, endpoint) {
+            ("tasks", "") => Some(Self::Task(id)),
+            ("installations", "") => Some(Self::Installation(id)),
+            ("wipes", "") => Some(Self::Wipe(id)),
+            ("disktests", "") => Some(Self::DiskTest(id)),
+            ("actions", "force-complete") => Some(Self::ForceComplete(id)),
+            ("installations", "cancel") => Some(Self::CancelInstallation(id)),
+            ("actions", "log/install") => Some(Self::Download(id, Journal::Install)),
+            ("actions", "log/ansible") => Some(Self::Download(id, Journal::Ansible)),
             _ => None,
+        }
+    }
+
+    pub(super) fn allows(&self, method: &Method) -> bool {
+        match self {
+            Self::ForceComplete(_) | Self::CancelInstallation(_) => *method == Method::POST,
+            _ => matches!(*method, Method::GET | Method::HEAD),
         }
     }
 
     pub(super) fn serve(
         &self,
         db: &Connection,
+        db_path: &Path,
         path: &str,
         query: &str,
         number: u32,
@@ -114,8 +142,125 @@ impl View {
             Self::DiskTest(id) => {
                 operation(db, *id, "disk_tests", "job_status", "log", "Test disque")
             }
+            Self::ForceComplete(id) => close(db_path, *id, false),
+            Self::CancelInstallation(id) => close(db_path, *id, true),
+            Self::Download(id, journal) => download(db, *id, journal),
         }
     }
+}
+
+fn close(path: &Path, id: i64, installation: bool) -> Result<Reply, ErrorBox> {
+    let mut db = connect(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let target = if installation {
+        let Some((action, state)) = tx
+            .query_row(
+                "SELECT action_id,COALESCE(install_status,'') FROM installations WHERE id=?",
+                [id],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(plain(StatusCode::NOT_FOUND, "Installation introuvable\n"));
+        };
+        if state == "in_progress" {
+            if let Some(action) = action {
+                crate::install::force_complete(&tx, action)?;
+            } else {
+                tx.execute(
+                    "UPDATE installations SET install_status='aborted',ended_at=CURRENT_TIMESTAMP WHERE id=?",
+                    [id],
+                )?;
+            }
+        }
+        format!("/installations/{id}")
+    } else {
+        let Some(machine) = tx
+            .query_row("SELECT machine_id FROM actions WHERE id=?", [id], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?
+        else {
+            return Ok(plain(StatusCode::NOT_FOUND, "Tâche introuvable\n"));
+        };
+        if crate::install::force_complete(&tx, id)? {
+            crate::pxe::log_event(
+                &tx,
+                machine,
+                "action",
+                &format!(
+                    "Admin a clôturé le suivi de l’action #{id}. Aucun arrêt distant garanti."
+                ),
+                None,
+                Some(id),
+            )?;
+        }
+        format!("/machines/{machine}")
+    };
+    tx.commit()?;
+    Ok(redirect(StatusCode::SEE_OTHER, target))
+}
+
+fn download(db: &Connection, id: i64, journal: &Journal) -> Result<Reply, ErrorBox> {
+    let Some(hostname) = db
+        .query_row(
+            "SELECT COALESCE(m.hostname,'') FROM actions a JOIN machines m ON m.id=a.machine_id WHERE a.id=?",
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(plain(StatusCode::NOT_FOUND, "Tâche introuvable\n"));
+    };
+    let (column, label) = match journal {
+        Journal::Install => ("install_log", "installation"),
+        Journal::Ansible => ("ansible_log", "post-installation"),
+    };
+    let mut stmt = db.prepare(&format!(
+        "SELECT id,{column},COUNT(*) OVER () FROM installations WHERE action_id=? ORDER BY id"
+    ))?;
+    let mut rows = stmt.query([id])?;
+    let mut log = String::new();
+    while let Some(row) = rows.next()? {
+        let Some(chunk) = row
+            .get::<_, Option<String>>(1)?
+            .filter(|value| !matches!(value.as_str(), "" | "0"))
+        else {
+            continue;
+        };
+        if row.get::<_, i64>(2)? > 1 {
+            write!(log, "\n=== Installation #{} ===\n", row.get::<_, i64>(0)?)?;
+        }
+        log.push_str(&chunk);
+    }
+    if log.is_empty() {
+        return Ok(plain(
+            StatusCode::NOT_FOUND,
+            "Aucun journal reçu pour cette action\n",
+        ));
+    }
+    let hostname: String = hostname
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || "._-".contains(*character))
+        .collect();
+    let host = if hostname.is_empty() {
+        "machine"
+    } else {
+        &hostname
+    };
+    Ok(Response::builder()
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{host}-action{id}-{label}.log\""),
+        )
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "no-store")
+        .header("Content-Length", log.len())
+        .body(bytes(log))?)
 }
 
 #[derive(Default)]
@@ -296,7 +441,28 @@ fn task(db: &Connection, id: i64) -> Result<Reply, ErrorBox> {
     escape(&mut output, &kind);
     output.push_str(" · ");
     escape(&mut output, label(STATUSES, &state));
-    output.push_str("</p><ul>");
+    output.push_str("</p>");
+    let (install, ansible): (bool, bool) = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM installations WHERE action_id=?1 AND install_log NOT IN ('','0')),
+                EXISTS(SELECT 1 FROM installations WHERE action_id=?1 AND ansible_log NOT IN ('','0'))",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    for (available, kind, title) in [
+        (install, "install", "Journal d’installation"),
+        (ansible, "ansible", "Journal de post-installation"),
+    ] {
+        if available {
+            write!(
+                output,
+                "<p><a href=\"/actions/{id}/log/{kind}\" download>{title}</a></p>"
+            )?;
+        }
+    }
+    if !matches!(state.as_str(), "success" | "failed" | "cancelled") {
+        write!(output, "<details><summary>Clôturer le suivi</summary><form method=\"post\" action=\"/actions/{id}/force-complete\"><p>Vérifiez que l’opération est terminée sur l’appareil avant de clôturer son suivi.</p><button>Confirmer la clôture</button></form></details>")?;
+    }
+    output.push_str("<ul>");
     let mut statement = db.prepare("SELECT created_at,message FROM machine_events WHERE action_id=? ORDER BY id DESC LIMIT 100")?;
     let mut rows = statement.query([id])?;
     while let Some(row) = rows.next()? {
@@ -342,9 +508,23 @@ fn operation(
     let mut output = String::from("<p>");
     escape(&mut output, &target);
     output.push_str(" · ");
-    escape(&mut output, label(STATUSES, &state));
+    escape(
+        &mut output,
+        label(
+            STATUSES,
+            if state == "in_progress" {
+                "running"
+            } else {
+                &state
+            },
+        ),
+    );
     output.push_str("</p><pre>");
     escape(&mut output, &log);
-    output.push_str("</pre><a href=\"/activity\">Activité</a>");
+    output.push_str("</pre>");
+    if table == "installations" && state == "in_progress" {
+        write!(output, "<details><summary>Clôturer le suivi</summary><form method=\"post\" action=\"/installations/{id}/cancel\"><p>Cette commande clôture le suivi dans PXE Tools. L’installation peut continuer sur l’appareil.</p><button>Confirmer la clôture</button></form></details>")?;
+    }
+    output.push_str("<a href=\"/activity\">Activité</a>");
     Ok(page(title, &output))
 }

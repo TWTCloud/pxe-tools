@@ -540,21 +540,26 @@ python3 tests/integration/verify_windows_pxe_deployment.py \
 ```
 
 Le banc Linux `tests/integration/test_windows_pxe_isolated.py` requiert
-un runner amd64 jetable avec KVM, les images de test Docker et un
+un runner amd64 jetable avec QEMU, les images de test Docker et un
 répertoire de médias préparé pour le test. Y placer `windows.iso`,
 `case.json`, `boot/` et les deux binaires Secure Boot amd64 issus de la
 même livraison iPXE dans `ipxe/`, `ipxe-shim.efi` et `ipxe.efi`. Le
 manifeste ajoute leurs empreintes dans `ipxe_sha256`. Le banc vérifie
 les médias, crée son propre réseau sans route par défaut, un TPM
 jetable et un disque qcow2 neuf. Le second démarrage ne monte plus l’ISO
-et doit produire la preuve Windows sur le port série.
+et doit produire la preuve Windows sur le port série. L’accélération KVM
+est utilisée par défaut. L’option `--accelerator tcg` permet de répéter le
+même parcours avec le processeur émulé, Secure Boot et TPM 2.0 actifs.
 
 L’option `--boot-root` vérifie aussi les quatre fichiers publiés avec
 `wimboot_sha256`, `bcd_sha256`, `boot_sdi_sha256` et `winpe_sha256` dans le
 manifeste. Le banc des paquets utilise des fichiers synthétiques pour vérifier
-le script, les plages HTTP et le refus d’un autre client. Le démarrage de
-l’iPXE signé, le chargement de WinPE et l’installation attendent le banc
-Windows avec les médias réels.
+le script, les plages HTTP et le refus d’un autre client. Le banc GitHub a
+vérifié les médias réels obtenus auprès de Microsoft. Sur `7e6071e`, le
+client iPXE signé a atteint le script Rust et demandé les quatre fichiers.
+Rust a répondu en HTTP 200, dont une réponse de 502 104 147 octets pour le
+WIM. Le banc KVM s’est arrêté sans preuve série WinPE.
+[Journal Windows KVM](https://github.com/williamboglietti/pxe-tools-rust-lab-20261123/actions/runs/45316153541/job/138183384980)
 
 ### Contrôles des deux distributions
 

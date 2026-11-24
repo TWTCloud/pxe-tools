@@ -306,7 +306,7 @@ impl Console {
                     return super::devices::register(&db_path, form.as_deref()).ok();
                 }
                 if let Action::Activity(view) = &action {
-                    return view.serve(&db, &path, &query, page).ok();
+                    return view.serve(&db, &db_path, &path, &query, page).ok();
                 }
                 if let Action::Jobs(view) = &action {
                     return view.serve(&db, page).ok();

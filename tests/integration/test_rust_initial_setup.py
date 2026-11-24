@@ -559,17 +559,30 @@ def verify_manual_preset_import(client, database, authorization):
 
 
 def verify_activity(client, database, authorization):
+    def request(path, **kwargs):
+        return client.request(path, authorization=authorization, **kwargs)
+
+    action_token = secrets.token_hex(32)
     with closing(sqlite3.connect(database)) as db, db:
         device = db.execute("INSERT INTO machines(mac,hostname) VALUES(?,?)",
                             ('02:00:00:00:20:01','activity_%')).lastrowid
         action = db.execute(
             "INSERT INTO actions(machine_id,type,status,token,created_by) VALUES(?,'install_only','running',?,?)",
-            (device, secrets.token_hex(32), '<fixture-author>'),
+            (device, action_token, '<fixture-author>'),
         ).lastrowid
         db.execute("INSERT INTO machine_events(machine_id,action_id,message) VALUES(?,?,?)",
                    (device, action, '<fixture-event>'))
-        db.execute("INSERT INTO installations(machine_id,install_status,action_id) VALUES(?,'success',?)",
-                   (device, action))
+        finished = db.execute(
+            "INSERT INTO installations(machine_id,install_status,install_log,action_id) VALUES(?,'success','<first>',?)",
+            (device, action),
+        ).lastrowid
+        active = db.execute(
+            "INSERT INTO installations(machine_id,install_status,install_log,ansible_status,ansible_log,action_id) "
+            "VALUES(?,'in_progress','<second>','running','<ansible>',?)",
+            (device, action),
+        ).lastrowid
+        queued = db.execute("INSERT INTO init_jobs(job_type,status) VALUES(?,'pending')",
+                            (f'action:render_postboot:{action}',)).lastrowid
         legacy = db.execute(
             "INSERT INTO installations(machine_id,install_status,install_log) VALUES(?,'in_progress','<legacy-log>')",
             (device,),
@@ -584,9 +597,46 @@ def verify_activity(client, database, authorization):
     signature = body.split(b'data-sig="',1)[1].split(b'"',1)[0].decode()
     assert client.request(path.replace('/activity?', '/activity/list?')+'&sig='+signature,
                           authorization=authorization)[0] == 204
-    assert b'&lt;fixture-event&gt;' in client.request(f'/tasks/{action}', authorization=authorization)[2]
-    assert b'&lt;legacy-log&gt;' in client.request(f'/installations/{legacy}', authorization=authorization)[2]
-    print('Rust activity preserves action and legacy install links, authenticated filtering, and progress fragments', flush=True)
+    detail = request(f'/tasks/{action}')[2]
+    install_log = f'/actions/{action}/log/install'
+    close_action = f'/actions/{action}/force-complete'
+    assert b'&lt;fixture-event&gt;' in detail and action_token.encode() not in detail
+    assert install_log.encode() in detail and close_action.encode() in detail
+    assert client.request(install_log)[0] == 401
+    assert request(install_log, secure=False)[0] == 404
+    headers = {}
+    expected = f'\n=== Installation #{finished} ===\n<first>\n=== Installation #{active} ===\n<second>'.encode()
+    assert request(install_log, response_headers=headers) == (200, None, expected)
+    assert headers['content-disposition'] == f'attachment; filename="activity_-action{action}-installation.log"'
+    assert headers['cache-control'] == 'no-store' and int(headers['content-length']) == len(expected)
+    assert request(f'/actions/{action}/log/ansible')[2] == f'\n=== Installation #{active} ===\n<ansible>'.encode()
+    assert request('/actions/999999/log/install')[0] == 404
+    assert request(close_action)[0] == 405
+    assert request(close_action, form={}, origin='https://outside.example')[0] == 403
+    assert request(close_action, form={}, secure=False)[0] == 404
+    assert client.request(close_action, form={})[0] == 401
+    with closing(sqlite3.connect(database)) as db:
+        before = db.execute('SELECT status FROM machines WHERE id=?', (device,)).fetchone()
+        assert db.execute('SELECT status FROM actions WHERE id=?', (action,)).fetchone() == ('running',)
+    for _ in range(2):
+        assert request(close_action, form={})[:2] == (303, f'/machines/{device}')
+    assert close_action.encode() not in request(f'/tasks/{action}')[2]
+    assert request(install_log)[2] == expected
+    assert b'&lt;legacy-log&gt;' in request(f'/installations/{legacy}')[2]
+    assert request(f'/installations/{legacy}/cancel', form={})[:2] == (303, f'/installations/{legacy}')
+    assert request(f'/installations/{finished}/cancel', form={})[:2] == (303, f'/installations/{finished}')
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute('SELECT status FROM machines WHERE id=?', (device,)).fetchone() == before
+        assert db.execute('SELECT status,ended_at IS NOT NULL FROM actions WHERE id=?', (action,)).fetchone() == ('cancelled', 1)
+        assert db.execute('SELECT install_status,ansible_status,ended_at IS NOT NULL FROM installations WHERE id=?',
+                          (active,)).fetchone() == ('aborted', 'aborted', 1)
+        assert db.execute('SELECT install_status,ended_at IS NOT NULL FROM installations WHERE id=?',
+                          (legacy,)).fetchone() == ('aborted', 1)
+        assert db.execute('SELECT install_status FROM installations WHERE id=?', (finished,)).fetchone() == ('success',)
+        assert db.execute('SELECT status FROM init_jobs WHERE id=?', (queued,)).fetchone() == ('failed',)
+        assert db.execute("SELECT COUNT(*) FROM machine_events WHERE action_id=? AND level='action'",
+                          (action,)).fetchone() == (1,)
+    print('Rust activity filters and shows progress, serves authenticated logs, and closes tracking idempotently', flush=True)
 
 
 def verify_appliance_settings(client, database, authorization):
