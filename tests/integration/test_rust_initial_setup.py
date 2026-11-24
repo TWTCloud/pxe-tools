@@ -114,7 +114,7 @@ def setup(client, credentials, config, database):
     return winner+':fixture-password'
 
 
-def verify_browser_login(client, authorization, *, first_run=False):
+def verify_browser_login(client, database, authorization, *, first_run=False):
     browser = {'Accept': 'text/html'}
     result = client.request('/admin/devices?page=2', extra_headers=browser)
     assert result[:2] == (302, '/login?next=%2Fadmin%2Fdevices%3Fpage%3D2'), result
@@ -127,6 +127,7 @@ def verify_browser_login(client, authorization, *, first_run=False):
     credentials = {'username': username, 'password': password, 'next': '/admin/devices?page=2'}
     assert client.request('/login', form=credentials, origin='https://other.example')[0] == 403
     assert client.request('/login', form={**credentials, 'password': 'wrong'})[0] == 401
+    assert client.request('/login', form={**credentials, 'username':'not-a-pxe-account'})[0] == 401
 
     def sign_in(form, expected, current=None):
         headers = {}
@@ -140,6 +141,9 @@ def verify_browser_login(client, authorization, *, first_run=False):
 
     target = '/init/network' if first_run else credentials['next']
     active = sign_in(credentials, target)
+    with closing(sqlite3.connect(database)) as db:
+        last_login, = db.execute('SELECT unixepoch(last_login_at) FROM users WHERE username=?', [username]).fetchone()
+        assert abs(time.time()-last_login) < 10
     assert client.request(target, extra_headers=active)[0] == 200
     target = '/init/network' if first_run else '/admin/'
     previous = active
@@ -1225,9 +1229,9 @@ def local(binary):
         assert not config.exists() and database.read_bytes() == original
         database.unlink()
         authorization = setup(client, credentials, config, database)
-        verify_browser_login(client, authorization, first_run=True)
+        verify_browser_login(client, database, authorization, first_run=True)
         verify_configuration(client, database, authorization, packaged=False)
-        verify_browser_login(client, authorization)
+        verify_browser_login(client, database, authorization)
         imported = root/'imported'
         imported.mkdir()
         updated = verify_tls_import(client, credentials, imported, root/'tls-import', authorization)
@@ -1289,7 +1293,7 @@ def main():
         client.ready()
         database = Path('/var/lib/pxe-tools/pxe-tools.sqlite')
         authorization = setup(client, credentials, Path('/etc/pxe-tools/db.conf'), database)
-        verify_browser_login(client, authorization, first_run=True)
+        verify_browser_login(client, database, authorization, first_run=True)
         if args.http_root:
             verify_worker_image_delete(database, args.http_root)
         boot_fixture = (args.http_root, args.tftp_root, args.netboot_fixture, args.dnsmasq_config)

@@ -147,17 +147,27 @@ impl Console {
         let password = password.to_owned();
         let next = next.to_owned();
         let result = task::spawn_blocking(move || {
+            // Exercise bcrypt for unknown accounts as well as existing accounts.
+            const UNKNOWN_ACCOUNT_HASH: &str =
+                "$2y$12$BivNwfeaFgD7FobF2xFxFeacHAMld9a7bYBP0yCpqXk/Ve6YOFioi";
             let db_path = configured_database(&config)?;
-            let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+            let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
             let hash = sessions::password_hash(&db, &username).ok()?;
-            let Some(hash) = hash.filter(|hash| bcrypt::verify(password, hash).unwrap_or(false))
-            else {
+            let verified = bcrypt::verify(password, hash.as_deref().unwrap_or(UNKNOWN_ACCOUNT_HASH))
+                .unwrap_or(false);
+            let Some(hash) = hash.filter(|_| verified) else {
                 return Some(sessions::login_page(
                     &next,
                     Some("Identifiants incorrects."),
                     StatusCode::UNAUTHORIZED,
                 ));
             };
+            if db.execute(
+                "UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE username=?1 AND password_hash=?2",
+                params![username, hash],
+            ).ok()? != 1 {
+                return Some(unauthorized());
+            }
             let next = if crate::setting(&db, "wizard_completed").ok()? == "1" {
                 &next
             } else {
