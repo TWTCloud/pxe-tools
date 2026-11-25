@@ -2,13 +2,13 @@
 
 use super::{admin::escape, jobs::json_reply, plain, setup::redirect, ui, ErrorBox, Reply};
 use crate::{
-    apt_updates::{self, Phase, State},
+    apt_updates::{self, Phase, State, Step},
     connect,
 };
 use hyper::{body::Bytes, StatusCode};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use serde_json::json;
-use std::{env, path::Path};
+use std::{env, fmt::Write, path::Path};
 
 pub(super) const ROUTE: &str = "/settings/updates";
 pub(super) const STATUS: &str = "/settings/updates/status";
@@ -33,10 +33,7 @@ pub(super) fn serve(
             ));
         }
         let state = State::read(db)?;
-        return json_reply(
-            StatusCode::OK,
-            json!({"phase": state.phase, "available": !state.candidates.is_empty()}),
-        );
+        return status(&state);
     }
     let Some(form) = form else {
         return page(&State::read(db)?);
@@ -50,14 +47,12 @@ pub(super) fn serve(
             let now: i64 = tx.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
             if !state.phase.pending() && (value == "check" || now - state.checked_at >= 6 * 3600) {
                 state.phase = Phase::Queued;
+                state.step = None;
                 super::onboarding::store(&tx, apt_updates::KEY, &serde_json::to_string(&state)?)?;
             }
             tx.commit()?;
             if value == "auto" {
-                return json_reply(
-                    StatusCode::OK,
-                    json!({"phase": state.phase, "available": !state.candidates.is_empty()}),
-                );
+                return status(&state);
             }
         }
         [(key, action), (plan_key, plan)]
@@ -73,6 +68,7 @@ pub(super) fn serve(
                 ));
             }
             state.phase = Phase::InstallQueued;
+            state.step = None;
             super::onboarding::store(&tx, apt_updates::KEY, &serde_json::to_string(&state)?)?;
             tx.commit()?;
         }
@@ -86,75 +82,180 @@ pub(super) fn serve(
     Ok(redirect(StatusCode::SEE_OTHER, ROUTE))
 }
 
+fn status(state: &State) -> Result<Reply, ErrorBox> {
+    json_reply(
+        StatusCode::OK,
+        json!({
+            "phase": state.phase,
+            "available": !state.candidates.is_empty(),
+            "message": progress_message(state),
+        }),
+    )
+}
+
+fn progress_message(state: &State) -> &'static str {
+    match state.phase {
+        Phase::Queued => "Vérification planifiée…",
+        Phase::Checking => "Consultation du dépôt APT signé…",
+        Phase::InstallQueued => "Installation planifiée…",
+        Phase::Installing => match state.step {
+            Some(Step::Download) => "Téléchargement des paquets et préparation des dépendances…",
+            Some(Step::Apply) => "Installation des paquets et redémarrage des services…",
+            _ => "Vérification de la version sélectionnée…",
+        },
+        _ => "",
+    }
+}
+
 fn page(state: &State) -> Result<Reply, ErrorBox> {
-    let (title, description) = match state.phase {
-        Phase::Idle => ("Vérification disponible", "La console vérifie les mises à jour à la connexion."),
-        Phase::Queued | Phase::Checking => ("Vérification en cours", "PXE Tools consulte le dépôt APT signé."),
-        Phase::InstallQueued | Phase::Installing => ("Installation en cours", "La console peut être brièvement indisponible pendant le redémarrage."),
-        Phase::Available => ("Mise à jour disponible", "Vous pouvez consulter les notes de version avant de lancer l’installation."),
-        Phase::UpToDate => ("PXE Tools est à jour", "Le dépôt APT ne propose pas de version plus récente pour les paquets installés."),
-        Phase::Installed => ("Mise à jour installée", "Les nouvelles versions des paquets sont en service."),
-        Phase::Busy => ("PXE Tools est occupé", "Attendez la fin des opérations PXE en cours, puis relancez la mise à jour."),
-        Phase::Changed => ("Nouvelle version détectée", "Le dépôt a changé depuis la vérification. Vérifiez les versions proposées avant de confirmer."),
-        Phase::Failed => ("Vérification ou installation interrompue", "Réessayez après avoir vérifié la connexion, l’état d’APT et le journal du service pxe-tools-apt-update."),
-        Phase::Unavailable => ("Dépôt PXE Tools indisponible", "Vérifiez que le dépôt APT officiel est activé et que sa clé est installée."),
+    let (title, description, tone) = match state.phase {
+        Phase::Idle => (
+            "Vérifier les mises à jour",
+            "Recherchez la dernière version de PXE Tools et des modules installés.",
+            "neutral",
+        ),
+        Phase::Queued | Phase::Checking => (
+            "Vérification en cours",
+            "La recherche se fait auprès du dépôt officiel de PXE Tools.",
+            "info",
+        ),
+        Phase::InstallQueued | Phase::Installing => (
+            "Installation en cours",
+            "La console se reconnecte automatiquement après le redémarrage des services.",
+            "info",
+        ),
+        Phase::Available => (
+            "Une mise à jour est disponible",
+            "L’installation peut interrompre brièvement l’accès à la console.",
+            "info",
+        ),
+        Phase::UpToDate => (
+            "PXE Tools est à jour",
+            "Vous utilisez la dernière version proposée pour vos paquets installés.",
+            "success",
+        ),
+        Phase::Installed => (
+            "Mise à jour terminée",
+            "La console est de nouveau disponible. Les versions installées sont indiquées ci-dessous.",
+            "success",
+        ),
+        Phase::Busy => (
+            "Installation reportée",
+            "Des opérations PXE sont en cours. Relancez l’installation lorsqu’elles sont terminées.",
+            "warning",
+        ),
+        Phase::Changed => (
+            "La version proposée a changé",
+            "Vérifiez les versions ci-dessous avant de relancer l’installation.",
+            "warning",
+        ),
+        Phase::Failed => (
+            match state.step {
+                Some(Step::Download | Step::Apply) => "Échec de l’installation",
+                _ => "Mise à jour interrompue",
+            },
+            match state.step {
+                Some(Step::Download) => "La préparation des paquets ou des dépendances a échoué.",
+                Some(Step::Apply) => "APT n’a pas terminé l’installation des paquets.",
+                _ => "Vérifiez la connexion au dépôt et réessayez.",
+            },
+            "error",
+        ),
+        Phase::Unavailable => (
+            "Dépôt PXE Tools indisponible",
+            "Vérifiez que le dépôt APT officiel et sa clé de signature sont configurés.",
+            "error",
+        ),
     };
     let phase = serde_json::to_string(&state.phase)?;
+    let pending = state.phase.pending();
+    let candidate = !state.candidates.is_empty();
     let mut html = format!(
-        r#"<section class="panel panel--form" data-update-phase="{}">
-<h2>{title}</h2><p>{description}</p>
-<div class="update-progress" data-update-progress role="status"{}>
-<p data-update-message>{}</p><div class="update-loading" role="progressbar" aria-label="Progression de la mise à jour"></div>
-</div><dl class="wizard-summary update-versions">
-<dt>PXE Tools installé</dt><dd>"#,
+        r#"<section class="panel update-center" aria-labelledby="update-heading" data-update-phase="{}">
+<header class="update-status" data-update-tone="{tone}">
+<h2 id="update-heading" data-update-title>{title}</h2><p data-update-description>{description}</p>
+<div class="update-progress" data-update-progress{}>
+<p data-update-message role="status">{}</p><div class="update-loading" role="progressbar" aria-label="Progression de la mise à jour"></div>
+</div></header>
+<dl class="update-packages">"#,
         phase.trim_matches('"'),
-        if state.phase.pending() { "" } else { " hidden" },
-        if matches!(state.phase, Phase::InstallQueued | Phase::Installing) {
-            "Installation des paquets en cours…"
-        } else {
-            "Vérification auprès du dépôt APT…"
-        },
+        if pending { "" } else { " hidden" },
+        progress_message(state),
     );
-    escape(
-        &mut html,
-        &env::var("PXE_APT_PACKAGE_VERSION")
-            .ok()
-            .or_else(|| state.installed.get("pxe-tools").cloned())
-            .unwrap_or_else(|| "À vérifier".into()),
-    );
-    html.push_str("</dd>");
-    if let Some(version) = state.installed.get("pxe-tools-ansible") {
-        html.push_str("<dt>Module Ansible installé</dt><dd>");
-        escape(&mut html, version);
-        html.push_str("</dd>");
-    }
     for (package, label) in [
-        ("pxe-tools", "PXE Tools disponible"),
-        ("pxe-tools-ansible", "Module Ansible disponible"),
+        ("pxe-tools", "PXE Tools"),
+        ("pxe-tools-ansible", "Module Ansible"),
     ] {
-        if let Some(version) = state.candidates.get(package) {
-            html.push_str(&format!("<dt>{label}</dt><dd>"));
-            escape(&mut html, version);
-            html.push_str("</dd>");
+        let installed = state.installed.get(package).cloned();
+        let installed = if package == "pxe-tools" {
+            env::var("PXE_APT_PACKAGE_VERSION").ok().or(installed)
+        } else {
+            installed
+        };
+        let available = state.candidates.get(package);
+        if installed.is_none() && available.is_none() && package != "pxe-tools" {
+            continue;
         }
+        write!(
+            html,
+            r#"<div class="update-package"><dt>{label}</dt><dd><div><span>Installée</span> <strong>"#
+        )?;
+        escape(&mut html, installed.as_deref().unwrap_or("À vérifier"));
+        html.push_str("</strong></div>");
+        if let Some(version) = available {
+            html.push_str("<div><span>Disponible</span> <strong>");
+            escape(&mut html, version);
+            html.push_str("</strong></div>");
+        }
+        html.push_str("</dd></div>");
     }
     html.push_str("</dl>");
-    if !state.phase.pending() {
-        if !state.candidates.is_empty() {
-            html.push_str(
-                r#"<form class="form-stack" method="post" action="/settings/updates">
-<p>PXE Tools et ses services peuvent redémarrer pendant l’installation des paquets affichés.</p>
-<label class="check-label"><input type="checkbox" required>Confirmer l’installation</label>
-<input type="hidden" name="action" value="install"><input type="hidden" name="plan" value=""#,
-            );
-            escape(&mut html, &serde_json::to_string(&state.candidates)?);
-            html.push_str(r#""><div class="form-actions"><button>Installer la mise à jour</button>
-<a class="button button--quiet" href="https://github.com/TWTCloud/pxe-tools/releases">Notes de version</a></div></form>"#);
-        }
-        html.push_str(r#"<form method="post" action="/settings/updates" class="maintenance-form" data-update-check><button class="button--quiet" name="action" value="check">Vérifier les mises à jour</button></form>"#);
-    } else {
-        html.push_str(r#"<p><a href="/settings/updates">Actualiser l’état</a></p>"#);
+    if state.phase == Phase::Failed {
+        html.push_str(r#"<details class="update-diagnostic"><summary>Consulter les détails sur le serveur</summary>
+<p>Sur le serveur PXE Tools, ouvrez le journal de la mise à jour.</p>
+<pre><code>sudo journalctl -u pxe-tools-apt-update.service -n 60 --no-pager</code></pre></details>"#);
     }
-    html.push_str("</section>");
+    html.push_str(r#"<footer class="update-actions">"#);
+    if pending {
+        write!(
+            html,
+            r#"<a href="{ROUTE}" data-update-reload>Actualiser l’état</a>"#
+        )?;
+    } else {
+        if candidate {
+            write!(
+                html,
+                r#"<form method="post" action="{ROUTE}" data-update-action="install">
+<input type="hidden" name="action" value="install"><input type="hidden" name="plan" value=""#
+            )?;
+            escape(&mut html, &serde_json::to_string(&state.candidates)?);
+            let action = match state.phase {
+                Phase::Failed | Phase::Busy => "Relancer l’installation",
+                _ => "Installer la mise à jour",
+            };
+            write!(html, r#""><button>{action}</button></form>"#)?;
+        }
+        let button_class = if candidate {
+            r#" class="button--quiet""#
+        } else {
+            ""
+        };
+        write!(
+            html,
+            r#"<form method="post" action="{ROUTE}" data-update-action="check">
+<input type="hidden" name="action" value="check"><button{button_class}>Vérifier les mises à jour</button></form>"#
+        )?;
+        if let Some(version) = state
+            .candidates
+            .get("pxe-tools")
+            .or_else(|| state.candidates.get("pxe-tools-ansible"))
+        {
+            let version = version.replace('~', "-");
+            html.push_str(r#"<a href="https://github.com/TWTCloud/pxe-tools/releases/tag/v"#);
+            escape(&mut html, &version);
+            html.push_str(r#"">Notes de version</a>"#);
+        }
+    }
+    html.push_str("</footer></section>");
     Ok(ui::page(ui::ConsoleSection::Updates, "Mises à jour", &html))
 }

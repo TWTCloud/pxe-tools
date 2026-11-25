@@ -75,6 +75,11 @@ def signed_fixture(current, target):
         text = file.read_text()
         assert text.count(before) == 1, (name, before)
         file.write_text(text.replace(before, after))
+    control = unpack / 'DEBIAN/control'
+    fields = control.read_text().splitlines()
+    depends = next(index for index, line in enumerate(fields) if line.startswith('Depends: '))
+    fields[depends] += ', hello'  # A new dependency available only from the system's repositories.
+    control.write_text('\n'.join(fields) + '\n')
     command('dpkg-deb', '--root-owner-group', '-Zgzip', '-b', str(unpack), str(repo / 'pxe-tools.deb'))
     packages = command('apt-ftparchive', 'packages', '.', cwd=repo, capture_output=True).stdout
     (repo / 'Packages').write_bytes(packages)
@@ -136,7 +141,10 @@ def main():
     code, page = request(ROUTE)
     assert code == 200 and current.encode() in page
     assert 'Vérifier les mises à jour'.encode() in page
-    assert b'data-update-progress role="status" hidden' in page
+    assert b'data-update-progress hidden' in page
+    assert page.count(b'<details class="profile-menu">') == 1
+    assert b'<span class="profile-name">setup-fixture</span>' in page
+    assert b'href="/admin/profile/tokens"' in page and b'action="/logout"' in page
     assert request(ROUTE + '/status', authenticate=False)[0] == 401
     assert request(ROUTE, {'action': 'auto'}, origin='https://example.invalid')[0] == 403
 
@@ -146,7 +154,7 @@ def main():
         assert code == 200 and json.loads(response)['phase'] == 'queued'
         code, page = request(ROUTE)
         assert code == 200 and b'data-update-phase="queued"' in page
-        assert b'data-update-progress role="status">' in page
+        assert b'data-update-progress>' in page
         assert b'role="progressbar"' in page and b'aria-valuenow' not in page
     finally:
         command('systemctl', 'start', 'pxe-tools-worker.service')
@@ -156,10 +164,14 @@ def main():
     command('systemctl', 'is-active', '--quiet', 'dbus.socket')
 
     signed_fixture(current, target)
+    query = subprocess.run(['dpkg-query', '-W', '-f=${db:Status-Status}', 'hello'],
+                           capture_output=True, text=True)
+    assert query.stdout != 'installed'
     assert request(ROUTE, {'action': 'check'})[0] == 303
     wait_for('available')
     code, page = request(ROUTE)
     assert code == 200 and target.encode() in page and b'Installer la mise' in page
+    assert b'data-update-action="install"' in page and b'type="checkbox"' not in page
     install = {'action': 'install', 'plan': json.dumps({'pxe-tools': target}, separators=(',', ':'))}
     assert request(ROUTE, {**install, 'plan': '{}'})[0] == 409
     db_path = json.loads(Path('/etc/pxe-tools/db.conf').read_text())['path']
@@ -167,6 +179,7 @@ def main():
         fixture = db.execute("INSERT INTO init_jobs(job_type,status) VALUES('fixture','running')").lastrowid
     assert request(ROUTE, install)[0] == 303
     wait_for('busy')
+    assert 'Installation reportée'.encode() in request(ROUTE)[1]
     with sqlite3.connect(db_path) as db:
         db.execute('DELETE FROM init_jobs WHERE id=?', (fixture,))
 
@@ -177,9 +190,12 @@ def main():
     wait_for('installed', timeout=220)
     assert command('dpkg-query', '-W', '-f=${Version}', 'pxe-tools',
                    capture_output=True, text=True).stdout == target
+    assert command('dpkg-query', '-W', '-f=${db:Status-Status}', 'hello',
+                   capture_output=True, text=True).stdout == 'installed'
     assert [sha256(file.read_bytes()).hexdigest() for file in (key, cert)] == before
     code, page = request(ROUTE)
     assert code == 200 and target.encode() in page and b'Installer la mise' not in page
+    assert 'Mise à jour terminée'.encode() in page
     command('systemctl', 'is-active', '--quiet', 'pxe-tools-worker.service')
     print('Native web-triggered signed APT update restored HTTPS, SQLite, the master key and TLS.')
 

@@ -12,6 +12,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 KEY = 'apt_console_update'
@@ -28,6 +29,13 @@ ENVIRONMENT = {
     **os.environ, 'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C',
     'DEBIAN_FRONTEND': 'noninteractive', 'NEEDRESTART_MODE': 'l',
 }
+APT_SECURITY = [
+    '-o', 'APT::Get::AllowUnauthenticated=false',
+    '-o', 'Acquire::AllowInsecureRepositories=false',
+    '-o', 'Acquire::AllowDowngradeToInsecureRepositories=false',
+    '-o', 'Acquire::https::Verify-Peer=true', '-o', 'Acquire::https::Verify-Host=true',
+    '-o', 'Acquire::Retries=1', '-o', 'Acquire::https::Timeout=20',
+]
 
 
 def trusted_file(path):
@@ -73,13 +81,12 @@ def legacy_source():
 class Apt:
     def __init__(self, source, lists):
         lists.mkdir(parents=True, exist_ok=True)
+        self.work = lists.parent
         self.options = [
+            *APT_SECURITY,
             '-o', f'Dir::Etc::sourcelist={source}', '-o', 'Dir::Etc::sourceparts=-',
             '-o', f'Dir::State::lists={lists}',
             '-o', 'Dir::Cache::pkgcache=', '-o', 'Dir::Cache::srcpkgcache=',
-            '-o', 'Acquire::AllowInsecureRepositories=false',
-            '-o', 'Acquire::AllowDowngradeToInsecureRepositories=false',
-            '-o', 'Acquire::https::Verify-Peer=true', '-o', 'Acquire::https::Verify-Host=true',
         ]
 
     @staticmethod
@@ -97,8 +104,7 @@ class Apt:
 
     def candidates(self, installed):
         subprocess.run(
-            ['/usr/bin/apt-get', *self.options, '-o', 'APT::Update::Error-Mode=any',
-             '-o', 'Acquire::Retries=1', '-o', 'Acquire::https::Timeout=20', 'update'],
+            ['/usr/bin/apt-get', *self.options, '-o', 'APT::Update::Error-Mode=any', 'update'],
             env=ENVIRONMENT, check=True,
         )
         held = set(subprocess.check_output(
@@ -121,14 +127,34 @@ class Apt:
                 result[package] = candidate
         return result
 
-    def install(self, candidates):
-        subprocess.run(
-            ['/usr/bin/apt-get', *self.options, '-o', 'DPkg::Lock::Timeout=60',
-             '-o', 'DPkg::Options::=--force-confdef', '-o', 'DPkg::Options::=--force-confold',
-             '--no-remove', '--no-install-recommends', '--only-upgrade', '--assume-yes',
-             'install', *(f'{package}={version}' for package, version in candidates.items())],
-            env=ENVIRONMENT, check=True,
-        )
+    def install(self, candidates, ready_to_apply):
+        # Authenticate the selected PXE Tools packages against the dedicated
+        # signed repository, then resolve system dependencies with normal APT sources.
+        with tempfile.TemporaryDirectory(prefix='packages-', dir=self.work) as directory:
+            subprocess.run(
+                ['/usr/bin/apt-get', *self.options, 'download',
+                 *(f'{package}={version}' for package, version in candidates.items())],
+                cwd=directory, env=ENVIRONMENT, check=True,
+            )
+            packages = sorted(Path(directory).glob('*.deb'))
+            downloaded = {}
+            for path in packages:
+                package, version = subprocess.check_output(
+                    ['/usr/bin/dpkg-deb', '-W', '--showformat=${Package}\t${Version}', path],
+                    env=ENVIRONMENT, text=True,
+                ).strip().split('\t', 1)
+                downloaded[package] = version
+            if downloaded != candidates or len(packages) != len(candidates):
+                raise RuntimeError('Downloaded packages do not match the approved update')
+            subprocess.run(['/usr/bin/apt-get', *APT_SECURITY, 'update'], env=ENVIRONMENT, check=True)
+            ready_to_apply()
+            subprocess.run(
+                ['/usr/bin/apt-get', *APT_SECURITY, '-o', 'DPkg::Lock::Timeout=60',
+                 '-o', 'DPkg::Options::=--force-confdef', '-o', 'DPkg::Options::=--force-confold',
+                 '--no-remove', '--no-install-recommends', '--only-upgrade', '--assume-yes',
+                 'install', *packages],
+                env=ENVIRONMENT, check=True,
+            )
 
 
 def get_state(db):
@@ -153,6 +179,7 @@ def process(db, apt, busy, *, recover=False):
             installed.get(package) == version for package, version in candidates.items()
         )
         set_state(db, state, phase='installed' if finished else 'failed', installed=installed,
+                  step=None if finished else state.get('step'),
                   candidates={} if finished else candidates, checked_at=int(time.time()))
         return
     if recover or phase not in ('queued', 'install_queued'):
@@ -160,7 +187,7 @@ def process(db, apt, busy, *, recover=False):
         return
     installing = phase == 'install_queued'
     approved = state.get('candidates', {})
-    set_state(db, state, phase='installing' if installing else 'checking')
+    set_state(db, state, phase='installing' if installing else 'checking', step='verify')
     try:
         installed = apt.installed() if apt else Apt.installed()
         if CORE not in installed or apt is None:
@@ -180,11 +207,12 @@ def process(db, apt, busy, *, recover=False):
             print(f'Active PXE operations: {", ".join(active)}', file=sys.stderr)
             set_state(db, state, phase='busy')
             return
-        apt.install(candidates)
+        set_state(db, state, step='download')
+        apt.install(candidates, lambda: set_state(db, state, step='apply'))
         installed = apt.installed()
         if any(installed.get(package) != version for package, version in candidates.items()):
             raise RuntimeError('APT did not configure the requested package versions')
-        set_state(db, state, phase='installed', installed=installed, candidates={})
+        set_state(db, state, phase='installed', installed=installed, candidates={}, step=None)
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'PXE Tools APT update: {error}', file=sys.stderr)
         set_state(db, state, phase='failed', checked_at=int(time.time()))
