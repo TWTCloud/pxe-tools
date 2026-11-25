@@ -22,6 +22,7 @@ mod onboarding;
 mod overview;
 mod presets;
 mod profile;
+mod proxmox;
 mod sessions;
 mod settings;
 mod setup;
@@ -119,9 +120,11 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         .transpose()?;
     let http_port = port("PXE_HTTP_PORT", 80)?;
     let https_port = port("PXE_HTTPS_PORT", 443)?;
-    let default_tls = tls_config().map_err(|error| format!("TLS configuration: {error}"))?;
+    let (default_tls, certificate_pin) =
+        tls_config().map_err(|error| format!("TLS configuration: {error}"))?;
     let tls = Arc::new(certificates::Certificates::new(
         default_tls,
+        certificate_pin,
         public_host.clone(),
     )?);
     let acme_challenge = Arc::new(acme::ChallengeResponse::default());
@@ -294,7 +297,12 @@ fn port(name: &str, default: u16) -> Result<u16, ErrorBox> {
     Ok(configured)
 }
 
-fn tls_config() -> Result<TlsAcceptor, ErrorBox> {
+fn certificate_pin(der: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(der))
+}
+
+fn tls_config() -> Result<(TlsAcceptor, String), ErrorBox> {
     let directory = credential_directory()?;
     let open = |name| {
         let path = directory.join(name);
@@ -305,10 +313,11 @@ fn tls_config() -> Result<TlsAcceptor, ErrorBox> {
     let certs = rustls_pemfile::certs(&mut open("cert.pem")?).collect::<Result<Vec<_>, _>>()?;
     let private_key =
         rustls_pemfile::private_key(&mut open("key.pem")?)?.ok_or("TLS private key missing")?;
+    let pin = certificate_pin(certs.first().ok_or("TLS certificate leaf missing")?);
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, private_key)?;
-    Ok(TlsAcceptor::from(Arc::new(config)))
+    Ok((TlsAcceptor::from(Arc::new(config)), pin))
 }
 
 fn credential_directory() -> Result<PathBuf, ErrorBox> {
@@ -514,6 +523,9 @@ async fn dispatch(
             .header(LOCATION, location)
             .body(bytes(""))
             .expect("valid redirect");
+    }
+    if path.starts_with(proxmox::PREFIX) {
+        return proxmox::serve(site, path, &parts.method, body, peer, local, secure).await;
     }
     let setup_allowed = site.pxe_ip.is_none()
         && (peer.is_loopback()
@@ -880,7 +892,12 @@ async fn dispatch(
                 &parts,
                 peer,
                 &site.database,
-                admin::Action::Images(route, form),
+                admin::Action::Images(
+                    route,
+                    form,
+                    site.pxe_ip
+                        .map(|address| format!("{address}:{}:{}", site.https_port, site.tls.pin())),
+                ),
             )
             .await;
     }

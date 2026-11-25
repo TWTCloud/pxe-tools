@@ -43,6 +43,17 @@ pub const RHEL_DVDS: [(&str, &str, &str, &str); 4] = [
         "1da7c7f9b30f2587d44f8ef6b34b2a27f2f0571bf09da6046195a74df275fa92",
     ),
 ];
+pub const PROXMOX_VERSION: &str = "9.2-1";
+pub const PROXMOX_ISOS: [(&str, &str); 2] = [
+    (
+        "amd64",
+        "4e88fe416df9b527624a175f24c9aa07c714d3332afb1ee3dbf3879573ef2c6c",
+    ),
+    (
+        "arm64",
+        "b1619dcd1f5b1a6d67d77b59e7e2fa2033174551d1e1b9dc22b2171ec093abbd",
+    ),
+];
 pub const RHEL_PREFIX: &str = "/pxe/rhel9/";
 type ErrorBox = Box<dyn Error + Send + Sync>;
 
@@ -99,6 +110,20 @@ fn allowed_url(value: &str) -> bool {
 
 impl Import {
     pub fn valid(&self) -> bool {
+        if self.kind == "proxmox" {
+            let mut parts = self.profile.split(':');
+            return !self.remote
+                && self.redhat_token.is_none()
+                && PROXMOX_ISOS.contains(&(self.source.as_str(), self.sha256.as_str()))
+                && parts
+                    .next()
+                    .is_some_and(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok())
+                && parts
+                    .next()
+                    .is_some_and(|port| port.parse::<u16>().is_ok_and(|port| port > 0))
+                && parts.next().is_some_and(digest)
+                && parts.next().is_none();
+        }
         if let Some(token) = &self.redhat_token {
             return self.kind == "rhel9"
                 && !self.remote

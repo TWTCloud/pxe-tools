@@ -11,6 +11,7 @@ pub const PREFIX: &str = "/pxe/linux/auto/";
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum Source {
     Ubuntu(String),
+    Proxmox(String),
     Rhel9(String),
     Rpm { distro: String, version: String },
 }
@@ -26,6 +27,8 @@ pub struct Plan {
     pub hostname: String,
     pub login: String,
     pub password_hash: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxmox_email: String,
 }
 
 impl Plan {
@@ -49,8 +52,13 @@ impl Plan {
                 .serial
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-            && valid_hostname(&self.hostname)
-            && preseed::technical_account(&self.login)
+            && if matches!(&self.source, Source::Proxmox(_)) {
+                valid_fqdn(&self.hostname)
+                    && self.login == "root"
+                    && valid_email(&self.proxmox_email)
+            } else {
+                valid_hostname(&self.hostname) && preseed::technical_account(&self.login)
+            }
             && self.password_hash.starts_with("$6$")
             && preseed::sanitized_hash(&self.password_hash).is_some()
     }
@@ -85,6 +93,7 @@ impl Plan {
             STANDARD.encode(launcher)
         );
         match &self.source {
+            Source::Proxmox(_) => None,
             Source::Ubuntu(_) => {
                 let late = format!(
                     "set -eu\ncurtin in-target --target=/target -- /bin/sh -ec \
@@ -125,7 +134,9 @@ impl Plan {
                     Source::Rpm { distro, version } => {
                         crate::catalog::rpm_repository(distro, version, &self.arch)?
                     }
-                    Source::Ubuntu(_) => unreachable!("Ubuntu uses autoinstall"),
+                    Source::Ubuntu(_) | Source::Proxmox(_) => {
+                        unreachable!("Not a Kickstart installation")
+                    }
                 };
                 Some(format!(
                     "{header}lang en_US.UTF-8\nkeyboard us\ntimezone Etc/UTC --utc\n\
@@ -160,6 +171,21 @@ impl Plan {
             self.serial, self.disk, self.disk
         )
     }
+}
+
+pub fn valid_fqdn(value: &str) -> bool {
+    value.len() <= 253 && value.contains('.') && value.split('.').all(valid_hostname)
+}
+
+fn valid_email(value: &str) -> bool {
+    value.len() <= 254
+        && value.split_once('@').is_some_and(|(local, host)| {
+            !local.is_empty()
+                && local
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b))
+                && valid_fqdn(host)
+        })
 }
 
 pub fn valid_hostname(name: &str) -> bool {

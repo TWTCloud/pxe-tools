@@ -112,6 +112,7 @@ struct Proxmox {
     version: String,
     base: String,
     external_answer: bool,
+    managed: bool,
 }
 
 fn ready(root: &Path, folder: &Path, names: &[&str]) -> bool {
@@ -236,13 +237,14 @@ pub(super) fn menu(
     }
     let (arch, loader) = route;
     let authority = linux_install::authority(server, site.http_port);
-    let entries = available(
+    let mut entries = available(
         &db,
         site.assets.http_root(),
         &site.rhel_repositories,
         arch,
         &authority,
     )?;
+    entries.retain(|entry| !matches!(entry.source, Source::Proxmox(_)));
     let proxmox = proxmox(site.assets.http_root(), arch)?;
     linux_response(render(&entries, &proxmox, &authority, loader, server), head)
 }
@@ -276,6 +278,7 @@ fn proxmox(root: &Path, arch: &str) -> Result<Vec<Proxmox>, ErrorBox> {
         entries.push(Proxmox {
             version: version.to_owned(),
             base: format!("/netboot/proxmox/{version}/{arch}"),
+            managed: ready(&canonical, &folder, &[".managed-answer"]),
             external_answer: ready(&canonical, &folder, &[".external-answer"])
                 && fs::symlink_metadata(folder.join(".external-answer"))
                     .is_ok_and(|info| info.len() <= 16)
@@ -303,6 +306,20 @@ pub(super) fn available(
         entries.push(rhel_entry("9", host.as_str(), base, url));
     }
     entries.extend(imported_rhel(root, arch, authority)?);
+    for media in proxmox(root, arch)?
+        .into_iter()
+        .filter(|media| media.managed)
+    {
+        entries.push(Entry {
+            title: format!("Proxmox VE {}", media.version),
+            source: Source::Proxmox(media.version),
+            authority: authority.into(),
+            kernel: format!("{}/linux", media.base),
+            initrd: format!("{}/initrd.gz", media.base),
+            arguments: "ramdisk_size=16777216 rw quiet splash=silent proxmox-start-auto-installer"
+                .into(),
+        });
+    }
     Ok(entries)
 }
 
@@ -455,6 +472,11 @@ pub(super) fn automatic(
         (Source::Ubuntu(_), "vendor-data") => String::new(),
         (source, "grub.cfg") => {
             match source {
+                Source::Proxmox(version) => write!(
+                    entry.initrd,
+                    " newc:/proxmox.iso:(http,{authority})/netboot/proxmox/{version}/{}/source.iso",
+                    plan.arch
+                )?,
                 Source::Ubuntu(_) => write!(
                     entry.arguments,
                     " autoinstall 'ds=nocloud-net;s={seed}' ---"

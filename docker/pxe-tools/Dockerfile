@@ -43,7 +43,7 @@ RUN set -eu; \
     debian-archive-keyring \
     # ISO extraction pour catalogue v2 (Debian/Ubuntu netinst → vmlinuz+initrd).
     # Fournit `7z` ; p7zip-full n'est plus qu'un paquet de transition vers 7zip.
-    7zip \
+    7zip xorriso \
     # Templates / envsubst
     gettext-base \
     # GRUB EFI signé MOK

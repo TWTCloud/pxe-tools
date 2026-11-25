@@ -340,6 +340,13 @@ def publish_winpe(archive, stage, cache, destination, bundle_sha):
 
 def prepare(request, root, progress):
     kind, sha, profile = request["kind"], request["sha256"], request["profile"]
+    if kind == "proxmox":
+        media = directory(root, "media")
+        with (media / ".import-lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return load("proxmox_media", "proxmox-media.py").prepare(
+                request, root, download, windows.fingerprint, directory, MediaError,
+            )
     if (kind not in ("rhel9", "windows-iso", "windows-wim", "windows-esd", "winpe")
             or not SHA256.fullmatch(sha)
             or (not re.fullmatch(r"[a-z0-9-]{1,40}", profile) if kind == "winpe" else profile != "")):
