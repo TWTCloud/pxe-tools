@@ -3,7 +3,8 @@
 use super::{
     admin::escape,
     plain,
-    setup::{page, redirect},
+    setup::redirect,
+    ui::{page, Section},
     ErrorBox, Reply,
 };
 use crate::{
@@ -84,13 +85,18 @@ pub(super) fn serve(
         (Route::Add, None) => catalog_form(db, ROUTE)
             .map(|form| {
                 page(
+                    Section::Images,
                     "Ajouter une image",
                     &format!("{form}<p><a href=\"{ROUTE}\">Images PXE</a></p>"),
                 )
             })
             .map_err(Into::into),
-        (Route::Status, None) => table(db, number).map(|html| page("Images PXE", &html)),
-        (Route::RefreshStatus, None) => refresh_button(db).map(|html| page("Catalogue PXE", &html)),
+        (Route::Status, None) => {
+            table(db, number).map(|html| page(Section::Images, "Images PXE", &html))
+        }
+        (Route::RefreshStatus, None) => {
+            refresh_button(db).map(|html| page(Section::Images, "Catalogue PXE", &html))
+        }
         (_, Some(form)) => update(route, method, path, form),
         _ => Ok(plain(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -144,7 +150,7 @@ fn media_form(db: &Connection) -> Result<Reply, ErrorBox> {
         html.push_str("</li>");
     }
     html.push_str("</ul>");
-    Ok(page("Préparer un média PXE", &html))
+    Ok(page(Section::Images, "Préparer un média PXE", &html))
 }
 
 fn queue_media(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
@@ -394,7 +400,7 @@ fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     html.push_str("</select></label><button>Enregistrer</button></form>");
     html.push_str(&refresh_button(db)?);
     html.push_str(&table(db, number)?);
-    Ok(page("Images PXE", &html))
+    Ok(page(Section::Images, "Images PXE", &html))
 }
 
 fn refresh_button(db: &Connection) -> Result<String, ErrorBox> {

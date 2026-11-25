@@ -4,6 +4,7 @@ use super::{
     connect, device_operations, escape, page, plain, redirect, setting, Device, ErrorBox, Reply,
 };
 use crate::pxe::{log_event, set_machine_status};
+use crate::web::ui::Section;
 use hyper::StatusCode;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde_json::{json, Value};
@@ -36,7 +37,7 @@ pub(super) fn form(device: &Device, id: i64) -> Result<Reply, ErrorBox> {
 <option value="poweroff">Arrêter</option><option value="reboot">Redémarrer</option></select></label></p>
 <p><label>Saisissez EFFACER pour confirmer <input name="confirm" autocomplete="off" required></label></p>
 <button>Programmer l’effacement</button></form>"#);
-    Ok(page("Effacer les disques", &html))
+    Ok(page(Section::Devices, "Effacer les disques", &html))
 }
 
 pub(super) fn submit(path: &Path, id: i64, data: &[u8], username: &str) -> Result<Reply, ErrorBox> {

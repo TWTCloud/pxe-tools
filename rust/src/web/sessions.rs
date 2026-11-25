@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::{
-    setup::{page, redirect},
-    ErrorBox, Reply,
-};
+use super::{setup::redirect, ui, ErrorBox, Reply};
 use hyper::{
     header::{HeaderMap, ACCEPT, COOKIE, SET_COOKIE},
     StatusCode,
@@ -240,9 +237,9 @@ pub(super) fn login_required(request: &hyper::http::request::Parts) -> Reply {
 }
 
 pub(super) fn login_page(next: &str, warning: Option<&str>, status: StatusCode) -> Reply {
-    let mut form = String::new();
+    let mut form = String::from("<p>Utilisez votre compte d’administration.</p>");
     if let Some(warning) = warning {
-        form.push_str("<p>");
+        form.push_str(r#"<p class="notice" role="alert">"#);
         super::admin::escape(&mut form, warning);
         form.push_str("</p>");
     }
@@ -250,10 +247,9 @@ pub(super) fn login_page(next: &str, warning: Option<&str>, status: StatusCode) 
         r#"<form method="post" action="/login"><input type="hidden" name="next" value=""#,
     );
     super::admin::escape(&mut form, next);
-    form.push_str(r#""><p><label>Identifiant <input name="username" autocomplete="username" required></label></p>
-<p><label>Mot de passe <input type="password" name="password" autocomplete="current-password" required></label></p>
-<button>Se connecter</button></form>"#);
-    let mut reply = page("Connexion à PXE Tools", &form);
-    *reply.status_mut() = status;
-    reply
+    form.push_str(r#"">
+<label for="login-username">Identifiant<input id="login-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+<label for="login-password">Mot de passe<input id="login-password" type="password" name="password" autocomplete="current-password" required></label>
+<button type="submit">Se connecter</button></form>"#);
+    ui::guest("Connexion", &form, status)
 }

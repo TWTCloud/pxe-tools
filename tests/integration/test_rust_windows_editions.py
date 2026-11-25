@@ -346,6 +346,11 @@ def check_lan(binary, root, tls, env):
             assert request('/', **private, headers={'Host': 'other.invalid'})[:2] == (302, origin+'/admin/')
             assert request('/admin/', **secure)[:2] == (302, '/init/welcome')
             assert request('/init/welcome', host=LAN, source=OUTSIDE_CLIENT, tls=tls)[0] == 404
+            style_status, _, style = request('/console-assets/style.css', **secure)
+            assert style_status == 200 and b'.auth-layout' in style and b'.workspace' in style
+            assert request('/console-assets/style.css', **private)[0] == 404
+            assert request('/console-assets/private', **secure)[0] == 404
+            assert b'/console-assets/style.css' in request('/login', **secure)[2]
             try:
                 request('/healthz', tls=tls, host=CDN)
             except ConnectionRefusedError:
@@ -364,7 +369,8 @@ def check_lan(binary, root, tls, env):
             authorization = base64.b64encode(b'lan-admin:fixture-lan-password').decode()
             admin = {'Authorization': 'Basic ' + authorization, **headers}
             assert request('/init/network', **secure, form={'role':'console'}, headers=admin)[:2] == (303,'/init/done')
-            assert request('/admin/devices', **secure, headers=admin)[0] == 200
+            status, _, console = request('/admin/devices', **secure, headers=admin)
+            assert status == 200 and b'class="rail"' in console and b'aria-current="page"' in console
             assert request('/pxe/linux/amd64/grub.cfg', **private)[0] == 404
         finally:
             service.terminate()

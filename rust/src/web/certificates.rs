@@ -4,7 +4,8 @@ use super::{
     acme,
     admin::escape,
     plain,
-    setup::{page, redirect},
+    setup::redirect,
+    ui::{page, Section},
     ErrorBox, Reply,
 };
 use hyper::StatusCode;
@@ -196,6 +197,7 @@ impl Certificates {
         };
         let acme = self.acme_form(&active);
         page(
+            Section::Certificates,
             "Certificats TLS",
             &format!(
                 r#"<p>Certificat actif · {status}</p>

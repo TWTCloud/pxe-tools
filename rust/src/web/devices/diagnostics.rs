@@ -4,6 +4,7 @@ use super::{
     connect, device_operations, escape, page, plain, redirect, setting, Device, ErrorBox, Reply,
 };
 use crate::pxe::{log_event, set_machine_status};
+use crate::web::ui::Section;
 use hyper::StatusCode;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::json;
@@ -54,7 +55,7 @@ pub(super) fn form(device: &Device, id: i64) -> Result<Reply, ErrorBox> {
 <option value="poweroff">Arrêter</option><option value="wait">Attendre</option></select></label></p>
 <p><label>Pour un test en écriture, saisissez DETRUIRE <input name="confirm" autocomplete="off"></label></p>
 <button>Programmer le test</button></form>"#);
-    Ok(page("Diagnostic du disque", &html))
+    Ok(page(Section::Devices, "Diagnostic du disque", &html))
 }
 
 pub(super) fn submit(
