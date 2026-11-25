@@ -11,7 +11,7 @@ use base64::{
 };
 use hyper::{header, Response, StatusCode};
 use sha2::{Digest, Sha256};
-use std::{cell::Cell, fmt::Write, sync::LazyLock};
+use std::{cell::RefCell, fmt::Write, sync::LazyLock};
 
 const MARK: &str = "/console-assets/mark.svg?v=2";
 const STYLE: &[u8] = include_bytes!("ui/style.css");
@@ -38,7 +38,10 @@ fn script_policy(script: &str) -> String {
 
 const MENU: &str = "M4 6h16M4 12h16M4 18h16";
 const CLOSE: &str = "m6 6 12 12M18 6 6 18";
-const LOGOUT: &str = r#"<form method="post" action="/logout"><button class="button button--quiet">Se déconnecter</button></form>"#;
+const PERSON: &str = "M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M14 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0z";
+const KEY: &str = "M21 7a5 5 0 0 1-6.4 4.8L7 19H3v-4l7.2-7.6A5 5 0 1 1 21 7zm-5 0h.01";
+const LOGOUT: &str = "M10 4H4v16h6m-1-8h11m-4-4 4 4-4 4";
+const CHEVRON: &str = "m6 9 6 6 6-6";
 
 fn brand() -> String {
     format!(
@@ -200,6 +203,7 @@ pub(super) enum ConsoleSection {
     Certificates,
     Accounts,
     Tokens,
+    Profile,
     Overview,
     Updates,
 }
@@ -216,7 +220,7 @@ impl ConsoleSection {
             Self::Settings | Self::Overview => account.allows(SettingsRead),
             Self::Certificates | Self::Accounts => account.admin,
             Self::Updates => account.admin && crate::apt_updates::enabled(),
-            Self::Tokens => true,
+            Self::Tokens | Self::Profile => true,
         }
     }
 
@@ -294,34 +298,31 @@ const NAVIGATION: [(&str, &[NavLink]); 3] = [
     ),
     (
         "Accès",
-        &[
-            (
-                super::access::USERS,
-                "Comptes et droits",
-                ConsoleSection::Accounts,
-                "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-4M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0zm5-4a4 4 0 0 1 0 8",
-            ),
-            (
-                super::access::TOKENS,
-                "Jetons d’API",
-                ConsoleSection::Tokens,
-                "M21 7a5 5 0 0 1-6.4 4.8L7 19H3v-4l7.2-7.6A5 5 0 1 1 21 7zm-5 0h.01",
-            ),
-        ],
+        &[(
+            super::access::USERS,
+            "Comptes et droits",
+            ConsoleSection::Accounts,
+            "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-4M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0zm5-4a4 4 0 0 1 0 8",
+        )],
     ),
 ];
 
-thread_local! {
-    // Rendering runs synchronously after authorization on the blocking worker.
-    // The mask only controls presentation and never authorizes an operation.
-    static NAVIGATION_MASK: Cell<u16> = const { Cell::new(u16::MAX) };
+struct Navigation {
+    mask: u16,
+    account: Account,
 }
 
-pub(super) struct NavigationGuard(u16);
+thread_local! {
+    // Rendering runs synchronously on the blocking worker. This state only
+    // controls presentation and never authorizes an operation.
+    static NAVIGATION_CONTEXT: RefCell<Option<Navigation>> = const { RefCell::new(None) };
+}
+
+pub(super) struct NavigationGuard(Option<Navigation>);
 
 impl Drop for NavigationGuard {
     fn drop(&mut self) {
-        NAVIGATION_MASK.set(self.0);
+        NAVIGATION_CONTEXT.replace(self.0.take());
     }
 }
 
@@ -331,7 +332,10 @@ pub(super) fn navigation_for(account: &Account) -> NavigationGuard {
         .flat_map(|(_, links)| *links)
         .filter(|(_, _, section, _)| section.visible_to(account))
         .fold(0, |mask, (_, _, section, _)| mask | section.bit());
-    NavigationGuard(NAVIGATION_MASK.replace(mask))
+    NavigationGuard(NAVIGATION_CONTEXT.replace(Some(Navigation {
+        mask,
+        account: account.clone(),
+    })))
 }
 
 pub(super) fn home(account: &Account) -> &'static str {
@@ -339,22 +343,70 @@ pub(super) fn home(account: &Account) -> &'static str {
         .iter()
         .flat_map(|(_, links)| *links)
         .find(|(_, _, section, _)| section.visible_to(account))
-        .map_or(super::access::TOKENS, |(path, ..)| *path)
+        .map_or(super::profile::ROUTE, |(path, ..)| *path)
+}
+
+fn profile_menu(account: &Account, section: ConsoleSection) -> String {
+    let mut html = format!(
+        r#"<details class="profile-menu"><summary class="button button--quiet">{}<span class="profile-name">"#,
+        icon(PERSON),
+    );
+    escape(&mut html, &account.username);
+    write!(
+        html,
+        r#"</span>{}</summary><div class="profile-options">"#,
+        icon(CHEVRON)
+    )
+    .expect("write to String");
+    let mut link = |path, label, item, glyph| {
+        let current = if section == item {
+            r#" aria-current="page""#
+        } else {
+            ""
+        };
+        write!(
+            html,
+            r#"<a class="profile-option" href="{path}"{current}>{}<span>{label}</span></a>"#,
+            icon(glyph)
+        )
+        .expect("write to String");
+    };
+    link(
+        super::profile::ROUTE,
+        "Mon profil",
+        ConsoleSection::Profile,
+        PERSON,
+    );
+    if account.id.is_some() {
+        link(
+            super::access::PERSONAL_TOKENS,
+            "Mes jetons d’API",
+            ConsoleSection::Tokens,
+            KEY,
+        );
+    }
+    if !account.is_external() {
+        write!(html, r#"<form method="post" action="/logout"><button type="submit" class="profile-option">{}<span>Se déconnecter</span></button></form>"#, icon(LOGOUT))
+            .expect("write to String");
+    }
+    html.push_str("</div></details>");
+    html
 }
 
 pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply {
-    let logout = matches!(
-        std::env::var("AUTH_MODE").unwrap_or_default().as_str(),
-        "" | "local"
-    );
     let brand = brand();
-    let mask = NAVIGATION_MASK.get();
+    let (mask, profile) = NAVIGATION_CONTEXT.with_borrow(|context| {
+        context.as_ref().map_or_else(
+            || (u16::MAX, String::new()),
+            |nav| (nav.mask, profile_menu(&nav.account, section)),
+        )
+    });
     let show = |section: ConsoleSection| section.bit() & mask != 0;
     let home = NAVIGATION
         .iter()
         .flat_map(|(_, links)| *links)
         .find(|(_, _, section, _)| show(*section))
-        .map_or(super::access::TOKENS, |(path, ..)| *path);
+        .map_or(super::profile::ROUTE, |(path, ..)| *path);
     let mut layout = String::from(
         r##"<a class="skip-link" href="#main">Aller au contenu</a><header class="masthead">"##,
     );
@@ -365,9 +417,7 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
         icon(MENU),
     )
     .expect("write to String");
-    if logout {
-        layout.push_str(LOGOUT);
-    }
+    layout.push_str(&profile);
     let mut navigation = String::new();
     for (group, links) in NAVIGATION {
         if !links.iter().any(|(_, _, item, _)| show(*item)) {
@@ -396,14 +446,10 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
         layout,
         r#"</header><dialog id="mobile-navigation" class="mobile-drawer" aria-label="Navigation PXE Tools">
 <div class="drawer-body"><div class="drawer-header">{brand}<form method="dialog"><button type="submit" class="button button--quiet drawer-close" aria-label="Fermer le menu" autofocus>{}</button></form></div>
-<nav class="rail" aria-label="Navigation principale">{navigation}</nav>"#,
+{profile}<nav class="rail" aria-label="Navigation principale">{navigation}</nav>"#,
         icon(CLOSE)
     )
     .expect("write to String");
-    if logout {
-        write!(layout, r#"<footer class="drawer-footer">{LOGOUT}</footer>"#)
-            .expect("write to String");
-    }
     write!(
         layout,
         r#"</div></dialog><div class="workspace"><nav class="rail" aria-label="Navigation principale">{navigation}</nav><main id="main" class="console-main" tabindex="-1"><h1>"#

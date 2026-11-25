@@ -8,9 +8,13 @@ En mode Authentik, un administrateur connecté via le proxy de confiance peut ac
 
 La désactivation d’un compte local ou la réinitialisation de son mot de passe invalide ses sessions et révoque ses jetons. La désactivation d’un compte Authentik bloque son accès à la console et révoque également ses jetons. Les retraits de droits restreignent immédiatement les jetons déjà délivrés. Pour revenir à une version antérieure de PXE Tools, restaurez d’abord une sauvegarde antérieure à la mise à niveau, y compris la configuration Authentik.
 
+## Profil
+
+Ouvrez le menu portant votre identifiant, puis **Mon profil**. Un compte local peut modifier son mot de passe avec le mot de passe actuel. Le changement ferme les autres sessions de console et conserve les jetons déjà délivrés. Authentik gère le mot de passe et la session des comptes qui utilisent ce fournisseur.
+
 ## Jetons
 
-Dans **Accès → Jetons d’API**, choisissez un nom, une durée de 1 à 365 jours et les droits d’API à attribuer. Les permissions proposées sont celles que possède le compte émetteur et que l’API prend en charge. Copiez le secret lors de l’émission. Le serveur conserve son empreinte SHA-256. Une rotation remplace le secret et peut modifier les droits du jeton tout en gardant sa date d’expiration. Une révocation invalide le secret pour les requêtes suivantes. Un administrateur peut révoquer les jetons de tous les comptes.
+Dans le menu de profil, ouvrez **Mes jetons d’API**, puis choisissez un nom, une durée de 1 à 365 jours et les droits d’API à attribuer. Les permissions proposées sont celles que possède le compte émetteur et que l’API prend en charge. Copiez le secret lors de l’émission. Le serveur conserve son empreinte SHA-256. Une rotation remplace le secret et peut modifier les droits du jeton tout en gardant sa date d’expiration. Une révocation invalide le secret pour les requêtes suivantes. Un administrateur peut révoquer les jetons de tous les comptes dans **Accès → Comptes et droits → Jetons de tous les comptes**.
 
 ## API JSON v1
 

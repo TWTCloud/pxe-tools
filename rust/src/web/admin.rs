@@ -74,7 +74,8 @@ pub(super) enum Action {
     Certificates(Arc<super::certificates::Certificates>, Option<Bytes>),
     Acme(Arc<super::certificates::Certificates>, Bytes),
     Users(Option<Bytes>),
-    Tokens(Option<Bytes>),
+    Tokens(Option<Bytes>, bool),
+    Profile(Option<Bytes>),
 }
 
 impl Action {
@@ -139,7 +140,7 @@ impl Action {
             | Self::Certificates(..)
             | Self::Acme(..)
             | Self::Users(..) => Admin,
-            Self::Tokens(..) => return None,
+            Self::Tokens(..) | Self::Profile(_) => return None,
         })
     }
 }
@@ -339,7 +340,8 @@ impl Console {
         let Ok(_permit) = self.jobs.try_acquire() else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
         };
-        let window = if matches!(identity, Identity::Basic(..)) {
+        let changing_password = matches!(&action, Action::Profile(Some(_)));
+        let window = if changing_password || matches!(identity, Identity::Basic(..)) {
             let Some(window) = self.reserve_attempt(peer) else {
                 return rate_limited();
             };
@@ -348,6 +350,10 @@ impl Console {
             None
         };
         let sessions = self.sessions.clone();
+        let profile_token = match &identity {
+            Identity::Session(token) if changing_password => Some(token.clone()),
+            _ => None,
+        };
         let missing_session =
             matches!(identity, Identity::Session(_)).then(|| sessions::login_required(request));
         let page = request
@@ -414,8 +420,16 @@ impl Console {
                 if let Action::Overview(address) = &action {
                     return super::overview::show(&db, &account, *address).ok();
                 }
-                if let Action::Tokens(form) = &action {
-                    return access::tokens(&db, &db_path, &account, form.as_deref()).ok();
+                if let Action::Tokens(form, personal) = &action {
+                    return access::tokens(&db, &db_path, &account, form.as_deref(), *personal).ok();
+                }
+                if let Action::Profile(form) = &action {
+                    return match form {
+                        Some(form) => super::profile::change_password(
+                            &db, &db_path, &account, form, &sessions, profile_token.as_deref()
+                        ).ok(),
+                        None => Some(super::profile::page(&account, query == "password=updated")),
+                    };
                 }
                 if let Action::Device(route, form) = &action {
                     return route
@@ -516,7 +530,12 @@ impl Console {
         .await;
         match reply {
             Ok((reply, authenticated)) => {
-                if authenticated {
+                if authenticated
+                    && (!changing_password
+                        || reply
+                            .as_ref()
+                            .is_some_and(|page| page.status() == StatusCode::SEE_OTHER))
+                {
                     if let Some(window) = window {
                         self.refund_attempt(peer, window);
                     }

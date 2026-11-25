@@ -321,6 +321,7 @@ def check_media(binary, root, public, database, tls, auth, headers, env):
 
 def verify_access(secure, private, admin, database):
     users, tokens, api = '/admin/access/users', '/admin/access/tokens', '/api/v1'
+    profile, personal = '/admin/profile', '/admin/profile/tokens'
 
     def form(path, fields, headers=admin, **kwargs):
         return request(path, **secure, headers=headers, form=fields, **kwargs)
@@ -341,7 +342,11 @@ def verify_access(secure, private, admin, database):
     assert request(users, **secure, headers=admin)[0] == 200
     assert form(users, {'action':'create', **credentials, 'scope':'devices.read'})[:2] == (303, users)
     visible = request('/admin/devices', **secure, headers=observer)
-    assert visible[0] == 200 and tokens.encode() in visible[2] and users.encode() not in visible[2]
+    assert visible[0] == 200 and personal.encode() in visible[2] and users.encode() not in visible[2]
+    assert b'class="profile-name">observer<' in visible[2] and b'action="/logout"' in visible[2]
+    assert request(profile, **secure)[0] == 401
+    identity = request(profile, **secure, headers=observer)
+    assert identity[0] == 200 and b'<h1>Mon profil</h1>' in identity[2] and b'name="current"' in identity[2]
     assert request(users, **secure, headers=observer)[0] == 403
     assert form(users, {'action':'create', 'username':'intrus', 'password':'fixture-attacker-password',
                         'admin':'1'}, observer)[0] == 403
@@ -356,12 +361,17 @@ def verify_access(secure, private, admin, database):
     assert form(tokens, {'action':'create', 'name':'test', 'days':'1','scope':'admin'}, observer)[0] == 422
     outside = {**observer, 'Origin':'https://outside.example'}
     assert form(tokens, {'action':'create', 'name':'test', 'days':'1','scope':'devices.read'}, outside)[0] == 403
-    issued = secret(form(tokens, {'action':'create','name':'Inventaire seul','days':'1','scope':'devices.read'},
+    issued = secret(form(personal, {'action':'create','name':'Inventaire seul','days':'1','scope':'devices.read'},
                          observer, response_header='Cache-Control'))
     assert issued.encode() not in request(tokens, **secure, headers=observer)[2]
     with sqlite3.connect(database) as db:
         token_id, digest = db.execute('SELECT id,secret_hash FROM api_tokens WHERE user_id=?', [owner]).fetchone()
         assert digest == sha256(issued.encode()).digest()
+    assert b'Inventaire seul' in request(personal, **secure, headers=observer)[2]
+    assert b'Inventaire seul' not in request(personal, **secure, headers=admin)[2]
+    assert b'Inventaire seul' in request(tokens, **secure, headers=admin)[2]
+    assert form(personal, {'action':'revoke','id':token_id}, admin)[0] == 404
+
     login = form('/login', credentials, response_header='Set-Cookie')
     assert login[0] == 303 and login[1]
     cookie = {'Cookie':login[1].split(';', 1)[0]}
@@ -372,11 +382,29 @@ def verify_access(secure, private, admin, database):
     assert api_call('/devices', issued, json_body={'mac':'02:00:00:00:20:01'})[0] == 403
     assert request('/admin/devices', **secure, headers=bearer(issued))[0] == 401
     assert request(api+'/devices', **private, headers=bearer(issued))[0] == 404
-    rotated = secret(form(tokens, {'action':'rotate','id':token_id,'scope':'devices.read'},
+    other = form('/login', credentials, response_header='Set-Cookie')
+    other_cookie = {'Cookie':other[1].split(';', 1)[0]}
+    browser = {**cookie, 'Origin':admin['Origin'], 'Content-Type':admin['Content-Type']}
+    new_password = 'fixture-renewed-observer-password'
+    change = {'current':credentials['password'], 'password':new_password, 'confirm':new_password}
+    assert form(profile, change, {**browser, 'Origin':'https://outside.example'})[0] == 403
+    assert form(profile, {**change, 'current':'incorrect-password'}, browser)[0] == 422
+    assert form(profile, {**change, 'confirm':'other-confirmation'}, browser)[0] == 422
+    changed = form(profile, change, browser, response_header='Set-Cookie')
+    assert changed[0] == 303 and changed[1] and changed[1].split(';', 1)[0] != cookie['Cookie']
+    renewed = {'Cookie':changed[1].split(';', 1)[0]}
+    confirmed = request(profile+'?password=updated', **secure, headers=renewed)
+    assert confirmed[0] == 200 and 'Mot de passe modifié'.encode() in confirmed[2]
+    assert request(profile, **secure, headers=other_cookie)[0] == 401
+    assert request(profile, **secure, headers=cookie)[0] == 401
+    assert request(profile, **secure, headers=observer)[0] == 401
+    observer['Authorization'] = 'Basic '+base64.b64encode(f'observer:{new_password}'.encode()).decode()
+    assert api_call('/devices', issued)[0] == 200
+    rotated = secret(form(personal, {'action':'rotate','id':token_id,'scope':'devices.read'},
                            observer, response_header='Cache-Control'))
     assert rotated != issued and api_call('/devices', issued)[0] == 401
     assert api_call('/devices', rotated)[0] == 200
-    assert form(tokens, {'action':'revoke','id':token_id}, observer)[:2] == (303, tokens)
+    assert form(personal, {'action':'revoke','id':token_id}, observer)[:2] == (303, personal)
     assert api_call('/devices', rotated)[0] == 401
 
     operator = secret(form(tokens, [('action','create'),('name','Automatisation'),('days','2'),
@@ -452,6 +480,9 @@ def verify_authentik_access(binary, config, secure, origin, env):
             assert request('/admin/devices', **secure, headers=viewer)[0] == 200
             assert request('/admin/devices', **secure, headers={**viewer,'X-Forwarded-User':'SSO-VIEWER'})[0] == 403
             assert request(users, **secure, headers=viewer)[0] == 403
+            profile = request('/admin/profile', **secure, headers=viewer)
+            assert profile[0] == 200 and b'Authentik' in profile[2] and b'name="current"' not in profile[2]
+            assert request('/admin/profile', **secure, headers=viewer, form={'current':'test'})[0] == 403
             assert request('/machines', **secure, headers=viewer, form={'mac':'02:00:00:00:20:03'})[0] == 403
         finally:
             service.terminate()
