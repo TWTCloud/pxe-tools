@@ -132,6 +132,13 @@ tbody tr:hover { background: #f7faff; }
 .table-region > table { min-width: 28rem; }
 .console-main > nav { display: flex; flex-wrap: wrap; gap: .72rem; margin: .75rem 0; }
 .console-main > form > button { margin: .35rem .35rem .35rem 0; }
+.console-main :where(form, fieldset, form p) > label:has(> :where(input:not([type="checkbox"], [type="radio"]), select, textarea)) {
+  display: grid;
+  gap: .36rem;
+  max-width: 42rem;
+  margin: .78rem 0;
+  font-size: .92rem;
+}
 .console-main > .device-actions { display: flex; gap: .65rem; flex-wrap: wrap; margin: 0 0 1.25rem; }
 .device-actions .button { font-size: .9rem; }
 .device-preferences { max-width: 34rem; background: var(--surface); }
@@ -141,6 +148,22 @@ tbody tr:hover { background: #f7faff; }
 .table-empty strong { display: block; font-weight: 680; }
 .table-mac { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .87rem; white-space: nowrap; }
 .device-state { display: inline-block; padding: .18rem .48rem; border-radius: 5px; background: var(--blue-pale); color: #254b70; font-size: .82rem; font-weight: 650; }
+.muted { color: var(--muted); }
+
+.media-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.1rem 1.35rem;
+  max-width: 58rem;
+  padding: clamp(1rem, 3vw, 1.6rem);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.field { display: grid; align-content: start; gap: .35rem; min-width: 0; }
+.field label { font-size: .92rem; }
+.field small { color: var(--muted); font-size: .81rem; }
+.media-submit { grid-column: 1 / -1; padding-top: .9rem; border-top: 1px solid var(--line); }
 
 .guest { background: var(--surface); }
 .auth-layout {
@@ -193,14 +216,16 @@ tbody tr:hover { background: #f7faff; }
 }
 
 @media (max-width: 820px) {
-  .workspace { grid-template-columns: minmax(0, 1fr); }
-  .rail { display: grid; gap: .45rem; padding: .65rem .7rem; }
+  .workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .rail { display: grid; align-content: start; gap: .45rem; padding: .65rem .7rem; }
   .rail-group { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem; }
   .rail-group + .rail-group { margin-top: 0; }
   .rail-group p { margin: .15rem .4rem; }
   .rail a { padding: .35rem .5rem; font-size: .82rem; }
   .console-main > table { display: block; }
+  .table-region > table:has(.table-empty) { min-width: 0; }
   th, td { padding: .65rem .75rem; }
+  .table-empty { padding: 1.65rem .85rem; }
 }
 
 @media (max-width: 650px) {
@@ -218,4 +243,5 @@ tbody tr:hover { background: #f7faff; }
   .masthead .brand { font-size: 1rem; }
   .masthead button { min-height: 2.35rem; }
   .device-actions .button { justify-content: flex-start; }
+  .media-form { grid-template-columns: minmax(0, 1fr); }
 }
