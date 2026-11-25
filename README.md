@@ -50,8 +50,9 @@ les accès, redémarrer le worker et activer explicitement le module.
 
 À partir de la bêta 14, une instance neuve ouvre la console HTTPS sur
 les IPv4 privées actives du serveur. Depuis un autre poste du réseau,
-ouvrez `https://<IPv4-du-serveur>/admin/`. Lisez le code de l’assistant
-sur le serveur avec `sudo cat /run/pxe-tools-rust-guided/setup-code`.
+ouvrez `https://<IPv4-du-serveur>/admin/`. Sur le serveur, `sudo pxe-tools setup`
+affiche le lien HTTPS et le code tant que l’assistant le demande. Avec la
+bêta 14, lisez le code avec `sudo cat /run/pxe-tools-rust-guided/setup-code`.
 Le proxy DHCP s’active après votre confirmation de la configuration
 réseau dans l’assistant.
 

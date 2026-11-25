@@ -255,6 +255,10 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             binary.chmod(0o755)
         if rust_guided:
             shutil.copy2(checked(rust_assets/'pxe-tools-pxe-http.service'), units)
+            command = root/'usr/bin/pxe-tools'
+            command.parent.mkdir(parents=True)
+            shutil.copyfile(checked(ROOT/'packaging/native/pxe-tools.py'), command)
+            command.chmod(0o755)
             launcher = root/'usr/lib/pxe-tools/start-rust-guided.sh'
             shutil.copyfile(checked(rust_assets/'start-guided.sh'), launcher)
             launcher.chmod(0o755)
