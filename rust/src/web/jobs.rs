@@ -58,6 +58,17 @@ impl View {
         }
     }
 
+    pub(super) fn is_redhat_media(&self, db: &Connection) -> rusqlite::Result<bool> {
+        let (Self::Detail(id) | Self::Poll(id) | Self::Status(id)) = self else {
+            return Ok(false);
+        };
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM init_jobs WHERE id=?1 AND job_type=?2)",
+            rusqlite::params![id, media::REDHAT_JOB],
+            |row| row.get(0),
+        )
+    }
+
     pub(super) fn serve(
         &self,
         db: &Connection,
@@ -337,9 +348,14 @@ fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
             )
             .body(bytes(html))?);
     }
+    let (back, label) = if redhat {
+        (media::REDHAT_ROUTE, "Télécharger RHEL")
+    } else {
+        ("/jobs", "Tâches")
+    };
     write!(
         html,
-        r#"<nav><a href="/jobs/{id}">Actualiser</a> · <a href="/jobs">Tâches</a></nav>"#
+        r#"<nav><a href="/jobs/{id}">Actualiser</a> · <a href="{back}">{label}</a></nav>"#
     )?;
     Ok(page(
         ConsoleSection::Jobs,

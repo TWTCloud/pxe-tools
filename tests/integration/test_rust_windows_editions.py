@@ -480,6 +480,23 @@ def verify_access(secure, private, admin, database):
     assert form(users, {'action':'create', 'username':'intrus', 'password':'fixture-attacker-password',
                         'admin':'1'}, observer)[0] == 403
     assert form('/machines', {'mac':'02:00:00:00:20:01'}, observer)[0] == 403
+    images_user = {'username': 'media-editor', 'password': 'fixture-media-editor-password'}
+    assert form(users, {'action': 'create', **images_user, 'scope': 'images.write'})[:2] == (303, users)
+    media_editor = {**admin, 'Authorization': 'Basic '+base64.b64encode(
+        b'media-editor:fixture-media-editor-password').decode()}
+    redhat = '/settings/images/rhel'
+    assert request(redhat, **secure, headers=observer)[0] == 403
+    assert request(redhat, **secure, headers=media_editor)[0] == 200
+    with sqlite3.connect(database) as db:
+        redhat_job, other_job = [
+            db.execute("INSERT INTO init_jobs(job_type,status) VALUES(?,'success') RETURNING id", (kind,)).fetchone()[0]
+            for kind in ('media:prepare:rhel', 'media:prepare')
+        ]
+    for suffix in ('', '/status', '/poll'):
+        assert request(f'/jobs/{redhat_job}{suffix}', **secure, headers=media_editor)[0] == 200
+        assert request(f'/jobs/{other_job}{suffix}', **secure, headers=media_editor)[0] == 403
+        assert request(f'/jobs/{redhat_job}{suffix}', **secure, headers=observer)[0] == 403
+    assert form(f'/api/init-retry-job/{redhat_job}', {}, media_editor)[0] == 403
     with sqlite3.connect(database) as db:
         owner = db.execute("SELECT id FROM users WHERE username='observer'").fetchone()[0]
         first_admin = db.execute("SELECT id FROM users WHERE username='lan-admin'").fetchone()[0]

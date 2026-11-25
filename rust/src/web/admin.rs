@@ -95,6 +95,7 @@ impl Action {
             Self::Register(..) => DevicesEdit,
             Self::Bulk(Bulk::Delete, _) => DevicesDelete,
             Self::Bulk(..) => Deploy,
+            Self::Images(super::images::Route::RedHat, _) => ImagesEdit,
             Self::Images(..) | Self::Windows(..) => select(ImagesRead, ImagesEdit),
             Self::Presets(..) => select(PresetsRead, PresetsEdit),
             Self::Preset(
@@ -401,6 +402,8 @@ impl Console {
                 if action
                     .permission(&method)
                     .is_some_and(|permission| !account.allows(permission))
+                    && !(account.allows(Permission::ImagesEdit)
+                        && matches!(&action, Action::Jobs(view) if view.is_redhat_media(&db).unwrap_or(false)))
                 {
                     return Some(if path.starts_with("/api/") {
                         access::denied()
