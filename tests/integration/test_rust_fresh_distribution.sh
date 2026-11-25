@@ -65,29 +65,40 @@ address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddre
 test -n "$address"
 docker exec "$container" curl -fsS --max-time 5 --cacert /run/pxe-tools-rust-guided/cert.pem \
     "https://$address/init/welcome" >/dev/null
-if [[ "$variant" == apt ]]; then
-    docker exec "$container" bash -ec '
+docker exec "$container" bash -ec '
+    variant="$1"
+    address="$2"
+    origin=https://127.0.0.1
+    code=$(</run/pxe-tools-rust-guided/setup-code)
+    [[ "$code" =~ ^[0-9a-f]{4}(-[0-9a-f]{4}){2}$ ]]
+    page=$(curl -kfsS --max-time 5 "$origin/init/admin")
+    [[ "$page" == *"/console-assets/style.css"* && "$page" == *"id=\"copy-setup-command\""* ]]
+    test "$(grep -o "name=\"code\"" <<< "$page" | wc -l)" -eq 1
+    css=$(curl -kfsS --max-time 5 "$origin/console-assets/style.css")
+    [[ "$css" == *".setup-command-row"* ]]
+    if [[ "$variant" == apt ]]; then
         test "$(dpkg-query -S /usr/bin/pxe-tools)" = "pxe-tools: /usr/bin/pxe-tools"
-        origin=https://127.0.0.1
-        page=$(curl -kfsS --max-time 5 "$origin/init/db")
-        [[ "$page" == *"/console-assets/style.css"* && "$page" == *"value=\"sudo pxe-tools setup\" readonly"* ]]
-        [[ "$page" == *"id=\"copy-setup-command\""* ]]
-        css=$(curl -kfsS --max-time 5 "$origin/console-assets/style.css")
-        [[ "$css" == *".setup-command-row"* ]]
-
+        [[ "$page" == *"value=\"sudo pxe-tools setup\" readonly"* ]]
         output=$(pxe-tools setup)
-        code=$(</run/pxe-tools-rust-guided/setup-code)
-        [[ "$output" == *"https://$1/init/welcome"* && "$output" == *"$code"* ]]
+        [[ "$output" == *"https://$address/init/welcome"* && "$output" == *"$code"* ]]
         if runuser -u nobody -- pxe-tools setup; then exit 1; fi
-
-        request=(curl -kfsS --max-time 5 -o /dev/null -w "%{http_code}" -H "Origin: $origin"
-                 --data-urlencode "code=$code")
-        test "$("${request[@]}" "$origin/init/db")" = 303
-        test "$("${request[@]}" "$origin/init/admin" --data-urlencode "username=setup-fixture" \
-            --data-urlencode "password=fixture-only-password" \
-            --data-urlencode "password_confirm=fixture-only-password")" = 303
+    else
+        [[ "$page" == *"value=\"cat /run/pxe-tools-rust-guided/setup-code\" readonly"* ]]
+    fi
+    request=(curl -ksS --max-time 5 -o /dev/null -w "%{http_code} %{redirect_url}" -H "Origin: $origin"
+             --data-urlencode "username=setup-fixture" --data-urlencode "password=fixture-only-password"
+             --data-urlencode "password_confirm=fixture-only-password")
+    wrong_code="0${code:1}"
+    [[ "$wrong_code" != "$code" ]] || wrong_code="1${code:1}"
+    test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=$wrong_code")" = "403 "
+    test ! -e /etc/pxe-tools/db.conf
+    submitted="${code^^}"
+    test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=${submitted//-/ }")" = "303 $origin/admin/devices"
+    test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=$code")" = "409 "
+    curl -kfsS --max-time 5 --user setup-fixture:fixture-only-password "$origin/admin/devices" >/dev/null
+    if [[ "$variant" == apt ]]; then
         output=$(pxe-tools setup)
-        [[ "$output" == *"https://$1/admin/"* && "$output" != *"$code"* ]]
-    ' _ "$address"
-fi
+        [[ "$output" == *"https://$address/admin/"* && "$output" != *"$code"* ]]
+    fi
+' _ "$variant" "$address"
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"

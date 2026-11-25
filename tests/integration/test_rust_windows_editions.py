@@ -509,7 +509,8 @@ def check_lan(binary, root, tls, env):
 
             css_path, welcome = wizard_page('/init/welcome', 'Stockage')
             assert b'id="setup-command"' not in welcome and b'<script>' not in welcome
-            check_setup_command('/init/db', 'Stockage')
+            assert request('/init/db', **secure)[:2] == (302, '/init/admin')
+            check_setup_command('/init/admin', 'Compte')
             style_status, css_type, style = request(css_path, **secure, response_header='Content-Type')
             assert style_status == 200 and css_type.startswith('text/css')
             assert b'.auth-layout' in style and b'.workspace' in style and b'.wizard-main' in style
@@ -524,13 +525,11 @@ def check_lan(binary, root, tls, env):
             else:
                 raise AssertionError('The console opened a non-private address')
             headers = {'Origin': origin, 'Content-Type': 'application/x-www-form-urlencoded'}
-            _, invalid_code = wizard_page('/init/db', 'Stockage', headers=headers,
+            _, invalid_code = wizard_page('/init/admin', 'Compte', headers=headers,
                                           form={'code':'b'*48}, expected=403)
             assert b'Code de configuration invalide' in invalid_code and b'b'*48 not in invalid_code
-            assert request('/init/db', **secure, form={'code':'a'*48},
+            assert request('/init/admin', **secure, form={'code':'a'*48},
                            headers={**headers, 'Origin':'https://other.invalid'})[0] == 403
-            assert request('/init/db', **secure, form={'code':'a'*48}, headers=headers)[:2] == (303,'/init/admin')
-            check_setup_command('/init/admin', 'Compte')
             credentials = {'username':'lan-admin', 'password':'fixture-lan-password'}
             assert request('/init/admin', **secure, headers=headers,
                            form={**credentials,'password_confirm': credentials['password'],'code':'a'*48})[:2] == (303,'/admin/devices')

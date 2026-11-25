@@ -77,30 +77,27 @@ def setup(client, credentials, config, database, *, probe_pending_reset=False):
     assert client.request('/admin/')[:2] == (302, '/init/welcome')
     assert client.request('/init/db', secure=False)[0] == 404
     assert client.request('/preseed.php', secure=False)[0] == 404
-    assert client.request('/init/db', form={'code': code}, origin='https://outside.example')[0] == 403
-    assert client.request('/init/db', form={'code': '0'*48})[0] == 403
+    assert client.request('/init/db')[:2] == (302, '/init/admin')
+    assert client.request('/init/admin')[2].count(b'name="code"') == 1
+    admin_form = {'code': code, 'username': 'operator',
+                  'password': 'fixture-password', 'password_confirm': 'fixture-password'}
+    assert client.request('/init/admin', form=admin_form, origin='https://outside.example')[0] == 403
+    wrong_code = ('0' if code[0] != '0' else '1') + code[1:]
+    assert client.request('/init/admin', form={**admin_form, 'code': wrong_code})[0] == 403
+    assert client.request('/init/admin', form={**admin_form, 'password_confirm': 'mismatch'})[0] == 400
     assert not config.exists() and not database.exists()
 
-    for _ in range(2):
-        result = client.request('/init/db', form={'code': code})
-        assert result[:2] == (303, '/init/admin'), result
-    assert json.loads(config.read_text()) == {'driver': 'sqlite', 'path': str(database)}
-    assert stat.S_IMODE(config.stat().st_mode) == 0o600
-    assert stat.S_IMODE(database.stat().st_mode) == 0o600
-    with closing(sqlite3.connect(database)) as db:
-        assert db.execute('PRAGMA journal_mode').fetchone() == ('wal',)
-        assert dict(db.execute('SELECT key,value FROM settings'))['pxe_enabled'] == 'off'
-        assert db.execute('SELECT COUNT(*) FROM users').fetchone() == (0,)
-
     def create(username):
-        return client.request('/init/admin', form={
-            'code': code, 'username': username,
-            'password': 'fixture-password', 'password_confirm': 'fixture-password',
-        })
+        return client.request('/init/admin', form={**admin_form, 'username': username})
 
     if probe_pending_reset:
+        # Also exercise continuing from the SQLite-only step in an older setup.
+        for _ in range(2):
+            result = client.request('/init/db', form={'code': code})
+            assert result[:2] == (303, '/init/admin'), result
         # A local fixture has no worker to race this synthetic pending reset.
         with closing(sqlite3.connect(database)) as db, db:
+            assert db.execute('SELECT COUNT(*) FROM users').fetchone() == (0,)
             job = db.execute("INSERT INTO init_jobs(job_type) VALUES('system:factory_reset_wipe')").lastrowid
         assert client.request('/admin/')[:2] == (302, '/init')
         assert 'Réinitialisation PXE en cours'.encode() in client.request('/init')[2]
@@ -117,7 +114,12 @@ def setup(client, credentials, config, database, *, probe_pending_reset=False):
     assert client.request('/init/admin')[:2] == (302, '/admin/devices')
     assert client.request('/admin/devices')[0] == 401
     assert client.request('/admin/devices', authorization=winner+':fixture-password')[0] == 200
+    assert json.loads(config.read_text()) == {'driver': 'sqlite', 'path': str(database)}
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert stat.S_IMODE(database.stat().st_mode) == 0o600
     with closing(sqlite3.connect(database)) as db:
+        assert db.execute('PRAGMA journal_mode').fetchone() == ('wal',)
+        assert dict(db.execute('SELECT key,value FROM settings'))['pxe_enabled'] == 'off'
         assert db.execute('SELECT username FROM users').fetchall() == [(winner,)]
         assert db.execute("SELECT value FROM settings WHERE key='wizard_completed'").fetchone() == ('0',)
     assert master_key.read_bytes() == original
@@ -2649,7 +2651,8 @@ def local(binary):
         stack.callback(server.terminate)
         client.ready(server)
         code = (credentials/'setup-code').read_text().strip()
-        assert client.request('/init/db', form={'code': code})[0] == 503
+        assert client.request('/init/admin', form={'code': code, 'username': 'existing',
+                              'password': 'fixture-password', 'password_confirm': 'fixture-password'})[0] == 503
         assert not config.exists() and database.read_bytes() == original
         database.unlink()
         authorization = setup(client, credentials, config, database, probe_pending_reset=True)
