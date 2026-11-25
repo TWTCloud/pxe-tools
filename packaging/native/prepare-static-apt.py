@@ -40,7 +40,7 @@ def allowed(relative: str) -> bool:
             or re.fullmatch(rf'{index}/by-hash/SHA256/{HEX}', relative) is not None
             or re.fullmatch(rf'{index}/by-hash/SHA512/{HEX512}', relative) is not None
             or re.fullmatch(r'changelogs/main/p/(pxe-tools(?:-ansible)?)/\1_[0-9][A-Za-z0-9.+~\-]{0,100}_changelog', relative) is not None
-            or re.fullmatch(rf'pool/main/p/pxe-tools/pxe-tools-{HEX}\.deb', relative) is not None)
+            or re.fullmatch(rf'pool/main/p/pxe-tools/pxe-tools-{HEX}\.(?:deb|changelog)', relative) is not None)
 
 
 def validate(root: Path, keyring: Path, primary: str, signing: str, *, allow_expired: bool = False) -> None:
@@ -64,6 +64,9 @@ def validate(root: Path, keyring: Path, primary: str, signing: str, *, allow_exp
             algorithm = 'sha512' if '/SHA512/' in relative else 'sha256'
             if match and digest(path, algorithm) != match.group(1):
                 raise ValueError(f'content-addressed object is corrupt: {relative}')
+    for relative in files:
+        if relative.endswith('.changelog') and relative.removesuffix('.changelog') + '.deb' not in files:
+            raise ValueError(f'changelog has no corresponding package: {relative}')
 
     release = root / 'dists/stable/Release'
     signed = root / 'dists/stable/InRelease'
@@ -174,7 +177,10 @@ def main() -> None:
         (candidate / '_headers').write_text(
             '/apt/dists/*\n  Cache-Control: no-cache, max-age=0, must-revalidate\n'
             '/apt/changelogs/*\n  Cache-Control: no-cache, max-age=0, must-revalidate\n'
-            '/apt/pool/*\n  Cache-Control: public, max-age=31536000, immutable\n', encoding='utf-8')
+            '/apt/pool/main/p/pxe-tools/*.deb\n  Cache-Control: public, max-age=31536000, immutable\n'
+            '/apt/pool/main/p/pxe-tools/*.changelog\n'
+            '  Cache-Control: no-cache, max-age=0, must-revalidate\n'
+            '  Content-Type: text/plain; charset=utf-8\n', encoding='utf-8')
         # Export only the public key. Never copy the supplied keyring verbatim.
         home = Path(temporary) / 'gpg'
         home.mkdir(mode=0o700)

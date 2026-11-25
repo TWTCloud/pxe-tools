@@ -23,11 +23,13 @@ import tempfile
 
 CHANGELOG_URI = 'https://packages.pxetools.com/apt/changelogs/@CHANGEPATH@_changelog'
 CHANGELOG_SOURCE = Path(__file__).resolve().parents[1] / 'changelogs'
+PACKAGE_POOL = 'pool/main/p/pxe-tools'
 
 
-def stage_changelogs(stage: Path) -> None:
+def stage_changelogs(stage: Path, package_versions: dict[Path, tuple[str, str]]) -> None:
     # Include the tracked history so clients with cached indexes can still
     # look up versions after the next snapshot replaces Packages.
+    published = {}
     for source in sorted(CHANGELOG_SOURCE.glob('*_changelog')):
         match = re.fullmatch(r'(pxe-tools(?:-ansible)?)_([0-9][A-Za-z0-9.+~\-]{0,100})_changelog', source.name)
         if match is None or source.is_symlink() or not source.is_file():
@@ -39,6 +41,11 @@ def stage_changelogs(stage: Path) -> None:
         target = stage / 'changelogs/main/p' / name / source.name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(data, encoding='utf-8')
+        published[name, version] = target
+    # Ubuntu Update Manager derives a third-party changelog URL from the .deb URL.
+    for package, identity in package_versions.items():
+        if identity in published:
+            shutil.copyfile(published[identity], package.with_suffix('.changelog'))
 
 
 def command(*args: str, cwd: Path | None = None, pass_fds: tuple[int, ...] = ()) -> bytes:
@@ -124,11 +131,12 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
 
     with tempfile.TemporaryDirectory(prefix='.pxe-apt-', dir=destination.parent) as temporary:
         stage = Path(temporary) / 'repository'
-        pool = stage / 'pool/main/p/pxe-tools'
+        pool = stage / PACKAGE_POOL
         pool.mkdir(parents=True)
         # A content-addressed filename keeps old package URLs immutable when
         # a later repository revision contains a different package.
         versions = {}
+        package_versions = {}
         current_digests = {}
         base_name = 'pxe-tools' if release_candidate else 'pxe-tools-local-test'
         base_architectures = ('all', 'amd64') if release_candidate or previous is not None else ('all', 'amd64', 'arm64')
@@ -177,6 +185,8 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
                     raise ValueError('both architectures must use the same base version')
                 index_architectures.add('amd64' if architecture == 'all' else architecture)
             versions[expected] = version
+            if release_candidate:
+                package_versions[copied] = expected, version
             if expected == 'pxe-tools-ansible-local-test':
                 depends = [item.strip() for item in field('Depends').split(',')]
                 if 'pxe-tools-local-test (>= 0.0.1~local2)' not in depends or 'ansible-core' not in depends:
@@ -221,7 +231,6 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
         if b'\nValid-Until:' in b'\n' + release or b'\nSHA256:' not in b'\n' + release:
             raise RuntimeError('unexpected APT Release metadata')
         if release_candidate:
-            stage_changelogs(stage)
             release = f'Changelogs: {CHANGELOG_URI}\n'.encode('ascii') + release
         # apt-ftparchive does not emit Valid-Until from its Release options.
         expires = format_datetime(now + timedelta(days=valid_days), usegmt=True)
@@ -319,7 +328,7 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
                 for paragraph in old_packages.strip().split('\n\n'):
                     fields = dict(line.split(': ', 1) for line in paragraph.splitlines() if ': ' in line)
                     filename, digest = fields.get('Filename', ''), fields.get('SHA256', '')
-                    if not re.fullmatch(r'pool/main/p/pxe-tools/pxe-tools-[0-9a-f]{64}\.deb', filename):
+                    if not re.fullmatch(rf'{PACKAGE_POOL}/pxe-tools-[0-9a-f]{{64}}\.deb', filename):
                         raise ValueError('previous index refers to an unexpected package path')
                     old_package = previous_path(filename)
                     if not old_package.is_file() or not re.fullmatch(r'[0-9a-f]{64}', digest):
@@ -329,7 +338,7 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
                             raise ValueError('previous package does not match its signed index')
             # Only immutable, content-addressed objects are carried forward. Old
             # mutable Release and Packages paths must never overwrite the new ones.
-            immutable_roots = [('pool/main/p/pxe-tools', r'pxe-tools-([0-9a-f]{64})\.deb', 'sha256', False)]
+            immutable_roots = [(PACKAGE_POOL, r'pxe-tools-([0-9a-f]{64})\.deb', 'sha256', False)]
             for architecture in old_architectures:
                 prefix = f'dists/stable/main/binary-{architecture}/by-hash'
                 immutable_roots += [
@@ -346,6 +355,12 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
                 target = stage / relative
                 target.mkdir(parents=True, exist_ok=True)
                 for item in source.iterdir():
+                    if (release_candidate and relative == PACKAGE_POOL
+                            and re.fullmatch(r'pxe-tools-[0-9a-f]{64}\.changelog', item.name)
+                            and not item.is_symlink() and item.is_file()
+                            and item.with_suffix('.deb').is_file()):
+                        # Regenerate the notes from the tracked changelog.
+                        continue
                     match = re.fullmatch(pattern, item.name)
                     if not match or item.is_symlink() or not item.is_file():
                         raise ValueError('invalid previous immutable object')
@@ -353,7 +368,8 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
                         digest = hashlib.file_digest(old, algorithm).hexdigest()
                     if digest != match.group(1):
                         raise ValueError('previous immutable object has an invalid digest')
-                    if relative == 'pool/main/p/pxe-tools' and release_candidate:
+                    dest = target / item.name
+                    if relative == PACKAGE_POOL and release_candidate:
                         old_name = command('dpkg-deb', '--field', str(item), 'Package').decode().strip()
                         old_version = command('dpkg-deb', '--field', str(item), 'Version').decode().strip()
                         if old_name not in ('pxe-tools', 'pxe-tools-ansible'):
@@ -362,7 +378,7 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
                         current = current_digests.get((old_name, old_arch))
                         if current is not None and old_version == versions[old_name] and digest != current:
                             raise ValueError('Debian version already has different package bytes')
-                    dest = target / item.name
+                        package_versions[dest] = old_name, old_version
                     if dest.exists():
                         if dest.read_bytes() != item.read_bytes():
                             raise ValueError('immutable object collision')
@@ -371,6 +387,7 @@ def build(package: Path, destination: Path, gnupg_home: Path, fingerprint: str,
         # Cover retained objects as well as the current APT index. The manifest
         # is embedded in signed Release and calculated from canonical paths.
         if release_candidate:
+            stage_changelogs(stage, package_versions)
             rows = []
             for path in sorted(stage.rglob('*'), key=Path.as_posix):
                 if path.is_file() and path.parent != release_dir:
