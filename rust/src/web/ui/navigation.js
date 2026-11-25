@@ -11,8 +11,6 @@
   });
   drawer.addEventListener('close', () => {
     trigger.setAttribute('aria-expanded', 'false');
-    const profile = drawer.querySelector('.profile-menu[open]');
-    if (profile) profile.open = false;
   });
   drawer.addEventListener('click', event => {
     if (event.target === drawer) drawer.close();
@@ -52,70 +50,74 @@
   const panel = document.querySelector('[data-update-phase]');
   if (!notice && !panel) return;
   const pending = ['queued', 'checking', 'install_queued', 'installing'];
-  let refresh = Boolean(panel && pending.includes(panel.dataset.updatePhase));
   const route = '/settings/updates';
-  let attempts = panel ? 150 : 18;
-  const form = panel?.querySelector('[data-update-check]');
+  const actions = panel?.querySelectorAll('[data-update-action]') ?? [];
   const progress = panel?.querySelector('[data-update-progress]');
-  const message = progress?.querySelector('[data-update-message]');
-  const button = form?.querySelector('button');
+  const message = panel?.querySelector('[data-update-message]');
+  const deadline = Date.now() + (panel ? 26 * 60_000 : 90_000);
+  let phase = panel?.dataset.updatePhase;
   let submitting = false;
-  let observedPending = refresh;
 
-  function showCheck() {
+  function announce(text) {
     progress.hidden = false;
-    form?.setAttribute('aria-busy', 'true');
-    button?.setAttribute('aria-disabled', 'true');
+    if (message.textContent !== text) message.textContent = text;
   }
 
-  form?.addEventListener('submit', event => {
-    if (submitting || observedPending) {
-      event.preventDefault();
-      return;
-    }
-    submitting = true;
-    showCheck();
-  });
+  for (const action of actions) {
+    action.addEventListener('submit', event => {
+      if (submitting || pending.includes(phase)) {
+        event.preventDefault();
+        return;
+      }
+      submitting = true;
+      for (const form of actions) form.querySelector('button').disabled = true;
+      const installing = action.dataset.updateAction === 'install';
+      panel.querySelector('[data-update-title]').textContent =
+        installing ? 'Installation en cours' : 'Vérification en cours';
+      panel.querySelector('[data-update-description]').textContent =
+        installing ? 'La console se reconnecte après le redémarrage des services.' : '';
+      announce(installing ? 'Installation planifiée…' : 'Vérification planifiée…');
+    });
+  }
 
-  async function check(automatic) {
+  function stop(messageText) {
+    if (!panel || !pending.includes(phase)) return;
+    progress.querySelector('[role=progressbar]').hidden = true;
+    announce(messageText);
+  }
+
+  async function poll(automatic) {
+    if (submitting) return;
     try {
       const response = automatic
         ? await fetch(route, { method: 'POST', body: new URLSearchParams({ action: 'auto' }) })
         : await fetch(route + '/status', { cache: 'no-store' });
-      if (response.redirected || response.status === 401 || response.status === 403) return;
+      if (response.redirected || [401, 403].includes(response.status)) {
+        stop('Reconnectez-vous pour consulter le résultat de la mise à jour.');
+        return;
+      }
       if (response.ok) {
-        const { phase, available } = await response.json();
-        if (notice) notice.hidden = !available || pending.includes(phase);
-        if (!pending.includes(phase)) {
-          if (panel && observedPending && !submitting) location.reload();
-          return;
-        }
-        if (panel) {
-          observedPending = true;
-          refresh = true;
-          showCheck();
-          if (phase === 'install_queued' || phase === 'installing') {
-            message.textContent = 'Installation des paquets en cours…';
+        const update = await response.json();
+        if (notice) notice.hidden = !update.available || pending.includes(update.phase);
+        if (panel && pending.includes(phase)) {
+          if (!pending.includes(update.phase)) {
+            location.reload();
+            return;
           }
+          phase = update.phase;
+          announce(update.message);
         }
+        if (!pending.includes(update.phase)) return;
       }
     } catch {
-      // The web service may be restarting while APT replaces the package.
+      // The HTTP service can be temporarily unavailable while APT replaces it.
+      if (panel && phase === 'installing') announce('Reconnexion à la console…');
     }
-    if (--attempts > 0) setTimeout(() => check(false), refresh ? 7000 : 5000);
-    else if (panel && observedPending) {
-      progress.querySelector('[role=progressbar]').hidden = true;
-      message.textContent = 'La vérification de l’état attend une réponse. Actualisez cette page pour réessayer.';
-      if (form) {
-        const reload = document.createElement('a');
-        reload.href = route;
-        reload.textContent = 'Actualiser l’état';
-        progress.append(reload);
-      }
-    }
+    if (Date.now() < deadline) setTimeout(() => poll(false), 5000);
+    else stop('La console attend encore une réponse. Actualisez l’état pour reprendre le suivi.');
   }
 
-  check(!refresh);
+  if (notice || pending.includes(phase)) poll(Boolean(notice));
 })();
 
 (() => {

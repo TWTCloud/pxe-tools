@@ -358,6 +358,9 @@ fn profile_menu(account: &Account, section: ConsoleSection) -> String {
         icon(CHEVRON)
     )
     .expect("write to String");
+    html.push_str(r#"<p class="profile-account">"#);
+    escape(&mut html, &account.username);
+    html.push_str("</p>");
     let mut link = |path, label, item, glyph| {
         let current = if section == item {
             r#" aria-current="page""#
@@ -413,7 +416,7 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
     write!(
         layout,
         r#"<a class="brand-link" href="{home}">{brand}</a><span class="masthead-label">Console d’administration</span>
-<button type="button" class="button button--quiet mobile-toggle" aria-haspopup="dialog" aria-controls="mobile-navigation" aria-expanded="false">{} Menu</button>"#,
+<button type="button" class="button button--quiet mobile-toggle" aria-label="Ouvrir le menu de navigation" aria-haspopup="dialog" aria-controls="mobile-navigation" aria-expanded="false">{}<span>Menu</span></button>"#,
         icon(MENU),
     )
     .expect("write to String");
@@ -446,7 +449,7 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
         layout,
         r#"</header><dialog id="mobile-navigation" class="mobile-drawer" aria-label="Navigation PXE Tools">
 <div class="drawer-body"><div class="drawer-header">{brand}<form method="dialog"><button type="submit" class="button button--quiet drawer-close" aria-label="Fermer le menu" autofocus>{}</button></form></div>
-{profile}<nav class="rail" aria-label="Navigation principale">{navigation}</nav>"#,
+<nav class="rail" aria-label="Navigation principale">{navigation}</nav>"#,
         icon(CLOSE)
     )
     .expect("write to String");

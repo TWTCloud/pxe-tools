@@ -15,6 +15,15 @@ pub(crate) struct State {
     pub installed: BTreeMap<String, String>,
     pub candidates: BTreeMap<String, String>,
     pub checked_at: i64,
+    pub step: Option<Step>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Step {
+    Verify,
+    Download,
+    Apply,
 }
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
