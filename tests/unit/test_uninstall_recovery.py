@@ -447,7 +447,18 @@ def stable_nginx_lock(root=Path('/'), *, owner=0):
         packaged = self.root / 'usr/lib/systemd/system' / unit
         packaged.write_bytes((ROOT / 'rust/packaging' / unit).read_bytes())
         self.fixture.systemd.active[unit] = 'inactive'
-        self.interrupt_after_purge()
+        original_capture = self.fixture.life.capture
+
+        def capture(version):
+            # The installed upgrade helper records the core units only.
+            state = original_capture(version)
+            del state['units'][unit]
+            del state['active'][unit]
+            self.fixture.life.save(state)
+            return state
+
+        with patch.object(self.fixture.life, 'capture', side_effect=capture):
+            self.interrupt_after_purge()
         packaged.unlink()  # Model removal of this additional package unit.
         mask = self.root / 'etc/systemd/system' / unit
         self.assertTrue(mask.is_symlink())
