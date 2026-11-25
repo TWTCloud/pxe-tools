@@ -7,7 +7,7 @@ use super::{
     ui::{page, status_badge, ConsoleSection},
     ErrorBox, Reply,
 };
-use crate::connect;
+use crate::{connect, media};
 use hyper::{Method, Response, StatusCode};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 use serde::Serialize;
@@ -56,6 +56,17 @@ impl View {
             Self::Retry(_) => *method == Method::POST,
             _ => matches!(*method, Method::GET | Method::HEAD),
         }
+    }
+
+    pub(super) fn is_redhat_media(&self, db: &Connection) -> rusqlite::Result<bool> {
+        let (Self::Detail(id) | Self::Poll(id) | Self::Status(id)) = self else {
+            return Ok(false);
+        };
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM init_jobs WHERE id=?1 AND job_type=?2)",
+            rusqlite::params![id, media::REDHAT_JOB],
+            |row| row.get(0),
+        )
     }
 
     pub(super) fn serve(
@@ -146,12 +157,12 @@ fn retry(db_path: &Path, id: i64) -> Result<Reply, ErrorBox> {
         "UPDATE init_jobs SET status='pending', started_at=NULL, ended_at=NULL,
            updated_at=NULL, progress_percent=0, message=NULL,
            log=CASE WHEN job_type LIKE 'image:delete:%' THEN log ELSE '' END
-         WHERE id=?1 AND status='failed'
+         WHERE id=?1 AND status='failed' AND job_type<>?2
            AND NOT EXISTS (
              SELECT 1 FROM init_jobs AS active
              WHERE active.job_type=init_jobs.job_type AND active.status IN ('pending','running')
            )",
-        [id],
+        rusqlite::params![id, media::REDHAT_JOB],
     )?;
     Ok(redirect(StatusCode::SEE_OTHER, format!("/jobs/{id}")))
 }
@@ -180,7 +191,8 @@ pub(super) fn title(kind: &str) -> &str {
         "bootstrap:cleanup_per_mac_files" => "Nettoyage des fichiers temporaires",
         "system:factory_reset_wipe" => "Remise à zéro du serveur",
         "system:nginx_reload" => "Mise à jour de l’interface",
-        "media:prepare" => "Préparation d’un média",
+        media::JOB => "Préparation d’un média",
+        media::REDHAT_JOB => "Téléchargement et préparation de RHEL",
         kind if kind.starts_with("image:delete:") => "Suppression d’une image",
         kind if kind.starts_with("preset:push_github:") => "Sauvegarde du modèle sur GitHub",
         kind if kind.starts_with("preset:delete_github:") => "Suppression du modèle sur GitHub",
@@ -276,23 +288,53 @@ fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
         return Ok(plain(StatusCode::NOT_FOUND, "Tâche introuvable\n"));
     };
     let mut html = String::from("<dl><dt>Type</dt><dd>");
-    escape(&mut html, &job.job_type);
+    let redhat = job.job_type == media::REDHAT_JOB;
+    escape(&mut html, if redhat { "DVD RHEL" } else { &job.job_type });
     html.push_str("</dd><dt>État</dt><dd>");
     status_badge(
         &mut html,
         &job.status,
         super::activity::status_label(&job.status),
     );
-    write!(
-        html,
-        "</dd><dt>Progression</dt><dd>{} %</dd></dl><p>",
-        job.progress_percent
-    )?;
-    escape(&mut html, job.message.as_deref().unwrap_or_default());
-    html.push_str("</p><pre>");
-    escape(&mut html, &log);
-    html.push_str("</pre>");
-    if job.status == "failed" {
+    if redhat {
+        let active = matches!(job.status.as_str(), "pending" | "running");
+        let poll = if active {
+            format!(
+                r#" data-rhel-job="/jobs/{id}/status" data-rhel-state="{}""#,
+                job.status
+            )
+        } else {
+            String::new()
+        };
+        write!(html, r#"</dd></dl><div{poll}><p role="status">"#)?;
+        escape(&mut html, job.message.as_deref().unwrap_or_default());
+        write!(
+            html,
+            r#"</p><div class="image-progress"><progress aria-label="Progression de la préparation" max="100" value="{0}"></progress><span>{0} %</span></div></div>"#,
+            job.progress_percent
+        )?;
+        if job.status == "failed" {
+            write!(
+                html,
+                r#"<p><a href="{}">Relancer avec un jeton Red Hat</a></p>"#,
+                media::REDHAT_ROUTE
+            )?;
+        }
+    } else {
+        write!(
+            html,
+            "</dd><dt>Progression</dt><dd>{} %</dd></dl><p>",
+            job.progress_percent
+        )?;
+        escape(&mut html, job.message.as_deref().unwrap_or_default());
+        html.push_str("</p>");
+    }
+    if !redhat || !log.is_empty() {
+        html.push_str("<pre>");
+        escape(&mut html, &log);
+        html.push_str("</pre>");
+    }
+    if job.status == "failed" && !redhat {
         write!(
             html,
             r#"<form method="post" action="/api/init-retry-job/{id}"><button>Relancer la tâche</button></form>"#
@@ -309,9 +351,14 @@ fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
             )
             .body(bytes(html))?);
     }
+    let (back, label) = if redhat {
+        (media::REDHAT_ROUTE, "Télécharger RHEL")
+    } else {
+        ("/jobs", "Tâches")
+    };
     write!(
         html,
-        r#"<nav><a href="/jobs/{id}">Actualiser</a> · <a href="/jobs">Tâches</a></nav>"#
+        r#"<nav><a href="/jobs/{id}">Actualiser</a> · <a href="{back}">{label}</a></nav>"#
     )?;
     Ok(page(
         ConsoleSection::Jobs,

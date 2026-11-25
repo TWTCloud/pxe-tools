@@ -208,3 +208,31 @@
 
   setTimeout(refresh, 5000);
 })();
+
+(() => {
+  const panel = document.querySelector('[data-rhel-job]');
+  if (!panel) return;
+
+  async function refresh() {
+    try {
+      const response = await fetch(panel.dataset.rhelJob, { cache: 'no-store' });
+      if (response.redirected || [401, 403, 404].includes(response.status)) return;
+      if (response.ok) {
+        const { status, message, progress_percent } = await response.json();
+        if (status !== panel.dataset.rhelState) {
+          location.reload();
+          return;
+        }
+        const label = panel.querySelector('[role="status"]');
+        if (message && message !== label.textContent) label.textContent = message;
+        panel.querySelector('progress').value = progress_percent;
+        panel.querySelector('span').textContent = progress_percent + ' %';
+      }
+    } catch {
+      // Keep showing the last reported progress until the console responds again.
+    }
+    setTimeout(refresh, 2500);
+  }
+
+  setTimeout(refresh, 1000);
+})();
