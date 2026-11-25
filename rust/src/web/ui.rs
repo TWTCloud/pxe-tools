@@ -99,11 +99,6 @@ const NAVIGATION: [(&str, &[NavLink]); 2] = [
 ];
 
 pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply {
-    let caption = NAVIGATION
-        .iter()
-        .flat_map(|(_, links)| *links)
-        .find(|(_, _, item, _)| *item == section)
-        .map_or("", |(_, label, _, _)| *label);
     let logout = matches!(
         std::env::var("AUTH_MODE").unwrap_or_default().as_str(),
         "" | "local"
@@ -114,8 +109,8 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
     );
     write!(
         layout,
-        r#"<button type="button" class="button button--quiet mobile-toggle" aria-haspopup="dialog" aria-controls="mobile-navigation" aria-expanded="false">{} Menu</button>
-<a class="brand-link" href="/admin/devices">{brand}</a><span class="masthead-label">Console d’administration</span><span class="masthead-section">{caption}</span>"#,
+        r#"<a class="brand-link" href="/admin/devices">{brand}</a><span class="masthead-label">Console d’administration</span>
+<button type="button" class="button button--quiet mobile-toggle" aria-haspopup="dialog" aria-controls="mobile-navigation" aria-expanded="false">{} Menu</button>"#,
         icon(MENU),
     )
     .expect("write to String");
@@ -188,7 +183,7 @@ fn document(class: &str, title: &str, layout: &str, status: StatusCode) -> Reply
     write!(
         html,
         r#" · PXE Tools</title><link rel="icon" type="image/svg+xml" href="{MARK}">
-<link rel="stylesheet" href="/console-assets/style.css?v=4"></head><body class="{class}">{layout}"#
+<link rel="stylesheet" href="/console-assets/style.css?v=5"></head><body class="{class}">{layout}"#
     )
     .expect("write to String");
     let policy = if class == "console" {
