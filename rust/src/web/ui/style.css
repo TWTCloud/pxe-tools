@@ -280,6 +280,7 @@ tbody tr:hover { background: #f7faff; }
   .rail a { padding: .35rem .5rem; font-size: .82rem; }
   .console-main > table { display: block; }
   .table-region > table:has(.table-empty) { min-width: 0; }
+  .table-region > table:has(.table-empty) thead { display: none; }
   th, td { padding: .65rem .75rem; }
   .table-empty { padding: 1.65rem .85rem; }
 }
