@@ -617,7 +617,21 @@ def verify_restored_console(secure, private, admin, database, plan):
         assert config['apt'] == {'non_free': True}
         assert config['packages'] == {'pkgsel_include': []}
         assert config['localization'] == {'locale': 'en_US.UTF-8', 'keymap': 'us'}
-    print('Restored network settings, overview, advanced preset options and duplication verified.')
+        simple = db.execute(
+            """INSERT INTO presets(name,distro,codename,admin_user_login,admin_user_pwhash)
+               VALUES('modele-guide','debian','trixie','setup','fixture-hash') RETURNING id""",
+        ).fetchone()[0]
+        db.execute("INSERT INTO machines(mac,hostname,status) VALUES('02:00:00:00:20:07','server_xyz','installed')")
+        db.execute("INSERT INTO machines(mac,hostname,status) VALUES('02:00:00:00:20:08','server-xyz','discovered')")
+    guided = f'/presets/{simple}/options'
+    assert request(guided, **secure, form={'keymap': 'us'}, headers=admin)[:2] == (303, guided)
+    preset_list = request('/presets', **secure, headers=admin)[2]
+    assert re.search(rb'modele-guide</a></td><td>[^<]+</td><td>Compatible', preset_list)
+    inventory = request('/admin/devices?' + urlencode({'q': 'SERVER_'}), **secure, headers=admin)[2]
+    assert b'server_xyz' in inventory and b'server-xyz' not in inventory
+    inventory = request('/admin/devices?status=discovered', **secure, headers=admin)[2]
+    assert b'server-xyz' in inventory and b'server_xyz' not in inventory
+    print('Restored network settings, overview, inventory filters, preset options and duplication verified.')
 
 
 def main(binary):

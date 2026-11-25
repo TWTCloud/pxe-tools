@@ -20,7 +20,22 @@ pub(super) const GUIDED: &str = "distro='debian' AND variant='debian' AND networ
      AND partition_mode='default' AND root_login_mode='disabled'
      AND COALESCE(pre_wipe_mode,'aucun') IN ('aucun','none') AND COALESCE(pre_wipe_mode_json,'')=''
      AND COALESCE(ansible_role,'')='' AND COALESCE(ansible_extra_vars,'')=''
-     AND COALESCE(advanced_config_json,'') IN ('','{}','[]')
+     AND CASE WHEN COALESCE(advanced_config_json,'') IN ('','{}','[]') THEN 1
+         WHEN json_valid(advanced_config_json) THEN json_type(advanced_config_json)='object'
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(advanced_config_json) section
+             WHERE section.type<>'object' OR section.key NOT IN ('localization','timezone','mirror','packages')
+               OR EXISTS (
+                 SELECT 1 FROM json_each(CASE WHEN section.type='object' THEN section.value ELSE '{}' END) option
+                 WHERE NOT (
+                   (section.key='localization' AND option.key IN ('locale','keymap') AND option.type='text')
+                   OR (section.key='timezone' AND option.key IN ('zone','ntp_server') AND option.type='text')
+                   OR (section.key='mirror' AND option.key IN ('hostname','directory') AND option.type='text')
+                   OR (section.key='packages' AND option.key='pkgsel_include' AND option.type='array')
+                 )
+               )
+           )
+         ELSE 0 END
      AND COALESCE(NULLIF(admin_user_groups,''),'sudo')='sudo'
      AND (codename IS NULL OR codename='' OR codename='trixie')
      AND COALESCE(admin_user_pwhash,'')<>''";

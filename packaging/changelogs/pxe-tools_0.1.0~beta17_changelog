@@ -1,6 +1,7 @@
 pxe-tools (0.1.0~beta17) stable; urgency=medium
 
   * Rétablir la vue d’ensemble et les réglages réseau PXE après l’assistant.
+  * Rétablir la recherche et le filtre par état dans l’inventaire.
   * Dupliquer les modèles et retrouver leurs réglages de localisation, miroir et paquets.
 
  -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
