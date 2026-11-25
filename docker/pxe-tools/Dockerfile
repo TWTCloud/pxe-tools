@@ -279,6 +279,7 @@ COPY rust/ rust/
 COPY app/db/schema.sqlite.sql app/db/schema.sqlite.sql
 COPY app/public/favicon.svg app/public/favicon.svg
 COPY app/public/fonts/mona-sans-latin-wght-normal.woff2 app/public/fonts/
+COPY app/public/img/distros/*.svg app/public/img/distros/
 COPY app/src/Views/pxe/wipe.sh.php app/src/Views/pxe/wipe.sh.php
 COPY docker/worker/templates/preseed.php.j2 docker/worker/templates/preseed-base.cfg.j2 docker/worker/templates/grub.php.j2 docker/worker/templates/
 COPY packaging/ci/collect-rust-notices.py /source/collect-rust-notices.py
