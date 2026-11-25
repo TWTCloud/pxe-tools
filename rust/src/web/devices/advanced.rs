@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{escape, page, plain, record_plan, redirect, Device, ErrorBox, Reply};
+use crate::web::ui::ConsoleSection;
 use crate::{connect, install, migrations, preseed, pxe};
 use hyper::StatusCode;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
@@ -71,6 +72,7 @@ pub(super) fn form(db: &Connection, id: i64, device: &Device) -> Result<Reply, E
     }
     html.push_str("</select></label></p><button>Vérifier les disques</button></form>");
     Ok(page(
+        ConsoleSection::Devices,
         "Installation Debian avec partition personnalisée",
         &html,
     ))
@@ -229,7 +231,11 @@ pub(super) fn submit(
                 html.push_str(r#"<p><label>Saisissez EFFACER pour confirmer le pré-effacement <input name="erase" autocomplete="off" required></label></p>"#);
             }
             html.push_str("<button>Programmer l’installation</button></form>");
-            Ok(page("Vérifier la partition Debian", &html))
+            Ok(page(
+                ConsoleSection::Devices,
+                "Vérifier la partition Debian",
+                &html,
+            ))
         }
         Route::Form => {
             if selection.review != fingerprint {

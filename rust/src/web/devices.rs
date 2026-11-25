@@ -13,7 +13,8 @@ use super::{
     device_operations::{self, Operation},
     plain,
     presets::GUIDED,
-    setup::{page, redirect},
+    setup::redirect,
+    ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::{connect, disk_identity, preseed, pxe, setting};
@@ -28,6 +29,7 @@ use std::{fmt::Write, net::Ipv4Addr, path::Path};
 pub(super) fn register(path: &Path, form: Option<&[u8]>) -> Result<Reply, ErrorBox> {
     let Some(form) = form else {
         return Ok(page(
+            ConsoleSection::Devices,
             "Ajouter un appareil",
             r#"
 <form method="post" action="/machines">
@@ -346,7 +348,7 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
         output.push_str("</li>");
     }
     output.push_str("</ul>");
-    Ok(page("Appareil", &output))
+    Ok(page(ConsoleSection::Devices, "Appareil", &output))
 }
 
 fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> {
@@ -405,7 +407,11 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
         output,
         r#"<p><a href="/machines/{id}/install/advanced">Utiliser un modèle de partition personnalisée</a></p>"#
     )?;
-    Ok(page("Installation Debian guidée", &output))
+    Ok(page(
+        ConsoleSection::Devices,
+        "Installation Debian guidée",
+        &output,
+    ))
 }
 
 #[derive(serde::Deserialize)]

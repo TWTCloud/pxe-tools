@@ -9,7 +9,8 @@ use crate::{
         admin::escape,
         linux_boot::{self, Entry, RhelRepositories},
         plain,
-        setup::{page, redirect},
+        setup::redirect,
+        ui::{page, ConsoleSection},
         ErrorBox, Reply,
     },
 };
@@ -73,7 +74,7 @@ fn form(
     )?;
     let disks: Vec<_> = serial_disks(device).collect();
     if entries.is_empty() || disks.is_empty() {
-        return Ok(page(title, "<p>Une image de l’architecture de l’appareil et un disque avec un numéro de série unique sont nécessaires.</p>"));
+        return Ok(page(ConsoleSection::Devices, title, "<p>Une image de l’architecture de l’appareil et un disque avec un numéro de série unique sont nécessaires.</p>"));
     }
     let mut html = format!(
         r#"<form method="post" action="/machines/{id}/install/linux">
@@ -100,7 +101,7 @@ fn form(
 <label>Confirmer le mot de passe <input name="password_confirm" type="password" autocomplete="new-password" required></label>
 <p><label><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE UEFI</label></p>
 <button>Programmer l’installation</button></form>"#);
-    Ok(page(title, &html))
+    Ok(page(ConsoleSection::Devices, title, &html))
 }
 
 #[derive(Deserialize)]

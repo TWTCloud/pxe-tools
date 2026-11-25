@@ -2,7 +2,8 @@
 
 use super::{
     admin, ansible_settings, plain,
-    setup::{page, redirect},
+    setup::redirect,
+    ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::{connect, setting, worker::factory_reset as reset_job};
@@ -218,7 +219,7 @@ impl Route {
 <p>Les comptes, paramètres, modèles, inventaires, images de démarrage et clés MOK de cette instance seront supprimés. Le PXE sera désactivé. Accédez ensuite à la console locale avec le code de configuration pour recréer le compte.</p>
 <p><label>Saisissez REINITIALISER <input name="confirm" required autocomplete="off"></label></p>
 <button>Réinitialiser l’appliance</button></form></details>"#);
-        Ok(page("Paramètres PXE", &html))
+        Ok(page(ConsoleSection::Settings, "Paramètres PXE", &html))
     }
 
     fn ipxe(self, db: &Connection) -> Result<Reply, ErrorBox> {
@@ -233,7 +234,7 @@ impl Route {
 <button>Enregistrer</button></form>"#
         );
         add_jobs(&mut html, db, "ipxe_job_ids")?;
-        Ok(page("Démarrage iPXE", &html))
+        Ok(page(ConsoleSection::Settings, "Démarrage iPXE", &html))
     }
 }
 

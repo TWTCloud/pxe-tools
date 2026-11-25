@@ -47,7 +47,8 @@ def media(root, profile, edition, label, index):
     }))
 
 
-def request(path, *, tls=None, source=None, form=None, headers=None, method=None, host=None):
+def request(path, *, tls=None, source=None, form=None, headers=None, method=None, host=None,
+            response_header='Location'):
     binding = (source, 0) if source else None
     if tls:
         connection = HTTPSConnection(host or '127.0.0.1', HTTPS, context=tls, timeout=2, source_address=binding)
@@ -57,7 +58,7 @@ def request(path, *, tls=None, source=None, form=None, headers=None, method=None
         connection.request(method or ('GET' if form is None else 'POST'), path,
                            None if form is None else urlencode(form), headers=headers or {})
         response = connection.getresponse()
-        return response.status, response.getheader('Location'), response.read()
+        return response.status, response.getheader(response_header), response.read()
     finally:
         connection.close()
 
@@ -346,6 +347,12 @@ def check_lan(binary, root, tls, env):
             assert request('/', **private, headers={'Host': 'other.invalid'})[:2] == (302, origin+'/admin/')
             assert request('/admin/', **secure)[:2] == (302, '/init/welcome')
             assert request('/init/welcome', host=LAN, source=OUTSIDE_CLIENT, tls=tls)[0] == 404
+            style_status, _, style = request('/console-assets/style.css', **secure)
+            assert style_status == 200 and b'.auth-layout' in style and b'.workspace' in style
+            assert request('/console-assets/style.css', **private)[0] == 404
+            assert request('/console-assets/private', **secure)[0] == 404
+            status, policy, login = request('/login', **secure, response_header='Referrer-Policy')
+            assert status == 200 and policy == 'same-origin' and b'/console-assets/style.css' in login
             try:
                 request('/healthz', tls=tls, host=CDN)
             except ConnectionRefusedError:
@@ -364,7 +371,8 @@ def check_lan(binary, root, tls, env):
             authorization = base64.b64encode(b'lan-admin:fixture-lan-password').decode()
             admin = {'Authorization': 'Basic ' + authorization, **headers}
             assert request('/init/network', **secure, form={'role':'console'}, headers=admin)[:2] == (303,'/init/done')
-            assert request('/admin/devices', **secure, headers=admin)[0] == 200
+            status, _, console = request('/admin/devices', **secure, headers=admin)
+            assert status == 200 and b'class="rail"' in console and b'aria-current="page"' in console
             assert request('/pxe/linux/amd64/grub.cfg', **private)[0] == 404
         finally:
             service.terminate()

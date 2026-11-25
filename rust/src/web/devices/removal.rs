@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{page, plain, redirect, ErrorBox, Reply};
+use crate::web::ui::ConsoleSection;
 use crate::{connect, menu_store::Menus};
 use hyper::{Method, StatusCode};
 use rusqlite::{params, OpenFlags, OptionalExtension, TransactionBehavior};
@@ -73,6 +74,7 @@ pub(super) fn bulk(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
     }
     match remove_selected(path, &ids) {
         Ok(result) => Ok(page(
+            ConsoleSection::Devices,
             "Suppression par lots",
             &format!(
                 r#"<p>{} appareil(s) supprimé(s), dont {} en cours d’opération. {} appareil(s) déjà absent(s).</p><a href="/admin/devices">Revenir aux appareils</a>"#,

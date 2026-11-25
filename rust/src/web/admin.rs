@@ -4,7 +4,9 @@ use super::{
     auth_proxy::TrustedProxies,
     bytes, plain,
     sessions::{self, Sessions},
-    single, Reply,
+    single,
+    ui::{self, ConsoleSection},
+    Reply,
 };
 use crate::{configured_database, connect};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -396,20 +398,7 @@ impl Console {
                             .expect("valid settings redirect"),
                     );
                 }
-                let output = render_devices(&db, page).ok()?;
-                Some(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .header("Content-Type", "text/html; charset=utf-8")
-                        .header("Cache-Control", "no-store")
-                        .header("X-Content-Type-Options", "nosniff")
-                        .header(
-                            "Content-Security-Policy",
-                            "default-src 'none'; frame-ancestors 'none'; form-action 'self'",
-                        )
-                        .body(bytes(output))
-                        .expect("valid console response"),
-                )
+                render_devices(&db, page).ok()
             })();
             (reply, authenticated)
         })
@@ -525,7 +514,7 @@ pub(super) fn terminology_form(html: &mut String, action: &str, term: &str) {
     html.push_str("</select><button>Enregistrer</button></form>");
 }
 
-fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
+fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<Reply> {
     let term = crate::setting(db, "ui_device_term")?;
     let (term, _, label) = DEVICE_TERMS
         .iter()
@@ -535,25 +524,16 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
         "SELECT COALESCE(hostname,''), mac, status, id FROM machines ORDER BY id LIMIT ? OFFSET ?",
     )?;
     let mut rows = rows.query([PAGE_SIZE as u64 + 1, u64::from(page - 1) * PAGE_SIZE as u64])?;
-    let mut html = format!(
-        r#"<!doctype html><html lang="fr"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>{label} · PXE Tools</title>
-<main><h1>{label}</h1>"#
+    let mut html = String::from(
+        r#"<nav class="device-actions" aria-label="Actions de l’inventaire">
+<a class="button" href="/machines/new">Ajouter un appareil</a>
+<a class="button button--quiet" href="/machines/bulk">Déployer par lots</a>
+<a class="button button--quiet" href="/machines/bulk-delete">Supprimer par lots</a></nav>"#,
     );
-    terminology_form(&mut html, DEVICE_SETTINGS, term);
-    html.push_str(r#"<nav><a href="/machines/new">Ajouter un appareil</a> · <a href="/machines/bulk">Déployer par lots</a> · <a href="/machines/bulk-delete">Supprimer par lots</a> · <a href="/activity">Activité</a> · <a href="/jobs">Tâches</a> · <a href="/presets">Modèles</a> · <a href="/settings/images">Images PXE</a> · <a href="/settings">Paramètres</a> · <a href="/admin/certificates">Certificats TLS</a></nav>"#);
-    if matches!(
-        std::env::var("AUTH_MODE").unwrap_or_default().as_str(),
-        "" | "local"
-    ) {
-        html.push_str(
-            r#"<form method="post" action="/logout"><button>Se déconnecter</button></form>"#,
-        );
-    }
     if crate::setting(db, "wizard_completed")? != "1" {
         html.push_str(r#"<p><a href="/init/network">Poursuivre la configuration initiale</a></p>"#);
     }
-    html.push_str("<table><thead><tr><th>Nom d’hôte</th><th>Adresse MAC</th><th>État</th></tr></thead><tbody>");
+    html.push_str(r#"<div class="table-region" role="region" aria-label="Inventaire des appareils" tabindex="0"><table><thead><tr><th scope="col">Nom d’hôte</th><th scope="col">Adresse MAC</th><th scope="col">État</th></tr></thead><tbody>"#);
     let mut count = 0;
     let mut has_next = false;
     while let Some(row) = rows.next()? {
@@ -573,29 +553,40 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<String> {
             },
         );
         html.push_str("</a></td>");
-        for column in 1..3 {
-            html.push_str("<td>");
-            escape(&mut html, &row.get::<_, String>(column)?);
-            html.push_str("</td>");
-        }
+        html.push_str(r#"<td class="table-mac">"#);
+        escape(&mut html, &row.get::<_, String>(1)?);
+        html.push_str(r#"</td><td><span class="device-state">"#);
+        escape(&mut html, &row.get::<_, String>(2)?);
+        html.push_str("</span></td>");
         html.push_str("</tr>");
         count += 1;
     }
-    html.push_str("</tbody></table><nav aria-label=\"Pagination\">");
-    if page > 1 {
-        html.push_str(&format!(
-            r#"<a rel="prev" href="/admin/devices?page={}">Précédente</a> "#,
-            page - 1
-        ));
+    if count == 0 {
+        html.push_str(r#"<tr><td colspan="3" class="table-empty"><strong>Aucun appareil dans l’inventaire</strong>Les appareils détectés par PXE apparaîtront ici.</td></tr>"#);
     }
-    if has_next && page < u32::MAX {
-        html.push_str(&format!(
-            r#"<a rel="next" href="/admin/devices?page={}">Suivante</a>"#,
-            page + 1
-        ));
+    html.push_str("</tbody></table></div>");
+    if page > 1 || has_next {
+        html.push_str(r#"<nav aria-label="Pagination">"#);
+        if page > 1 {
+            html.push_str(&format!(
+                r#"<a rel="prev" href="/admin/devices?page={}">Précédente</a> "#,
+                page - 1
+            ));
+        }
+        if has_next && page < u32::MAX {
+            html.push_str(&format!(
+                r#"<a rel="next" href="/admin/devices?page={}">Suivante</a>"#,
+                page + 1
+            ));
+        }
+        html.push_str("</nav>");
     }
-    html.push_str("</nav></main></html>");
-    Ok(html)
+    html.push_str(
+        r#"<details class="device-preferences"><summary>Appellation dans la console</summary>"#,
+    );
+    terminology_form(&mut html, DEVICE_SETTINGS, term);
+    html.push_str("</details>");
+    Ok(ui::page(ConsoleSection::Devices, label, &html))
 }
 
 pub(super) fn escape(output: &mut String, value: &str) {

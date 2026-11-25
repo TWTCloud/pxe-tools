@@ -3,7 +3,8 @@
 use super::{
     admin::escape,
     plain,
-    setup::{page, redirect},
+    setup::redirect,
+    ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::{
@@ -84,13 +85,18 @@ pub(super) fn serve(
         (Route::Add, None) => catalog_form(db, ROUTE)
             .map(|form| {
                 page(
+                    ConsoleSection::Images,
                     "Ajouter une image",
                     &format!("{form}<p><a href=\"{ROUTE}\">Images PXE</a></p>"),
                 )
             })
             .map_err(Into::into),
-        (Route::Status, None) => table(db, number).map(|html| page("Images PXE", &html)),
-        (Route::RefreshStatus, None) => refresh_button(db).map(|html| page("Catalogue PXE", &html)),
+        (Route::Status, None) => {
+            table(db, number).map(|html| page(ConsoleSection::Images, "Images PXE", &html))
+        }
+        (Route::RefreshStatus, None) => {
+            refresh_button(db).map(|html| page(ConsoleSection::Images, "Catalogue PXE", &html))
+        }
         (_, Some(form)) => update(route, method, path, form),
         _ => Ok(plain(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -106,18 +112,23 @@ pub(super) fn serve(
 fn media_form(db: &Connection) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
         r#"<nav><a href="/settings/images">Catalogue des images</a> · <a href="/settings/windows">Éditions Windows</a></nav>
-<form method="post" action="/settings/images/media">
-<label>Type de média <select name="kind" required>
+<form class="media-form" method="post" action="/settings/images/media">
+<div class="field"><label for="media-kind">Type de média</label><select id="media-kind" name="kind" required>
 <option value="rhel9">DVD RHEL 9</option>
 <option value="windows-iso">ISO Windows</option>
 <option value="windows-wim">Fichier install.wim</option>
 <option value="windows-esd">Fichier install.esd</option>
 <option value="winpe">Archive WinPE préparée</option>
-</select></label>
-<label>Nom du fichier sur le serveur ou URL HTTPS autorisée <input name="source" maxlength="4096" required></label>
-<label>Empreinte SHA-256 de la source <input name="sha256" pattern="[A-Fa-f0-9]{64}" required></label>
-<label>Identifiant de l’édition pour une archive WinPE <input name="profile" pattern="[a-z0-9-]{1,40}"></label>
-<button>Préparer le média</button>
+</select></div>
+<div class="field"><label for="media-source">Source du média</label>
+<input id="media-source" name="source" maxlength="4096" aria-describedby="media-source-help" required>
+<small id="media-source-help">Nom du fichier sur le serveur ou URL HTTPS autorisée.</small></div>
+<div class="field"><label for="media-sha">Empreinte SHA-256</label>
+<input id="media-sha" name="sha256" pattern="[A-Fa-f0-9]{64}" required></div>
+<div class="field"><label for="media-profile">Identifiant de l’édition</label>
+<input id="media-profile" name="profile" pattern="[a-z0-9-]{1,40}" aria-describedby="media-profile-help">
+<small id="media-profile-help">Pour une archive WinPE uniquement.</small></div>
+<div class="media-submit"><button>Préparer le média</button></div>
 </form>
 <p>Les fichiers locaux se placent dans le dossier privé <code>media/inbox</code> du stockage HTTP PXE. Importez le fichier Windows avant l’archive WinPE de l’édition.</p>"#,
     );
@@ -131,8 +142,14 @@ fn media_form(db: &Connection) -> Result<Reply, ErrorBox> {
         "SELECT id,status,message FROM init_jobs WHERE job_type=?1 ORDER BY id DESC LIMIT 10",
     )?;
     let mut rows = jobs.query([crate::media::JOB])?;
-    html.push_str("<h2>Préparations récentes</h2><ul>");
-    while let Some(row) = rows.next()? {
+    html.push_str("<h2>Préparations récentes</h2>");
+    let mut next = rows.next()?;
+    if next.is_none() {
+        html.push_str(r#"<p class="muted">Aucune préparation lancée.</p>"#);
+        return Ok(page(ConsoleSection::Images, "Préparer un média PXE", &html));
+    }
+    html.push_str("<ul>");
+    while let Some(row) = next {
         let id: i64 = row.get(0)?;
         write!(html, "<li><a href=\"/jobs/{id}\">Tâche {id}</a> · ")?;
         escape(&mut html, &row.get::<_, String>(1)?);
@@ -142,9 +159,10 @@ fn media_form(db: &Connection) -> Result<Reply, ErrorBox> {
             &row.get::<_, Option<String>>(2)?.unwrap_or_default(),
         );
         html.push_str("</li>");
+        next = rows.next()?;
     }
     html.push_str("</ul>");
-    Ok(page("Préparer un média PXE", &html))
+    Ok(page(ConsoleSection::Images, "Préparer un média PXE", &html))
 }
 
 fn queue_media(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
@@ -394,7 +412,7 @@ fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     html.push_str("</select></label><button>Enregistrer</button></form>");
     html.push_str(&refresh_button(db)?);
     html.push_str(&table(db, number)?);
-    Ok(page("Images PXE", &html))
+    Ok(page(ConsoleSection::Images, "Images PXE", &html))
 }
 
 fn refresh_button(db: &Connection) -> Result<String, ErrorBox> {

@@ -5,7 +5,8 @@ pub(super) mod progress;
 use super::{
     admin::escape,
     bytes, plain,
-    setup::{page, redirect},
+    setup::redirect,
+    ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::{connect, monitoring::Catalog};
@@ -523,7 +524,7 @@ fn list(db: &Connection, filter: &Filter, number: u32, fragment: bool) -> Result
         form.push_str("</select></label> ");
     }
     write!(form, "<input type=\"hidden\" name=\"machine\" value=\"{}\"><button>Filtrer</button> <a href=\"/activity\">Réinitialiser</a></form>{section}", filter.machine)?;
-    Ok(page("Activité", &form))
+    Ok(page(ConsoleSection::Activity, "Activité", &form))
 }
 
 fn task(db: &Connection, id: i64, catalog: &Catalog, fragment: bool) -> Result<Reply, ErrorBox> {
@@ -597,7 +598,7 @@ fn task(db: &Connection, id: i64, catalog: &Catalog, fragment: bool) -> Result<R
             .body(bytes(output))?);
     }
     output.push_str("<a href=\"/activity\">Activité</a>");
-    Ok(page("Suivi de la tâche", &output))
+    Ok(page(ConsoleSection::Activity, "Suivi de la tâche", &output))
 }
 
 fn operation(db: &Connection, id: i64, kind: &Operation) -> Result<Reply, ErrorBox> {
@@ -644,5 +645,5 @@ fn operation(db: &Connection, id: i64, kind: &Operation) -> Result<Reply, ErrorB
         write!(output, "<details><summary>Clôturer le suivi</summary><form method=\"post\" action=\"/installations/{id}/cancel\"><p>Cette commande clôture le suivi dans PXE Tools. L’installation peut continuer sur l’appareil.</p><button>Confirmer la clôture</button></form></details>")?;
     }
     output.push_str("<a href=\"/activity\">Activité</a>");
-    Ok(page(title, &output))
+    Ok(page(ConsoleSection::Activity, title, &output))
 }

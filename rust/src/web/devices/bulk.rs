@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{advanced, escape, page, removal, Device, ErrorBox, Reply};
+use crate::web::ui::ConsoleSection;
 use crate::{connect, install, migrations, preseed, pxe, web::jobs::json_reply};
 use hyper::{Method, StatusCode};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
@@ -140,7 +141,11 @@ fn selection_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     let next = device_checkboxes(db, number, &mut html)?;
     html.push_str("<p><label><input type=\"checkbox\" name=\"wake_now\" value=\"1\"> Demander le redémarrage des appareils</label></p><button>Vérifier les cibles</button></form>");
     pagination(&mut html, "/machines/bulk", number, next)?;
-    Ok(page("Déploiement Debian par lots", &html))
+    Ok(page(
+        ConsoleSection::Devices,
+        "Déploiement Debian par lots",
+        &html,
+    ))
 }
 
 fn delete_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
@@ -153,7 +158,7 @@ fn delete_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     html.push_str(r#"<p><label>Saisissez SUPPRIMER <input name="confirm" required autocomplete="off"></label></p>
 <button>Supprimer les appareils sélectionnés</button></form>"#);
     pagination(&mut html, "/machines/bulk-delete", number, next)?;
-    Ok(page("Suppression par lots", &html))
+    Ok(page(ConsoleSection::Devices, "Suppression par lots", &html))
 }
 
 fn device_checkboxes(db: &Connection, number: u32, html: &mut String) -> Result<bool, ErrorBox> {
@@ -459,7 +464,11 @@ fn preview_page(selection: &Selection, targets: &[Value], ready: usize) -> Resul
         write!(html, "<button>Programmer le repartitionnement et l’installation sur {ready} appareil(s)</button>")?;
     }
     html.push_str("</form><a href=\"/machines/bulk\">Modifier la sélection</a>");
-    Ok(page("Contrôle du déploiement par lots", &html))
+    Ok(page(
+        ConsoleSection::Devices,
+        "Contrôle du déploiement par lots",
+        &html,
+    ))
 }
 
 fn queue(path: &Path, username: &str, selection: &Selection) -> Result<Reply, ErrorBox> {
@@ -503,7 +512,11 @@ fn queue(path: &Path, username: &str, selection: &Selection) -> Result<Reply, Er
         html.push_str("</li>");
     }
     html.push_str("</ul><a href=\"/admin/devices\">Appareils</a>");
-    Ok(page("Déploiement Debian par lots", &html))
+    Ok(page(
+        ConsoleSection::Devices,
+        "Déploiement Debian par lots",
+        &html,
+    ))
 }
 
 fn queue_target(

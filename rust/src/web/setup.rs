@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::{bytes, credential_directory, plain, ErrorBox, Reply};
+use super::{bytes, credential_directory, plain, ui, ErrorBox, Reply};
 use crate::{configured_database, connect, setting, worker::factory_reset};
 use hyper::{header::LOCATION, Response, StatusCode};
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
@@ -57,7 +57,7 @@ impl Wizard {
             (Some(Stage::Database), "/init" | "/init/welcome") => page(
                 "Configuration initiale",
                 "<p>Préparez la base SQLite, puis créez le compte d’administration.</p>
-                 <p><a href=\"/init/db\">Configurer la base</a></p>",
+                 <p><a class=\"button\" href=\"/init/db\">Configurer la base</a></p>",
             ),
             (Some(Stage::Database), "/init/db") => page(
                 "Base SQLite",
@@ -364,21 +364,6 @@ pub(super) fn redirect(status: StatusCode, target: impl AsRef<str>) -> Reply {
         .expect("valid setup redirect")
 }
 
-pub(super) fn page(title: &str, form: &str) -> Reply {
-    let html = format!(
-        r#"<!doctype html><html lang="fr"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} · PXE Tools</title><main><h1>{title}</h1>{form}</main></html>"#,
-    );
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "text/html; charset=utf-8")
-        .header("Cache-Control", "no-store")
-        .header("Referrer-Policy", "no-referrer")
-        .header(
-            "Content-Security-Policy",
-            "default-src 'none'; frame-ancestors 'none'; form-action 'self'",
-        )
-        .body(bytes(html))
-        .expect("valid setup page")
+fn page(title: &str, form: &str) -> Reply {
+    ui::guest(title, form, StatusCode::OK)
 }

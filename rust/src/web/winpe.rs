@@ -3,7 +3,8 @@
 use super::{
     admin::escape,
     bytes, plain,
-    setup::{page, redirect},
+    setup::redirect,
+    ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::{configured_database, connect, setting};
@@ -160,7 +161,11 @@ impl Editions {
             } else {
                 "<p>Préparez un média WinPE et son manifeste pour chaque édition à proposer.</p>"
             };
-            return Ok(page("Installation Windows", message));
+            return Ok(page(
+                ConsoleSection::Settings,
+                "Installation Windows",
+                message,
+            ));
         };
         if let Some(form) = form {
             let mut fields = form_urlencoded::parse(form);
@@ -194,7 +199,11 @@ impl Editions {
             write!(html, " (index {})</option>", edition.image_index)?;
         }
         html.push_str(r#"</select></label><button>Enregistrer</button></form><p><a href="/settings/images">Images PXE</a></p>"#);
-        Ok(page("Installation Windows", &html))
+        Ok(page(
+            ConsoleSection::Settings,
+            "Installation Windows",
+            &html,
+        ))
     }
 }
 

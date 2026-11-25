@@ -21,6 +21,7 @@ mod presets;
 mod sessions;
 mod settings;
 mod setup;
+mod ui;
 mod winpe;
 
 pub(crate) use setup::adopt_existing_database;
@@ -444,6 +445,10 @@ async fn dispatch(
     let (parts, body) = request.into_parts();
     let path = parts.uri.path();
     let readable = matches!(parts.method, Method::GET | Method::HEAD);
+    if secure && readable && path.starts_with("/console-assets/") {
+        return ui::asset(path, parts.method == Method::HEAD)
+            .unwrap_or_else(|| plain(StatusCode::NOT_FOUND, "Not found\n"));
+    }
     if !secure && parts.method == Method::GET && path.starts_with(acme::PREFIX) {
         return site
             .acme_challenge
