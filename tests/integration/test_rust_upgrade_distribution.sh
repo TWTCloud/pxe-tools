@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: LGPL-3.0-only
-# Exercise the published beta 12 in a disposable Docker namespace.
+# Exercise the previous approved release in a disposable Docker namespace.
 set -euo pipefail
 
 variant="${1:?apt or docker}"
 registry=ghcr.io/williamboglietti/pxe-tools-appliance
-release=https://github.com/williamboglietti/pxe-tools/releases/download/v0.1.0-beta12
+manifest=packaging/ci/release-manifest.json
+tag=$(jq -er .release_tag "$manifest")
+previous=$(jq -er .version "$manifest")
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$ ]]
+[[ "$tag" == "v${previous//\~/-}" ]]
+release="https://github.com/williamboglietti/pxe-tools/releases/download/$tag"
 name="pxe-rust-upgrade-$variant-$$"
 work=$(mktemp -d)
 volumes=()
@@ -20,6 +25,9 @@ cleanup() {
         docker rm -fv "$name" >/dev/null
     fi
     if [ "${#volumes[@]}" -gt 0 ]; then docker volume rm "${volumes[@]}" >/dev/null; fi
+    if [ "$variant" = docker ] && docker network inspect "$name" >/dev/null 2>&1; then
+        docker network rm "$name" >/dev/null
+    fi
     rm -rf -- "$work"
 }
 trap cleanup EXIT
@@ -36,6 +44,7 @@ wait_https() {
 }
 
 download() {
+    [[ "$1" =~ ^pxe-tools(-ansible)?_[A-Za-z0-9._-]+_(amd64|arm64|all)\.deb$ && "$2" =~ ^[0-9a-f]{64}$ ]]
     curl -fsSL --retry 3 --max-time 90 "$release/$1" -o "$work/$1"
     printf '%s  %s\n' "$2" "$work/$1" | sha256sum --check
 }
@@ -44,12 +53,14 @@ case "$variant" in
     apt)
         arch=$(dpkg-deb -f "${PXE_GUIDED_DEB:?}" Architecture)
         case "$arch" in
-            amd64) digest=36189e6b327ae47451e7e4d63376e3f090e0b6e534d4cdfed4fdc7bd01c0174c ;;
-            arm64) digest=30b0fe7dd4cd789be83f38bb15f67818e249e62d4c6d88119504402da07ef992 ;;
+            amd64) prefix=package ;;
+            arm64) prefix=arm64_package ;;
             *) exit 2 ;;
         esac
-        download "pxe-tools_0.1.0-beta12_$arch.deb" "$digest"
-        download pxe-tools-ansible_0.1.0-beta12_all.deb d1bfb0f7eb8d46e15977f7e892321054e6eb66bc9c34dfe7e433729beb388576
+        old_core=$(jq -er ".${prefix}_asset" "$manifest")
+        old_module=$(jq -er .ansible_package_asset "$manifest")
+        download "$old_core" "$(jq -er ".${prefix}_sha256" "$manifest")"
+        download "$old_module" "$(jq -er .ansible_package_sha256 "$manifest")"
         cp -- "$PXE_GUIDED_DEB" "$work/rust.deb"
         cp -- "${PXE_GUIDED_ANSIBLE_DEB:?}" "$work/rust-ansible.deb"
         chmod 0755 "$work"
@@ -61,35 +72,39 @@ case "$variant" in
             if docker exec "$name" systemctl list-units --no-legend >/dev/null 2>&1; then break; fi
             sleep 1
         done
-        docker exec -i -e DEBIAN_FRONTEND=noninteractive "$name" bash -es -- "$arch" <<'APT_LEGACY'
+        docker exec -i -e DEBIAN_FRONTEND=noninteractive "$name" bash -es -- "$old_core" "$old_module" "$previous" <<'APT_LEGACY'
             apt-get update -qq
-            apt-get install -y --no-install-recommends "/mnt/pxe-fixture/pxe-tools_0.1.0-beta12_$1.deb" \
-                /mnt/pxe-fixture/pxe-tools-ansible_0.1.0-beta12_all.deb
-            test "$(dpkg-query -W -f='${Version}' pxe-tools)" = '0.1.0~beta12'
+            apt-get install -y --no-install-recommends "/mnt/pxe-fixture/$1" "/mnt/pxe-fixture/$2"
+            test "$(dpkg-query -W -f='${Version}' pxe-tools)" = "$3"
             systemctl stop pxe-tools-worker.service
 APT_LEGACY
         schema=/usr/lib/pxe-tools/app/db/schema.sqlite.sql
         cert=/var/lib/pxe-tools-native/tls/cert.pem
         ;;
     docker)
-        prior="$registry:v0.1.0-beta12"
+        prior="$registry:$tag"
         docker pull "$prior"
-        test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$prior")" = 1e425e788ca9a3a6db2ab9143b6617172a099177
+        test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$prior")" = "$(jq -er .source_commit "$manifest")"
         mounts=()
-        for location in /var/lib/pxe-tools /etc/pxe-tools /srv/http /srv/tftp; do
+        for location in /var/lib/pxe-tools /etc/pxe-tools /srv/http /srv/tftp /var/lib/pxe-tools-tls; do
             volume="$name-${#volumes[@]}"
             docker volume create "$volume" >/dev/null
             volumes+=("$volume")
             mounts+=(--mount "type=volume,src=$volume,dst=$location")
         done
-        docker run -d --name "$name" --network none "${mounts[@]}" "$prior" >/dev/null
-        for _ in {1..60}; do
-            if docker exec "$name" curl -fsS --max-time 2 http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
-            sleep 1
-        done
-        docker exec "$name" curl -fsS --max-time 5 http://127.0.0.1:8080/healthz >/dev/null
+        docker network create --internal "$name" >/dev/null
+        docker run -d --name "$name" --network "$name" "${mounts[@]}" "$prior" >/dev/null
+        if [ "$(docker image inspect --format '{{json .Config.Env}}' "$prior" | jq -r 'index("PXE_RUST_DIRECT_HTTP=1") != null')" = true ]; then
+            wait_https 443
+        else
+            for _ in {1..60}; do
+                if docker exec "$name" curl -fsS --max-time 2 http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
+                sleep 1
+            done
+            docker exec "$name" curl -fsS --max-time 5 http://127.0.0.1:8080/healthz >/dev/null
+        fi
         schema=/app/db/schema.sqlite.sql
-        cert=/var/lib/pxe-tools/tls/cert.pem
+        cert="$(docker exec "$name" printenv TLS_DIR)/cert.pem"
         ;;
     *) exit 2 ;;
 esac
@@ -135,14 +150,16 @@ if [ "$variant" = apt ]; then
 APT_UPGRADE
 else
     docker rm -fv "$name" >/dev/null
-    docker run -d --name "$name" --network none "${mounts[@]}" "${PXE_RUST_GUIDED_DOCKER_IMAGE:?}" >/dev/null
+    docker run -d --name "$name" --network "$name" "${mounts[@]}" "${PXE_RUST_GUIDED_DOCKER_IMAGE:?}" >/dev/null
 fi
 
 wait_https 443
-docker exec "$name" curl -kfsS -u fixture-admin:fixture-login-password https://127.0.0.1/admin/devices > "$work/admin.html"
+address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name")
+test -n "$address"
+docker exec "$name" curl -kfsS -u fixture-admin:fixture-login-password "https://$address/admin/devices" > "$work/admin.html"
 grep -Fq '<h1>Ordinateurs</h1>' "$work/admin.html"
 test "$(docker exec "$name" sha256sum /etc/pxe-tools/master.key | cut -d ' ' -f 1)" = "$key"
 served=$(docker exec "$name" bash -o pipefail -c 'openssl s_client -connect 127.0.0.1:443 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256')
 test "$served" = "$fingerprint"
 test -z "$(docker exec "$name" ss -Hlun '( sport = :67 or sport = :4011 )')"
-printf 'Rust %s upgrade from beta 12 preserved SQLite, the account, the master key and TLS.\n' "$variant"
+printf 'Rust %s upgrade from %s preserved SQLite, the account, the master key and TLS.\n' "$variant" "$previous"
