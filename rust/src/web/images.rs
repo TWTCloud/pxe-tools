@@ -437,14 +437,18 @@ fn refresh_button(db: &Connection) -> Result<String, ErrorBox> {
 }
 
 fn table(db: &Connection, number: u32) -> Result<String, ErrorBox> {
-    let mut html = String::from("<table><thead><tr><th>Distribution</th><th>Version</th><th>Architecture</th><th>État</th><th>Progression</th><th>Activée</th><th>Actions</th></tr></thead><tbody>");
+    let mut html = String::from(
+        r#"<div class="table-region" role="region" aria-label="Images PXE gérées" tabindex="0"><table><thead><tr><th scope="col">Distribution</th><th scope="col">Version</th><th scope="col">Architecture</th><th scope="col">État</th><th scope="col">Progression</th><th scope="col">Activée</th><th scope="col">Actions</th></tr></thead><tbody>"#,
+    );
     let mut query = db.prepare(
         "SELECT distro, COALESCE(version_full,version), arch, status, progress_percent, enabled,id
          FROM os_images ORDER BY distro,major DESC,version_full DESC,arch,id LIMIT ? OFFSET ?",
     )?;
     let mut rows = query.query([PAGE_SIZE + 1, u64::from(number - 1) * PAGE_SIZE])?;
+    let mut found = false;
     for _ in 0..PAGE_SIZE {
         let Some(row) = rows.next()? else { break };
+        found = true;
         html.push_str("<tr>");
         for col in 0..4 {
             html.push_str("<td>");
@@ -469,7 +473,10 @@ fn table(db: &Connection, number: u32) -> Result<String, ErrorBox> {
 </td></tr>"#
         )?;
     }
-    html.push_str("</tbody></table><nav aria-label=\"Pagination\">");
+    if !found {
+        html.push_str(r#"<tr><td class="table-empty muted" colspan="7">Aucune image PXE à afficher.</td></tr>"#);
+    }
+    html.push_str("</tbody></table></div><nav aria-label=\"Pagination\">");
     if number > 1 {
         write!(
             html,
