@@ -65,4 +65,23 @@ address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddre
 test -n "$address"
 docker exec "$container" curl -fsS --max-time 5 --cacert /run/pxe-tools-rust-guided/cert.pem \
     "https://$address/init/welcome" >/dev/null
+if [[ "$variant" == apt ]]; then
+    docker exec "$container" bash -ec '
+        test "$(dpkg-query -S /usr/bin/pxe-tools)" = "pxe-tools: /usr/bin/pxe-tools"
+        output=$(pxe-tools setup)
+        code=$(</run/pxe-tools-rust-guided/setup-code)
+        [[ "$output" == *"https://$1/init/welcome"* && "$output" == *"$code"* ]]
+        if runuser -u nobody -- pxe-tools setup; then exit 1; fi
+
+        origin=https://127.0.0.1
+        request=(curl -kfsS --max-time 5 -o /dev/null -w "%{http_code}" -H "Origin: $origin"
+                 --data-urlencode "code=$code")
+        test "$("${request[@]}" "$origin/init/db")" = 303
+        test "$("${request[@]}" "$origin/init/admin" --data-urlencode "username=setup-fixture" \
+            --data-urlencode "password=fixture-only-password" \
+            --data-urlencode "password_confirm=fixture-only-password")" = 303
+        output=$(pxe-tools setup)
+        [[ "$output" == *"https://$1/admin/"* && "$output" != *"$code"* ]]
+    ' _ "$address"
+fi
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"
