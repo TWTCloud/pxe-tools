@@ -110,7 +110,9 @@ fn document(class: &str, title: &str, layout: &str, status: StatusCode) -> Reply
         .status(status)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
-        .header(header::REFERRER_POLICY, "no-referrer")
+        // A restrictive no-referrer policy also suppresses the Origin of
+        // browser form submissions checked by the console.
+        .header(header::REFERRER_POLICY, "same-origin")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(
             "Content-Security-Policy",
