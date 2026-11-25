@@ -303,6 +303,7 @@ fn factory_reset(tx: rusqlite::Transaction<'_>) -> Result<Reply, ErrorBox> {
          DELETE FROM os_images;
          DELETE FROM catalog_entries;
          DELETE FROM users;
+         DELETE FROM access_events;
          DELETE FROM settings;
          DELETE FROM init_jobs;
          INSERT INTO settings(key,value) VALUES ('db_init_done','1'), ('admin_created','0'),

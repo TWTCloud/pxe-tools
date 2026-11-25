@@ -39,11 +39,13 @@ pub(super) enum ConsoleSection {
     Images,
     Settings,
     Certificates,
+    Accounts,
+    Tokens,
 }
 
 type NavLink = (&'static str, &'static str, ConsoleSection, &'static str);
 
-const NAVIGATION: [(&str, &[NavLink]); 2] = [
+const NAVIGATION: [(&str, &[NavLink]); 3] = [
     (
         "Opérations",
         &[
@@ -93,6 +95,23 @@ const NAVIGATION: [(&str, &[NavLink]); 2] = [
                 "Certificats TLS",
                 ConsoleSection::Certificates,
                 "m12 3 8 3v5c0 5-3 8-8 10-5-2-8-5-8-10V6zm-3 9 2 2 4-4",
+            ),
+        ],
+    ),
+    (
+        "Accès",
+        &[
+            (
+                super::access::USERS,
+                "Comptes et droits",
+                ConsoleSection::Accounts,
+                "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-4M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0zm5-4a4 4 0 0 1 0 8",
+            ),
+            (
+                super::access::TOKENS,
+                "Jetons d’API",
+                ConsoleSection::Tokens,
+                "M21 7a5 5 0 0 1-6.4 4.8L7 19H3v-4l7.2-7.6A5 5 0 1 1 21 7zm-5 0h.01",
             ),
         ],
     ),
@@ -183,7 +202,7 @@ fn document(class: &str, title: &str, layout: &str, status: StatusCode) -> Reply
     write!(
         html,
         r#" · PXE Tools</title><link rel="icon" type="image/svg+xml" href="{MARK}">
-<link rel="stylesheet" href="/console-assets/style.css?v=5"></head><body class="{class}">{layout}"#
+<link rel="stylesheet" href="/console-assets/style.css?v=6"></head><body class="{class}">{layout}"#
     )
     .expect("write to String");
     let policy = if class == "console" {

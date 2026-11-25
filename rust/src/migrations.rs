@@ -86,6 +86,28 @@ pub fn upgrade(config: &Path, http: &Path) -> Result<(), Box<dyn Error + Send + 
 const LEGACY_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     ("init_jobs", &[("updated_at", "DATETIME")]),
     (
+        "users",
+        &[
+            (
+                "is_admin",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(is_admin IN (0, 1))",
+            ),
+            (
+                "enabled",
+                "INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1))",
+            ),
+            (
+                "permissions",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(permissions >= 0)",
+            ),
+            (
+                "external",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(external IN (0, 1))",
+            ),
+            ("session_epoch", "INTEGER NOT NULL DEFAULT 0"),
+        ],
+    ),
+    (
         "machines",
         &[
             ("root_password_hash", "TEXT"),
@@ -194,6 +216,9 @@ pub fn schema(config: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
                     &format!("ALTER TABLE {table} ADD COLUMN {column} {declaration}"),
                     [],
                 )?;
+                if *table == "users" && *column == "is_admin" {
+                    tx.execute("UPDATE users SET is_admin=1", [])?;
+                }
                 initialize_local_boot |= *table == "machines" && *column == "local_boot_source";
             }
         }

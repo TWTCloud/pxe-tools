@@ -402,7 +402,7 @@ def main(binary):
                 ('pxe_enabled', 'on'), ('pxe_ip', SERVER), ('pxe_interface', 'lo'),
                 ('pxe_subnet', '192.0.2.0/24'), ('wizard_completed', '1'),
             ])
-            db.execute('INSERT INTO users(username,password_hash) VALUES(?,?)', (
+            db.execute('INSERT INTO users(username,password_hash,is_admin) VALUES(?,?,1)', (
                 'fixture-admin', '$2y$12$zGZhsSwt3AHDHVbliUPl5eMV46SsqfpLUsIOAcZiq1frkQPqxaEcK',
             ))
             linux_media(public, db)
