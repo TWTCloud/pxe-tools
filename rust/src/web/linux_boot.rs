@@ -108,6 +108,20 @@ pub(super) struct Entry {
     arguments: String,
 }
 
+struct Proxmox {
+    version: String,
+    base: String,
+    external_answer: bool,
+}
+
+fn ready(root: &Path, folder: &Path, names: &[&str]) -> bool {
+    names.iter().all(|name| {
+        let file = folder.join(name);
+        file.canonicalize().is_ok_and(|file| file.starts_with(root))
+            && fs::symlink_metadata(file).is_ok_and(|file| file.is_file() && file.len() > 0)
+    })
+}
+
 fn ubuntu(
     db: &Connection,
     root: &Path,
@@ -143,14 +157,7 @@ fn ubuntu(
         }
         let tag = format!("ubuntu/{version}/{arch}");
         let folder = netboot.join(&tag);
-        let ready = ["linux", "initrd.gz", "source.iso"].iter().all(|name| {
-            let file = folder.join(name);
-            file.canonicalize()
-                .ok()
-                .is_some_and(|file| file.starts_with(&canonical))
-                && fs::symlink_metadata(file).is_ok_and(|file| file.is_file() && file.len() > 0)
-        });
-        if ready {
+        if ready(&canonical, &folder, &["linux", "initrd.gz", "source.iso"]) {
             let base = format!("/netboot/{tag}");
             entries.push(Entry {
                 title: format!("Ubuntu Server {version}"),
@@ -161,6 +168,51 @@ fn ubuntu(
                 arguments: format!("root=/dev/ram0 ip=dhcp cloud-config-url=/dev/null url=http://{authority}{base}/source.iso"),
             });
         }
+    }
+    Ok(entries)
+}
+
+fn rpm(db: &Connection, root: &Path, arch: &str, authority: &str) -> Result<Vec<Entry>, ErrorBox> {
+    let Ok(netboot) = root.join("netboot").canonicalize() else {
+        return Ok(Vec::new());
+    };
+    if !netboot.starts_with(root) {
+        return Ok(Vec::new());
+    }
+    let mut query = db.prepare(
+        "SELECT distro,version_full FROM os_images
+         WHERE distro IN ('fedora','centos','almalinux','rocky') AND arch=? AND extract_method='direct'
+         AND enabled=1 AND status='downloaded' AND version_full IS NOT NULL
+         ORDER BY distro,major DESC,version_full DESC LIMIT 32",
+    )?;
+    let rows = query.query_map([arch], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut entries = Vec::new();
+    for row in rows {
+        let (distro, version) = row?;
+        let Some(repo) = crate::catalog::rpm_repository(&distro, &version, arch) else {
+            continue;
+        };
+        let tag = format!("{distro}/{version}/{arch}");
+        let folder = netboot.join(&tag);
+        let marker = folder.join(".rpm-verified");
+        if !ready(&netboot, &folder, &["linux", "initrd.gz", ".rpm-verified"])
+            || !fs::symlink_metadata(&marker).is_ok_and(|file| file.len() <= 256)
+            || !fs::read_to_string(marker).is_ok_and(|content| content.trim_end() == repo)
+        {
+            continue;
+        }
+        let label = crate::catalog::rpm_label(&distro).expect("known RPM distribution");
+        let base = format!("/netboot/{tag}");
+        entries.push(Entry {
+            title: format!("{label} {version}"),
+            source: Source::Rpm { distro, version },
+            authority: authority.to_owned(),
+            kernel: format!("{base}/linux"),
+            initrd: format!("{base}/initrd.gz"),
+            arguments: format!("ip=dhcp inst.repo={repo}"),
+        });
     }
     Ok(entries)
 }
@@ -191,7 +243,48 @@ pub(super) fn menu(
         arch,
         &authority,
     )?;
-    linux_response(render(&entries, loader, server), head)
+    let proxmox = proxmox(site.assets.http_root(), arch)?;
+    linux_response(render(&entries, &proxmox, &authority, loader, server), head)
+}
+
+fn proxmox(root: &Path, arch: &str) -> Result<Vec<Proxmox>, ErrorBox> {
+    let path = root.join("netboot/proxmox");
+    let Ok(canonical) = path.canonicalize() else {
+        return Ok(Vec::new());
+    };
+    if !canonical.starts_with(root) {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for item in fs::read_dir(&canonical)? {
+        let item = item?;
+        let version = item.file_name();
+        let Some(version) = version.to_str().filter(|value| {
+            crate::images::safe_netboot_component(value)
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'-'))
+        }) else {
+            continue;
+        };
+        let folder = item.path().join(arch);
+        if !item.file_type()?.is_dir()
+            || !ready(&canonical, &folder, &["linux", "initrd.gz", "source.iso"])
+        {
+            continue;
+        }
+        entries.push(Proxmox {
+            version: version.to_owned(),
+            base: format!("/netboot/proxmox/{version}/{arch}"),
+            external_answer: ready(&canonical, &folder, &[".external-answer"])
+                && fs::symlink_metadata(folder.join(".external-answer"))
+                    .is_ok_and(|info| info.len() <= 16)
+                && fs::read_to_string(folder.join(".external-answer"))
+                    .is_ok_and(|content| content.trim_end() == "http"),
+        });
+    }
+    entries.sort_by(|a, b| b.version.cmp(&a.version));
+    Ok(entries)
 }
 
 pub(super) fn available(
@@ -202,6 +295,7 @@ pub(super) fn available(
     authority: &str,
 ) -> Result<Vec<Entry>, ErrorBox> {
     let mut entries = ubuntu(db, root, arch, authority)?;
+    entries.extend(rpm(db, root, arch, authority)?);
     if let Some(repo) = repositories.for_arch(arch) {
         let base = repo.path().trim_end_matches('/');
         let host = repo.authority().expect("validated HTTP repository");
@@ -365,14 +459,15 @@ pub(super) fn automatic(
                     entry.arguments,
                     " autoinstall 'ds=nocloud-net;s={seed}' ---"
                 )?,
-                Source::Rhel9(_) => write!(
+                Source::Rhel9(_) | Source::Rpm { .. } => write!(
                     entry.arguments,
                     " inst.cmdline inst.ks={seed}kickstart.cfg inst.nosave=all_ks"
                 )?,
             }
             render_grub_entry(&entry)
         }
-        (Source::Ubuntu(_), "user-data") | (Source::Rhel9(_), "kickstart.cfg") => {
+        (Source::Ubuntu(_), "user-data")
+        | (Source::Rhel9(_) | Source::Rpm { .. }, "kickstart.cfg") => {
             let Some(configuration) = plan.configuration(&mac, &token, server, site.http_port)
             else {
                 return Ok(missing());
@@ -414,8 +509,28 @@ fn render_grub_entry(entry: &Entry) -> String {
     )
 }
 
-fn render(entries: &[Entry], loader: Loader, server: Ipv4Addr) -> String {
+fn render(
+    entries: &[Entry],
+    proxmox: &[Proxmox],
+    authority: &str,
+    loader: Loader,
+    server: Ipv4Addr,
+) -> String {
     let mut script = String::new();
+    let proxmox_entries = proxmox.iter().flat_map(|entry| {
+        [
+            (true, "terminal", "installation guidée", "proxmox-tui-mode"),
+            (
+                entry.external_answer,
+                "auto",
+                "réponse externe",
+                "proxmox-start-auto-installer",
+            ),
+        ]
+        .into_iter()
+        .filter(|(enabled, _, _, _)| *enabled)
+        .map(move |(_, id, label, argument)| (entry, id, label, argument))
+    });
     match loader {
         Loader::Grub => {
             script.push_str("set timeout=-1\n");
@@ -426,6 +541,11 @@ fn render(entries: &[Entry], loader: Loader, server: Ipv4Addr) -> String {
                     entry.title, entry.kernel, entry.arguments, entry.initrd,
                 ).expect("write to String");
             }
+            for (entry, _, label, argument) in proxmox_entries {
+                let (version, base) = (&entry.version, &entry.base);
+                writeln!(script, "menuentry 'Proxmox VE {version} · {label}' {{\n    linux (http,{authority}){base}/linux ramdisk_size=16777216 rw quiet {argument}\n    initrd (http,{authority}){base}/initrd.gz newc:/proxmox.iso:(http,{authority}){base}/source.iso\n}}")
+                    .expect("write to String");
+            }
             writeln!(script, "menuentry 'Retour au menu PXE' {{\n    configfile (tftp,{server})/grub/grub.cfg\n}}")
                 .expect("write to String");
         }
@@ -435,6 +555,14 @@ fn render(entries: &[Entry], loader: Loader, server: Ipv4Addr) -> String {
                 writeln!(script, "item linux-{id} Installer {}", entry.title)
                     .expect("write to String");
             }
+            for (entry, id, label, _) in proxmox_entries.clone() {
+                let version = &entry.version;
+                writeln!(
+                    script,
+                    "item proxmox-{version}-{id} Proxmox VE {version} · {label}"
+                )
+                .expect("write to String");
+            }
             script.push_str("item return Retour au menu PXE\nchoose selected || goto return\ngoto \x24{selected}\n");
             for (id, entry) in entries.iter().enumerate() {
                 let host = &entry.authority;
@@ -442,6 +570,11 @@ fn render(entries: &[Entry], loader: Loader, server: Ipv4Addr) -> String {
                     ":linux-{id}\nkernel http://{host}{} initrd=initrd.img {} || goto menu\ninitrd --name initrd.img http://{host}{} || goto menu\nboot || goto menu",
                     entry.kernel, entry.arguments, entry.initrd,
                 ).expect("write to String");
+            }
+            for (entry, id, _, argument) in proxmox_entries {
+                let (version, base) = (&entry.version, &entry.base);
+                writeln!(script, ":proxmox-{version}-{id}\nkernel http://{authority}{base}/linux initrd=initrd.img ramdisk_size=16777216 rw quiet {argument} || goto menu\ninitrd --name initrd.img http://{authority}{base}/initrd.gz || goto menu\ninitrd http://{authority}{base}/source.iso proxmox.iso || goto menu\nboot || goto menu")
+                    .expect("write to String");
             }
             script.push_str(":return\nexit\n");
         }

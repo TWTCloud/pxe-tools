@@ -28,6 +28,24 @@ _iv_fetch() { curl -fsSL --retry 3 --retry-delay 2 --max-time 120 -o "$2" "$1"; 
 # SHA256 hex d'un fichier (1er champ).
 _iv_sha256() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
 
+# Anaconda trees publish both boot file hashes in .treeinfo over HTTPS.
+verify_rpm_netboot() {
+    local dir="$1" repository="$2" path file want
+    curl -fsSL --proto '=https' --proto-redir '=https' --retry 2 --max-time 30 \
+        --max-filesize 262144 -o "$dir/.treeinfo" "$repository/.treeinfo" || return 1
+    for path in vmlinuz initrd.img; do
+        case "$path" in
+            vmlinuz) file=linux ;;
+            initrd.img) file=initrd.gz ;;
+        esac
+        want=$(awk -F ' *= *' -v p="images/pxeboot/$path" '
+            /^\[/ { checksums=($0 ~ /^\[checksums\][[:space:]]*$/) }
+            checksums && $1==p { sub(/^sha256:/, "", $2); sub(/\r$/, "", $2); print $2 }
+        ' "$dir/.treeinfo") || return 1
+        [[ "$want" =~ ^[0-9a-f]{64}$ && "$(_iv_sha256 "$dir/$file")" = "$want" ]] || return 1
+    done
+}
+
 # gpgv générique. Détaché : <kr> <sig> <data>. Clearsigned/inline : <kr> <fichier>.
 _iv_gpgv() {
     local kr="$1"; shift

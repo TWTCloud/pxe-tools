@@ -46,6 +46,7 @@ fn serial_disks(device: &Device) -> impl Iterator<Item = (String, String)> {
 fn selector(entry: &Entry) -> String {
     match &entry.source {
         Source::Ubuntu(version) => format!("ubuntu-{version}"),
+        Source::Rpm { distro, version } => format!("{distro}-{version}"),
         Source::Rhel9(url) => match url.trim_end_matches('/').rsplit_once('/') {
             Some((base, digest))
                 if base.ends_with("/pxe/rhel9") && crate::media::digest(digest) =>
@@ -64,7 +65,7 @@ fn form(
     id: i64,
     device: &Device,
 ) -> Result<Reply, ErrorBox> {
-    let title = "Installation automatique Ubuntu ou RHEL";
+    let title = "Installation automatique Linux";
     let entries = linux_boot::available(
         db,
         root,
@@ -214,6 +215,7 @@ pub(in crate::web) fn serve(
     let (distro, version) = match &entry.source {
         Source::Ubuntu(version) => ("ubuntu", version.as_str()),
         Source::Rhel9(_) => ("rhel", "9"),
+        Source::Rpm { distro, version } => (distro.as_str(), version.as_str()),
     };
     let plan = Plan {
         source: entry.source.clone(),

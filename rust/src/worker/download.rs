@@ -17,15 +17,45 @@ pub(crate) fn run(database: &Path, id: i64, scripts: &Path) -> Result<(), ErrorB
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let image = tx
         .query_row(
-            "SELECT distro || ' ' || version || ' ' || arch, COALESCE(extract_method,'direct')
+            "SELECT distro, COALESCE(version_full,version), arch, COALESCE(extract_method,'direct')
          FROM os_images WHERE id=?1 AND enabled=1 AND status='pending'",
             [id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((label, method)) = image else {
+    let Some((distro, version, arch, method)) = image else {
         return Ok(());
     };
+    if crate::catalog::rpm_label(&distro).is_some() {
+        let Some(repo) =
+            crate::catalog::rpm_repository(&distro, &version, &arch).filter(|_| method == "direct")
+        else {
+            fail(
+                &tx,
+                id,
+                "pending",
+                "Version ou architecture RPM indisponible",
+            )?;
+            tx.commit()?;
+            return Ok(());
+        };
+        tx.execute(
+            "UPDATE os_images SET kernel_url=?2, initrd_url=?3, firmware_url=NULL WHERE id=?1",
+            params![
+                id,
+                format!("{repo}/images/pxeboot/vmlinuz"),
+                format!("{repo}/images/pxeboot/initrd.img")
+            ],
+        )?;
+    }
+    let label = format!("{distro} {version} {arch}");
     let name = if method.eq_ignore_ascii_case("iso_extract") {
         "bootstrap-download-image-iso.sh"
     } else {

@@ -11,7 +11,11 @@ use crate::{connect, pxe::parse_subnet, setting};
 use hyper::StatusCode;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::Ipv4Addr, path::Path};
+use std::{
+    collections::{BTreeSet, HashMap},
+    net::Ipv4Addr,
+    path::Path,
+};
 
 const NETWORK_DRAFT: &str = "rust_wizard_network";
 const IMAGE_DRAFT: &str = "rust_wizard_image";
@@ -91,7 +95,15 @@ pub(super) fn is_route(path: &str) -> bool {
 pub(super) fn serve(db: &Connection, path: &Path, endpoint: &str, form: Option<&[u8]>) -> Reply {
     let reply = if let Some(data) = form {
         let mut values = HashMap::new();
+        let mut extras = BTreeSet::new();
         for (field, value) in form_urlencoded::parse(data) {
+            if endpoint == "/init/images" && field == "extra[]" {
+                let Some(id) = value.parse::<i64>().ok().filter(|id| *id > 0) else {
+                    return invalid(endpoint, "Une image supplémentaire est invalide.");
+                };
+                extras.insert(id);
+                continue;
+            }
             if values
                 .insert(field.into_owned(), value.into_owned())
                 .is_some()
@@ -99,7 +111,7 @@ pub(super) fn serve(db: &Connection, path: &Path, endpoint: &str, form: Option<&
                 return invalid(endpoint, "Le formulaire est ambigu.");
             }
         }
-        change(path, endpoint, &values)
+        change(path, endpoint, &values, extras)
     } else {
         view(db, endpoint)
     };
@@ -156,6 +168,7 @@ fn change(
     path: &Path,
     endpoint: &str,
     fields: &HashMap<String, String>,
+    extras: BTreeSet<i64>,
 ) -> Result<Reply, ErrorBox> {
     let mut db = connect(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -194,9 +207,29 @@ fn change(
         else {
             return Ok(invalid(endpoint, "Choisissez une image Debian."));
         };
+        let rescue: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM catalog_entries
+             WHERE id=?1 AND distro='debian' AND extract_method='direct')",
+            [entry],
+            |row| row.get(0),
+        )?;
+        if !rescue {
+            return Ok(invalid(
+                endpoint,
+                "Choisissez une image Debian pour le secours PXE.",
+            ));
+        }
         let Some(id) = images::queue_image(&tx, entry, true)? else {
             return Ok(invalid(endpoint, "Cette image Debian est indisponible."));
         };
+        for extra in extras {
+            if extra != entry && images::queue_image(&tx, extra, true)?.is_none() {
+                return Ok(invalid(
+                    endpoint,
+                    "Une image supplémentaire est indisponible.",
+                ));
+            }
+        }
         store(&tx, IMAGE_DRAFT, &id.to_string())?;
         tx.commit()?;
         return Ok(redirect(StatusCode::SEE_OTHER, "/init/done"));
@@ -379,9 +412,10 @@ fn network_page(plan: Option<&Network>) -> Reply {
 
 fn images_page(db: &Connection) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
-        r#"<p class="wizard-intro">Sélectionnez l’image Debian que les clients utiliseront pour démarrer.</p>"#,
+        r#"<p class="wizard-intro">Choisissez une image Debian pour la découverte et le secours. Les autres installateurs sont téléchargés en arrière-plan et apparaissent dans le menu PXE lorsqu’ils sont prêts.</p>"#,
     );
     html.push_str(&images::catalog_form(db, "/init/images")?);
+    html.push_str(r#"<p class="muted">Proxmox VE utilise un média préparé séparément après cette configuration.</p>"#);
     html.push_str(r#"<p class="wizard-back"><a href="/init/network">Modifier le réseau</a></p>"#);
     Ok(ui::wizard(
         Some(WizardStep::Network),

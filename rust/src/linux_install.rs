@@ -12,6 +12,7 @@ pub const PREFIX: &str = "/pxe/linux/auto/";
 pub enum Source {
     Ubuntu(String),
     Rhel9(String),
+    Rpm { distro: String, version: String },
 }
 
 #[derive(Deserialize, Serialize)]
@@ -30,6 +31,12 @@ pub struct Plan {
 impl Plan {
     pub fn valid(&self) -> bool {
         matches!(self.arch.as_str(), "amd64" | "arm64")
+            && match &self.source {
+                Source::Rpm { distro, version } => {
+                    crate::catalog::rpm_repository(distro, version, &self.arch).is_some()
+                }
+                _ => true,
+            }
             && normalize_mac(&self.boot_mac).as_deref() == Some(self.boot_mac.as_str())
             && !self.client.is_loopback()
             && !self.client.is_unspecified()
@@ -63,7 +70,7 @@ impl Plan {
         let guard = self.guard(&boot_mac);
         let authority = authority(server, port);
         let mut launcher = preseed::first_boot_script(server, port, &machine_mac, token);
-        if matches!(&self.source, Source::Rhel9(_)) {
+        if matches!(&self.source, Source::Rhel9(_) | Source::Rpm { .. }) {
             launcher = launcher.replace("ssh.service", "sshd.service");
         }
         let target = "/etc/systemd/system-generators/pxe-first-boot";
@@ -103,15 +110,25 @@ impl Plan {
                 }});
                 Some(format!("#cloud-config\n{content}\n"))
             }
-            Source::Rhel9(repo) => {
+            Source::Rhel9(_) | Source::Rpm { .. } => {
                 let disk = self.disk.strip_prefix("/dev/")?;
-                let repo = if repo.starts_with(crate::media::RHEL_PREFIX) {
-                    format!("http://{authority}{repo}")
+                let header = if matches!(&self.source, Source::Rhel9(_)) {
+                    "#version=RHEL9\n"
                 } else {
-                    repo.to_owned()
+                    ""
+                };
+                let repo = match &self.source {
+                    Source::Rhel9(repo) if repo.starts_with(crate::media::RHEL_PREFIX) => {
+                        format!("http://{authority}{repo}")
+                    }
+                    Source::Rhel9(repo) => repo.clone(),
+                    Source::Rpm { distro, version } => {
+                        crate::catalog::rpm_repository(distro, version, &self.arch)?
+                    }
+                    Source::Ubuntu(_) => unreachable!("Ubuntu uses autoinstall"),
                 };
                 Some(format!(
-                    "#version=RHEL9\nlang en_US.UTF-8\nkeyboard us\ntimezone Etc/UTC --utc\n\
+                    "{header}lang en_US.UTF-8\nkeyboard us\ntimezone Etc/UTC --utc\n\
                      network --bootproto=dhcp --device={boot_mac} --activate --hostname={}\n\
                      url --url={}\nfirstboot --disable\nrootpw --lock\n\
                      user --name={} --groups=wheel --iscrypted --password={}\n\

@@ -132,6 +132,7 @@ fn media_form(db: &Connection) -> Result<Reply, ErrorBox> {
 </form>
 <p>Les fichiers locaux se placent dans le dossier privé <code>media/inbox</code> du stockage HTTP PXE. Importez le fichier Windows avant l’archive WinPE de l’édition.</p>"#,
     );
+    html.push_str(r#"<p><a href="https://github.com/TWTCloud/pxe-tools/blob/main/docs/installateurs-linux-pxe.md#proxmox-ve">Préparer un média Proxmox VE</a></p>"#);
     let hosts = crate::media::download_hosts();
     if !hosts.is_empty() {
         html.push_str("<p>Hôtes de téléchargement autorisés&nbsp;: ");
@@ -503,7 +504,8 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
                     kernel_url,initrd_url,firmware_url,iso_url,extract_method,1,'pending'
                 FROM catalog_entries WHERE id=?1 AND arch IN ('amd64','arm64')
                     AND ((distro='debian' AND extract_method='direct')
-                      OR (NOT ?2 AND distro='ubuntu' AND extract_method='iso_extract'))
+                      OR (distro='ubuntu' AND extract_method='iso_extract')
+                      OR (distro IN ('fedora','centos','almalinux','rocky') AND extract_method='direct'))
                 ON CONFLICT(distro,version_full,arch) WHERE version_full IS NOT NULL
                 DO UPDATE SET enabled=1,
                     status=CASE WHEN os_images.status IN ('downloaded','downloading')
@@ -519,47 +521,74 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
                   WHERE c.id=?1 AND c.arch IN ('amd64','arm64')
                     AND i.extract_method=c.extract_method
                     AND ((c.distro='debian' AND c.extract_method='direct')
-                      OR (NOT ?2 AND c.distro='ubuntu' AND c.extract_method='iso_extract'))",
-        rusqlite::params![id, resume],
+                      OR (c.distro='ubuntu' AND c.extract_method='iso_extract')
+                      OR (c.distro IN ('fedora','centos','almalinux','rocky') AND c.extract_method='direct'))",
+        [id],
         |row| row.get(0),
     )
     .optional()
 }
 
+pub(super) fn distro_label(distro: &str) -> &str {
+    match distro {
+        "debian" => "Debian",
+        "ubuntu" => "Ubuntu Server",
+        _ => crate::catalog::rpm_label(distro).unwrap_or(distro),
+    }
+}
+
 pub(super) fn catalog_form(db: &Connection, action: &'static str) -> rusqlite::Result<String> {
-    let include_ubuntu = action == ROUTE;
+    let wizard = action == "/init/images";
+    let label = if wizard {
+        "Image Debian de secours"
+    } else {
+        "Image PXE"
+    };
     let mut html = format!(
         r#"<form class="form-stack" method="post" action="{action}">
-<div class="field"><label for="catalog-image">Image PXE</label><select id="catalog-image" name="image">"#,
+<div class="field"><label for="catalog-image">{label}</label><select id="catalog-image" name="image">"#,
     );
     let mut query = db.prepare(
         "SELECT id,version_full,arch,distro FROM catalog_entries
         WHERE arch IN ('amd64','arm64') AND ((distro='debian' AND extract_method='direct')
-          OR (?1 AND distro='ubuntu' AND extract_method='iso_extract'))
-        ORDER BY distro,major DESC,version_full DESC,arch,id LIMIT 50",
+          OR (distro='ubuntu' AND extract_method='iso_extract')
+          OR (distro IN ('fedora','centos','almalinux','rocky') AND extract_method='direct'))
+        ORDER BY (distro<>'debian'),distro,major DESC,version_full DESC,arch,id LIMIT 150",
     )?;
-    let mut rows = query.query([include_ubuntu])?;
+    let mut rows = query.query([])?;
     let mut count = 0;
+    let mut extra = String::new();
     while let Some(row) = rows.next()? {
-        count += 1;
         let id: i64 = row.get(0)?;
-        let distro = if row.get::<_, String>(3)? == "ubuntu" {
-            "Ubuntu Server"
-        } else {
-            "Debian"
-        };
-        html.push_str(&format!(r#"<option value="{id}">{distro} "#));
-        escape(&mut html, &row.get::<_, String>(1)?);
-        html.push_str(" · ");
-        escape(&mut html, &row.get::<_, String>(2)?);
-        html.push_str("</option>");
+        let distro: String = row.get(3)?;
+        let mut option = format!(r#"<option value="{id}">{} "#, distro_label(&distro));
+        escape(&mut option, &row.get::<_, String>(1)?);
+        option.push_str(" · ");
+        escape(&mut option, &row.get::<_, String>(2)?);
+        option.push_str("</option>");
+        if !wizard || distro == "debian" {
+            count += 1;
+            html.push_str(&option);
+        }
+        if wizard {
+            extra.push_str(&option);
+        }
     }
     if count == 0 {
         html.push_str(r#"<option value="">Aucune image disponible</option>"#);
     }
-    html.push_str(r#"</select></div><div class="form-actions">"#);
+    html.push_str("</select></div>");
+    if wizard && count != 0 {
+        html.push_str(&format!(r#"<div class="field"><label for="catalog-extra">Images supplémentaires (facultatif)</label>
+<select id="catalog-extra" name="extra[]" multiple size="8">{extra}</select></div>"#));
+    }
+    html.push_str(r#"<div class="form-actions">"#);
     if count != 0 {
-        html.push_str("<button>Télécharger cette image</button>");
+        html.push_str(if wizard {
+            "<button>Préparer les images</button>"
+        } else {
+            "<button>Télécharger cette image</button>"
+        });
     }
     html.push_str(
         r#"<button class="button--quiet" name="action" value="refresh">Actualiser le catalogue</button></div></form>"#,

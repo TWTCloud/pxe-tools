@@ -63,6 +63,14 @@ def request(path, *, tls=None, source=None, form=None, json_body=None, headers=N
         connection.close()
 
 
+RPM_REPOSITORIES = {
+    'centos': ('10', 'https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os'),
+    'fedora': ('44', 'https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Server/x86_64/os'),
+    'almalinux': ('9', 'https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os'),
+    'rocky': ('9', 'https://download.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os'),
+}
+
+
 def linux_media(root, db):
     db.executemany("""INSERT INTO os_images(distro,version,version_full,arch,extract_method,enabled,status)
                       VALUES('ubuntu',?,?,?,'iso_extract',?,'downloaded')""", [
@@ -82,6 +90,27 @@ def linux_media(root, db):
             (path/asset).write_bytes(b'fixture')
         if version != '22.04.5':
             (path/'source.iso').write_bytes(b'Ubuntu fixture ISO')
+    for distro, (version, repo) in RPM_REPOSITORIES.items():
+        db.execute("""INSERT INTO os_images(distro,version,version_full,arch,extract_method,enabled,status)
+                      VALUES(?,?,?,'amd64','direct',1,'downloaded')""", (distro, version, version))
+        path = root/'netboot'/distro/version/'amd64'
+        path.mkdir(parents=True)
+        for asset in ('linux', 'initrd.gz'):
+            (path/asset).write_bytes(b'RPM fixture')
+        (path/'.rpm-verified').write_text(repo+'\n')
+    db.execute("""INSERT INTO os_images(distro,version,version_full,arch,extract_method,enabled,status)
+                  VALUES('centos','9','9','amd64','direct',1,'downloaded')""")
+    path = root/'netboot'/'centos'/'9'/'amd64'
+    path.mkdir(parents=True)
+    for asset in ('linux', 'initrd.gz'):
+        (path/asset).write_bytes(b'legacy unverified fixture')
+    for arch in ('amd64', 'arm64'):
+        path = root/'netboot'/'proxmox'/'9.2-1'/arch
+        path.mkdir(parents=True)
+        for asset in ('linux', 'initrd.gz', 'source.iso'):
+            (path/asset).write_bytes(b'Proxmox fixture')
+        if arch == 'amd64':
+            (path/'.external-answer').write_text('http\n')
 
 
 def check_linux(tls, auth, form_headers):
@@ -95,9 +124,17 @@ def check_linux(tls, auth, form_headers):
     assert b'inst.repo=http://192.0.2.99:8090/rhel/9/' in grub
     assert b'linux (http,192.0.2.99:8090)/rhel/9/images/pxeboot/vmlinuz' in grub
     assert b'autoinstall' not in grub and b'inst.ks=' not in grub
+    for _, repo in RPM_REPOSITORIES.values():
+        assert f'inst.repo={repo}'.encode() in grub
+    assert b'CentOS Stream 9' not in grub
+    assert b'proxmox-start-auto-installer' in grub
+    assert b'newc:/proxmox.iso:(http,192.0.2.1:8088)/netboot/proxmox/9.2-1/amd64/source.iso' in grub
     status, _, ipxe = request('/pxe/linux/arm64/boot.ipxe', source=WINDOWS_CLIENT)
     assert status == 200 and ipxe.startswith(b'#!ipxe') and b'Ubuntu Server 26.04.1' in ipxe
     assert b'24.04.5' not in ipxe and b'Red Hat' not in ipxe
+    assert b'CentOS Stream' not in ipxe
+    assert b'initrd http://192.0.2.1:8088/netboot/proxmox/9.2-1/arm64/source.iso proxmox.iso' in ipxe
+    assert b'proxmox-tui-mode' in ipxe and b'proxmox-start-auto-installer' not in ipxe
     status, _, iso = request('/netboot/ubuntu/24.04.5/amd64/source.iso', source=WINDOWS_CLIENT,
                              headers={'Range': 'bytes=0-5'})
     assert status == 206 and iso == b'Ubuntu'
@@ -110,9 +147,10 @@ def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
     crypt = CDLL('libcrypt.so.1').crypt
     crypt.argtypes = (c_char_p, c_char_p)
     crypt.restype = c_char_p
-    for offset, image, file in ((1, 'ubuntu-24.04.5', 'user-data'),
-                                (2, 'rhel9', 'kickstart.cfg'),
-                                (3, f'rhel9-{rhel_sha}', 'kickstart.cfg')):
+    selections = [('ubuntu-24.04.5', 'user-data'), ('rhel9', 'kickstart.cfg'),
+                  (f'rhel9-{rhel_sha}', 'kickstart.cfg')]
+    selections += [(f'{distro}-{version}', 'kickstart.cfg') for distro, (version, _) in RPM_REPOSITORIES.items()]
+    for offset, (image, file) in enumerate(selections, 1):
         mac = f'02:00:00:00:50:{offset:02x}'
         serial = f'PXE-TEST-{offset}'
         inventory = {
@@ -167,6 +205,9 @@ def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
             assert b'inst.ks=' in chain and b'inst.nosave=all_ks' in chain
             if offset == 3:
                 assert f'url --url=http://{SERVER}:{HTTP}/pxe/rhel9/{rhel_sha}/'.encode() in config
+            if offset > 3:
+                repo = RPM_REPOSITORIES[image.rsplit('-', 1)[0]][1]
+                assert f'url --url={repo}'.encode() in config and f'inst.repo={repo}'.encode() in chain
             assert b'ignoredisk --only-use=vda\nclearpart --all --initlabel --drives=vda' in config
             assert b'%pre --erroronfail' in config and serial.encode() in config
             assert b'%packages\n@^minimal-environment\ncurl\n%end' in config
@@ -189,7 +230,7 @@ def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
             assert db.execute('SELECT status,local_boot_source FROM machines WHERE id=?', (device,)).fetchone() == ('installed', 'pxe')
             assert db.execute("""SELECT COUNT(*) FROM machine_events
                                  WHERE action_id=? AND checkpoint='os_first_boot'""", (action,)).fetchone() == (1,)
-    print('Ubuntu Autoinstall and RHEL Kickstart console actions, private seeds and first-boot callbacks verified.')
+    print('Ubuntu Autoinstall and RPM Kickstart console actions, private seeds and first-boot callbacks verified.')
 
 
 def create_iso(path, tree, files):
@@ -539,7 +580,28 @@ def check_lan(binary, root, tls, env):
             wizard_page('/init/network', 'Réseau', headers=admin)
             plan = {'role':'proxy', 'pxe_interface':'lo', 'pxe_ip':LAN, 'pxe_subnet':'10.77.0.0/24'}
             assert request('/init/network', **secure, form=plan, headers=admin)[:2] == (303,'/init/images')
-            wizard_page('/init/images', 'Réseau', headers=admin)
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                db.executemany(
+                    "INSERT INTO catalog_entries(id,distro,version_full,arch,extract_method) VALUES(?,?,?,'amd64',?)",
+                    [(9001, 'debian', '13.5.0', 'direct'), (9002, 'ubuntu', '24.04.5', 'iso_extract')]
+                    + [(9003+i, distro, version, 'direct')
+                       for i, (distro, (version, _)) in enumerate(RPM_REPOSITORIES.items())],
+                )
+            _, picker = wizard_page('/init/images', 'Réseau', headers=admin)
+            rescue = re.search(rb'name="image">(.*?)</select>', picker, re.S)[1]
+            assert b'9001' in rescue and b'9002' not in rescue and b'9003' not in rescue
+            for expected in (b'Ubuntu Server', b'CentOS Stream', b'AlmaLinux', b'Rocky Linux', b'Fedora Server'):
+                assert expected in picker
+            assert request('/init/images', **secure, form={'image': '9002'}, headers=admin)[0] == 422
+            assert request('/init/images', **secure, form=[('image', '9001'), ('extra[]', '9002'),
+                           ('extra[]', '9999')], headers=admin)[0] == 422
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                assert db.execute("SELECT COUNT(*) FROM os_images").fetchone() == (0,)
+            images = [('image', '9001')] + [('extra[]', str(i)) for i in range(9002, 9007)]
+            for _ in range(2):
+                assert request('/init/images', **secure, form=images, headers=admin)[:2] == (303, '/init/done')
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                assert db.execute("SELECT COUNT(*) FROM os_images WHERE enabled=1 AND status='pending'").fetchone() == (6,)
             _, pending_image = wizard_page('/init/done', 'Validation', headers=admin)
             assert b'name="confirmation"' not in pending_image
             assert request('/init/network', **secure, form={'role':'console'}, headers=admin)[:2] == (303,'/init/done')

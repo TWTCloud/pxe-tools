@@ -43,6 +43,20 @@ if [ -z "$row" ]; then
 fi
 IFS='|' read -r distro version version_full arch kernel_url initrd_url codename firmware_url <<< "$row"
 
+rpm_repository=
+curl_protocols=()
+case "$distro" in
+    almalinux|centos|fedora|rocky)
+        rpm_repository="${kernel_url%/images/pxeboot/vmlinuz}"
+        if [[ "$rpm_repository" != https://* || "$kernel_url" != "$rpm_repository/images/pxeboot/vmlinuz" \
+              || "$initrd_url" != "$rpm_repository/images/pxeboot/initrd.img" || -n "$firmware_url" ]]; then
+            echo '[download-image] Arbre d’installation RPM invalide.' >&2
+            exit 1
+        fi
+        curl_protocols=(--proto '=https' --proto-redir '=https')
+        ;;
+esac
+
 safe_component() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$ && "$1" != *..* ]]; }
 if ! safe_component "$distro" || ! safe_component "${version_full:-$version}" || ! safe_component "$arch" \
    || { [ -n "$codename" ] && ! safe_component "$codename"; }; then
@@ -123,12 +137,12 @@ probe_size() {
     local url="$1"
     local size
     # curl -ILs : -I HEAD only, -L follow redirects, -s silent
-    size=$(curl -ILs --max-time 10 "$url" 2>/dev/null | awk 'tolower($1) == "content-length:" { gsub("\r","",$2); print $2 }' | tail -1)
+    size=$(curl -ILs "${curl_protocols[@]}" --max-time 10 "$url" 2>/dev/null | awk 'tolower($1) == "content-length:" { gsub("\r","",$2); print $2 }' | tail -1)
     if [ -z "$size" ] || [ "$size" = "0" ]; then
         # Fallback : certains miroirs ne renvoient pas Content-Length sur HEAD
         # mais honorent une requête Range — Content-Range donne alors la taille
         # totale sans télécharger le fichier (bytes 0-0/TOTAL).
-        size=$(curl -sL --max-time 10 -D - -o /dev/null -H "Range: bytes=0-0" "$url" 2>/dev/null \
+        size=$(curl -sL "${curl_protocols[@]}" --max-time 10 -D - -o /dev/null -H "Range: bytes=0-0" "$url" 2>/dev/null \
             | awk 'tolower($1) == "content-range:" { print $NF }' | awk -F/ '{gsub("\r","",$2); print $2}' | tail -1)
     fi
     echo "${size:-0}"
@@ -168,19 +182,24 @@ download_with_progress() {
     # ratait TOUJOURS, $total valait 0 en permanence, d'où le message sans
     # total ("· 35 Mo téléchargés") quel que soit l'état réel du réseau.
     local total="${TOTALS[$key]:-0}"
-    wget -L --tries=3 --timeout=60 -q -O "$dest.tmp" "$url" &
-    local wget_pid=$!
+    if [ -n "$rpm_repository" ]; then
+        curl -fsSL "${curl_protocols[@]}" --retry 2 --connect-timeout 15 \
+            --speed-limit 1 --speed-time 60 -o "$dest.tmp" "$url" &
+    else
+        wget -L --tries=3 --timeout=60 -q -O "$dest.tmp" "$url" &
+    fi
+    local download_pid=$!
 
     # Boucle de monitoring (1 update/s).
-    while kill -0 "$wget_pid" 2>/dev/null; do
+    while kill -0 "$download_pid" 2>/dev/null; do
         # Abandon si la row a disparu (factory reset / suppression pendant le DL).
         # Le worker est mono-thread et GELÉ sur ce wget : sans ça, un reset ne serait
         # traité qu'après la fin du download (potentiellement plusieurs minutes).
         # COUNT(*) (pas SELECT 1) : sur lock SQLite transitoire la sortie est vide
         # ≠ "0" → on NE coupe PAS par erreur (faux positif évité), on retentera au tick suivant.
         if [ "$(sqlite3 "$PXE_DB_PATH" "SELECT COUNT(*) FROM os_images WHERE id=$IMAGE_ID" 2>/dev/null)" = "0" ]; then
-            kill "$wget_pid" 2>/dev/null || true
-            wait "$wget_pid" 2>/dev/null || true
+            kill "$download_pid" 2>/dev/null || true
+            wait "$download_pid" 2>/dev/null || true
             rm -f "$dest.tmp"
             echo "[download-image] row $IMAGE_ID disparue (reset/suppression) → abandon"
             exit 0
@@ -207,7 +226,7 @@ download_with_progress() {
         sleep 1
     done
 
-    if wait "$wget_pid"; then
+    if wait "$download_pid"; then
         mv "$dest.tmp" "$dest"
         return 0
     else
@@ -276,18 +295,21 @@ if [ "$distro" = "debian" ]; then
             exit 1
         fi
     fi
-else
-    # Direct non-Debian (Alma/Rocky/CentOS/Fedora) : pas de source checksum signée
-    # câblée → best-effort non vérifié (hors périmètre menace F-05, distros non
-    # installables aujourd'hui). À durcir quand on les rendra installables.
-    echo "[download-image]   ⚠ $distro : intégrité non vérifiée (best-effort)" >&2
+elif [ -n "$rpm_repository" ]; then
+    publish "$label · vérification d’intégrité…" 99
+    if ! verify_rpm_netboot "$stage_dir" "$rpm_repository"; then
+        publish_error "Le noyau et l’initrd RPM ne correspondent pas à l’arbre d’installation HTTPS."
+        exit 1
+    fi
 fi
 
-# Debian files pass GPG/SHA before publication. Other direct distros keep the
-# documented best-effort mode; staging still isolates their root writes.
 # The publisher copies from root-private staging through no-follow dirfds.
 python3 "$publisher" "$stage_dir/linux" "$dest_dir/linux"
 python3 "$publisher" "$stage_dir/initrd.gz" "$dest_dir/initrd.gz"
+if [ -n "$rpm_repository" ]; then
+    printf '%s\n' "$rpm_repository" > "$stage_dir/.rpm-verified"
+    python3 "$publisher" "$stage_dir/.rpm-verified" "$dest_dir/.rpm-verified"
+fi
 if [ -n "$firmware_url" ]; then
     python3 "$publisher" "$stage_dir/firmware.cpio.gz" "$dest_dir/firmware.cpio.gz"
 fi
