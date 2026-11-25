@@ -656,6 +656,9 @@ def check_lan(binary, root, tls, env):
 
 def verify_restored_console(secure, private, admin, database, plan):
     network = '/settings/network'
+    image_status = request('/api/images-status', **secure, headers=admin)
+    assert image_status[0] == 200
+    assert b'data-state="pending"' in image_status[2] and b'data-download-percent>100 %' in image_status[2]
     assert request(network, **private)[0] == 404
     assert request(network, **secure)[0] == 401
     assert request('/init/network?from=settings', **secure, headers=admin)[:2] == (302, network)

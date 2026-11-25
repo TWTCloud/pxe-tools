@@ -438,7 +438,7 @@ fn refresh_button(db: &Connection) -> Result<String, ErrorBox> {
 
 fn table(db: &Connection, number: u32) -> Result<String, ErrorBox> {
     let mut html = String::from(
-        r#"<div class="table-region" role="region" aria-label="Images PXE gérées" tabindex="0"><table><thead><tr><th scope="col">Distribution</th><th scope="col">Version</th><th scope="col">Architecture</th><th scope="col">État</th><th scope="col">Progression</th><th scope="col">Activée</th><th scope="col">Actions</th></tr></thead><tbody>"#,
+        r#"<div class="table-region" role="region" aria-label="Images PXE gérées" tabindex="0"><table data-image-progress-table><thead><tr><th scope="col">Distribution</th><th scope="col">Version</th><th scope="col">Architecture</th><th scope="col">État</th><th scope="col">Progression</th><th scope="col">Activée</th><th scope="col">Actions</th></tr></thead><tbody>"#,
     );
     let mut query = db.prepare(
         "SELECT distro, COALESCE(version_full,version), arch, status, progress_percent, enabled,id
@@ -449,14 +449,17 @@ fn table(db: &Connection, number: u32) -> Result<String, ErrorBox> {
     for _ in 0..PAGE_SIZE {
         let Some(row) = rows.next()? else { break };
         found = true;
-        html.push_str("<tr>");
-        for col in 0..4 {
+        let id: i64 = row.get(6)?;
+        let status: String = row.get(3)?;
+        let (state, status_label) = download_status(&status);
+        write!(html, r#"<tr data-image-id="{id}" data-state="{state}">"#)?;
+        for col in 0..3 {
             html.push_str("<td>");
             escape(&mut html, &row.get::<_, String>(col)?);
             html.push_str("</td>");
         }
         let percent = row.get::<_, i64>(4)?.clamp(0, 100);
-        let id: i64 = row.get(6)?;
+        let percent = if state == "downloaded" { 100 } else { percent };
         let (active, next, label) = if row.get::<_, bool>(5)? {
             ("Oui", 0, "Désactiver")
         } else {
@@ -464,7 +467,7 @@ fn table(db: &Connection, number: u32) -> Result<String, ErrorBox> {
         };
         write!(
             html,
-            r#"<td>{percent} %</td><td>{active}</td><td>
+            r#"<td data-download-status>{status_label}</td><td data-download-percent>{percent} %</td><td>{active}</td><td>
 <div class="form-actions">
 <form method="post" action="{ROUTE}/{id}/toggle"><button class="button--quiet" name="enabled" value="{next}">{label}</button></form>
 <form method="post" action="{ROUTE}/{id}/download"><button class="button--quiet">Relancer le téléchargement</button></form>
@@ -495,6 +498,16 @@ fn table(db: &Connection, number: u32) -> Result<String, ErrorBox> {
     Ok(html)
 }
 
+fn download_status(status: &str) -> (&'static str, &'static str) {
+    match status {
+        "pending" => ("pending", "En attente"),
+        "downloading" => ("downloading", "Téléchargement en cours"),
+        "downloaded" => ("downloaded", "Prête"),
+        "failed" | "error" => ("failed", "Échec du téléchargement"),
+        _ => ("unavailable", "Indisponible"),
+    }
+}
+
 pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::Result<Option<i64>> {
     db.execute(
         "INSERT INTO os_images(distro,version,version_full,arch,codename,major,channel,
@@ -503,7 +516,7 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
                     kernel_url,initrd_url,firmware_url,iso_url,extract_method,1,'pending'
                 FROM catalog_entries WHERE id=?1 AND arch IN ('amd64','arm64')
                     AND ((distro='debian' AND extract_method='direct')
-                      OR (NOT ?2 AND distro='ubuntu' AND extract_method='iso_extract'))
+                      OR (distro='ubuntu' AND extract_method='iso_extract'))
                 ON CONFLICT(distro,version_full,arch) WHERE version_full IS NOT NULL
                 DO UPDATE SET enabled=1,
                     status=CASE WHEN os_images.status IN ('downloaded','downloading')
@@ -519,8 +532,8 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
                   WHERE c.id=?1 AND c.arch IN ('amd64','arm64')
                     AND i.extract_method=c.extract_method
                     AND ((c.distro='debian' AND c.extract_method='direct')
-                      OR (NOT ?2 AND c.distro='ubuntu' AND c.extract_method='iso_extract'))",
-        rusqlite::params![id, resume],
+                      OR (c.distro='ubuntu' AND c.extract_method='iso_extract'))",
+        [id],
         |row| row.get(0),
     )
     .optional()

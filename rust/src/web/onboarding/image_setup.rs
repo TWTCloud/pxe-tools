@@ -5,6 +5,7 @@ use crate::{
     setting,
     web::{admin::escape, images, jobs::json_reply, setup::redirect, ui, ErrorBox, Reply},
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hyper::StatusCode;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -184,7 +185,7 @@ pub(super) fn submit(db: &Connection, fields: &HashMap<String, String>) -> Resul
             selected.sort_unstable();
             let mut saved: Vec<_> = extras(db)?.into_iter().map(|image| image.id).collect();
             for choice in selected {
-                if let Some(id) = images::queue_image(db, choice, false)? {
+                if let Some(id) = images::queue_image(db, choice, true)? {
                     if id != service_id && !saved.contains(&id) {
                         saved.push(id);
                     }
@@ -230,7 +231,7 @@ fn snapshot(db: &Connection) -> Result<Snapshot, ErrorBox> {
     ).optional()?;
     let loading = matches!(job.as_deref(), Some("pending" | "running"));
     let catalog = choices(&db, recommended, &extras, loading, base.is_some())?;
-    let catalog_version = format!("{:x}", Sha256::digest(catalog.as_bytes()));
+    let catalog_version = URL_SAFE_NO_PAD.encode(&Sha256::digest(catalog.as_bytes())[..9]);
     let ready = base
         .as_ref()
         .is_some_and(|image| image.status == "downloaded");
