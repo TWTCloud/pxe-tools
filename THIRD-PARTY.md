@@ -63,3 +63,9 @@ Les textes complets LGPL 2 et LGPL 2.1 associés aux notices des outils statique
 sont inclus. Les preuves de construction et de reliage, leur portée et leurs
 limites sont précisées dans `static-helpers/SOURCE-PREPARATION.md`. Les archives sont disponibles à l’adresse indiquée dans cette notice et doivent
 rester accessibles tant que les exécutables correspondants sont distribués.
+
+Les distributions Rust de la bêta 13 joignent les notices des crates utilisées,
+les notices de la bibliothèque standard et l’inventaire de sources dans
+`/usr/share/doc/pxe-tools/rust/`. L’inventaire indique l’URL de chaque archive
+de crate et l’empreinte issue de `rust/Cargo.lock`. Il figure aussi dans les
+offres de sources Docker publiées pour les deux architectures.

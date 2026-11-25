@@ -163,6 +163,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
           architecture: str = 'amd64',
           maintainer: str = 'PXE Tools local test <maintainers@example.invalid>',
           rust_binary: Path | None = None, rust_guided: bool = False,
+          rust_notices: Path | None = None,
           upgrade_fixture: bool = False) -> None:
     if package_name not in ('pxe-tools-local-test', 'pxe-tools'):
         raise ValueError('unsupported package name')
@@ -233,6 +234,10 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         for name in ('COPYING', 'COPYING.LESSER', 'THIRD-PARTY.md'):
             shutil.copy2(checked(ROOT/name), docs/name)
         copy_tree(ROOT/'third_party/licenses', docs/'licenses', tracked)
+        if rust_notices is not None:
+            if rust_binary is None or not (rust_notices/'crates.json').is_file():
+                raise ValueError('Rust notices require a binary and the crate source inventory')
+            shutil.copytree(rust_notices, docs/'rust')
         native=root/'usr/lib/pxe-tools/native'; native.mkdir(parents=True)
         for name in ('default.env','init.sh','start-php-fpm.sh','start-worker.py','configure-secure-tftp.py','php-fpm.conf','nginx.conf','pxe-nginx.conf','render-pxe-http.py','upgrade-lifecycle.py','reconcile-nginx.py','ownership-provenance.py','uninstall-apt.py'):
             shutil.copy2(checked(ROOT/'packaging/native'/name), native/name)

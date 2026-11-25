@@ -125,7 +125,7 @@ def inspect_image(image):
                 raise ValueError('archived Debian source checksum mismatch')
             files.append({**record, 'sha256': digest, 'bytes': len(data)})
         available[package] = files
-    return {
+    offer = {
         'image_id': details['Id'], 'architecture': details['Architecture'],
         'debian_sources': [{'name': name, 'version': version, 'files': available[name, version]}
                            for name, version in sorted(needed)],
@@ -133,6 +133,13 @@ def inspect_image(image):
         'static_helpers': 'https://github.com/williamboglietti/pxe-tools/releases/tag/sources-2026-11-12',
         'pxe_tools_source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
     }
+    if 'PXE_RUST_GUIDED=1' in details['Config']['Env']:
+        offer['rust_crates'] = json.loads(subprocess.check_output([
+            *run, 'cat', image, '/usr/share/doc/pxe-tools/rust/crates.json',
+        ]))
+        if not offer['rust_crates']:
+            raise ValueError('The Rust source inventory is empty')
+    return offer
 
 
 if __name__ == '__main__':
