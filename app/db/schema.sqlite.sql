@@ -197,7 +197,34 @@ CREATE TABLE IF NOT EXISTS users (
     username        TEXT NOT NULL UNIQUE COLLATE NOCASE,
     password_hash   TEXT NOT NULL,
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_login_at   DATETIME
+    last_login_at   DATETIME,
+    is_admin        INTEGER NOT NULL DEFAULT 0 CHECK(is_admin IN (0, 1)),
+    enabled         INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    permissions     INTEGER NOT NULL DEFAULT 0 CHECK(permissions >= 0),
+    external        INTEGER NOT NULL DEFAULT 0 CHECK(external IN (0, 1)),
+    session_epoch   INTEGER NOT NULL DEFAULT 0,
+    managed_password_hash TEXT
+);
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    secret_hash  BLOB NOT NULL UNIQUE CHECK(length(secret_hash) = 32),
+    scopes       INTEGER NOT NULL CHECK(scopes > 0),
+    created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+    expires_at   INTEGER NOT NULL,
+    rotated_at   INTEGER,
+    revoked_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS api_tokens_owner ON api_tokens(user_id);
+
+CREATE TABLE IF NOT EXISTS access_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor        TEXT NOT NULL,
+    operation    TEXT NOT NULL,
+    target       TEXT NOT NULL,
+    created_at   INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
 -- os_images — catalogue distros téléchargeables (Spec E)

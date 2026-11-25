@@ -124,6 +124,35 @@ pub(super) fn route(path: &str) -> Option<DeviceRoute> {
 }
 
 impl DeviceRoute {
+    pub(super) fn permission(
+        &self,
+        method: &hyper::Method,
+        form: Option<&[u8]>,
+    ) -> super::access::Permission {
+        use super::access::Permission::*;
+        match &self.section {
+            Section::Detail if form.is_some_and(|form| removal::requested(method, form)) => {
+                DevicesDelete
+            }
+            Section::Detail | Section::Status if form.is_some() => DevicesEdit,
+            Section::Detail | Section::Status | Section::HardwareContext => DevicesRead,
+            Section::Install | Section::Advanced(_) => Deploy,
+            Section::Command(Operation::Rescue | Operation::ExitRescue) => Admin,
+            Section::Command(_) => Power,
+            Section::Ansible(_) => Ansible,
+            Section::Wipe => Wipe,
+            Section::Diagnostics(diagnostics::Route::Start)
+                if form.is_some_and(|data| {
+                    form_urlencoded::parse(data)
+                        .any(|(key, value)| key == "mode" && value.ends_with("_rw"))
+                }) =>
+            {
+                Wipe
+            }
+            Section::Diagnostics(_) => Disks,
+        }
+    }
+
     pub(super) fn form_limit(&self, method: &hyper::Method) -> Option<usize> {
         match (&self.section, method) {
             (

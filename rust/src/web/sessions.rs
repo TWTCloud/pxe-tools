@@ -26,6 +26,8 @@ struct Session {
     user: String,
     fingerprint: String,
     expires: i64,
+    #[serde(default)]
+    epoch: i64,
 }
 
 impl Sessions {
@@ -53,6 +55,7 @@ impl Sessions {
         &self,
         user: String,
         password_hash: &str,
+        epoch: i64,
         obsolete: Option<&str>,
     ) -> Result<String, ErrorBox> {
         let dir = self.directory()?;
@@ -61,6 +64,7 @@ impl Sessions {
             user,
             fingerprint: digest(password_hash),
             expires: crate::now() + LIFETIME,
+            epoch,
         };
         let stored = dir.join(format!("rust-{}", digest(&token)));
         let bytes = serde_json::to_vec(&session)?;
@@ -87,9 +91,9 @@ impl Sessions {
         let Some(session) = self.read(token)? else {
             return Ok(None);
         };
-        let current: Option<String> = password_hash(db, &session.user)?;
+        let current = credential(db, &session.user)?;
         Ok(current
-            .filter(|hash| digest(hash) == session.fingerprint)
+            .filter(|(hash, epoch)| *epoch == session.epoch && digest(hash) == session.fingerprint)
             .map(|_| session.user))
     }
 
@@ -156,10 +160,15 @@ fn digest(value: &str) -> String {
 }
 
 pub(super) fn password_hash(db: &Connection, user: &str) -> rusqlite::Result<Option<String>> {
+    Ok(credential(db, user)?.map(|(hash, _)| hash))
+}
+
+pub(super) fn credential(db: &Connection, user: &str) -> rusqlite::Result<Option<(String, i64)>> {
     db.query_row(
-        "SELECT password_hash FROM users WHERE username=?1",
+        "SELECT COALESCE(managed_password_hash,password_hash),session_epoch FROM users
+         WHERE username=?1 AND enabled=1 AND external=0",
         [user],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
 }

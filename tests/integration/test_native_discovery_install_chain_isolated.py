@@ -881,7 +881,7 @@ def main():
                 ('ansible_enabled','on' if provision else 'off'),('ansible_ssh_pubkey',client_pubkey),
                 ('catalog_auto_refresh_enabled','off'),('ui_device_term','ordinateur')])
             if not rust_lab or packaged:
-                db.execute('INSERT INTO users(username,password_hash) VALUES(?,?)',('fixture-admin',login_hash))
+                db.execute('INSERT INTO users(username,password_hash,is_admin) VALUES(?,?,1)',('fixture-admin',login_hash))
             db.execute("INSERT INTO os_images(distro,version,arch,codename,version_full,enabled,status) "
                        "VALUES('debian','13.0',?,'trixie','13.0',1,'downloaded')",(client_arch,))
             if client_arch=='arm64':

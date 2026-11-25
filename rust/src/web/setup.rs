@@ -324,7 +324,7 @@ fn create_admin(config: &Path, username: &str, password: &str) -> Result<Reply, 
         return Ok(closed());
     }
     transaction.execute(
-        "INSERT INTO users(username, password_hash) VALUES (?1, ?2)",
+        "INSERT INTO users(username, password_hash, is_admin) VALUES (?1, ?2, 1)",
         params![username, hash],
     )?;
     transaction.execute(

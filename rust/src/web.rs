@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod access;
 mod acme;
 mod activity;
 mod admin;
 mod ansible_settings;
 mod ansible_webhook;
+mod api;
 mod assets;
 mod auth_proxy;
 mod certificates;
@@ -457,6 +459,25 @@ async fn dispatch(
     if path == "/healthz" && readable {
         return plain(StatusCode::OK, "ok\n");
     }
+    if path.starts_with(api::PREFIX) {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        let Ok(_permit) = site.requests.try_acquire() else {
+            return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
+        };
+        let mut reply = api::serve(parts, body, &site.database)
+            .await
+            .unwrap_or_else(|_| {
+                api::error(StatusCode::SERVICE_UNAVAILABLE, "api_unavailable")
+                    .expect("valid error response")
+            });
+        reply.headers_mut().insert(
+            hyper::header::X_CONTENT_TYPE_OPTIONS,
+            hyper::header::HeaderValue::from_static("nosniff"),
+        );
+        return reply;
+    }
     if path == "/" && readable {
         let location = if secure {
             "/admin/".to_owned()
@@ -542,6 +563,30 @@ async fn dispatch(
             .admin
             .login(&parts, peer, &site.database, Some(form))
             .await;
+    }
+    if matches!(path, access::USERS | access::TOKENS) {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        let form = if readable {
+            None
+        } else if parts.method == Method::POST {
+            if !admin_origin(&parts.headers, peer, site) {
+                return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+            }
+            match read_form(&parts.headers, body, 8192).await {
+                Ok(form) => Some(form),
+                Err(reply) => return reply,
+            }
+        } else {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        };
+        let action = if path == access::USERS {
+            admin::Action::Users(form)
+        } else {
+            admin::Action::Tokens(form)
+        };
+        return site.admin.serve(&parts, peer, &site.database, action).await;
     }
     if matches!(path, "/admin/" | "/admin/devices") && readable {
         if !secure {

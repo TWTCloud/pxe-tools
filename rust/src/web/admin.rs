@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{
+    access::{self, Permission},
     auth_proxy::TrustedProxies,
     bytes, plain,
     sessions::{self, Sessions},
@@ -65,6 +66,72 @@ pub(super) enum Action {
     Setup(String, Option<Bytes>),
     Certificates(Arc<super::certificates::Certificates>, Option<Bytes>),
     Acme(Arc<super::certificates::Certificates>, Bytes),
+    Users(Option<Bytes>),
+    Tokens(Option<Bytes>),
+}
+
+impl Action {
+    fn permission(&self, method: &hyper::Method) -> Option<Permission> {
+        use super::{
+            activity::View as Activity, devices::bulk::Route as Bulk, jobs::View as Job,
+            presets::Route as Preset, settings::Route as Setting,
+        };
+        use Permission::*;
+        let read = matches!(*method, hyper::Method::GET | hyper::Method::HEAD);
+        let select = |view, edit| if read { view } else { edit };
+        Some(match self {
+            Self::Devices => DevicesRead,
+            Self::Device(route, form) => route.permission(method, form.as_deref()),
+            Self::Linux(..) => Deploy,
+            Self::Register(..) => DevicesEdit,
+            Self::Bulk(Bulk::Delete, _) => DevicesDelete,
+            Self::Bulk(..) => Deploy,
+            Self::Images(..) | Self::Windows(..) => select(ImagesRead, ImagesEdit),
+            Self::Presets(..) => select(PresetsRead, PresetsEdit),
+            Self::Preset(
+                Preset::New
+                | Preset::Import
+                | Preset::Detail(_)
+                | Preset::Snapshot(_)
+                | Preset::Push(_),
+                _,
+            )
+            | Self::PullPresets => PresetsEdit,
+            Self::Jobs(Job::Retry(_)) => Admin,
+            Self::Jobs(Job::Detail(_) | Job::Poll(_)) => Logs,
+            Self::Jobs(Job::List | Job::Status(_) | Job::Latest(_)) => JobsRead,
+            Self::Activity(Activity::ForceComplete(_) | Activity::CancelInstallation(_), _) => {
+                ActivityClose
+            }
+            Self::Activity(
+                Activity::Legacy(..)
+                | Activity::Installation(_)
+                | Activity::Wipe(_)
+                | Activity::DiskTest(_)
+                | Activity::Download(..),
+                _,
+            ) => Logs,
+            Self::Activity(
+                Activity::List
+                | Activity::Fragment
+                | Activity::DeviceTasks(_)
+                | Activity::DeviceProgress(_)
+                | Activity::Task(_)
+                | Activity::Checklist(_),
+                _,
+            ) => ActivityRead,
+            Self::Terminology(..) => SettingsEdit,
+            Self::Settings(Setting::General | Setting::Dns | Setting::Ipxe, _) => {
+                select(SettingsRead, SettingsEdit)
+            }
+            Self::Settings(..)
+            | Self::Setup(..)
+            | Self::Certificates(..)
+            | Self::Acme(..)
+            | Self::Users(..) => Admin,
+            Self::Tokens(..) => return None,
+        })
+    }
 }
 
 enum Identity {
@@ -163,10 +230,10 @@ impl Console {
                 "$2y$12$BivNwfeaFgD7FobF2xFxFeacHAMld9a7bYBP0yCpqXk/Ve6YOFioi";
             let db_path = configured_database(&config)?;
             let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
-            let hash = sessions::password_hash(&db, &username).ok()?;
-            let verified = bcrypt::verify(password, hash.as_deref().unwrap_or(UNKNOWN_ACCOUNT_HASH))
+            let credential = sessions::credential(&db, &username).ok()?;
+            let verified = bcrypt::verify(password, credential.as_ref().map_or(UNKNOWN_ACCOUNT_HASH, |(hash, _)| hash))
                 .unwrap_or(false);
-            let Some(hash) = hash.filter(|_| verified) else {
+            let Some((hash, epoch)) = credential.filter(|_| verified) else {
                 return Some(sessions::login_page(
                     &next,
                     Some("Identifiants incorrects."),
@@ -174,18 +241,22 @@ impl Console {
                 ));
             };
             if db.execute(
-                "UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE username=?1 AND password_hash=?2",
-                params![username, hash],
+                "UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE username=?1
+                 AND COALESCE(managed_password_hash,password_hash)=?2 AND session_epoch=?3 AND enabled=1 AND external=0",
+                params![username, hash, epoch],
             ).ok()? != 1 {
                 return Some(unauthorized());
             }
-            let next = if crate::setting(&db, "wizard_completed").ok()? == "1" {
+            let account = access::account(&db, &username, false).ok()??;
+            let next = if matches!(next.as_str(), "/admin/" | "/admin/devices") && !account.allows(Permission::DevicesRead) {
+                ui::home(&account)
+            } else if !account.admin || crate::setting(&db, "wizard_completed").ok()? == "1" {
                 &next
             } else {
                 "/init/network"
             };
             let token = sessions
-                .issue(username, &hash, current_token.as_deref())
+                .issue(username, &hash, epoch, current_token.as_deref())
                 .ok()?;
             Some(sessions::cookie(&token, next))
         })
@@ -288,7 +359,7 @@ impl Console {
             let reply = (|| {
                 let db_path = configured_database(&config)?;
                 let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-                let username = match identity {
+                let (username, external) = match identity {
                     Identity::Basic(username, password) => {
                         if !sessions::password_hash(&db, &username)
                             .ok()?
@@ -296,17 +367,43 @@ impl Console {
                         {
                             return Some(unauthorized());
                         }
-                        username
+                        (username, false)
                     }
                     Identity::Session(token) => {
                         let Some(username) = sessions.user(&db, &token).ok()? else {
                             return missing_session;
                         };
-                        username
+                        (username, false)
                     }
-                    Identity::Forwarded(username) => username,
+                    Identity::Forwarded(username) => (username, true),
                 };
                 authenticated = true;
+                let Some(account) = access::account(&db, &username, external).ok()? else {
+                    return Some(access::denied());
+                };
+                let _navigation = ui::navigation_for(&account);
+                if action
+                    .permission(&method)
+                    .is_some_and(|permission| !account.allows(permission))
+                {
+                    return Some(if path.starts_with("/api/") {
+                        access::denied()
+                    } else {
+                        let mut response = ui::page(
+                            ConsoleSection::Tokens,
+                            "Accès réservé",
+                            &format!(r#"<p>Votre compte ne dispose pas du droit nécessaire.</p><p><a href="{}">Revenir à vos rubriques</a></p>"#, ui::home(&account)),
+                        );
+                        *response.status_mut() = StatusCode::FORBIDDEN;
+                        response
+                    });
+                }
+                if let Action::Users(form) = &action {
+                    return access::users(&db, &db_path, &account, form.as_deref()).ok();
+                }
+                if let Action::Tokens(form) = &action {
+                    return access::tokens(&db, &db_path, &account, form.as_deref()).ok();
+                }
                 if let Action::Device(route, form) = &action {
                     return route
                         .serve(&db, &db_path, &method, form.as_deref(), &username)
