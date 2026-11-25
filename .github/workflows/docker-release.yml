@@ -6,6 +6,8 @@ on:
       - .github/workflows/docker-release.yml
       - docker/pxe-tools/Dockerfile
       - packaging/ci/release-version.txt
+      - packaging/ci/collect-rust-notices.py
+      - packaging/ci/docker-source-offer.py
       - tests/integration/test_server_architecture.sh
       - tests/integration/test_rust_*distribution.sh
   workflow_dispatch:

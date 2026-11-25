@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/apt-package-candidate.yml
       - packaging/ci/release-version.txt
+      - packaging/ci/collect-rust-notices.py
       - packaging/changelogs/**
       - tests/integration/test_rust_*distribution.sh
   workflow_dispatch:
@@ -84,13 +85,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/package"
           asset_version=${version//\~/-}
           [[ "$asset_version" =~ ^[A-Za-z0-9._-]+$ ]]
-          rustup toolchain install 1.96.0 --profile minimal
+          rustup toolchain install 1.96.0 --profile minimal --component rust-docs
           cargo +1.96.0 build --locked --release --manifest-path rust/Cargo.toml
           binary=rust/target/release/pxe-tools-rust
           strip "$binary"
+          rustup run 1.96.0 python3 packaging/ci/collect-rust-notices.py "$RUNNER_TEMP/rust-notices"
           package="$RUNNER_TEMP/package/pxe-tools_${asset_version}_$ARCH.deb"
           python3 packaging/native/build-apt-package-candidate.py "$package" --version "$version" --architecture "$ARCH" \
-            --rust-binary "$binary" --maintainer 'PXE Tools <security@pxetools.com>'
+            --rust-binary "$binary" --rust-notices "$RUNNER_TEMP/rust-notices" --maintainer 'PXE Tools <security@pxetools.com>'
           [[ "$(dpkg-deb --field "$package" Package)" == pxe-tools ]]
           [[ "$(dpkg-deb --field "$package" Version)" == "$version" ]]
           [[ "$(dpkg-deb --field "$package" Architecture)" == "$ARCH" ]]

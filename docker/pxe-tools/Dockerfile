@@ -279,8 +279,12 @@ COPY rust/ rust/
 COPY app/db/schema.sqlite.sql app/db/schema.sqlite.sql
 COPY app/src/Views/pxe/wipe.sh.php app/src/Views/pxe/wipe.sh.php
 COPY docker/worker/templates/preseed.php.j2 docker/worker/templates/preseed-base.cfg.j2 docker/worker/templates/grub.php.j2 docker/worker/templates/
+COPY packaging/ci/collect-rust-notices.py /source/collect-rust-notices.py
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+RUN rustup component add rust-docs
 RUN cargo build --locked --release --manifest-path rust/Cargo.toml \
-    && strip rust/target/release/pxe-tools-rust
+    && strip rust/target/release/pxe-tools-rust \
+    && python3 /source/collect-rust-notices.py /source/rust-notices
 
 FROM php-appliance AS rust-experimental
 COPY --from=rust-build /source/rust/target/release/pxe-tools-rust /usr/lib/pxe-tools/pxe-tools-rust
@@ -294,6 +298,7 @@ ENV PXE_RUST_GUIDED=1 PXE_RUST_DIRECT_HTTP=1 TLS_DIR=/var/lib/pxe-tools-tls
 RUN install -d -o root -g root -m 0700 /var/lib/pxe-tools-tls
 VOLUME ["/var/lib/pxe-tools-tls"]
 COPY --from=rust-build /source/rust/target/release/pxe-tools-rust /usr/lib/pxe-tools/pxe-tools-rust
+COPY --from=rust-build /source/rust-notices/ /usr/share/doc/pxe-tools/rust/
 COPY --chmod=0755 rust/packaging/start-guided.sh /usr/lib/pxe-tools/start-rust-guided.sh
 COPY --chmod=0755 rust/packaging/s6-guided-run /etc/s6-overlay/s6-rc.d/rust-guided/run
 RUN rm /etc/s6-overlay/s6-rc.d/user/contents.d/php-fpm \
