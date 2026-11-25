@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-only
-"""Acquire authentic Debian PXE firmware and optionally its amd64 GRUB modules.
+"""Acquire authenticated Debian PXE firmware and matching GRUB modules.
 
 This uses an isolated temporary APT state and never installs a Debian package or
 changes the host's APT configuration. Candidate binaries are published only
@@ -9,6 +9,7 @@ versions from the two signed archive packages.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import fcntl
 import os
@@ -18,8 +19,8 @@ import secrets
 import stat
 from contextlib import contextmanager
 import resource
+import struct
 import subprocess
-import sys
 import tarfile
 import tempfile
 import urllib.parse
@@ -30,10 +31,17 @@ SUITE = 'trixie'
 LIMIT = 16 * 1024 * 1024
 MAX_APT_FILE = 64 * 1024 * 1024
 SCRIPTS = Path(__file__).resolve().parent
-SHIM_MEMBER = './usr/lib/shim/shimx64.efi.signed'
-MOK_MEMBER = './usr/lib/shim/mmx64.efi.signed'
-GRUB_SIGNED_MEMBER = './usr/lib/grub/x86_64-efi-signed/grubnetx64.efi.signed'
-GRUB_MODULE_PREFIX = './usr/lib/grub/x86_64-efi/'
+TARGETS = {'amd64': ('x64', 'x86_64-efi', 0x8664),
+           'arm64': ('aa64', 'arm64-efi', 0xAA64)}
+
+
+def check_machine(image, machine):
+    if len(image) < 64 or image[:2] != b'MZ':
+        raise ValueError('invalid EFI image')
+    header = struct.unpack_from('<I', image, 0x3c)[0]
+    if (header + 6 > len(image) or image[header:header + 4] != b'PE\0\0'
+            or struct.unpack_from('<H', image, header + 4)[0] != machine):
+        raise ValueError('EFI image architecture does not match the Debian packages')
 
 
 def constrained():
@@ -126,26 +134,27 @@ def extract_member(deb, name):
 
 
 def extract_grub_modules(deb, destination):
+    prefix = f'./usr/lib/grub/{destination.name}/'
     destination.mkdir()
     with package_tar(deb) as (archive, members):
         for member in members:
-            if not member.name.startswith(GRUB_MODULE_PREFIX) or member.name == GRUB_MODULE_PREFIX:
+            if not member.name.startswith(prefix) or member.name == prefix:
                 continue
-            name = member.name.removeprefix(GRUB_MODULE_PREFIX)
+            name = member.name.removeprefix(prefix)
             if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name)
                     or not member.isfile() or member.size > LIMIT):
-                raise ValueError('invalid amd64 GRUB module file')
+                raise ValueError('invalid GRUB module file')
             with archive.extractfile(member) as source, (destination / name).open('xb') as target:
                 target.write(source.read(LIMIT + 1))
     if not all((destination / name).is_file() for name in
                ('kernel.img', 'moddep.lst', 'modinfo.sh', 'http.mod', 'tftp.mod')):
-        raise ValueError('incomplete amd64 GRUB modules')
+        raise ValueError('incomplete GRUB modules')
 
 
-def downloaded_package(work, name):
-    candidates = list(work.glob(name + '_*_amd64.deb'))
+def downloaded_package(work, name, architecture):
+    candidates = list(work.glob(f'{name}_*_{architecture}.deb'))
     if len(candidates) != 1 or candidates[0].stat().st_size > LIMIT:
-        raise ValueError(f'missing, ambiguous or oversized amd64 package: {name}')
+        raise ValueError(f'missing, ambiguous or oversized {architecture} package: {name}')
     return candidates[0]
 
 
@@ -215,13 +224,14 @@ def write_staged(directory_fd, data):
     return name
 
 
-def publish_pair(directory_fd, shim, mok):
-    previous = {name: previous_target(directory_fd, name)
-                for name in ('mmx64.efi', 'grubnetx64.efi')}
+def publish_pair(directory_fd, shim, mok, architecture='amd64'):
+    suffix, _, _ = TARGETS[architecture]
+    files = ((f'mm{suffix}.efi', mok), (f'grubnet{suffix}.efi', shim))
+    previous = {name: previous_target(directory_fd, name) for name, _ in files}
     staged = []
     changed = []
     try:
-        for name, data in (('mmx64.efi', mok), ('grubnetx64.efi', shim)):
+        for name, data in files:
             staged.append((name, write_staged(directory_fd, data)))
         for name, temporary in staged:
             os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
@@ -243,7 +253,8 @@ def publish_pair(directory_fd, shim, mok):
                 pass
 
 
-def acquire(destination, keyring, *, with_grub=False):
+def acquire(destination, keyring, *, with_grub=False, architecture='amd64'):
+    suffix, platform, efi_machine = TARGETS[architecture]
     destination = Path(destination)
     keyring = Path(keyring)
     if (not keyring.is_absolute() or not keyring.is_file()
@@ -259,26 +270,28 @@ def acquire(destination, keyring, *, with_grub=False):
             run(['gpgv', '--keyring', str(keyring), '--output', str(work / 'Release'), str(inrelease)])
             run(['python3', str(SCRIPTS / 'debian-release-freshness.py'), str(work / 'Release')])
             release = (work / 'Release').read_text(encoding='utf-8')
-            relative = 'main/installer-amd64/current/images/SHA256SUMS'
+            installer = f'main/installer-{architecture}/current/images'
+            relative = f'{installer}/SHA256SUMS'
             sums = fetch(f'dists/{SUITE}/{relative}', 4 * 1024 * 1024)
             if hashlib.sha256(sums).hexdigest() != release_sha256(release, relative):
                 raise ValueError('installer checksum manifest does not match signed Release')
-            expected = sums_sha256(sums.decode('ascii'), './netboot/debian-installer/amd64/bootnetx64.efi')
-            netboot = fetch(f'dists/{SUITE}/main/installer-amd64/current/images/netboot/debian-installer/amd64/bootnetx64.efi', LIMIT)
+            name = f'netboot/debian-installer/{architecture}/bootnet{suffix}.efi'
+            expected = sums_sha256(sums.decode('ascii'), './' + name)
+            netboot = fetch(f'dists/{SUITE}/{installer}/{name}', LIMIT)
             if hashlib.sha256(netboot).hexdigest() != expected:
                 raise ValueError('Debian netboot shim digest mismatch')
 
             (work / 'lists/partial').mkdir(parents=True)
             (work / 'archives/partial').mkdir(parents=True)
             (work / 'sources.list').write_text(
-                f'deb [arch=amd64 signed-by={keyring}] {ARCHIVE} {SUITE} main\n', encoding='ascii')
+                f'deb [arch={architecture} signed-by={keyring}] {ARCHIVE} {SUITE} main\n', encoding='ascii')
             opts = ['-o', f'Dir::Etc::sourcelist={work / "sources.list"}',
                     '-o', 'Dir::Etc::sourceparts=-', '-o', 'Dir::Etc::main=/dev/null',
                     '-o', 'Dir::Etc::parts=-', '-o', 'Dir::Etc::preferences=/dev/null',
                     '-o', 'Dir::Etc::preferencesparts=-', '-o', 'Dir::State::status=/dev/null',
                     '-o', f'Dir::State::lists={work / "lists"}',
                     '-o', f'Dir::Cache::archives={work / "archives"}',
-                    '-o', 'APT::Architecture=amd64',
+                    '-o', f'APT::Architecture={architecture}',
                     '-o', 'Dir::Cache::pkgcache=', '-o', 'Dir::Cache::srcpkgcache=',
                     '-o', 'APT::Sandbox::User=root', '-o', 'Debug::NoLocking=1',
                     '-o', 'Acquire::Languages=none', '-o', 'Acquire::Max-ValidTime=15552000',
@@ -286,51 +299,72 @@ def acquire(destination, keyring, *, with_grub=False):
                     '-o', 'APT::Get::List-Cleanup=0']
             env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME': str(work), 'LC_ALL': 'C'}
             run(['apt-get', *opts, 'update'], cwd=work, env=env)
-            packages = ['shim-signed', 'shim-helpers-amd64-signed']
+            packages = ['shim-signed', f'shim-helpers-{architecture}-signed']
             if with_grub:
-                packages.extend(('grub-efi-amd64-bin', 'grub-efi-amd64-signed'))
+                packages.extend((f'grub-efi-{architecture}-bin', f'grub-efi-{architecture}-signed'))
             run(['apt-get', *opts, 'download', *packages], cwd=work, env=env)
-            shim_deb, mok_deb = (downloaded_package(work, name) for name in packages[:2])
+            shim_deb, mok_deb = (downloaded_package(work, name, architecture) for name in packages[:2])
             shim_version = run(['dpkg-deb', '-f', str(shim_deb), 'Built-Using'], output=True).decode().strip()
             mok_version = run(['dpkg-deb', '-f', str(mok_deb), 'Built-Using'], output=True).decode().strip()
             if shim_build(shim_version) != shim_build(mok_version):
                 raise ValueError('Debian shim and MokManager source versions do not match')
-            shim = extract_member(shim_deb, SHIM_MEMBER)
-            mok = extract_member(mok_deb, MOK_MEMBER)
+            shim = extract_member(shim_deb, f'./usr/lib/shim/shim{suffix}.efi.signed')
+            mok = extract_member(mok_deb, f'./usr/lib/shim/mm{suffix}.efi.signed')
             if hashlib.sha256(shim).hexdigest() != expected or shim != netboot:
                 raise ValueError('package shim does not match signed installer shim')
+            check_machine(shim, efi_machine)
+            check_machine(mok, efi_machine)
             if with_grub:
-                modules_deb, signed_deb = (downloaded_package(work, name) for name in packages[2:])
+                modules_deb, signed_deb = (downloaded_package(work, name, architecture) for name in packages[2:])
                 version = run(['dpkg-deb', '-f', str(modules_deb), 'Version'], output=True).decode().strip()
                 native_version = run(['dpkg-query', '-W', '-f=${Version}', 'grub-common'],
                                      output=True).decode().strip()
                 if version != native_version:
-                    raise ValueError('Debian amd64 GRUB modules must match the installed grub-common version')
-                extract_grub_modules(modules_deb, destination / 'x86_64-efi')
+                    raise ValueError('Debian GRUB modules must match the installed grub-common version')
+                extract_grub_modules(modules_deb, destination / platform)
                 (destination / 'grub.version').write_text(version + '\n', encoding='ascii')
-                (destination / 'grubnetx64.efi.signed').write_bytes(extract_member(signed_deb, GRUB_SIGNED_MEMBER))
+                filename = f'grubnet{suffix}.efi.signed'
+                signed = extract_member(signed_deb, f'./usr/lib/grub/{platform}-signed/{filename}')
+                check_machine(signed, efi_machine)
+                (destination / filename).write_bytes(signed)
             # No existing binary is touched before every authenticated check passes.
-            publish_pair(directory_fd, shim, mok)
-            print('Authenticated Debian shim and matching MokManager prepared.')
+            publish_pair(directory_fd, shim, mok, architecture)
+            print(f'Authenticated Debian {architecture} shim and matching MokManager prepared.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('directory')
+    parser.add_argument('keyring_or_target')
+    parser.add_argument('--with-grub', action='store_true')
+    parser.add_argument('--publish-pair', action='store_true')
+    parser.add_argument('--architecture', choices=TARGETS, default='amd64')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        parser.error('Root is required')
+    if args.publish_pair:
+        if args.with_grub:
+            parser.error('--publish-pair and --with-grub are mutually exclusive')
+        suffix, _, machine = TARGETS[args.architecture]
+        source = trusted_directory(args.directory)
+        try:
+            shim = previous_target(source, f'grubnet{suffix}.efi')
+            mok = previous_target(source, f'mm{suffix}.efi')
+            if not shim or not mok:
+                raise ValueError('staged Debian EFI pair missing')
+            check_machine(shim, machine)
+            check_machine(mok, machine)
+            with locked_destination(args.keyring_or_target) as target:
+                publish_pair(target, shim, mok, args.architecture)
+        finally:
+            os.close(source)
+    else:
+        acquire(args.directory, args.keyring_or_target, with_grub=args.with_grub,
+                architecture=args.architecture)
 
 
 if __name__ == '__main__':
     try:
-        if sys.argv[1:2] == ['--publish-pair'] and len(sys.argv) == 4 and os.geteuid() == 0:
-            source = trusted_directory(sys.argv[2])
-            try:
-                shim = previous_target(source, 'grubnetx64.efi')
-                mok = previous_target(source, 'mmx64.efi')
-                if not shim or not mok or shim[:2] != b'MZ' or mok[:2] != b'MZ':
-                    raise ValueError('staged Debian EFI pair missing')
-                with locked_destination(sys.argv[3]) as target:
-                    publish_pair(target, shim, mok)
-            finally:
-                os.close(source)
-        else:
-            if ((len(sys.argv) != 3 and (len(sys.argv) != 4 or sys.argv[3] != '--with-grub'))
-                    or os.geteuid() != 0):
-                raise ValueError('expected root, destination, Debian archive keyring and optional --with-grub')
-            acquire(sys.argv[1], sys.argv[2], with_grub=len(sys.argv) == 4)
+        main()
     except (OSError, ValueError, UnicodeError, tarfile.TarError, subprocess.SubprocessError) as exc:
         raise SystemExit(f'Debian shim preparation failed: {exc}')

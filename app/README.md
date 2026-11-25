@@ -64,21 +64,29 @@ Les noms d’hôte, les notes et les données existantes restent identiques, ain
 
 ### API PXE (port 80 — vhost PXE + port 8080)
 
-Pas d'auth — appelés par les machines en cours d'install.
+Les clients PXE utilisent ces routes hors session web. Les filtres réseau
+utilisent l'adresse du pair vue par le serveur.
 
-| Méthode | Path                | Body / Query | Action |
-|--|--|--|--|
-| POST    | `/api/discovery`    | JSON `{mac, inventory, disks, interfaces}` | Crée/update machine en `discovered` |
-| GET/POST| `/api/install-start`| `?mac=...` | status → `installing`, créer row `installations` |
-| GET/POST| `/api/install-end`  | `?mac=...&status=success\|failed` | status → `installed`/`failed`, enqueue Ansible |
+| Méthode | Route | Contrôle ou effet |
+|--|--|--|
+| GET/POST | `/api/discovery` | Inventaire complet en JSON ou en base64. Un ping `phase` consigne un événement. |
+| GET/POST | `/api/install-start` | Boucle locale uniquement. Machine configurée ou en cours d'installation, dans une phase d'installation ouverte. |
+| GET/POST | `/api/install-end` | Sous-réseau PXE IPv4 et jeton Bearer de l'action d'installation de cette machine. L'installation la plus récente doit correspondre à l'action. |
+| GET | `/preseed.php?mac=…` | Sous-réseau PXE IPv4 et phase d'installation ouverte. Le rendu lance `install-start` en boucle locale. |
+| GET | `/api/monitoring/installs` | Boucle locale IPv4 ou sous-réseau PXE IPv4. Résumé en lecture seule. |
 
 ## DB SQLite
 
-Fichier : `/var/lib/pxe-tools/pxe-tools.sqlite` (`www-data:ansible 0660`).
+Le chemin par défaut est `/var/lib/pxe-tools/pxe-tools.sqlite`. La configuration
+`/etc/pxe-tools/db.conf` fait foi lorsqu'elle existe. Le schéma se trouve dans
+[db/schema.sqlite.sql](db/schema.sqlite.sql).
 
-Tables : `machines`, `presets`, `installations` (cf [db/schema.sql](db/schema.sql)).
+`Db::get()` active par défaut le mode WAL et configure un délai d'attente
+SQLite de 5 secondes. Le répertoire de la base doit permettre la gestion des
+fichiers `-wal` et `-shm` par les services qui accèdent à la base.
 
-Mode rollback journal (pas WAL). Le directory parent doit être writable par www-data + ansible (mode `0775`, group `www-data`, et user `ansible` ajouté à ce groupe).
+Les premiers essais de portage utilisent le même schéma sur des fixtures
+jetables. Voir le [banc Rust](../tests/benchmarks/rust-monitor/README.md).
 
 ## États d'une machine
 

@@ -313,7 +313,7 @@ def _read_image_delete_signal(process: subprocess.Popen, expected: bytes) -> Non
 
 
 def run_image_delete(job: dict) -> None:
-    """Stage fixed files as root while an unprivileged PHP child holds the lock."""
+    """Stage fixed files as root while an unprivileged child holds the lock."""
     job_id = job.get('id')
     match = re.fullmatch(r'image:delete:([1-9][0-9]{0,18})', str(job.get('job_type', '')))
     if type(job_id) is not int or job_id <= 0 or match is None:
@@ -347,15 +347,18 @@ def run_image_delete(job: dict) -> None:
             if dict(row) != json.loads(job['log']):
                 raise ValueError('image changed after request')
             restore_staged(fd, job_id)
-            # Do not run PHP with root privileges or let it reread the mutable
-            # db.conf. The child gets only the parent's already-selected DB.
+            # Give the unprivileged child only the parent's selected database.
             account = pwd.getpwnam('www-data')
             if account.pw_uid == 0 or account.pw_gid == 0:
                 raise ValueError('invalid web account')
-            cli = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'cli', 'delete-image.php')
+            if os.environ.get('PXE_RUST_GUIDED') == '1':
+                command = ['/usr/lib/pxe-tools/pxe-tools-rust', '--reserve-image-deletion']
+            else:
+                cli = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'cli', 'delete-image.php')
+                command = ['/usr/bin/php', cli]
             env = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8',
                    'PXE_HTTP_ROOT': HTTP_ROOT, 'HTTP_ROOT': HTTP_ROOT}
-            process = subprocess.Popen(['/usr/bin/php', cli, str(image_id), str(job_id), DB_PATH],
+            process = subprocess.Popen([*command, str(image_id), str(job_id), DB_PATH],
                                        env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.DEVNULL, user=account.pw_uid,
                                        group=account.pw_gid, extra_groups=())
@@ -406,6 +409,11 @@ def run_bootstrap_job(job: dict) -> None:
     pour ne pas saturer SQLite. Heartbeat updated_at à chaque flush."""
     job_id = job["id"]
     job_type = job["job_type"]
+    if (os.environ.get("PXE_RUST_GUIDED") == "1"
+            and job_type in ("system:nginx_reload", "system:release_nginx_port")):
+        update_init_job(job_id, status="failed", ended_at=now(), updated_at=now(),
+                        message="Tâche historique Nginx. Consultez l’état du serveur Rust.")
+        return
 
     if job_type.startswith('image:delete:'):
         run_image_delete(job)
@@ -439,10 +447,23 @@ def run_bootstrap_job(job: dict) -> None:
     if job_type.startswith("action:render_postboot:"):
         run_render_postboot_job(job)
         return
+    if (job_type.startswith(("action:reboot:", "machine:reboot:", "machine:shutdown:"))
+            and os.environ.get("PXE_RUST_GUIDED") == "1"):
+        subprocess.run(
+            ["/usr/lib/pxe-tools/pxe-tools-rust", "--run-power-job", DB_PATH, str(job_id)],
+            check=True, timeout=20,
+        )
+        return
     if job_type.startswith("action:reboot:"):
         run_reboot_job(job)
         return
     if job_type.startswith("action:ansible_retry:"):
+        if os.environ.get("PXE_RUST_GUIDED") == "1":
+            subprocess.run(
+                ["/usr/lib/pxe-tools/pxe-tools-rust", "--run-ansible-retry", DB_PATH, str(job_id)],
+                check=True, timeout=15,
+            )
+            return
         run_ansible_retry_job(job)
         return
     if job_type.startswith("machine:reboot:"):
@@ -466,6 +487,12 @@ def run_bootstrap_job(job: dict) -> None:
         update_init_job(job_id, status="failed", message="Type de tâche inconnu ou non disponible.", ended_at=now(), updated_at=now())
         return
     script_name, env_override = entry
+    if os.environ.get("PXE_RUST_GUIDED") == "1" and job_type.startswith("bootstrap:"):
+        subprocess.run([
+            "/usr/lib/pxe-tools/pxe-tools-rust", "--run-bootstrap-job",
+            DB_PATH, str(job_id), SCRIPTS_DIR,
+        ], check=True)
+        return
 
     script_path = os.path.join(SCRIPTS_DIR, script_name)
     if not os.path.isfile(script_path):
@@ -575,8 +602,8 @@ def _repository_scope_module():
     return repository_scope
 
 
-def _repository_profile() -> dict | None:
-    path = db_setting("ansible_repo_profile", "").strip()
+def _repository_profile(path: str | None = None) -> dict | None:
+    path = db_setting("ansible_repo_profile", "").strip() if path is None else path
     if not path:
         return None
     return _repository_scope_module().load_profile(
@@ -964,7 +991,9 @@ def run_preset_pull_github(job: dict) -> None:
         update_init_job(job_id, progress_percent=25, updated_at=now())
         flush_log()
 
-        preset_directory = _preset_relative_directory()
+        profile_path = db_setting("ansible_repo_profile", "").strip()
+        profile = _repository_profile(profile_path)
+        preset_directory = profile["presets_path"] if profile else "host_vars"
         host_vars_dir = os.path.join(WORKDIR, preset_directory)
         if not os.path.isdir(host_vars_dir):
             log_lines.append(f"[worker] aucun dossier {preset_directory}/ dans le repo, rien à importer\n")
@@ -997,8 +1026,9 @@ def run_preset_pull_github(job: dict) -> None:
         log_lines.append(f"[worker] {len(files)} fichier(s) à traiter\n")
         flush_log()
 
+        rust_guided = os.environ.get("PXE_RUST_GUIDED") == "1"
         cli_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cli", "preset-import.php")
-        if not os.path.isfile(cli_script):
+        if not rust_guided and not os.path.isfile(cli_script):
             raise RuntimeError(f"CLI introuvable : {cli_script}")
 
         created = 0
@@ -1020,9 +1050,11 @@ def run_preset_pull_github(job: dict) -> None:
                 continue
             # Une modification locale sauvegardée pendant ce pull attend son
             # propre push. Ne pas l'écraser avec une version GitHub plus vieille.
+            payload = None
             try:
                 with open(path, encoding="utf-8") as source:
-                    imported_name = json.load(source).get("name")
+                    payload = json.load(source)
+                imported_name = payload.get("name")
                 with db_connect() as db:
                     local = db.execute(
                         "SELECT * FROM presets WHERE name = ?", (imported_name,)
@@ -1044,10 +1076,22 @@ def run_preset_pull_github(job: dict) -> None:
                     continue
             except (OSError, ValueError, AttributeError):
                 pass  # Le CLI d'import remontera l'erreur du fichier invalide.
-            r = subprocess.run(
-                ["php", cli_script, f"--json-file={path}"],
-                capture_output=True, text=True, timeout=30,
-            )
+            if rust_guided:
+                command = ["/usr/lib/pxe-tools/pxe-tools-rust", "--import-preset", "/etc/pxe-tools/db.conf"]
+                if isinstance(payload, dict):
+                    request = {
+                        "preset": payload,
+                        "repository_profile": profile_path,
+                        "allowed_roles": list(profile["playbooks"]) if profile else None,
+                    }
+                    r = subprocess.run(command, input=json.dumps(request), capture_output=True, text=True, timeout=30)
+                else:
+                    r = subprocess.CompletedProcess(command, 2, stderr="Modèle JSON invalide.")
+            else:
+                r = subprocess.run(
+                    ["php", cli_script, f"--json-file={path}"],
+                    capture_output=True, text=True, timeout=30,
+                )
             if r.returncode == 0:
                 try:
                     out = json.loads(r.stdout.strip())
@@ -1104,6 +1148,9 @@ def run_preset_pull_github(job: dict) -> None:
 
 def enqueue_auto_preset_pull() -> None:
     """Relance les publications échouées, puis actualise depuis le dépôt."""
+    if os.environ.get("PXE_RUST_GUIDED") == "1":
+        schedule_rust_worker_jobs("presets")
+        return
     if not is_ansible_enabled():
         return
     if not db_setting("ansible_repo_url", "") or not os.path.isdir(os.path.join(WORKDIR, ".git")):
@@ -1331,6 +1378,12 @@ def run_image_download(image: dict) -> None:
     Le script publie son own progress dans os_images.message + progress_percent
     + updated_at via side-channel SQLite."""
     image_id = image["id"]
+    if os.environ.get("PXE_RUST_GUIDED") == "1":
+        subprocess.run([
+            "/usr/lib/pxe-tools/pxe-tools-rust", "--run-image-download",
+            DB_PATH, str(image_id), SCRIPTS_DIR,
+        ], check=True)
+        return
     label = f"{image['distro']} {image['version']} {image['arch']}"
     script = script_for_image(image)
 
@@ -1824,7 +1877,7 @@ def is_ansible_enabled() -> bool:
         return False  # DB neuve / setting absente → pas d'ansible
 
 
-def fetch_pending_ansible() -> dict | None:
+def fetch_pending_ansible(installation_id: int | None = None) -> dict | None:
     # Même si Ansible est désactivé, les installations terminées doivent être
     # consommées pour sortir de ansible_status='pending' et clôturer l'action.
     # run_playbook les marque alors 'no_role' sans lancer de playbook.
@@ -1848,7 +1901,7 @@ def fetch_pending_ansible() -> dict | None:
         FROM installations i
         JOIN machines m ON i.machine_id = m.id
         LEFT JOIN actions a ON i.action_id = a.id
-        WHERE i.ansible_status = 'pending'
+        WHERE i.ansible_status = 'pending' AND (:install_id IS NULL OR i.id = :install_id)
           AND NOT EXISTS (
               SELECT 1 FROM machine_events e
               WHERE e.action_id = i.action_id AND e.checkpoint = 'os_first_boot_expected'
@@ -1857,10 +1910,37 @@ def fetch_pending_ansible() -> dict | None:
                     WHERE b.action_id = e.action_id AND b.checkpoint = 'os_first_boot'
                 )
           )
+          AND (
+            :wait_for_boot = 0
+            OR a.id IS NULL
+            OR a.status NOT IN ('pending', 'running')
+            OR a.type NOT IN ('install_only', 'reinstall')
+            OR COALESCE(i.install_status, '') <> 'success'
+            OR COALESCE(unixepoch(i.ended_at), 0) + :boot_timeout <= unixepoch()
+            OR EXISTS (
+                SELECT 1 FROM machine_events
+                WHERE action_id = a.id AND checkpoint = 'os_first_boot'
+            )
+            OR (
+                EXISTS (SELECT 1 FROM settings WHERE key = 'ansible_enabled' AND value = 'on')
+                AND CASE WHEN json_valid(m.install_config_json) THEN
+                    json_type(m.install_config_json, '$.ansible_role') = 'text'
+                    AND trim(json_extract(m.install_config_json, '$.ansible_role')) <> ''
+                ELSE 0 END
+            )
+          )
         ORDER BY i.created_at, i.id LIMIT 1
     """
+    # In guided Rust mode, the no-role path must keep the action token
+    # valid through first boot. Real playbooks already wait for that
+    # checkpoint and must reach their existing timeout/fallback handling.
+    arguments = {
+        "wait_for_boot": os.environ.get("PXE_RUST_GUIDED") == "1",
+        "boot_timeout": _OS_FIRST_BOOT_TIMEOUT_S,
+        "install_id": installation_id,
+    }
     with db_connect() as db:
-        row = db.execute(sql).fetchone()
+        row = db.execute(sql, arguments).fetchone()
         if not row:
             return None
         job = dict(row)
@@ -2253,6 +2333,13 @@ def run_render_postboot_job(job: dict) -> None:
     """
     job_id = job["id"]
     job_type = job["job_type"]
+    if os.environ.get("PXE_RUST_GUIDED") == "1":
+        subprocess.run(
+            ["/usr/lib/pxe-tools/pxe-tools-rust", "--run-postboot-job", DB_PATH, str(job_id),
+             os.path.abspath(POSTBOOT_TEMPLATES_DIR), os.path.abspath(POSTBOOT_OUTPUT_DIR)],
+            check=True, timeout=15,
+        )
+        return
     try:
         action_id = int(job_type.rsplit(":", 1)[-1])
     except (IndexError, ValueError):
@@ -2780,39 +2867,36 @@ def render_postboot_for_action(action_id: int, token: str, mac: str, pxe_ip: str
             action_id, bool(token), bool(mac), bool(pxe_ip),
         )
         return None
-    try:
-        # Import lazy : Jinja2 est dispo dans le container (cf. Dockerfile),
-        # mais on évite de l'importer au top-level pour ne pas crasher le worker
-        # si quelqu'un lance un script avec un PYTHONPATH cassé.
-        from jinja2 import Environment, FileSystemLoader, StrictUndefined
-    except ImportError as e:
-        logging.error("Jinja2 indisponible: %s", e)
-        return None
-
     out_dir = os.path.join(POSTBOOT_OUTPUT_DIR, str(action_id))
     try:
-        os.makedirs(out_dir, mode=0o750, exist_ok=True)
-        env = Environment(
-            loader=FileSystemLoader(POSTBOOT_TEMPLATES_DIR),
-            undefined=StrictUndefined,
-            keep_trailing_newline=True,
-        )
         ctx = {"pxe_ip": pxe_ip, "token": token, "mac": mac}
-
-        sh_tpl = env.get_template("postboot.sh.j2")
+        if os.environ.get("PXE_RUST_GUIDED") == "1":
+            result = subprocess.run(
+                ["/usr/lib/pxe-tools/pxe-tools-rust", "--render-postboot", POSTBOOT_TEMPLATES_DIR],
+                input=json.dumps(ctx), text=True, capture_output=True, timeout=15,
+            )
+            if result.returncode:
+                # The rendered files and input both contain the action token.
+                # Keep their contents out of worker logs on every path.
+                raise RuntimeError("Rust rejected the postboot rendering request")
+            rendered = json.loads(result.stdout)
+            script, service = rendered["script"], rendered["service"]
+        else:
+            from jinja2 import Environment, FileSystemLoader, StrictUndefined
+            env = Environment(
+                loader=FileSystemLoader(POSTBOOT_TEMPLATES_DIR),
+                undefined=StrictUndefined,
+                keep_trailing_newline=True,
+            )
+            script = env.get_template("postboot.sh.j2").render(**ctx)
+            service = env.get_template("pxe-postboot.service.j2").render(**ctx)
+        os.makedirs(out_dir, mode=0o750, exist_ok=True)
         sh_path = os.path.join(out_dir, "postboot.sh")
-        with open(sh_path, "w", encoding="utf-8") as f:
-            f.write(sh_tpl.render(**ctx))
-        # SEC-01 : 0640 — le script n'est plus exécuté par nginx, il est
-        # lu (readfile) par PHP-FPM qui le sert via Content-Type shellscript.
-        # Pas besoin du bit x ; readable owner+group (www-data) suffit.
-        os.chmod(sh_path, 0o640)
-
-        svc_tpl = env.get_template("pxe-postboot.service.j2")
         svc_path = os.path.join(out_dir, "pxe-postboot.service")
-        with open(svc_path, "w", encoding="utf-8") as f:
-            f.write(svc_tpl.render(**ctx))
-        os.chmod(svc_path, 0o640)
+        for path, contents in ((sh_path, script), (svc_path, service)):
+            with open(path, "w", encoding="utf-8") as output:
+                output.write(contents)
+            os.chmod(path, 0o640)
 
         # Best-effort chown www-data:www-data (worker tourne typiquement en
         # root dans le container). Skip silencieux hors container/tests.
@@ -3068,6 +3152,9 @@ def start_auto_catalog_refresh(job_id: int) -> bool:
 
 def enqueue_auto_catalog_refresh() -> None:
     """Enfile un refresh périodique uniquement quand aucune machine ne boote."""
+    if os.environ.get("PXE_RUST_GUIDED") == "1":
+        schedule_rust_worker_jobs("catalog")
+        return
     now_epoch = int(time.time())
     try:
         with db_connect() as db:
@@ -3131,6 +3218,17 @@ def enqueue_auto_catalog_refresh() -> None:
                 print("[worker] auto refresh catalogue enqueued", flush=True)
     except Exception as e:
         print(f"[worker] auto refresh catalogue failed: {e}", file=sys.stderr, flush=True)
+
+
+def schedule_rust_worker_jobs(family: str) -> None:
+    try:
+        subprocess.run(
+            ["/usr/lib/pxe-tools/pxe-tools-rust", "--schedule-worker-jobs",
+             DB_PATH, family, os.path.abspath(WORKDIR)],
+            check=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        logging.error("Rust worker could not schedule %s: %s", family, error)
 
 
 def bootstrap_ansible_workspace() -> None:
@@ -3287,22 +3385,34 @@ def main() -> None:
     except Exception as e:
         print(f"[worker] bootstrap_ansible_workspace failed: {e}", file=sys.stderr, flush=True)
 
-    # Reaper en premier : un précédent crash/restart laisse des rows status='running'
-    # (init_jobs) ou 'downloading' (os_images). Sans reset elles bloquent la file
-    # de façon invisible (fetch ne les voit pas).
-    try:
-        reaped = reap_running_zombies()
-        if reaped > 0:
-            print(f"[worker] reaped {reaped} init_jobs zombie(s) status=running → failed", flush=True)
-    except Exception as e:
-        print(f"[worker] reaper init_jobs failed: {e}", file=sys.stderr, flush=True)
+    if os.environ.get("PXE_RUST_GUIDED") == "1":
+        try:
+            recovered = subprocess.run(
+                ["/usr/lib/pxe-tools/pxe-tools-rust", "--recover-interrupted-jobs", DB_PATH],
+                text=True, capture_output=True, check=True, timeout=15,
+            )
+            counts = json.loads(recovered.stdout)
+            if any(counts.values()):
+                print(f"[worker] restored interrupted jobs: {counts}", flush=True)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print(f"[worker] interrupted job recovery failed: {error}", file=sys.stderr, flush=True)
+    else:
+        # Reaper en premier : un précédent crash/restart laisse des rows status='running'
+        # (init_jobs) ou 'downloading' (os_images). Sans reset elles bloquent la file
+        # de façon invisible (fetch ne les voit pas).
+        try:
+            reaped = reap_running_zombies()
+            if reaped > 0:
+                print(f"[worker] reaped {reaped} init_jobs zombie(s) status=running → failed", flush=True)
+        except Exception as e:
+            print(f"[worker] reaper init_jobs failed: {e}", file=sys.stderr, flush=True)
 
-    try:
-        reaped_img = reap_image_zombies()
-        if reaped_img > 0:
-            print(f"[worker] reaped {reaped_img} os_images zombie(s) status=downloading → pending", flush=True)
-    except Exception as e:
-        print(f"[worker] reaper os_images failed: {e}", file=sys.stderr, flush=True)
+        try:
+            reaped_img = reap_image_zombies()
+            if reaped_img > 0:
+                print(f"[worker] reaped {reaped_img} os_images zombie(s) status=downloading → pending", flush=True)
+        except Exception as e:
+            print(f"[worker] reaper os_images failed: {e}", file=sys.stderr, flush=True)
 
     # Enqueue les jobs bootstrap si nécessaire (au premier démarrage du container)
     try:
@@ -3400,5 +3510,37 @@ def main() -> None:
             time.sleep(POLL_INTERVAL)
 
 
+def rust_worker_step(step: str, config: str, database: str = "", identifier: str = "") -> None:
+    """Execute one operation delegated by the Rust worker."""
+    global DB_PATH
+    if os.environ.get("PXE_RUST_GUIDED") != "1":
+        raise RuntimeError("Sous-commande réservée au worker Rust")
+    if step == "clean-vault" and not database and not identifier:
+        purge_unlock_dir()
+        return
+    selected, source = select_database(config, DB_FALLBACK_PATH, DB_LEGACY_PATH)
+    if source != "config" or selected != database:
+        raise RuntimeError("Configuration SQLite modifiée ; tâche suspendue")
+    DB_PATH = selected
+    if step == "startup" and not identifier:
+        bootstrap_ansible_workspace()
+    elif step == "runtime" and not identifier:
+        publish_ansible_runtime_status()
+    elif step == "job":
+        with db_connect() as db:
+            job = db.execute("SELECT * FROM init_jobs WHERE id=? AND status='pending'", (int(identifier),)).fetchone()
+        if job is not None:
+            run_bootstrap_job(dict(job))
+    elif step == "playbook":
+        job = fetch_pending_ansible(int(identifier))
+        if job is not None and unlock_pending():
+            run_playbook(job)
+    else:
+        raise RuntimeError("Sous-commande du worker inconnue")
+
+
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:2] == ["--rust-worker-step"]:
+        rust_worker_step(*sys.argv[2:])
+    else:
+        main()

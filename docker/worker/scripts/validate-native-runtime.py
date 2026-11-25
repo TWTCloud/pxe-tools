@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-3.0-only
-"""Fail closed before privileged native writes to unsafe TFTP or MOK trees."""
+"""Validate protected publication paths and recover the Docker TLS identity."""
+from contextlib import contextmanager
 import importlib.util
 import os
 from pathlib import Path
+import pwd
 import re
+import secrets
 import stat
+import subprocess
 import sys
 
 path = Path(__file__).with_name('prepare-debian-shim.py')
@@ -37,7 +41,8 @@ def ensure_mok(path):
         os.close(parent)
 
 
-def ensure_tls(path):
+@contextmanager
+def tls_directory(path):
     path = Path(path)
     if not path.is_absolute() or '..' in path.parts or not path.name:
         raise ValueError('invalid TLS path')
@@ -52,29 +57,106 @@ def ensure_tls(path):
             info = os.fstat(directory)
             if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
                 raise ValueError('TLS directory must be root-owned and private')
-            present = []
-            for name in ('cert.pem', 'key.pem'):
-                try:
-                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-                except FileNotFoundError:
-                    present.append(False)
-                    continue
-                try:
-                    file_info = os.fstat(fd)
-                    mode = stat.S_IMODE(file_info.st_mode)
-                    if (not stat.S_ISREG(file_info.st_mode) or file_info.st_uid != 0
-                            or file_info.st_nlink != 1 or mode & 0o022
-                            or (name == 'key.pem' and mode & 0o077)):
-                        raise ValueError('TLS certificate or key must be a protected root-owned file')
-                    present.append(True)
-                finally:
-                    os.close(fd)
-            if present[0] != present[1]:
-                raise ValueError('TLS certificate and key must be present together')
+            yield directory
         finally:
             os.close(directory)
     finally:
         os.close(parent)
+
+def tls_material(directory):
+    material = {}
+    for name in ('cert.pem', 'key.pem'):
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            continue
+        with os.fdopen(fd, 'rb') as source:
+            info = os.fstat(source.fileno())
+            mode = stat.S_IMODE(info.st_mode)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+                    or mode & 0o022 or (name == 'key.pem' and mode & 0o077)):
+                raise ValueError('TLS certificate or key must be a protected root-owned file')
+            material[name] = source.read()
+    return material
+
+
+def ensure_tls(path):
+    with tls_directory(path) as directory:
+        if len(tls_material(directory)) == 1:
+            raise ValueError('TLS certificate and key must be present together')
+
+
+def legacy_docker_tls(path):
+    path = Path(path)
+    parent = guard.trusted_directory(path.parent.parent)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        try:
+            data = os.open(path.parent.name, flags, dir_fd=parent)
+        except FileNotFoundError:
+            return {}
+        try:
+            # The application may own the data volume. Never follow its links.
+            try:
+                directory = os.open(path.name, flags, dir_fd=data)
+            except FileNotFoundError:
+                return {}
+            try:
+                info = os.fstat(directory)
+                # The beta 12 image pre-created this directory as www-data.
+                # The certificate and key must still be protected root-owned files.
+                if info.st_uid not in (0, pwd.getpwnam('www-data').pw_uid) or info.st_mode & 0o022:
+                    raise ValueError('legacy TLS directory is not protected')
+                return tls_material(directory)
+            finally:
+                os.close(directory)
+        finally:
+            os.close(data)
+    finally:
+        os.close(parent)
+
+
+def migrate_docker_tls(destination, legacy):
+    with tls_directory(destination) as directory:
+        current = tls_material(directory)
+        if len(current) == 2:
+            return
+        original = legacy_docker_tls(legacy)
+        if not current and not original:
+            return
+        if len(original) != 2 or any(original[name] != content for name, content in current.items()):
+            raise ValueError('legacy TLS pair is incomplete or differs from the protected copy')
+        try:
+            certificate = subprocess.run(
+                ['/usr/bin/openssl', 'x509', '-noout', '-pubkey'], input=original['cert.pem'],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=5,
+            ).stdout
+            private = subprocess.run(
+                ['/usr/bin/openssl', 'pkey', '-pubout'], input=original['key.pem'],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=5,
+            ).stdout
+        except subprocess.SubprocessError as error:
+            raise ValueError('cannot read the legacy TLS pair') from error
+        if not certificate or certificate != private:
+            raise ValueError('legacy TLS key does not match its certificate')
+        for name, content in original.items():
+            if name in current:
+                continue
+            temporary = f'.legacy-tls-{secrets.token_hex(16)}'
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
+            try:
+                with os.fdopen(fd, 'wb') as output:
+                    output.write(content)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.rename(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                os.fsync(directory)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+        print('[bootstrap-tls] certificat et clé Docker existants repris')
 
 
 def ensure_http_tree(root, relative):
@@ -113,6 +195,8 @@ if __name__ == '__main__':
             ensure_mok(sys.argv[2])
         elif sys.argv[1] == 'tls' and len(sys.argv) == 3:
             ensure_tls(sys.argv[2])
+        elif sys.argv[1] == 'docker-tls' and len(sys.argv) == 3 and sys.argv[2] == '/var/lib/pxe-tools-tls':
+            migrate_docker_tls(sys.argv[2], '/var/lib/pxe-tools/tls')
         elif sys.argv[1] == 'http-tree' and len(sys.argv) == 4:
             ensure_http_tree(sys.argv[2], sys.argv[3])
         else:

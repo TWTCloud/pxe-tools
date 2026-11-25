@@ -4,6 +4,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -15,6 +16,13 @@ path = Path(__file__).resolve().parents[2] / 'docker/worker/scripts/prepare-debi
 spec = importlib.util.spec_from_file_location('prepare_debian_shim', path)
 shim = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(shim)
+
+
+def efi(machine):
+    header = bytearray(70)
+    header[:2] = b'MZ'
+    struct.pack_into('<I4sH', header, 60, 64, b'PE\0\0', machine)
+    return bytes(header)
 
 
 class DebianShimAcquisition(unittest.TestCase):
@@ -65,6 +73,24 @@ class DebianShimAcquisition(unittest.TestCase):
             for name in ('mmx64.efi', 'grubnetx64.efi'):
                 self.assertEqual((root / name).stat().st_mode & 0o777, 0o644)
 
+    def test_arm64_publication_uses_distinct_names_and_architecture(self):
+        machine = shim.TARGETS['arm64'][2]
+        arm = efi(machine)
+        shim.check_machine(arm, machine)
+        with self.assertRaisesRegex(ValueError, 'architecture'):
+            shim.check_machine(efi(0x8664), machine)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'grubnetx64.efi').write_bytes(efi(0x8664))
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                shim.publish_pair(fd, arm, arm, 'arm64')
+            finally:
+                os.close(fd)
+            self.assertEqual((root/'grubnetaa64.efi').read_bytes(), arm)
+            self.assertEqual((root/'mmaa64.efi').read_bytes(), arm)
+            self.assertEqual((root/'grubnetx64.efi').read_bytes(), efi(0x8664))
+
     def test_extraction_reads_only_one_regular_bounded_exact_member(self):
         def extract(entries):
             archive = io.BytesIO()
@@ -81,11 +107,11 @@ class DebianShimAcquisition(unittest.TestCase):
             def fake_run(args, stdout, **kwargs):
                 stdout.write(archive.getvalue())
             with mock.patch.object(shim.subprocess, 'run', side_effect=fake_run):
-                return shim.extract_member(Path('/unused-fixture.deb'), shim.SHIM_MEMBER)
+                return shim.extract_member(Path('/unused-fixture.deb'), './usr/lib/shim/shimx64.efi.signed')
         self.assertEqual(extract([('../../ignored', 'file', b'other'),
-                                  (shim.SHIM_MEMBER, 'file', b'MZ shim')]), b'MZ shim')
-        for entries in ([(shim.SHIM_MEMBER, 'link', b'')],
-                        [(shim.SHIM_MEMBER, 'file', b'MZ one'), (shim.SHIM_MEMBER, 'file', b'MZ two')],
+                                  ('./usr/lib/shim/shimx64.efi.signed', 'file', b'MZ shim')]), b'MZ shim')
+        for entries in ([('./usr/lib/shim/shimx64.efi.signed', 'link', b'')],
+                        [('./usr/lib/shim/shimx64.efi.signed', 'file', b'MZ one'), ('./usr/lib/shim/shimx64.efi.signed', 'file', b'MZ two')],
                         [('./usr/lib/shim/wrong.efi', 'file', b'MZ wrong')]):
             with self.subTest(entries=entries), self.assertRaises(ValueError):
                 extract(entries)
@@ -131,7 +157,7 @@ class DebianShimAcquisition(unittest.TestCase):
             for name in ('grubnetx64.efi', 'mmx64.efi'):
                 (dest / name).write_bytes(b'previous-' + name.encode())
             before = {f.name: f.read_bytes() for f in dest.iterdir()}
-            candidate = b'MZ authenticated shim fixture'
+            candidate = efi(0x8664) + b'authenticated shim fixture'
             boot_name = './netboot/debian-installer/amd64/bootnetx64.efi'
             sums = (hashlib.sha256(candidate).hexdigest() + '  ' + boot_name + '\n').encode()
             relative = 'main/installer-amd64/current/images/SHA256SUMS'
@@ -184,10 +210,10 @@ class DebianShimAcquisition(unittest.TestCase):
                     shim.acquire(dest, key)
             self.assertEqual({f.name: f.read_bytes() for f in dest.iterdir()}, before)
             with mock.patch.object(shim, 'fetch', side_effect=fetch), mock.patch.object(shim, 'run', side_effect=run), \
-                    mock.patch.object(shim, 'extract_member', side_effect=[candidate, b'MZ mok']):
+                    mock.patch.object(shim, 'extract_member', side_effect=[candidate, efi(0x8664)]):
                 shim.acquire(dest, key)
             self.assertEqual((dest / 'grubnetx64.efi').read_bytes(), candidate)
-            self.assertEqual((dest / 'mmx64.efi').read_bytes(), b'MZ mok')
+            self.assertEqual((dest / 'mmx64.efi').read_bytes(), efi(0x8664))
 
 
 if __name__ == '__main__':

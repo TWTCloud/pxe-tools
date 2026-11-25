@@ -14,12 +14,14 @@ ROOT = Path(__file__).resolve().parents[2]
 class PreseedInvariants(unittest.TestCase):
     def render(self, config, inventory=None, running_action_token=None, global_root_hash=None, template=None, expected_status=200,
                module_enabled=None, module_key=None, module_user=None, stale_key=None, machine_status='configured',
-               installation_status=None, previous_installation=False):
+               installation_status=None, previous_installation=False,
+               subnet='192.0.2.0/24', remote_addr='192.0.2.2'):
         with tempfile.TemporaryDirectory(prefix='pxe-preseed-review-') as tmp:
             data = Path(tmp)
             connection = sqlite3.connect(data / 'pxe-tools.sqlite')
             connection.executescript((ROOT / 'app/db/schema.sqlite.sql').read_text())
-            connection.execute("INSERT INTO settings(key,value) VALUES ('pxe_subnet','192.0.2.0/24')")
+            if subnet is not None:
+                connection.execute("INSERT INTO settings(key,value) VALUES ('pxe_subnet',?)", (subnet,))
             if module_enabled is not None:
                 connection.execute("INSERT INTO settings(key,value) VALUES ('ansible_enabled',?)", (module_enabled,))
             if module_key is not None:
@@ -46,10 +48,10 @@ class PreseedInvariants(unittest.TestCase):
                 renderer = renderer.replace("@file_get_contents('http://127.0.0.1/api/install-start?mac=' . urlencode($mac), false, $ctx)", "'{\"installation_id\": 42}'")
             renderer = renderer.replace('{{ pxe_data_dir }}', tmp).replace('{{ pxe_ip }}', '192.0.2.1')
             (data / 'renderer.php').write_text(renderer)
-            (data / 'run.php').write_text("<?php register_shutdown_function(function () { file_put_contents(__DIR__.'/http.status', (string)(http_response_code() ?: 200)); }); $_GET['mac']='02:00:00:00:00:01'; $_SERVER['REMOTE_ADDR']='192.0.2.2'; require __DIR__.'/renderer.php';")
+            (data / 'run.php').write_text("<?php register_shutdown_function(function () { file_put_contents(__DIR__.'/http.status', (string)(http_response_code() ?: 200)); }); $_GET['mac']='02:00:00:00:00:01'; $_SERVER['REMOTE_ADDR']=$argv[1]; $_SERVER['HTTP_X_FORWARDED_FOR']='192.0.2.2'; require __DIR__.'/renderer.php';")
             env = dict(os.environ, PXE_APP_DIR=str(ROOT / 'app'), PXE_DB_DRIVER='sqlite',
                        PXE_DB_PATH=str(data / 'pxe-tools.sqlite'))
-            result = subprocess.run([os.environ.get('PHP_BINARY','php'), '-d', 'allow_url_fopen=0', str(data / 'run.php')], env=env, capture_output=True, text=True)
+            result = subprocess.run([os.environ.get('PHP_BINARY','php'), '-d', 'allow_url_fopen=0', str(data / 'run.php'), remote_addr], env=env, capture_output=True, text=True)
             if result.returncode:
                 self.fail('preseed renderer failed: ' + result.stderr[:500])
             self.assertEqual(result.stderr, '')
@@ -64,6 +66,23 @@ class PreseedInvariants(unittest.TestCase):
         without_action = self.render({'distro': 'debian'})
         self.assertNotIn('/api/install-end?mac=', without_action)
         self.assertNotIn('/etc/systemd/system-generators/pxe-first-boot', without_action)
+
+    def test_preseed_checks_actual_source_before_rendering(self):
+        token = 'a' * 64
+        config = {'distro': 'debian'}
+        for subnet, addr, status in (
+            ('192.0.2.0/24', '198.51.100.2', 403),
+            ('192.0.2.0/24', '127.0.0.1', 403),
+            ('192.0.2.0/24', '::1', 403),
+            (None, '192.0.2.2', 503),
+            ('192.0.2.0/024', '192.0.2.2', 503),
+        ):
+            with self.subTest(subnet=subnet, addr=addr):
+                result = self.render(config, running_action_token=token, subnet=subnet,
+                                     remote_addr=addr, expected_status=status)
+                self.assertTrue(result.startswith('# ERREUR : '))
+                self.assertNotIn('d-i ', result)
+                self.assertNotIn(token, result)
 
     def test_plain_install_reports_first_boot_without_ansible_files(self):
         config = {'distro': 'debian', 'codename': 'trixie',
@@ -217,7 +236,7 @@ $_GET = ['mac' => '02:00:00:00:00:01', 'code' => 'os_first_boot', 'ack' => $argv
         self.assertIn('d-i ', self.render(config, running_action_token=token,
                                          previous_installation=True))
 
-    def test_signed_boot_packages_are_added_only_for_debian_uefi_amd64(self):
+    def test_signed_boot_packages_follow_debian_uefi_architecture(self):
         config = {'distro': 'debian', 'codename': 'trixie',
                   'advanced': {'packages': {'pkgsel_include': ['sudo', 'curl']}}}
         output = self.render(config, template='{{ACCOUNTS_BLOCK}}\n{{PACKAGES_BLOCK}}\n{{EARLY_COMMAND_BLOCK}}\n')
@@ -234,18 +253,18 @@ $_GET = ['mac' => '02:00:00:00:00:01', 'code' => 'os_first_boot', 'ack' => $argv
             for p in bindir.iterdir(): p.chmod(0o755)
             efi = root/'efi'; out = root/'out'
             env = dict(os.environ, PATH=str(bindir)+':'+os.environ['PATH'], PXE_TEST_OUTPUT=str(out))
-            for has_efi, arch, expected in [(True, 'x86_64', True), (False, 'x86_64', False),
-                                            (True, 'aarch64', False)]:
+            for has_efi, arch, expected in [(True, 'x86_64', 'amd64'), (False, 'x86_64', None),
+                                            (True, 'aarch64', 'arm64'), (True, 'riscv64', None)]:
                 with self.subTest(has_efi=has_efi, arch=arch):
                     if efi.exists(): efi.rmdir()
                     if has_efi: efi.mkdir()
                     if out.exists(): out.unlink()
                     env['PXE_TEST_ARCH'] = arch
                     subprocess.run(['sh', '-c', command.replace('/sys/firmware/efi', str(efi))], env=env, check=True)
-                    self.assertEqual(out.exists(), expected)
+                    self.assertEqual(out.exists(), expected is not None)
                     if expected:
                         self.assertEqual(out.read_text().split(), ['pkgsel/include', 'sudo', 'curl',
-                                         'grub-efi-amd64-signed', 'shim-signed'])
+                                         f'grub-efi-{expected}-signed', 'shim-signed'])
             env['PXE_TEST_ARCH'] = 'x86_64'
             if not efi.exists(): efi.mkdir()
             if out.exists(): out.unlink()
@@ -263,7 +282,9 @@ $_GET = ['mac' => '02:00:00:00:00:01', 'code' => 'os_first_boot', 'ack' => $argv
         active = self.render(config, running_action_token='fixture-token',
                              template='{{ACCOUNTS_BLOCK}}\n{{PACKAGES_BLOCK}}\n{{EARLY_COMMAND_BLOCK}}\n')
         self.assertEqual(active.count('d-i preseed/early_command string'), 1)
-        self.assertIn('grub-efi-amd64-signed shim-signed', active)
+        self.assertIn('grub-efi-amd64-signed', active)
+        self.assertIn('grub-efi-arm64-signed', active)
+        self.assertIn('$pxe_signed shim-signed', active)
         self.assertIn('partitioning_started', active)
 
     def test_hostname_and_domain_are_emitted_only_when_configured(self):
@@ -488,7 +509,7 @@ $_GET = ['mac' => '02:00:00:00:00:01', 'code' => 'os_first_boot', 'ack' => $argv
                     'vgs':[{'name':'sys','pvs':['md0']}],
                     'logical_volumes':[{'vg':'sys','name':'root','fs':'ext4','mount':'/','fill':True}]}
                 output = self.render({'distro':'debian','partition_mode':'custom','partition_custom_json':json.dumps(plan)})
-                self.assertIn(expected, output)
+                self.assertIn(expected + " " + chr(92) + "\n", output)
 
     def test_explicit_grub_choice_is_not_replaced_by_default(self):
         output = self.render({'distro':'debian','partition_mode':'default','advanced':{'bootloader':{'with_other_os':True}}})

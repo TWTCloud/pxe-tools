@@ -17,6 +17,7 @@ def main() -> None:
     parser.add_argument('--version', required=True, help='Debian version for this candidate')
     parser.add_argument('--architecture', choices=('amd64', 'arm64'), default='amd64')
     parser.add_argument('--maintainer', required=True, help='one maintainer name and email')
+    parser.add_argument('--rust-binary', type=Path, help='build the standalone Rust candidate with this native Linux binary')
     args = parser.parse_args()
     spec = importlib.util.spec_from_file_location('pxe_package_builder', Path(__file__).with_name('build-local-package.py'))
     if spec is None or spec.loader is None:
@@ -24,7 +25,8 @@ def main() -> None:
     builder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(builder)
     builder.build(args.destination, args.version, package_name='pxe-tools',
-                  architecture=args.architecture, maintainer=args.maintainer)
+                  architecture=args.architecture, maintainer=args.maintainer,
+                  rust_binary=args.rust_binary, rust_guided=args.rust_binary is not None)
     print('Built unpublished PXE Tools package:', args.destination)
 
 

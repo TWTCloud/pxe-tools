@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS presets (
     root_login_mode         TEXT NOT NULL DEFAULT 'disabled',       -- 'enabled' (root + late_command useradd) | 'disabled' (passwd/make-user natif d-i)
     admin_user_fullname     TEXT,                                   -- passwd/user-fullname (requis si root_login_mode='disabled')
     domain                  TEXT,
+    pre_wipe_mode           TEXT NOT NULL DEFAULT 'aucun',
+    pre_wipe_mode_json      TEXT,
+    based_on_machine_id     INTEGER,
+    hostname_pattern        TEXT,
+    hostname_random         INTEGER NOT NULL DEFAULT 0,
     variant                  TEXT NOT NULL DEFAULT 'debian',          -- 'debian' | 'proxmox-ve' (PVE 9 = Debian 13 + couche Ansible proxmox_ve posée au 1er boot)
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -51,6 +56,7 @@ CREATE TABLE IF NOT EXISTS machines (
     boot_mode       TEXT NOT NULL DEFAULT 'http',  -- 'http' (rapide) ou 'tftp' (fiable, pour VMs/firmwares lents)
     local_boot_source TEXT NOT NULL DEFAULT 'none', -- none | pxe (install réussie) | manual (admin)
     rescue_mode     INTEGER NOT NULL DEFAULT 0,    -- 1 = prochain boot servira le menuentry rescue (Debian d-i en récupération)
+    auto_deploy     INTEGER NOT NULL DEFAULT 0,    -- autorise un redéploiement Ansible déclenché par le webhook
     next_action     TEXT,                          -- consigne lue par discover.sh en boucle de poll : NULL=wait (rester allumée), 'poweroff', 'reboot'
     awaiting_action_until DATETIME,                -- timestamp UTC d'expiration de la fenêtre d'attente post-discovery (NOW+1h). NULL = pas en attente.
     boot_arch       TEXT,                          -- Spec D.4 : arch détectée au discovery (uname -m → mapping amd64/arm64) — sert /netboot/<distro>/<boot_arch>/

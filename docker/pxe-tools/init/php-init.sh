@@ -304,10 +304,16 @@ done
 if [ ! -e "$DB_CONF" ] && [ ! -L "$DB_CONF" ] && [ -n "$DETECTED_DB" ] && \
    [ "$ENV_DB_DRIVER" != mysql ] && [ "$ENV_DB_DRIVER" != mariadb ]; then
     echo "[php-init] db.conf absent + DB SQLite legacy détectée ($DETECTED_DB) → auto-gen db.conf"
-    php -r 'require $argv[1]; \Admin\Db::writeInitialConfig(["driver" => "sqlite", "path" => $argv[2]]);' "$PXE_APP_DIR/src/Db.php" "$DETECTED_DB" || {
+    if ! (
+        if [ "${PXE_RUST_GUIDED:-0}" = 1 ]; then
+            /usr/lib/pxe-tools/pxe-tools-rust --adopt-existing-sqlite "$DB_CONF" "$DETECTED_DB"
+        else
+            php -r 'require $argv[1]; \Admin\Db::writeInitialConfig(["driver" => "sqlite", "path" => $argv[2]]);' "$PXE_APP_DIR/src/Db.php" "$DETECTED_DB"
+        fi
+    ); then
         echo '[php-init] ERREUR : impossible de créer db.conf sans écraser un fichier.' >&2
         exit 1
-    }
+    fi
     chown www-data:www-data "$DB_CONF" 2>/dev/null || true
 fi
 
@@ -492,9 +498,17 @@ PYTHON
         fi
     fi
 
-    if [ -f "$MIGRATE_PHP" ] && [ -f "$DB_PATH" ]; then
-        echo "[php-init] Migrations data SQLite : $MIGRATE_PHP"
-        run_as_web php "$MIGRATE_PHP" || { echo "[php-init] ERREUR : migration refusée ou échouée ; démarrage arrêté." >&2; exit 1; }
+    if [ -f "$DB_PATH" ]; then
+        if [ "${PXE_RUST_GUIDED:-0}" = 1 ]; then
+            echo '[php-init] Migrations data SQLite avec Rust'
+            run_as_web /usr/lib/pxe-tools/pxe-tools-rust --migrate-sqlite "$DB_CONF" "${HTTP_ROOT:-/srv/http}" || {
+                echo '[php-init] ERREUR : migration Rust refusée ou échouée ; démarrage arrêté.' >&2
+                exit 1
+            }
+        elif [ -f "$MIGRATE_PHP" ]; then
+            echo "[php-init] Migrations data SQLite : $MIGRATE_PHP"
+            run_as_web php "$MIGRATE_PHP" || { echo "[php-init] ERREUR : migration refusée ou échouée ; démarrage arrêté." >&2; exit 1; }
+        fi
     fi
 fi
 

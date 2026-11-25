@@ -1,0 +1,6 @@
+#!/command/with-contenv sh
+set -eu
+install -d -o www-data -g www-data -m 0700 /run/pxe-tools-rust-monitor
+rm -f /run/pxe-tools-rust-monitor/http.sock
+exec /command/s6-setuidgid www-data /usr/lib/pxe-tools/pxe-tools-rust \
+    --monitor-only /etc/pxe-tools/db.conf /run/pxe-tools-rust-monitor/http.sock

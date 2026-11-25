@@ -189,17 +189,40 @@ if [ -d /sys/class/tpm/tpm0 ]; then
     [ -n "$v" ] && TPM_VERSION="$v"
 fi
 
-# Secure Boot : lit /sys/firmware/efi/efivars/SecureBoot-* (5e octet = 0/1)
-# Format efivar : 4 octets attributes + N octets data. Pour SecureBoot, data = 1 octet.
+# Debian Installer may leave efivarfs unmounted. Read the firmware variable
+# without changing it or relying on a writable mount in the installer.
 SECURE_BOOT="null"
 if [ "$BOOT_MODE" = "UEFI" ]; then
-    sb_file=$(ls /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | head -1)
-    if [ -n "$sb_file" ] && [ -r "$sb_file" ]; then
-        # od retourne les octets ; on prend le 5e (index 4 après les 4 octets attributes)
-        sb_byte=$(od -An -t u1 "$sb_file" 2>/dev/null | awk '{print $5; exit}')
+    sb_dir=/sys/firmware/efi/efivars
+    sb_name=SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+    sb_mounted=0
+    if [ ! -r "$sb_dir/$sb_name" ] && [ -d "$sb_dir" ] \
+        && ! grep -q ' /sys/firmware/efi/efivars efivarfs ' /proc/mounts; then
+        modprobe efivarfs 2>/dev/null || true
+        if mount -t efivarfs -o ro,nosuid,nodev,noexec efivarfs "$sb_dir" 2>/dev/null; then
+            sb_mounted=1
+        fi
+    fi
+    if [ -r "$sb_dir/$sb_name" ]; then
+        # The installer includes dd and tr even when od is unavailable.
+        # Read the four attribute bytes and the data byte in one efivarfs read.
+        sb_byte=$(dd if="$sb_dir/$sb_name" bs=5 count=1 2>/dev/null \
+            | dd bs=1 skip=4 count=1 2>/dev/null | tr -cd '\000\001' | tr '\000\001' '01')
         case "$sb_byte" in
             1) SECURE_BOOT="true" ;;
             0) SECURE_BOOT="false" ;;
+        esac
+    fi
+    if [ "$sb_mounted" = 1 ]; then
+        umount "$sb_dir" 2>/dev/null || true
+    fi
+    if [ "$SECURE_BOOT" = "null" ] && [ "$CPU_ARCH" = "x86_64" ]; then
+        # x86 Linux reports the EFI stub's measured state even if the
+        # installer could not load efivarfs. Keep unknown states as null.
+        sb_state=$(dmesg 2>/dev/null | awk '/(^|[[:space:]])Secure boot (enabled|disabled)$/ { print $NF; exit }')
+        case "$sb_state" in
+            enabled) SECURE_BOOT="true" ;;
+            disabled) SECURE_BOOT="false" ;;
         esac
     fi
 fi

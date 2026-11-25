@@ -46,10 +46,11 @@ def binary_records(compressed: bytes) -> dict[str, tuple[str, int]]:
 
 
 class FullInstallMirror(FixtureMirror):
-    def __init__(self, root: Path, release: Path, keyring: Path, preseed: bytes, binary_index: Path):
-        super().__init__(root, release, keyring, preseed)
+    def __init__(self, root: Path, release: Path, keyring: Path, preseed: bytes, binary_index: Path,
+                 *, architecture: str = "amd64"):
+        super().__init__(root, release, keyring, preseed, architecture=architecture)
         data = binary_index.read_bytes()
-        expected = self.release_entries.get('main/binary-amd64/Packages.xz')
+        expected = self.release_entries.get(f'main/binary-{architecture}/Packages.xz')
         actual = (hashlib.sha256(data).hexdigest(), len(data))
         if expected != actual:
             raise ValueError('binary index does not match the authenticated Release')
@@ -88,9 +89,11 @@ class FullInstallMirror(FixtureMirror):
         return dest
 
     def file_for(self, request: str):
-        match = re.fullmatch(r'/debian/dists/trixie/(main/binary-(?:amd64|all))/by-hash/SHA256/([a-f0-9]{64})', request)
+        match = re.fullmatch(r'/debian/dists/trixie/(main/binary-(?:amd64|arm64|all))/by-hash/SHA256/([a-f0-9]{64})', request)
         if match:
             directory, wanted = match.groups()
+            if directory not in (f"main/binary-{self.architecture}", "main/binary-all"):
+                raise ValueError("unsigned fixture architecture")
             matches = [(path, value) for path, value in self.release_entries.items()
                        if path.startswith(directory + '/') and value[0] == wanted]
             if not matches or any(value != matches[0][1] for _, value in matches):

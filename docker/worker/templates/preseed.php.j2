@@ -475,14 +475,9 @@ function partman_partition_segment(array $p, ?string $diskPath, ?string $vgForPv
 
     // Partition BIOS GRUB : 1 MiB, sans système de fichiers, embarque GRUB legacy
     // sur GPT. Émet le segment minimal `1 1 1 free $bios_boot{ } method{ biosgrub } .`.
-    // Le drapeau $disk{} est ajouté pour les plans multi-disques (un biosgrub par
-    // disque) — sur mono-disque c'est inoffensif (partman ignore quand 1 seul disque).
     if ($fs === 'biosgrub') {
         $sizeStr = $size > 0 ? (string)$size : '1';
         $parts = ["$sizeStr $sizeStr $sizeStr free", '$bios_boot{ }'];
-        if ($diskPath !== null) {
-            $parts[] = '$disk{ ' . $diskPath . ' }';
-        }
         $parts[] = 'method{ biosgrub }';
         return implode(' ', $parts) . ' .';
     }
@@ -501,11 +496,10 @@ function partman_partition_segment(array $p, ?string $diskPath, ?string $vgForPv
 
     $parts = ["$minSize $prio $maxSize $type"];
     $parts[] = '$primary{ }';
-    if ($diskPath !== null) {
-        $parts[] = '$disk{ ' . $diskPath . ' }';
-    }
-
     if ($fs === 'lvm-pv') {
+        if ($diskPath !== null) {
+            $parts[] = 'device{ ' . $diskPath . ' }';
+        }
         // preseed: $lvmok{ } est INTERDIT sur le segment PV — il ne va QUE sur les LVs
         // (segments avec in_vg{ }). Si on le pose ici, partman ne reconnaît plus la
         // partition comme PV, le VG reste vide et d-i bloque sur "Pas de volume
@@ -616,7 +610,7 @@ function build_pv_to_vg(array $vgs): array {
  *   <level> <num-devices> <num-spares> <fs> <mountpoint> <devices> <spare-devices>
  *
  * - <devices>       : liste `#`-séparée des partitions membres (paths /dev/sdaN)
- * - <spare-devices> : idem, ou `-` si pas de spare
+ * - <spare-devices> : optionnel, liste `#`-séparée
  * - <fs>=lvm + <mountpoint>=- pour un MD utilisé comme PV LVM (consommé par partman-auto-lvm via vg_name{ })
  *
  * Mapping id (sda1) → /dev/sda1 : partman attribue les paths dans l'ordre des
@@ -650,14 +644,14 @@ function build_raid_recipe(array $raidArrays, array $disks): string {
         $memberPaths = array_map(fn($id) => $idToPath[(string)$id] ?? '/dev/UNKNOWN', $members);
         $sparePaths  = array_map(fn($id) => $idToPath[(string)$id] ?? '/dev/UNKNOWN', $spares);
         $devices = implode('#', $memberPaths);
-        $sparesField = $numSpares > 0 ? implode('#', $sparePaths) : '-';
+        $sparesField = $numSpares > 0 ? ' ' . implode('#', $sparePaths) : '';
 
         // is_pv → MD consommé par LVM, pas formaté ici (fs=lvm, mount=-)
         // sinon → fallback ext4 sur / (Phase B : pas de champ mount UI sur les MD non-PV)
         $fs    = !empty($arr['is_pv']) ? 'lvm'  : 'ext4';
         $mount = !empty($arr['is_pv']) ? '-'   : '/';
 
-        $lines[] = "$level $numActive $numSpares $fs $mount $devices $sparesField";
+        $lines[] = "$level $numActive $numSpares $fs $mount $devices$sparesField";
     }
 
     // Format multi-lignes attendu par partman : segments séparés par " . " avec backslash continuation
@@ -1065,7 +1059,10 @@ CFG;
 
         // Génération des segments expert_recipe
         $segments = [];
+        $firstRecipe = null;
+        $samePerDisk = true;
         foreach ($disks as $d) {
+            $diskSegments = [];
             $diskPath = $d['path'] ?? null;
             foreach ($d['partitions'] ?? [] as $p) {
                 $vgForPv = null;
@@ -1073,8 +1070,15 @@ CFG;
                     $pvId = (string)($p['id'] ?? '');
                     $vgForPv = $pvToVg[$pvId] ?? null;
                 }
-                $segments[] = partman_partition_segment($p, count($targetDisks) > 1 ? $diskPath : null, $vgForPv);
+                $diskSegments[] = partman_partition_segment($p, count($targetDisks) > 1 ? $diskPath : null, $vgForPv);
             }
+            $firstRecipe ??= $diskSegments;
+            $samePerDisk = $samePerDisk && $diskSegments === $firstRecipe;
+            array_push($segments, ...$diskSegments);
+        }
+        // Debian applies the entire physical recipe once to each RAID disk.
+        if ($hasRaid && $samePerDisk) {
+            $segments = $firstRecipe ?? [];
         }
         foreach ($lvs as $lv) {
             $segments[] = partman_lv_segment($lv);
@@ -1885,12 +1889,12 @@ $disk_guard_tpl = str_replace('__BOOTMODE__', $planned_boot_mode, $disk_guard_tp
 
 $early_parts = [];
 if ($distro === 'trixie') {
-    // Debian's grub-efi-amd64-signed is a recommendation. When recommends
-    // are disabled, install both signed components explicitly on UEFI amd64;
-    // BIOS installs must retain their existing GRUB package selection.
-    $early_parts[] = 'if [ -d /sys/firmware/efi ] && [ "$(uname -m)" = x86_64 ]; then '
-                   . 'pxe_pkgs="$(debconf-get pkgsel/include)" || exit 1; '
-                   . 'debconf-set pkgsel/include "$pxe_pkgs grub-efi-amd64-signed shim-signed" || exit 1; fi';
+    // Request the architecture's signed UEFI bootloader even with recommends disabled.
+    $early_parts[] = 'if [ -d /sys/firmware/efi ]; then '
+                   . 'case "$(uname -m)" in x86_64) pxe_signed=grub-efi-amd64-signed ;; '
+                   . 'aarch64) pxe_signed=grub-efi-arm64-signed ;; *) pxe_signed= ;; esac; '
+                   . 'if [ -n "$pxe_signed" ]; then pxe_pkgs="$(debconf-get pkgsel/include)" || exit 1; '
+                   . 'debconf-set pkgsel/include "$pxe_pkgs $pxe_signed shim-signed" || exit 1; fi; fi';
 }
 if ($dilog_enabled) {
     $early_parts[] = 'echo ' . base64_encode($dilog_tpl) . " | base64 -d > /tmp/pxe-dilog.sh ; "

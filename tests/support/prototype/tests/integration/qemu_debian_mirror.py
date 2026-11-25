@@ -26,7 +26,10 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class FixtureMirror:
-    def __init__(self, root: Path, release: Path, keyring: Path, preseed: bytes):
+    def __init__(self, root: Path, release: Path, keyring: Path, preseed: bytes, *, architecture: str = "amd64"):
+        if architecture not in ("amd64", "arm64"):
+            raise ValueError("unsupported installer mirror architecture")
+        self.architecture = architecture
         self.root, self.release, self.keyring, self.preseed = root, release, keyring, preseed
         self.base = 'https://deb.debian.org/debian/'
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
@@ -49,7 +52,7 @@ class FixtureMirror:
                     if path in self.release_entries:
                         raise ValueError('duplicate release path')
                     self.release_entries[path] = metadata
-        for arch in ('amd64', 'all'):
+        for arch in (architecture, 'all'):
             path = 'main/debian-installer/binary-' + arch + '/Packages.xz'
             compressed = self._fetch_signed('dists/trixie/' + path, self.release_entries[path])
             # The authenticated index is parsed in a short-lived process. Its

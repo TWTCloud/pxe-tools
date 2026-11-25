@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build GRUB EFI custom : http builtin + grub-early.cfg embedded.
-# Spec D : loop sur archs (x86_64-efi signé MOK + arm64-efi non signé).
+# Chargeurs x86_64 et ARM64 signés MOK selon la configuration.
 # Idempotent : skip si binaire existe ET grub-early.cfg pas plus récent.
 # REBUILD=1 force la régénération.
 set -euo pipefail
@@ -62,9 +62,9 @@ GRUB_MODULES=(all_video boot cat chain configfile echo efifwsetup efinet ext2 fa
 # build_one_arch <grub_arch> <output_basename> <sign:0|1> <module_directory>
 #   <grub_arch>     : x86_64-efi | arm64-efi (passé à grub-mkimage -O)
 #   <output_basename> : grubx64.efi pour le chargeur appelé par shim,
-#                       grubnetaa64.efi pour le chargeur ARM expérimental.
+#                       grubaa64.efi avec shim ARM64, grubnetaa64.efi sans shim.
 #   L’entrée DHCP x86 grubnetx64.efi est réservée au shim signé Microsoft.
-#   <sign>          : 1 → sbsign avec MOK (UEFI Secure Boot x86), 0 → laisser non signé (ARM)
+#   <sign>          : 1 → sbsign avec MOK, 0 → laisser non signé
 build_one_arch() {
     local grub_arch="$1" out_name="$2" sign="$3"
     local out_path="$TFTP_ROOT/$out_name"
@@ -111,8 +111,6 @@ build_one_arch() {
             echo "[bootstrap-grub] Verifying signature $out_name..."
             sbverify --cert "$MOK_DIR/MOK.pem" "$out_path"
         else
-            # Spec D : ARM64 non signé (pas de Secure Boot ARM dans cette spec).
-            # Cible : RPi UEFI, Jetson, serveurs ARM avec SB désactivé.
             mv "$unsigned" "$out_path"
             echo "[bootstrap-grub] $out_name livré non signé (Secure Boot ARM non géré)"
         fi
@@ -135,11 +133,19 @@ build_one_arch() {
 
 x86_modules=/usr/lib/grub/x86_64-efi
 grub_stage=''
+arm_stage=''
+tmp_shim=''
+cleanup() {
+    if [[ -n "$grub_stage" ]]; then rm -rf -- "$grub_stage"; fi
+    if [[ -n "$arm_stage" ]]; then rm -rf -- "$arm_stage"; fi
+    if [[ -n "$tmp_shim" ]]; then rm -f -- "$tmp_shim"; fi
+}
+trap cleanup EXIT
 sbat_source_args=()
-if [ "$(dpkg --print-architecture)" = arm64 ]; then
+host_arch=$(dpkg --print-architecture)
+if [ "$host_arch" = arm64 ]; then
     : "${DEBIAN_ARCHIVE_KEYRING=/usr/share/keyrings/debian-archive-keyring.gpg}"
     grub_stage=$(mktemp -d /run/pxe-grub-amd64.XXXXXXXX)
-    trap 'rm -rf -- "$grub_stage"' EXIT
     python3 "$BOOTSTRAP_SCRIPTS_DIR/prepare-debian-shim.py" "$grub_stage" "$DEBIAN_ARCHIVE_KEYRING" --with-grub
     x86_modules="$grub_stage/x86_64-efi"
     module_version=$(cat "$grub_stage/grub.version")
@@ -150,7 +156,6 @@ fi
 # expects. Older builds put GRUB at the shim path; restore shim only after the
 # new loader has been built and signed successfully.
 build_one_arch x86_64-efi grubx64.efi 1 "$x86_modules"
-build_one_arch arm64-efi  grubnetaa64.efi 0 /usr/lib/grub/arm64-efi
 if [ ! -f "$TFTP_ROOT/grubx64.efi" ]; then
     echo '[bootstrap-grub] ERREUR : GRUB signé indisponible.' >&2
     exit 1
@@ -171,11 +176,29 @@ else
         exit 1
     fi
     tmp_shim=$(mktemp "$TFTP_ROOT/.shim.XXXXXXXX")
-    trap 'rm -f -- "$tmp_shim"' EXIT
     cp "$shim" "$tmp_shim"
     chmod 0644 "$tmp_shim"
     mv -f -- "$tmp_shim" "$TFTP_ROOT/grubnetx64.efi"
-    trap - EXIT
+    tmp_shim=''
+fi
+
+arm_secure_boot="${PXE_ARM64_SECURE_BOOT:-}"
+if [[ -z "$arm_secure_boot" && "${PXE_RUST_GUIDED:-0}" == 1 && "$host_arch" == arm64 ]]; then
+    arm_secure_boot=1
+fi
+if [[ "$arm_secure_boot" == 1 ]]; then
+    : "${DEBIAN_ARCHIVE_KEYRING=/usr/share/keyrings/debian-archive-keyring.gpg}"
+    arm_stage=$(mktemp -d /run/pxe-grub-arm64.XXXXXXXX)
+    python3 "$BOOTSTRAP_SCRIPTS_DIR/prepare-debian-shim.py" "$arm_stage" "$DEBIAN_ARCHIVE_KEYRING" \
+        --architecture arm64 --with-grub
+    module_version=$(cat "$arm_stage/grub.version")
+    sbat_source_args=(--signed-efi "$arm_stage/grubnetaa64.efi.signed" --module-version "$module_version")
+    build_one_arch arm64-efi grubaa64.efi 1 "$arm_stage/arm64-efi"
+    sbverify --cert "$MOK_DIR/MOK.pem" "$TFTP_ROOT/grubaa64.efi"
+    python3 "$BOOTSTRAP_SCRIPTS_DIR/prepare-debian-shim.py" --publish-pair "$arm_stage" "$TFTP_ROOT" \
+        --architecture arm64
+else
+    build_one_arch arm64-efi grubnetaa64.efi 0 /usr/lib/grub/arm64-efi
 fi
 
 echo "[bootstrap-grub] OK"

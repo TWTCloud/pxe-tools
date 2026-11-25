@@ -1,0 +1,14 @@
+[Unit]
+Description=PXE Tools experimental Rust monitoring
+After=pxe-tools-init.service
+PartOf=pxe-tools-pxe-http.service
+
+[Service]
+User=www-data
+Group=www-data
+RuntimeDirectory=pxe-tools-rust-monitor
+RuntimeDirectoryMode=0700
+ExecStart=/usr/lib/pxe-tools/pxe-tools-rust --monitor-only /etc/pxe-tools/db.conf /run/pxe-tools-rust-monitor/http.sock
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true

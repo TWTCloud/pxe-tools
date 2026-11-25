@@ -36,13 +36,18 @@ class BinaryMirror(unittest.TestCase):
         instance = object.__new__(FullInstallMirror)
         content = b'fixture index'
         digest = hashlib.sha256(content).hexdigest()
-        instance.release_entries = {'main/binary-amd64/Packages.xz': (digest, len(content))}
+        instance.architecture = 'arm64'
+        instance.release_entries = {f'main/binary-{arch}/Packages.xz': (digest, len(content))
+                                    for arch in ('amd64', 'arm64')}
         with patch.object(instance, '_fetch_signed', return_value=Path('/fixture')) as fetch:
-            value = instance.file_for('/debian/dists/trixie/main/binary-amd64/by-hash/SHA256/' + digest)
+            value = instance.file_for('/debian/dists/trixie/main/binary-arm64/by-hash/SHA256/' + digest)
             self.assertEqual(value, (None, Path('/fixture')))
-            fetch.assert_called_once_with('dists/trixie/main/binary-amd64/Packages.xz', (digest, len(content)))
+            fetch.assert_called_once_with('dists/trixie/main/binary-arm64/Packages.xz', (digest, len(content)))
             with self.assertRaises(ValueError):
-                instance.file_for('/debian/dists/trixie/main/binary-amd64/by-hash/SHA256/' + 'b'*64)
+                instance.file_for('/debian/dists/trixie/main/binary-arm64/by-hash/SHA256/' + 'b'*64)
+
+            with self.assertRaises(ValueError):
+                instance.file_for('/debian/dists/trixie/main/binary-amd64/by-hash/SHA256/' + digest)
 
     def test_package_path_must_be_present_in_verified_index(self):
         instance = object.__new__(FullInstallMirror)
