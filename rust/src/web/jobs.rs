@@ -277,21 +277,22 @@ fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
         return Ok(plain(StatusCode::NOT_FOUND, "Tâche introuvable\n"));
     };
     let mut html = String::from("<dl><dt>Type</dt><dd>");
-    escape(&mut html, &job.job_type);
+    let redhat = job.job_type == media::REDHAT_JOB;
+    escape(&mut html, if redhat { "DVD RHEL" } else { &job.job_type });
     html.push_str("</dd><dt>État</dt><dd>");
     status_badge(
         &mut html,
         &job.status,
         super::activity::status_label(&job.status),
     );
-    if job.job_type == media::REDHAT_JOB {
+    if redhat {
         let active = matches!(job.status.as_str(), "pending" | "running");
         let poll = if active {
             format!(r#" data-rhel-job="/jobs/{id}/status""#)
         } else {
             String::new()
         };
-        write!(html, r#"</dd></dl><div{poll}><p role="status">"#,)?;
+        write!(html, r#"</dd></dl><div{poll}><p role="status">"#)?;
         escape(&mut html, job.message.as_deref().unwrap_or_default());
         write!(
             html,
@@ -314,10 +315,12 @@ fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
         escape(&mut html, job.message.as_deref().unwrap_or_default());
         html.push_str("</p>");
     }
-    html.push_str("<pre>");
-    escape(&mut html, &log);
-    html.push_str("</pre>");
-    if job.status == "failed" && job.job_type != media::REDHAT_JOB {
+    if !redhat || !log.is_empty() {
+        html.push_str("<pre>");
+        escape(&mut html, &log);
+        html.push_str("</pre>");
+    }
+    if job.status == "failed" && !redhat {
         write!(
             html,
             r#"<form method="post" action="/api/init-retry-job/{id}"><button>Relancer la tâche</button></form>"#

@@ -250,7 +250,7 @@ fn redhat_form(error: Option<&str>) -> Result<Reply, ErrorBox> {
     );
     for (version, arch, size, _) in media::RHEL_DVDS {
         let label = if arch == "amd64" {
-            "Intel / AMD (64 bits)"
+            "Intel/AMD"
         } else {
             "ARM64"
         };
