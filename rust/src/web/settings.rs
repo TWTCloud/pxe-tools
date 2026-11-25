@@ -276,12 +276,6 @@ impl Route {
 <label class="check-label"><input type="checkbox" name="confirm" value="yes" required> Confirmer le changement de clé</label>
 <div class="form-actions"><button class="button--danger">Régénérer la clé MOK</button></div></form></details>"#);
         add_jobs(&mut html, db, "appliance_last_job_ids")?;
-        html.push_str(r#"</section><section class="panel"><h2>Appellation des appareils</h2>"#);
-        admin::terminology_form(
-            &mut html,
-            "/settings/terminology",
-            &setting(db, "ui_device_term")?,
-        );
         html.push_str(r#"</section></div></div><section class="settings-reset"><h2>Réinitialisation</h2>
 <details><summary>Réinitialiser le parc</summary>
 <form class="form-stack" method="post" action="/settings/reset"><p>Les fiches d’appareils et leurs historiques seront supprimés. La configuration de l’appliance et les modèles sont conservés.</p>

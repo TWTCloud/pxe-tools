@@ -161,7 +161,7 @@ wait_https 443
 address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name")
 test -n "$address"
 docker exec "$name" curl -kfsS -u fixture-admin:fixture-login-password "https://$address/admin/devices" > "$work/admin.html"
-grep -Fq '<h1>Ordinateurs</h1>' "$work/admin.html"
+grep -Fq '<h1>Inventaire</h1>' "$work/admin.html"
 test "$(docker exec "$name" sha256sum /etc/pxe-tools/master.key | cut -d ' ' -f 1)" = "$key"
 served=$(docker exec "$name" bash -o pipefail -c 'openssl s_client -connect 127.0.0.1:443 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256')
 test "$served" = "$fingerprint"

@@ -649,6 +649,8 @@ def verify_job_console(client, database, authorization):
     assert client.request('/api/init-job-status?job_type=bootstrap:restart_dnsmasq')[0] == 401
     page = client.request('/jobs', authorization=authorization)
     assert page[0] == 200 and endpoint.encode() in page[2]
+    assert b'jobs-table' in page[2] and b'Activation du r' in page[2] and b'Application r' in page[2]
+    assert b'status-badge--active' in page[2]
     page = client.request(endpoint, authorization=authorization)
     assert page[0] == 200 and b'&lt;fixture-log&gt;' in page[2]
     poll = client.request(endpoint+'/poll', authorization=authorization)
@@ -825,7 +827,9 @@ def verify_activity(client, database, authorization):
     assert client.request(path, secure=False)[0] == 404
     status, _, body = client.request(path, authorization=authorization)
     assert status == 200 and f'href="/tasks/{action}"'.encode() in body and b'&lt;fixture-author&gt;' in body
-    assert body.count(b'href="/installations/') == 1 and f'href="/installations/{legacy}"'.encode() in body
+    assert f'href="/installations/{legacy}"'.encode() in body
+    assert f'href="/installations/{finished}"'.encode() not in body
+    assert b'class="activity-row"' in body and b'data-activity-refresh' in body
     assert b'&lt;fixture-event&gt;' in body and b'<fixture-event>' not in body
     signature = body.split(b'data-sig="',1)[1].split(b'"',1)[0].decode()
     assert client.request(path.replace('/activity?', '/activity/list?')+'&sig='+signature,
@@ -907,6 +911,10 @@ def verify_appliance_settings(client, database, authorization):
     assert request('/settings', form={'discovery_boot_proto':'tftp'})[:2] == (303, '/settings')
     page = request('/settings')
     assert b'name="discovery_boot_proto"' in page[2] and b'value="tftp" selected' in page[2]
+    assert b'ui-device-term' not in page[2]
+    inventory = request('/admin/devices')[2]
+    assert b'<h1>Inventaire</h1>' in inventory and b'ui-device-term' not in inventory
+    assert b'inventory-filters' in inventory
     route = '/settings/default-dns'
     valid = [('default_dns[]','192.0.2.5'), ('default_dns[]','192.0.2.5'), ('default_dns[]','192.0.2.6')]
     assert request(route, form=valid, origin='https://outside.example')[0] == 403
@@ -1185,7 +1193,7 @@ def verify_authentik_proxy(server, client, env, registry, authorization):
                                       extra_headers=headers)[0]==403
                 assert client.request(path,form={'ui_device_term':'serveur'},origin='https://pxe.example.test',
                                       extra_headers=headers)[:2]==(303,'/admin/devices')
-                assert b'<h1>Serveurs</h1>' in client.request('/admin/devices',extra_headers=headers)[2]
+                assert b'<h1>Inventaire</h1>' in client.request('/admin/devices',extra_headers=headers)[2]
                 with closing(sqlite3.connect(registry)) as db:
                     assert not db.execute("SELECT 1 FROM users WHERE username='authentik-fixture'").fetchone()
             finally:

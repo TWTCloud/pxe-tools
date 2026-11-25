@@ -166,10 +166,26 @@ pub(super) fn wizard_error(
     wizard(Some(step), "Vérifiez la configuration", &html, status)
 }
 
-fn icon(path: &str) -> String {
+pub(super) fn icon(path: &str) -> String {
     format!(
         r#"<svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{path}"/></svg>"#
     )
+}
+
+pub(super) fn status_badge(output: &mut String, status: &str, label: &str) {
+    let tone = match status {
+        "success" | "downloaded" => "success",
+        "running" | "downloading" => "active",
+        "failed" | "error" => "error",
+        _ => "neutral",
+    };
+    write!(
+        output,
+        r#"<span class="status-badge status-badge--{tone}">"#
+    )
+    .expect("write to String");
+    escape(output, label);
+    output.push_str("</span>");
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -473,6 +489,35 @@ pub(super) fn asset(path: &str, head: bool) -> Option<Reply> {
         "/console-assets/mona.woff2" => (
             "font/woff2",
             include_bytes!("../../../app/public/fonts/mona-sans-latin-wght-normal.woff2"),
+        ),
+        "/console-assets/chevron.svg" => ("image/svg+xml", include_bytes!("ui/chevron.svg")),
+        "/console-assets/almalinux.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/almalinux.svg"),
+        ),
+        "/console-assets/centos.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/centos.svg"),
+        ),
+        "/console-assets/fedora.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/fedora.svg"),
+        ),
+        "/console-assets/proxmox.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/proxmox.svg"),
+        ),
+        "/console-assets/rocky.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/rocky.svg"),
+        ),
+        "/console-assets/debian.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/debian.svg"),
+        ),
+        "/console-assets/ubuntu.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/ubuntu.svg"),
         ),
         "/console-assets/server-room.webp" => ("image/webp", include_bytes!("ui/server-room.webp")),
         _ => return None,

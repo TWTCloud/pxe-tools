@@ -848,7 +848,7 @@ async fn dispatch(
             )
             .await;
     }
-    if let Some(route) = images::Route::for_path(path) {
+    if let Some(route) = images::Route::for_path(path, parts.uri.query().unwrap_or_default()) {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }

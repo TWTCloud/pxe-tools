@@ -43,18 +43,10 @@ const DEVICE_STATES: &[(&str, &str)] = &[
     ("testing", "Diagnostic en cours"),
     ("tested", "Diagnostic terminé"),
 ];
-const DEVICE_TERMS: [(&str, &str, &str); 4] = [
-    ("machine", "Machine", "Machines"),
-    ("client", "Client PXE", "Clients PXE"),
-    ("ordinateur", "Ordinateur", "Ordinateurs"),
-    ("serveur", "Serveur", "Serveurs"),
-];
+const DEVICE_TERMS: &[&str] = &["machine", "client", "ordinateur", "serveur"];
 
 pub(super) fn device_term(term: &str) -> Option<&'static str> {
-    DEVICE_TERMS
-        .iter()
-        .find(|(key, _, _)| *key == term)
-        .map(|(key, _, _)| *key)
+    DEVICE_TERMS.iter().copied().find(|key| *key == term)
 }
 
 pub(super) enum Action {
@@ -477,6 +469,7 @@ impl Console {
                         &db_path,
                         page,
                         form.as_deref(),
+                        account.allows(Permission::ImagesEdit),
                     ));
                 }
                 if let Action::Setup(endpoint, form) = &action {
@@ -617,27 +610,7 @@ pub(super) fn unauthorized() -> Reply {
         .expect("valid challenge response")
 }
 
-pub(super) fn terminology_form(html: &mut String, action: &str, term: &str) {
-    html.push_str(&format!(
-        r#"<form class="form-stack" method="post" action="{action}">
-<div class="field"><label for="ui-device-term">Appellation dans la console</label>
-<select name="ui_device_term" id="ui-device-term">"#
-    ));
-    for (key, option, _) in DEVICE_TERMS {
-        let selected = if key == term { " selected" } else { "" };
-        html.push_str(&format!(
-            r#"<option value="{key}"{selected}>{option}</option>"#
-        ));
-    }
-    html.push_str(r#"</select></div><div class="form-actions"><button>Enregistrer l’appellation</button></div></form>"#);
-}
-
 fn render_devices(db: &Connection, page: u32, query: &str) -> rusqlite::Result<Reply> {
-    let term = crate::setting(db, "ui_device_term")?;
-    let (term, _, label) = DEVICE_TERMS
-        .iter()
-        .find(|(key, _, _)| *key == term)
-        .unwrap_or(&DEVICE_TERMS[0]);
     let mut search = String::new();
     let mut state = "";
     for (key, value) in form_urlencoded::parse(query.as_bytes()) {
@@ -677,8 +650,8 @@ fn render_devices(db: &Connection, page: u32, query: &str) -> rusqlite::Result<R
     if crate::setting(db, "wizard_completed")? != "1" {
         html.push_str(r#"<p><a href="/init/network">Poursuivre la configuration initiale</a></p>"#);
     }
-    html.push_str(r#"<form class="form-actions" method="get" action="/admin/devices">
-<div class="field"><label for="inventory-search">Recherche</label><input id="inventory-search" name="q" maxlength="120" placeholder="Nom d’hôte ou adresse MAC" value=""#);
+    html.push_str(r#"<form class="panel filter-form inventory-filters" method="get" action="/admin/devices" aria-label="Filtrer l’inventaire">
+<div class="field"><label for="inventory-search">Recherche</label><input id="inventory-search" name="q" type="search" maxlength="120" placeholder="Nom d’hôte ou adresse MAC" value=""#);
     escape(&mut html, &search);
     html.push_str(r#""></div><div class="field"><label for="inventory-filter">État</label><select id="inventory-filter" name="status"><option value="">Tous les états</option>"#);
     for &(key, label) in DEVICE_STATES {
@@ -687,7 +660,7 @@ fn render_devices(db: &Connection, page: u32, query: &str) -> rusqlite::Result<R
             r#"<option value="{key}"{selected}>{label}</option>"#
         ));
     }
-    html.push_str(r#"</select></div><button>Filtrer</button><a class="button button--quiet" href="/admin/devices">Effacer les filtres</a></form>"#);
+    html.push_str(r#"</select></div><div class="form-actions"><button>Filtrer</button><a class="button button--quiet" href="/admin/devices">Effacer les filtres</a></div></form>"#);
     html.push_str(r#"<div class="table-region device-inventory" role="region" aria-label="Inventaire des appareils" tabindex="0"><table role="table"><thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">Nom d’hôte</th><th scope="col" role="columnheader">Adresse MAC</th><th scope="col" role="columnheader">État</th></tr></thead><tbody role="rowgroup">"#);
     let mut count = 0;
     let mut has_next = false;
@@ -756,12 +729,7 @@ fn render_devices(db: &Connection, page: u32, query: &str) -> rusqlite::Result<R
         }
         html.push_str("</nav>");
     }
-    html.push_str(
-        r#"<details class="device-preferences"><summary>Appellation dans la console</summary>"#,
-    );
-    terminology_form(&mut html, DEVICE_SETTINGS, term);
-    html.push_str("</details>");
-    Ok(ui::page(ConsoleSection::Devices, label, &html))
+    Ok(ui::page(ConsoleSection::Devices, "Inventaire", &html))
 }
 
 pub(super) fn escape(output: &mut String, value: &str) {

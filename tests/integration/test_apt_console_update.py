@@ -136,11 +136,20 @@ def main():
     code, page = request(ROUTE)
     assert code == 200 and current.encode() in page
     assert 'Vérifier les mises à jour'.encode() in page
+    assert b'data-update-progress role="status" hidden' in page
     assert request(ROUTE + '/status', authenticate=False)[0] == 401
     assert request(ROUTE, {'action': 'auto'}, origin='https://example.invalid')[0] == 403
 
-    code, response = request(ROUTE, {'action': 'auto'})
-    assert code == 200 and json.loads(response)['phase'] == 'queued'
+    command('systemctl', 'stop', 'pxe-tools-worker.service')
+    try:
+        code, response = request(ROUTE, {'action': 'auto'})
+        assert code == 200 and json.loads(response)['phase'] == 'queued'
+        code, page = request(ROUTE)
+        assert code == 200 and b'data-update-phase="queued"' in page
+        assert b'data-update-progress role="status">' in page
+        assert b'role="progressbar"' in page and b'aria-valuenow' not in page
+    finally:
+        command('systemctl', 'start', 'pxe-tools-worker.service')
     wait_for('unavailable')
     code, response = request(ROUTE, {'action': 'auto'})
     assert code == 200 and json.loads(response)['phase'] == 'unavailable'
