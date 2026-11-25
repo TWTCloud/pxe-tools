@@ -91,7 +91,7 @@ APT_GUEST
 else
     image="${PXE_DOCKER_TEST_IMAGE:-$name}"
     labels=(--label "org.opencontainers.image.revision=$(git rev-parse HEAD)"
-            --label 'org.opencontainers.image.source=https://github.com/williamboglietti/pxe-tools')
+            --label 'org.opencontainers.image.source=https://github.com/TWTCloud/pxe-tools')
     if [ -n "${PXE_DOCKER_DOCUMENTATION:-}" ]; then
         labels+=(--label "org.opencontainers.image.documentation=$PXE_DOCKER_DOCUMENTATION")
     fi

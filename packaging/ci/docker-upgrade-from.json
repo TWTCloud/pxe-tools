@@ -1,0 +1,5 @@
+{
+  "version": "0.1.0~beta14",
+  "image": "ghcr.io/williamboglietti/pxe-tools-appliance@sha256:6a3ce4b6d3d26ccf7c5c3d901108fb72e79b915b906019a75ac8345060976b09",
+  "source_commit": "63332d0a537af422a69ce68cd1e1e74b478b9570"
+}

@@ -25,12 +25,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  REGISTRY_IMAGE: ghcr.io/williamboglietti/pxe-tools-appliance
+  REGISTRY_IMAGE: ghcr.io/twtcloud/pxe-tools
 
 jobs:
   plan:
     if: >-
-      github.repository == 'williamboglietti/pxe-tools' &&
+      github.repository == 'TWTCloud/pxe-tools' &&
       ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected) ||
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-24.04
@@ -153,6 +153,7 @@ jobs:
             test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "linux/$arch"
             test "$(docker image inspect --format '{{.Id}}' "$image")" = "$(jq -er .image_id "$offer")"
             test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = "$SOURCE"
+            test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$image")" = "https://github.com/$GITHUB_REPOSITORY"
             test "$(jq -er .pxe_tools_source "$offer")" = "$SOURCE"
             offers+=("$offer")
             images+=("$image")

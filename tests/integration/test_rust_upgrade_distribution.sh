@@ -4,13 +4,12 @@
 set -euo pipefail
 
 variant="${1:?apt or docker}"
-registry=ghcr.io/williamboglietti/pxe-tools-appliance
 manifest=packaging/ci/release-manifest.json
 tag=$(jq -er .release_tag "$manifest")
 previous=$(jq -er .version "$manifest")
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$ ]]
 [[ "$tag" == "v${previous//\~/-}" ]]
-release="https://github.com/williamboglietti/pxe-tools/releases/download/$tag"
+release="https://github.com/TWTCloud/pxe-tools/releases/download/$tag"
 name="pxe-rust-upgrade-$variant-$$"
 work=$(mktemp -d)
 volumes=()
@@ -82,9 +81,12 @@ APT_LEGACY
         cert=/var/lib/pxe-tools-native/tls/cert.pem
         ;;
     docker)
-        prior="$registry:$tag"
+        docker_baseline=packaging/ci/docker-upgrade-from.json
+        prior=$(jq -er .image "$docker_baseline")
+        previous=$(jq -er .version "$docker_baseline")
+        [[ "$prior" =~ ^ghcr[.]io/[a-z0-9-]+/[a-z0-9-]+@sha256:[0-9a-f]{64}$ ]]
         docker pull "$prior"
-        test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$prior")" = "$(jq -er .source_commit "$manifest")"
+        test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$prior")" = "$(jq -er .source_commit "$docker_baseline")"
         mounts=()
         for location in /var/lib/pxe-tools /etc/pxe-tools /srv/http /srv/tftp /var/lib/pxe-tools-tls; do
             volume="$name-${#volumes[@]}"
