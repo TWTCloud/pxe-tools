@@ -213,7 +213,9 @@ if [[ "$variant" == apt ]]; then
             sleep 1
         done
         test "$ready" = true
-        python3 ./pxe-uninstall-test.py "${args[@]}"
+        # In CI, retain the exception chain behind the public CLI's concise error.
+        python3 -c 'import runpy, sys; sys.exit(runpy.run_path(sys.argv[1])["main"](sys.argv[2:]))' \
+            ./pxe-uninstall-test.py "${args[@]}"
         for package in pxe-tools pxe-tools-ansible; do
             if dpkg-query -W "$package" >/dev/null 2>&1; then exit 1; fi
         done
