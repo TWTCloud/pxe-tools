@@ -1640,9 +1640,6 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
             record = dict(record, account=approved_account)
         elif any(group.gr_name == 'pxe-tools-ansible' for group in accounts['groups']):
             raise ValueError('unproven Ansible group has no matching account; inspect before removal')
-    mounts = mounts_provider()
-    for path in paths:
-        remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, expected=record['directories'][path], generation_matches=generation_matches)
     source, key = apt_cleanup_plan(root, owner=owner)
     if legacy:
         # The preview explicitly preserves APT configuration for this legacy
