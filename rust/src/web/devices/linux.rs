@@ -3,7 +3,7 @@
 use super::{record_plan, schedule_allowed, Device};
 use crate::{
     connect,
-    linux_install::{valid_hostname, Plan, Source},
+    linux_install::{Plan, Source},
     preseed, pxe, setting,
     web::{
         admin::escape,
@@ -46,6 +46,8 @@ fn serial_disks(device: &Device) -> impl Iterator<Item = (String, String)> {
 fn selector(entry: &Entry) -> String {
     match &entry.source {
         Source::Ubuntu(version) => format!("ubuntu-{version}"),
+        Source::Proxmox(version) => format!("proxmox-{version}"),
+        Source::Rpm { distro, version } => format!("{distro}-{version}"),
         Source::Rhel9(url) => match url.trim_end_matches('/').rsplit_once('/') {
             Some((base, digest))
                 if base.ends_with("/pxe/rhel9") && crate::media::digest(digest) =>
@@ -64,7 +66,7 @@ fn form(
     id: i64,
     device: &Device,
 ) -> Result<Reply, ErrorBox> {
-    let title = "Installation automatique Ubuntu ou RHEL";
+    let title = "Installation automatique Linux";
     let entries = linux_boot::available(
         db,
         root,
@@ -93,10 +95,12 @@ fn form(
         escape(&mut html, &format!("{path} · {serial}"));
         html.push_str("</option>");
     }
-    html.push_str(r#"</select></label><label>Nom d’hôte <input name="hostname" required maxlength="63" value=""#);
+    html.push_str(r#"</select></label><label>Nom d’hôte <input name="hostname" required maxlength="253" value=""#);
     escape(&mut html, &device.hostname);
     html.push_str(r#""></label>
-<label>Compte administrateur <input name="login" required maxlength="32"></label>
+<label>Compte administrateur Linux <input name="login" maxlength="32"></label>
+<p class="record-meta">Pour Proxmox VE, indiquez un nom complet (par exemple pve01.exemple.fr). Le compte est root.</p>
+<label>Adresse e-mail Proxmox VE <input name="proxmox_email" type="email" maxlength="254"></label>
 <label>Mot de passe <input name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label>
 <label>Confirmer le mot de passe <input name="password_confirm" type="password" autocomplete="new-password" required></label>
 <p><label><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE UEFI</label></p>
@@ -111,6 +115,8 @@ struct Selection {
     disk: String,
     hostname: String,
     login: String,
+    #[serde(default)]
+    proxmox_email: String,
     password: String,
     password_confirm: String,
     confirm: String,
@@ -165,8 +171,6 @@ pub(in crate::web) fn serve(
     };
     let hostname = input.hostname.trim().to_ascii_lowercase();
     if input.confirm != "yes"
-        || !valid_hostname(&hostname)
-        || !preseed::technical_account(&input.login)
         || !(12..=128).contains(&input.password.len())
         || input.password.chars().any(char::is_control)
         || input.password != input.password_confirm
@@ -213,7 +217,9 @@ pub(in crate::web) fn serve(
     };
     let (distro, version) = match &entry.source {
         Source::Ubuntu(version) => ("ubuntu", version.as_str()),
+        Source::Proxmox(version) => ("proxmox", version.as_str()),
         Source::Rhel9(_) => ("rhel", "9"),
+        Source::Rpm { distro, version } => (distro.as_str(), version.as_str()),
     };
     let plan = Plan {
         source: entry.source.clone(),
@@ -223,8 +229,13 @@ pub(in crate::web) fn serve(
         disk,
         serial,
         hostname,
-        login: input.login,
+        login: if distro == "proxmox" {
+            "root".into()
+        } else {
+            input.login
+        },
         password_hash: hash,
+        proxmox_email: input.proxmox_email.trim().to_ascii_lowercase(),
     };
     if !plan.valid() {
         return Ok(invalid());

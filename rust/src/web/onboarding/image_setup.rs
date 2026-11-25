@@ -16,7 +16,8 @@ const PAGE: &str = "/init/images";
 pub(super) const BASE_DRAFT: &str = "rust_wizard_image";
 pub(super) const EXTRAS_DRAFT: &str = "rust_wizard_additional_images";
 const AVAILABLE: &str = "arch IN ('amd64','arm64') AND
-    ((distro='debian' AND extract_method='direct') OR (distro='ubuntu' AND extract_method='iso_extract'))";
+    ((distro='debian' AND extract_method='direct') OR (distro='ubuntu' AND extract_method='iso_extract')
+      OR (distro IN ('fedora','centos','almalinux','rocky') AND extract_method='direct'))";
 
 pub(super) struct Image {
     pub id: i64,
@@ -47,10 +48,10 @@ impl Image {
 }
 
 fn distro(value: &str) -> &str {
-    if value == "ubuntu" {
-        "Ubuntu Server"
-    } else {
-        "Debian"
+    match value {
+        "ubuntu" => "Ubuntu Server",
+        "debian" => "Debian",
+        _ => crate::catalog::rpm_label(value).unwrap_or(value),
     }
 }
 

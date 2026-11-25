@@ -23,6 +23,35 @@ const UBUNTU_ARM: &str = "https://cdimage.ubuntu.com/releases/";
 const UBUNTU_ARCHIVE: &str = "https://old-releases.ubuntu.com/releases/";
 const ARCHES: &[(&str, &str)] = &[("amd64", "x86_64"), ("arm64", "aarch64")];
 
+pub(crate) fn rpm_label(distro: &str) -> Option<&'static str> {
+    match distro {
+        "fedora" => Some("Fedora Server"),
+        "centos" => Some("CentOS Stream"),
+        "almalinux" => Some("AlmaLinux"),
+        "rocky" => Some("Rocky Linux"),
+        _ => None,
+    }
+}
+
+pub(crate) fn rpm_repository(distro: &str, version: &str, arch: &str) -> Option<String> {
+    let upstream = ARCHES.iter().find(|(name, _)| *name == arch)?.1;
+    Some(match (distro, version) {
+        ("fedora", "43" | "44" | "45") => format!(
+            "https://dl.fedoraproject.org/pub/fedora/linux/releases/{version}/Server/{upstream}/os"
+        ),
+        ("centos", "9" | "10") => {
+            format!("https://mirror.stream.centos.org/{version}-stream/BaseOS/{upstream}/os")
+        }
+        ("almalinux", "8" | "9" | "10") => {
+            format!("https://repo.almalinux.org/almalinux/{version}/BaseOS/{upstream}/os")
+        }
+        ("rocky", "8" | "9" | "10") => {
+            format!("https://download.rockylinux.org/pub/rocky/{version}/BaseOS/{upstream}/os")
+        }
+        _ => return None,
+    })
+}
+
 pub(crate) struct DebianRelease {
     pub major: u32,
     pub codename: &'static str,
@@ -319,28 +348,32 @@ fn ubuntu_versions(
 
 fn rpm(distro: &str) -> Vec<Entry> {
     let versions: &[(u32, &str)] = match distro {
-        "fedora" => &[(43, "oldstable"), (44, "stable")],
+        "fedora" => &[(44, "oldstable"), (45, "stable")],
         "centos" => &[(9, "oldstable"), (10, "stable")],
         _ => &[(8, "oldstable"), (9, "oldstable"), (10, "stable")],
     };
-    versions.iter().flat_map(|&(major, channel)| {
-        ARCHES.iter().map(move |&(arch, upstream)| {
-            let base = match distro {
-                "fedora" => format!("https://dl.fedoraproject.org/pub/fedora/linux/releases/{major}/Server/{upstream}/os"),
-                "centos" => format!("https://mirror.stream.centos.org/{major}/BaseOS/{upstream}/os"),
-                "almalinux" => format!("https://repo.almalinux.org/almalinux/{major}/BaseOS/{upstream}/os"),
-                _ => format!("https://download.rockylinux.org/pub/rocky/{major}/BaseOS/{upstream}/os"),
-            };
-            let dir = format!("{base}/images/pxeboot");
-            Entry {
-                major, codename:None, channel, version:major.to_string(), arch,
-                urls:Sources {
-                    kernel:Some(format!("{dir}/vmlinuz")), initrd:Some(format!("{dir}/initrd.img")),
-                    ..Sources::default()
-                },
-            }
+    versions
+        .iter()
+        .flat_map(|&(major, channel)| {
+            ARCHES.iter().filter_map(move |&(arch, _)| {
+                let version = major.to_string();
+                let base = rpm_repository(distro, &version, arch)?;
+                let dir = format!("{base}/images/pxeboot");
+                Some(Entry {
+                    major,
+                    codename: None,
+                    channel,
+                    version,
+                    arch,
+                    urls: Sources {
+                        kernel: Some(format!("{dir}/vmlinuz")),
+                        initrd: Some(format!("{dir}/initrd.img")),
+                        ..Sources::default()
+                    },
+                })
+            })
         })
-    }).collect()
+        .collect()
 }
 
 fn publish(db: &Connection, job: Option<i64>, percent: u8, message: &str) {

@@ -1,0 +1,73 @@
+name: Isolated Proxmox VE PXE boot
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  first-boot:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.label.name == 'ci:proxmox-pxe')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04, hypervisor: qemu-system-x86, firmware: ovmf, grub: grub-efi-amd64-bin}
+          - {arch: arm64, runner: ubuntu-24.04-arm, hypervisor: qemu-system-arm, firmware: qemu-efi-aarch64, grub: grub-efi-arm64-bin}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    env:
+      SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          persist-credentials: false
+      - name: Check native KVM and install fixture tools
+        id: kvm
+        env:
+          ARCH: ${{ matrix.arch }}
+          HYPERVISOR: ${{ matrix.hypervisor }}
+          FIRMWARE: ${{ matrix.firmware }}
+          GRUB: ${{ matrix.grub }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          test "$(dpkg --print-architecture)" = "$ARCH"
+          sudo apt-get update -qq
+          if test -c /dev/kvm; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+            sudo apt-get install -y --no-install-recommends "$HYPERVISOR" "$FIRMWARE" "$GRUB" \
+              dnsmasq-base ipxe-qemu qemu-utils xorriso
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::KVM unavailable. This job will verify media preparation only.'
+            sudo apt-get install -y --no-install-recommends xorriso
+          fi
+      - name: Build PXE Tools
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          cargo +1.96.0 build --locked --release --manifest-path rust/Cargo.toml
+      - name: Prepare the real Proxmox ISO on this runner
+        if: steps.kvm.outputs.available == 'false'
+        run: |
+          sudo env PYTHONUNBUFFERED=1 python3 tests/integration/test_rust_proxmox_first_boot.py \
+            rust/target/release/pxe-tools-rust "$RUNNER_TEMP/proxmox-evidence" --prepare-only
+      - name: Install Proxmox VE via PXE and verify the first boot
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          sudo env PYTHONUNBUFFERED=1 python3 tests/integration/test_rust_proxmox_first_boot.py \
+            rust/target/release/pxe-tools-rust "$RUNNER_TEMP/proxmox-evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: proxmox-first-boot-${{ matrix.arch }}
+          path: ${{ runner.temp }}/proxmox-evidence
+          if-no-files-found: ignore
+          retention-days: 3

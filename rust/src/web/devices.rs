@@ -312,7 +312,7 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
     }
     write!(output, "</ul><nav class=\"device-actions\" aria-label=\"Actions de l’appareil\"><a class=\"button\" href=\"/machines/{id}/install\">Programmer une installation Debian</a><a class=\"button button--quiet\" href=\"/activity?machine={id}\">Activité</a>")?;
     if linux::supports(device) {
-        write!(output, "<a class=\"button button--quiet\" href=\"/machines/{id}/install/linux\">Programmer une installation Ubuntu ou RHEL</a>")?;
+        write!(output, "<a class=\"button button--quiet\" href=\"/machines/{id}/install/linux\">Programmer une installation Linux</a>")?;
     }
     output.push_str(r#"<a class="button button--quiet" href="/admin/devices">Inventaire</a></nav><h2>Opérations PXE</h2><div class="form-actions">"#);
     write!(

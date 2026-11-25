@@ -47,6 +47,7 @@ struct Managed {
 struct Active {
     acceptor: TlsAcceptor,
     external: bool,
+    pin: String,
     renewal: Option<(String, i64)>,
 }
 
@@ -54,13 +55,18 @@ pub(super) struct Certificates {
     directory: PathBuf,
     active: RwLock<Active>,
     default: TlsAcceptor,
+    default_pin: String,
     public_host: Option<String>,
     acme_from_env: bool,
     acme: watch::Sender<Option<Arc<acme::Config>>>,
 }
 
 impl Certificates {
-    pub(super) fn new(default: TlsAcceptor, public_host: Option<String>) -> Result<Self, ErrorBox> {
+    pub(super) fn new(
+        default: TlsAcceptor,
+        default_pin: String,
+        public_host: Option<String>,
+    ) -> Result<Self, ErrorBox> {
         let directory = env::var_os("PXE_TLS_IMPORT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/var/lib/pxe-tools/tls-import".into());
@@ -82,6 +88,7 @@ impl Certificates {
         let active = if let Some(pair) = external {
             Active {
                 acceptor: pair.acceptor()?,
+                pin: pair.pin()?,
                 external: true,
                 renewal: None,
             }
@@ -109,6 +116,7 @@ impl Certificates {
             });
             cached.unwrap_or(Active {
                 acceptor: default.clone(),
+                pin: default_pin.clone(),
                 external: false,
                 renewal: None,
             })
@@ -117,10 +125,15 @@ impl Certificates {
             directory,
             active: RwLock::new(active),
             default,
+            default_pin,
             public_host,
             acme_from_env,
             acme: watch::Sender::new(acme.map(Arc::new)),
         })
+    }
+
+    pub(super) fn pin(&self) -> String {
+        self.active.read().expect("TLS config lock").pin.clone()
     }
 
     pub(super) fn acceptor(&self) -> TlsAcceptor {
@@ -293,6 +306,7 @@ impl Certificates {
         if config.is_none() && active.renewal.is_some() {
             *active = Active {
                 acceptor: self.default.clone(),
+                pin: self.default_pin.clone(),
                 external: false,
                 renewal: None,
             };
@@ -305,7 +319,10 @@ impl Certificates {
         let Some(pair) = Pair::parse(form) else {
             return invalid();
         };
-        let Ok(acceptor) = pair.acceptor() else {
+        let Ok((acceptor, pin)) = pair
+            .acceptor()
+            .and_then(|acceptor| Ok((acceptor, pair.pin()?)))
+        else {
             return invalid();
         };
         // Serialize persist-and-activate so concurrent imports cannot leave
@@ -321,6 +338,7 @@ impl Certificates {
         }
         *current = Active {
             acceptor,
+            pin,
             external: true,
             renewal: None,
         };
@@ -329,6 +347,14 @@ impl Certificates {
 }
 
 impl Pair {
+    fn pin(&self) -> Result<String, ErrorBox> {
+        let leaf = rustls_pemfile::certs(&mut BufReader::new(self.certificate.as_bytes()))
+            .next()
+            .transpose()?
+            .ok_or("TLS certificate leaf missing")?;
+        Ok(super::certificate_pin(&leaf))
+    }
+
     fn parse(form: &[u8]) -> Option<Self> {
         let mut certificate = None;
         let mut private_key = None;
@@ -389,6 +415,7 @@ impl Managed {
         let renew_at = last - (last - first) / 3;
         Ok(Active {
             acceptor: self.pair.acceptor()?,
+            pin: self.pair.pin()?,
             external: false,
             renewal: Some((self.directory.clone(), renew_at)),
         })

@@ -17,6 +17,7 @@ import sys
 import tempfile
 from threading import Thread
 import time
+import tomllib
 from urllib.parse import urlencode
 from zipfile import ZipFile
 
@@ -63,6 +64,14 @@ def request(path, *, tls=None, source=None, form=None, json_body=None, headers=N
         connection.close()
 
 
+RPM_REPOSITORIES = {
+    'centos': ('10', 'https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os'),
+    'fedora': ('44', 'https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Server/x86_64/os'),
+    'almalinux': ('9', 'https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os'),
+    'rocky': ('9', 'https://download.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os'),
+}
+
+
 def linux_media(root, db):
     db.executemany("""INSERT INTO os_images(distro,version,version_full,arch,extract_method,enabled,status)
                       VALUES('ubuntu',?,?,?,'iso_extract',?,'downloaded')""", [
@@ -82,6 +91,27 @@ def linux_media(root, db):
             (path/asset).write_bytes(b'fixture')
         if version != '22.04.5':
             (path/'source.iso').write_bytes(b'Ubuntu fixture ISO')
+    for distro, (version, repo) in RPM_REPOSITORIES.items():
+        db.execute("""INSERT INTO os_images(distro,version,version_full,arch,extract_method,enabled,status)
+                      VALUES(?,?,?,'amd64','direct',1,'downloaded')""", (distro, version, version))
+        path = root/'netboot'/distro/version/'amd64'
+        path.mkdir(parents=True)
+        for asset in ('linux', 'initrd.gz'):
+            (path/asset).write_bytes(b'RPM fixture')
+        (path/'.rpm-verified').write_text(repo+'\n')
+    db.execute("""INSERT INTO os_images(distro,version,version_full,arch,extract_method,enabled,status)
+                  VALUES('centos','9','9','amd64','direct',1,'downloaded')""")
+    path = root/'netboot'/'centos'/'9'/'amd64'
+    path.mkdir(parents=True)
+    for asset in ('linux', 'initrd.gz'):
+        (path/asset).write_bytes(b'legacy unverified fixture')
+    for arch in ('amd64', 'arm64'):
+        path = root/'netboot'/'proxmox'/'9.2-1'/arch
+        path.mkdir(parents=True)
+        for asset in ('linux', 'initrd.gz', 'source.iso'):
+            (path/asset).write_bytes(b'Proxmox fixture')
+        if arch == 'amd64':
+            (path/'.external-answer').write_text('http\n')
 
 
 def check_linux(tls, auth, form_headers):
@@ -95,9 +125,17 @@ def check_linux(tls, auth, form_headers):
     assert b'inst.repo=http://192.0.2.99:8090/rhel/9/' in grub
     assert b'linux (http,192.0.2.99:8090)/rhel/9/images/pxeboot/vmlinuz' in grub
     assert b'autoinstall' not in grub and b'inst.ks=' not in grub
+    for _, repo in RPM_REPOSITORIES.values():
+        assert f'inst.repo={repo}'.encode() in grub
+    assert b'CentOS Stream 9' not in grub
+    assert b'proxmox-start-auto-installer' in grub
+    assert b'newc:/proxmox.iso:(http,192.0.2.1:8088)/netboot/proxmox/9.2-1/amd64/source.iso' in grub
     status, _, ipxe = request('/pxe/linux/arm64/boot.ipxe', source=WINDOWS_CLIENT)
     assert status == 200 and ipxe.startswith(b'#!ipxe') and b'Ubuntu Server 26.04.1' in ipxe
     assert b'24.04.5' not in ipxe and b'Red Hat' not in ipxe
+    assert b'CentOS Stream' not in ipxe
+    assert b'initrd http://192.0.2.1:8088/netboot/proxmox/9.2-1/arm64/source.iso proxmox.iso' in ipxe
+    assert b'proxmox-tui-mode' in ipxe and b'proxmox-start-auto-installer' not in ipxe
     status, _, iso = request('/netboot/ubuntu/24.04.5/amd64/source.iso', source=WINDOWS_CLIENT,
                              headers={'Range': 'bytes=0-5'})
     assert status == 206 and iso == b'Ubuntu'
@@ -110,9 +148,10 @@ def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
     crypt = CDLL('libcrypt.so.1').crypt
     crypt.argtypes = (c_char_p, c_char_p)
     crypt.restype = c_char_p
-    for offset, image, file in ((1, 'ubuntu-24.04.5', 'user-data'),
-                                (2, 'rhel9', 'kickstart.cfg'),
-                                (3, f'rhel9-{rhel_sha}', 'kickstart.cfg')):
+    selections = [('ubuntu-24.04.5', 'user-data'), ('rhel9', 'kickstart.cfg'),
+                  (f'rhel9-{rhel_sha}', 'kickstart.cfg')]
+    selections += [(f'{distro}-{version}', 'kickstart.cfg') for distro, (version, _) in RPM_REPOSITORIES.items()]
+    for offset, (image, file) in enumerate(selections, 1):
         mac = f'02:00:00:00:50:{offset:02x}'
         serial = f'PXE-TEST-{offset}'
         inventory = {
@@ -167,6 +206,9 @@ def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
             assert b'inst.ks=' in chain and b'inst.nosave=all_ks' in chain
             if offset == 3:
                 assert f'url --url=http://{SERVER}:{HTTP}/pxe/rhel9/{rhel_sha}/'.encode() in config
+            if offset > 3:
+                repo = RPM_REPOSITORIES[image.rsplit('-', 1)[0]][1]
+                assert f'url --url={repo}'.encode() in config and f'inst.repo={repo}'.encode() in chain
             assert b'ignoredisk --only-use=vda\nclearpart --all --initlabel --drives=vda' in config
             assert b'%pre --erroronfail' in config and serial.encode() in config
             assert b'%packages\n@^minimal-environment\ncurl\n%end' in config
@@ -189,7 +231,72 @@ def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
             assert db.execute('SELECT status,local_boot_source FROM machines WHERE id=?', (device,)).fetchone() == ('installed', 'pxe')
             assert db.execute("""SELECT COUNT(*) FROM machine_events
                                  WHERE action_id=? AND checkpoint='os_first_boot'""", (action,)).fetchone() == (1,)
-    print('Ubuntu Autoinstall and RHEL Kickstart console actions, private seeds and first-boot callbacks verified.')
+    print('Ubuntu Autoinstall and RPM Kickstart console actions, private seeds and first-boot callbacks verified.')
+
+
+def check_proxmox(root, public, database, tls, auth, headers):
+    pin = sha256(ssl.PEM_cert_to_DER_cert((root/'cert.pem').read_text())).hexdigest()
+    address = f'{SERVER}:{HTTPS}'
+    media = public/'netboot/proxmox/9.2-1/amd64'
+    (media/'.managed-answer').write_text(json.dumps({'authority': address, 'pin': pin}))
+    assert b'/settings/images/proxmox' in request('/settings/images/add', tls=tls, headers=auth)[2]
+    status, job, _ = request('/settings/images/proxmox', tls=tls, form={'arch':'arm64'}, headers=headers)
+    assert status == 303 and job.startswith('/jobs/')
+    with sqlite3.connect(database) as db:
+        row = db.execute('SELECT value FROM settings WHERE key=?',
+                         ('media_import_request_'+job.rsplit('/', 1)[1],)).fetchone()
+        queued = json.loads(row[0])
+        assert queued['source'] == 'arm64' and queued['profile'] == f'{address}:{pin}'
+        mac = '02:00:00:00:73:01'
+        inventory = {'boot_mac': mac, 'discovery_ip': WINDOWS_CLIENT,
+                     'inventory': {'boot_mode': 'UEFI'}, 'disks': [{'name': 'vda', 'serial': 'PVE-PXE'}]}
+        device = db.execute("""INSERT INTO machines(mac,status,boot_arch,inventory_json)
+                               VALUES (?,'discovered','amd64',?) RETURNING id""", (mac,json.dumps(inventory))).fetchone()[0]
+    route = f'/machines/{device}/install/linux'
+    assert b'Proxmox VE 9.2-1' in request(route, tls=tls, headers=auth)[2]
+    form = {'image': 'proxmox-9.2-1', 'disk': '/dev/vda:PVE-PXE', 'hostname': 'pve01.example.test',
+            'login': '', 'proxmox_email': 'admin@example.test', 'password': 'fixture-proxmox-password',
+            'password_confirm': 'fixture-proxmox-password', 'confirm': 'yes'}
+    assert request(route, tls=tls, form={**form, 'disk': '/dev/vda:WRONG'}, headers=headers)[0] == 409
+    status, task, _ = request(route, tls=tls, form=form, headers=headers)
+    assert status == 303
+    action = int(task.rsplit('/',1)[1])
+    public_request = {'source': WINDOWS_CLIENT}
+    secure = {**public_request, 'host': SERVER, 'tls': tls}
+    grub = '/grub.php?'+urlencode({'mac': mac, 'arch': 'amd64'})
+    answer = '/pxe/proxmox/answer'
+    identity = {'network_interfaces': [{'link': 'eth0', 'mac': mac}]}
+    assert request(answer, json_body=identity, **secure)[0] == 404
+    menu = request(grub, **public_request)[2].decode()
+    base = re.search(r'(/pxe/linux/auto/[0-9]+/[a-f0-9]{32}/)grub.cfg', menu)[1]
+    boot, key = base.strip('/').split('/')[-2:]
+    selected = '/api/boot-selected?'+urlencode({'boot_id':boot,'token':key,'menu':'install'})
+    assert request(selected, **public_request)[0] == 200
+    boot_config = request(base+'grub.cfg', **public_request)[2]
+    assert b'proxmox-start-auto-installer' in boot_config
+    assert b'newc:/proxmox.iso:' in boot_config
+    assert request(answer, json_body=identity, **public_request)[0] == 404
+    assert request(answer, json_body={'network_interfaces':[]}, **secure)[0] == 404
+    assert request(answer, json_body=identity, **{**secure,'source':OTHER_CLIENT})[0] == 404
+    status, cache, body = request(answer, json_body=identity, response_header='Cache-Control', **secure)
+    assert status == 200 and cache == 'no-store' and b'fixture-proxmox-password' not in body
+    parsed = tomllib.loads(body.decode())
+    assert parsed['global']['fqdn'] == 'pve01.example.test'
+    assert parsed['disk-setup']['filter'] == {'DEVNAME':'/dev/vda','ID_SERIAL_SHORT':'PVE-PXE'}
+    assert parsed['disk-setup']['filter-match'] == 'all'
+    hook = f'/pxe/proxmox/hook/{boot}/{key}'
+    assert parsed['first-boot']['url'] == f'https://{address}{hook}'
+    assert parsed['first-boot']['cert-fingerprint'] == pin
+    assert request(hook, **{**secure, 'source':OTHER_CLIENT})[0] == 404
+    assert b'pveproxy.service' in request(hook, **secure)[2]
+    complete = f'/pxe/proxmox/complete/{action}'
+    assert request(complete, json_body={'token':'wrong'}, **secure)[0] == 404
+    token = parsed['post-installation-webhook']['auth-token']
+    assert request(complete, json_body={'token':token}, **secure)[0] == 200
+    assert request(answer, json_body=identity, **secure)[0] == 404
+    checkpoint = '/api/internal/checkpoint?'+urlencode({'mac': mac,'code':'os_first_boot','ack':'1'})
+    assert request(checkpoint, form={}, headers={'Authorization':'Bearer '+token}, **public_request)[2] == b'accepted\n'
+    print('Proxmox PXE answer, pinned TLS, disk selection, webhook and first-boot receipt verified.')
 
 
 def create_iso(path, tree, files):
@@ -775,7 +882,7 @@ def check_lan(binary, root, tls, env):
             state = image_state()
             assert not state['active'] and 'Ubuntu Server' in state['catalog'] and 'ARM 64 bits' in state['catalog']
             assert 'image:debian:13.5.0:amd64' not in state['catalog']
-            assert request('/init/images', **secure, form={'action': 'prepare', 'image:centos:10:amd64': 'on'},
+            assert request('/init/images', **secure, form={'action': 'prepare', 'image:centos:999:amd64': 'on'},
                            headers=admin)[0] == 422
             selection = {'action': 'prepare', 'image:debian:12.14.0:amd64': 'on', 'image:ubuntu:24.04.5:arm64': 'on'}
             assert request('/init/images', **secure, form=selection,
@@ -936,7 +1043,7 @@ def main(binary):
         config.write_text(json.dumps({'driver': 'sqlite', 'path': str(database)}))
         subprocess.run([
             'openssl', 'req', '-new', '-x509', '-newkey', 'rsa:2048', '-nodes',
-            '-subj', '/CN=127.0.0.1', '-addext', f'subjectAltName=IP:127.0.0.1,IP:{CDN},IP:{LAN}',
+            '-subj', '/CN=127.0.0.1', '-addext', f'subjectAltName=IP:127.0.0.1,IP:{CDN},IP:{LAN},IP:{SERVER}',
             '-days', '1', '-keyout', str(root/'key.pem'), '-out', str(root/'cert.pem'),
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         tls = ssl.create_default_context(cafile=str(root/'cert.pem'))
@@ -990,6 +1097,7 @@ def main(binary):
                 check_linux(tls, auth, form_headers)
                 rhel_sha = check_media(binary, root, public, database, tls, auth, form_headers, env)
                 check_automatic_linux(database, tls, auth, form_headers, rhel_sha)
+                check_proxmox(root, public, database, tls, auth, form_headers)
             finally:
                 service.terminate()
         print('Authenticated edition selection, distinct WinPE paths and private installation media verified.')

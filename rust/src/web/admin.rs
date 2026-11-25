@@ -61,7 +61,7 @@ pub(super) enum Action {
     ),
     Register(Option<Bytes>),
     Bulk(super::devices::bulk::Route, Option<Bytes>),
-    Images(super::images::Route, Option<Bytes>),
+    Images(super::images::Route, Option<Bytes>, Option<String>),
     Presets(Option<Bytes>),
     Preset(super::presets::Route, Option<Bytes>),
     PullPresets,
@@ -95,7 +95,7 @@ impl Action {
             Self::Register(..) => DevicesEdit,
             Self::Bulk(Bulk::Delete, _) => DevicesDelete,
             Self::Bulk(..) => Deploy,
-            Self::Images(super::images::Route::RedHat, _) => ImagesEdit,
+            Self::Images(super::images::Route::RedHat, ..) => ImagesEdit,
             Self::Images(..) | Self::Windows(..) => select(ImagesRead, ImagesEdit),
             Self::Presets(..) => select(PresetsRead, PresetsEdit),
             Self::Preset(
@@ -478,7 +478,7 @@ impl Console {
                 if let Action::PullPresets = &action {
                     return super::presets::pull(&db_path).ok();
                 }
-                if let Action::Images(route, form) = &action {
+                if let Action::Images(route, form, proxmox) = &action {
                     return Some(super::images::serve(
                         *route,
                         &method,
@@ -487,6 +487,7 @@ impl Console {
                         page,
                         form.as_deref(),
                         account.allows(Permission::ImagesEdit),
+                        proxmox.as_deref(),
                     ));
                 }
                 if let Action::Setup(endpoint, form) = &action {

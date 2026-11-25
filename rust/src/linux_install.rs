@@ -11,7 +11,9 @@ pub const PREFIX: &str = "/pxe/linux/auto/";
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum Source {
     Ubuntu(String),
+    Proxmox(String),
     Rhel9(String),
+    Rpm { distro: String, version: String },
 }
 
 #[derive(Deserialize, Serialize)]
@@ -25,11 +27,19 @@ pub struct Plan {
     pub hostname: String,
     pub login: String,
     pub password_hash: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxmox_email: String,
 }
 
 impl Plan {
     pub fn valid(&self) -> bool {
         matches!(self.arch.as_str(), "amd64" | "arm64")
+            && match &self.source {
+                Source::Rpm { distro, version } => {
+                    crate::catalog::rpm_repository(distro, version, &self.arch).is_some()
+                }
+                _ => true,
+            }
             && normalize_mac(&self.boot_mac).as_deref() == Some(self.boot_mac.as_str())
             && !self.client.is_loopback()
             && !self.client.is_unspecified()
@@ -42,8 +52,13 @@ impl Plan {
                 .serial
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-            && valid_hostname(&self.hostname)
-            && preseed::technical_account(&self.login)
+            && if matches!(&self.source, Source::Proxmox(_)) {
+                valid_fqdn(&self.hostname)
+                    && self.login == "root"
+                    && valid_email(&self.proxmox_email)
+            } else {
+                valid_hostname(&self.hostname) && preseed::technical_account(&self.login)
+            }
             && self.password_hash.starts_with("$6$")
             && preseed::sanitized_hash(&self.password_hash).is_some()
     }
@@ -63,7 +78,7 @@ impl Plan {
         let guard = self.guard(&boot_mac);
         let authority = authority(server, port);
         let mut launcher = preseed::first_boot_script(server, port, &machine_mac, token);
-        if matches!(&self.source, Source::Rhel9(_)) {
+        if matches!(&self.source, Source::Rhel9(_) | Source::Rpm { .. }) {
             launcher = launcher.replace("ssh.service", "sshd.service");
         }
         let target = "/etc/systemd/system-generators/pxe-first-boot";
@@ -78,6 +93,7 @@ impl Plan {
             STANDARD.encode(launcher)
         );
         match &self.source {
+            Source::Proxmox(_) => None,
             Source::Ubuntu(_) => {
                 let late = format!(
                     "set -eu\ncurtin in-target --target=/target -- /bin/sh -ec \
@@ -103,15 +119,27 @@ impl Plan {
                 }});
                 Some(format!("#cloud-config\n{content}\n"))
             }
-            Source::Rhel9(repo) => {
+            Source::Rhel9(_) | Source::Rpm { .. } => {
                 let disk = self.disk.strip_prefix("/dev/")?;
-                let repo = if repo.starts_with(crate::media::RHEL_PREFIX) {
-                    format!("http://{authority}{repo}")
+                let header = if matches!(&self.source, Source::Rhel9(_)) {
+                    "#version=RHEL9\n"
                 } else {
-                    repo.to_owned()
+                    ""
+                };
+                let repo = match &self.source {
+                    Source::Rhel9(repo) if repo.starts_with(crate::media::RHEL_PREFIX) => {
+                        format!("http://{authority}{repo}")
+                    }
+                    Source::Rhel9(repo) => repo.clone(),
+                    Source::Rpm { distro, version } => {
+                        crate::catalog::rpm_repository(distro, version, &self.arch)?
+                    }
+                    Source::Ubuntu(_) | Source::Proxmox(_) => {
+                        unreachable!("Not a Kickstart installation")
+                    }
                 };
                 Some(format!(
-                    "#version=RHEL9\nlang en_US.UTF-8\nkeyboard us\ntimezone Etc/UTC --utc\n\
+                    "{header}lang en_US.UTF-8\nkeyboard us\ntimezone Etc/UTC --utc\n\
                      network --bootproto=dhcp --device={boot_mac} --activate --hostname={}\n\
                      url --url={}\nfirstboot --disable\nrootpw --lock\n\
                      user --name={} --groups=wheel --iscrypted --password={}\n\
@@ -143,6 +171,21 @@ impl Plan {
             self.serial, self.disk, self.disk
         )
     }
+}
+
+pub fn valid_fqdn(value: &str) -> bool {
+    value.len() <= 253 && value.contains('.') && value.split('.').all(valid_hostname)
+}
+
+fn valid_email(value: &str) -> bool {
+    value.len() <= 254
+        && value.split_once('@').is_some_and(|(local, host)| {
+            !local.is_empty()
+                && local
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".+_-".contains(&b))
+                && valid_fqdn(host)
+        })
 }
 
 pub fn valid_hostname(name: &str) -> bool {

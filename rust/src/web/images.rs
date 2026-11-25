@@ -26,6 +26,7 @@ pub(super) enum Route {
     Add,
     Media(Option<&'static str>),
     RedHat,
+    Proxmox,
     Refresh,
     RefreshStatus,
     AutoRefresh,
@@ -50,6 +51,7 @@ impl Route {
                     }),
             ),
             REDHAT_ROUTE => Self::RedHat,
+            "/settings/images/proxmox" => Self::Proxmox,
             "/settings/images/refresh" => Self::Refresh,
             "/settings/images/refresh-button" => Self::RefreshStatus,
             "/settings/images/auto-refresh" => Self::AutoRefresh,
@@ -94,11 +96,13 @@ pub(super) fn serve(
     number: u32,
     form: Option<&[u8]>,
     can_edit: bool,
+    proxmox: Option<&str>,
 ) -> Reply {
     let result = match (route, form) {
         (Route::List, None) => list(db, number, can_edit),
         (Route::Media(kind), None) => media_form(db, kind),
         (Route::Media(_), Some(form)) => queue_media(path, form),
+        (Route::Proxmox, Some(form)) if can_edit => queue_proxmox(path, form, proxmox),
         (Route::RedHat, None) if can_edit => redhat_form(None),
         (Route::RedHat, Some(form)) if can_edit => queue_redhat(path, form),
         (Route::RedHat, _) => Ok(plain(StatusCode::FORBIDDEN, "Accès refusé\n")),
@@ -308,6 +312,35 @@ fn queue_redhat(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
             "Collez le jeton complet généré dans le portail Red Hat.",
         ));
     }
+    enqueue_media(path, request)
+}
+
+fn queue_proxmox(path: &Path, form: &[u8], configuration: Option<&str>) -> Result<Reply, ErrorBox> {
+    let mut fields = form_urlencoded::parse(form);
+    let Some((name, arch)) = fields.next() else {
+        return Ok(invalid());
+    };
+    let Some((_, sha)) = media::PROXMOX_ISOS
+        .into_iter()
+        .find(|(arch_id, _)| *arch_id == arch)
+        .filter(|_| name == "arch" && fields.next().is_none())
+    else {
+        return Ok(invalid());
+    };
+    let Some(configuration) = configuration else {
+        return Ok(plain(
+            StatusCode::CONFLICT,
+            "Activez le service PXE avant de préparer le média Proxmox.\n",
+        ));
+    };
+    let request = media::Import {
+        kind: "proxmox".into(),
+        source: arch.into_owned(),
+        sha256: sha.into(),
+        profile: configuration.into(),
+        remote: false,
+        redhat_token: None,
+    };
     enqueue_media(path, request)
 }
 
@@ -717,7 +750,8 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
                     kernel_url,initrd_url,firmware_url,iso_url,extract_method,1,'pending'
                 FROM catalog_entries WHERE id=?1 AND arch IN ('amd64','arm64')
                     AND ((distro='debian' AND extract_method='direct')
-                      OR (distro='ubuntu' AND extract_method='iso_extract'))
+                      OR (distro='ubuntu' AND extract_method='iso_extract')
+                      OR (distro IN ('fedora','centos','almalinux','rocky') AND extract_method='direct'))
                 ON CONFLICT(distro,version_full,arch) WHERE version_full IS NOT NULL
                 DO UPDATE SET enabled=1,
                     status=CASE WHEN os_images.status IN ('downloaded','downloading')
@@ -733,7 +767,8 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
                   WHERE c.id=?1 AND c.arch IN ('amd64','arm64')
                     AND i.extract_method=c.extract_method
                     AND ((c.distro='debian' AND c.extract_method='direct')
-                      OR (c.distro='ubuntu' AND c.extract_method='iso_extract'))",
+                      OR (c.distro='ubuntu' AND c.extract_method='iso_extract')
+                      OR (c.distro IN ('fedora','centos','almalinux','rocky') AND c.extract_method='direct'))",
         [id],
         |row| row.get(0),
     )
@@ -761,7 +796,8 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
          ) AS managed FROM catalog_entries c
          WHERE c.distro=?1 AND c.arch IN ('amd64','arm64')
            AND ((c.distro='debian' AND c.extract_method='direct')
-             OR (c.distro='ubuntu' AND c.extract_method='iso_extract'))
+             OR (c.distro='ubuntu' AND c.extract_method='iso_extract')
+                      OR (c.distro IN ('fedora','centos','almalinux','rocky') AND c.extract_method='direct'))
          ORDER BY c.major DESC,c.version_full DESC,c.arch,c.id LIMIT 50",
     )?;
     for (code, title, description) in [
@@ -775,6 +811,10 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
             "Ubuntu Server",
             "ISO officielle et fichiers de démarrage extraits sur le serveur.",
         ),
+        ("centos", "CentOS Stream", "Installateur réseau officiel."),
+        ("fedora", "Fedora Server", "Installateur réseau officiel."),
+        ("almalinux", "AlmaLinux", "Installateur réseau officiel."),
+        ("rocky", "Rocky Linux", "Installateur réseau officiel."),
     ] {
         write!(
             html,
@@ -824,12 +864,22 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
     if can_edit {
         write!(
             html,
-            r#"<article class="panel image-card">{}<p>Préparez un DVD officiel de RHEL 9 pour le démarrage réseau.</p>
+            r#"<article class="panel image-card">{}<p>Installez Proxmox VE directement avec l’ISO officielle.</p>
+<form method="post" action="{ROUTE}/proxmox" class="form-stack">
+<div class="field"><label for="image-proxmox">Version et architecture</label>
+<select id="image-proxmox" name="arch" required><option value="amd64">Proxmox VE {} · Intel/AMD</option>
+<option value="arm64">Proxmox VE {} · ARM64</option></select></div>
+<p class="record-meta">Prévoyez 8 Gio libres sur le serveur et au moins 6 Gio de RAM sur le client PXE.</p>
+<div class="form-actions"><button>Télécharger et préparer</button></div></form></article>
+<article class="panel image-card">{}<p>Préparez un DVD officiel de RHEL 9 pour le démarrage réseau.</p>
 <div class="form-actions"><a class="button" href="{REDHAT_ROUTE}">Télécharger depuis Red Hat</a>
 <a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer le DVD</a></div></article>
 <article class="panel image-card">{}<p>Importez le média d’installation et un environnement de démarrage WinPE.</p>
 <div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso">Importer les fichiers</a>
 <a class="button button--quiet" href="/settings/windows">Gérer les éditions</a></div></article>"#,
+            heading("proxmox", "Proxmox VE"),
+            media::PROXMOX_VERSION,
+            media::PROXMOX_VERSION,
             heading("rhel9", "Red Hat Enterprise Linux"),
             heading("windows", "Windows")
         )?;
