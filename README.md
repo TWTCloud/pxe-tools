@@ -58,26 +58,26 @@ client x86 concerné avant d'utiliser le chargeur signé par cette instance.
 
 ## Installation avec Docker
 
-L’image bêta 13 est disponible pour Linux amd64 et arm64. Depuis la racine
+L’image bêta 14 est disponible pour Linux amd64 et arm64. Depuis la racine
 du dépôt sur un hôte Docker Linux, téléchargez l'image et démarrez l'appliance.
 
 ```sh
-docker pull ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta13
-PXE_TOOLS_IMAGE=ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta13 \
+docker pull ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta14
+PXE_TOOLS_IMAGE=ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta14 \
   docker compose -f compose/docker-compose.yml up -d
 ```
 
 Le fichier Compose utilise le réseau de l’hôte pour le PXE. Ouvrez
-`https://127.0.0.1/admin/` depuis l’hôte et lisez le code de l’assistant
-dans le conteneur.
+`https://<IPv4-du-serveur>/admin/` et lisez le code de l’assistant dans
+le conteneur.
 
 ```sh
-PXE_TOOLS_IMAGE=ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta13 \
+PXE_TOOLS_IMAGE=ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta14 \
   docker compose -f compose/docker-compose.yml exec pxe-tools cat /run/pxe-tools-rust-guided/setup-code
 ```
 
 Les notes de mise à niveau et les offres de sources accompagnent la
-[bêta 13](https://github.com/williamboglietti/pxe-tools/releases/tag/v0.1.0-beta13).
+[bêta 14](https://github.com/williamboglietti/pxe-tools/releases/tag/v0.1.0-beta14).
 
 ## Données et limites
 
