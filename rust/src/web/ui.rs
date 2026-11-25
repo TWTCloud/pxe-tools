@@ -188,7 +188,7 @@ fn document(class: &str, title: &str, layout: &str, status: StatusCode) -> Reply
     write!(
         html,
         r#" · PXE Tools</title><link rel="icon" type="image/svg+xml" href="{MARK}">
-<link rel="stylesheet" href="/console-assets/style.css?v=3"></head><body class="{class}">{layout}"#
+<link rel="stylesheet" href="/console-assets/style.css?v=4"></head><body class="{class}">{layout}"#
     )
     .expect("write to String");
     let policy = if class == "console" {

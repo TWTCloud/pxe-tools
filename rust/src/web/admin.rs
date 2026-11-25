@@ -560,7 +560,25 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<Reply> {
         html.push_str(
             r#"</td><td class="inventory-state" role="cell"><span class="device-state">"#,
         );
-        escape(&mut html, &row.get::<_, String>(2)?);
+        let status: String = row.get(2)?;
+        escape(
+            &mut html,
+            match status.as_str() {
+                "unknown" => "Inconnu",
+                "inventorying" => "Inventaire en cours",
+                "discovered" => "Détecté",
+                "configured" => "Configuré",
+                "installing" => "Installation en cours",
+                "installed" => "Installé",
+                "provisioned" => "Provisionné",
+                "failed" => "Échec",
+                "wiping" => "Effacement en cours",
+                "wiped" => "Effacé",
+                "testing" => "Diagnostic en cours",
+                "tested" => "Diagnostic terminé",
+                value => value,
+            },
+        );
         html.push_str("</span></td>");
         html.push_str("</tr>");
         count += 1;
