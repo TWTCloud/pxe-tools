@@ -328,6 +328,7 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 .wizard-intro { margin: 0 0 var(--space-5); color: var(--muted); }
 .wizard-error { padding: var(--space-3); background: var(--danger-bg); color: var(--danger); border-radius: var(--radius); }
 .wizard-network { margin: 0; }
+.wizard-panel form:has(#setup-role option[value="console"]:checked) .wizard-network { display: none; }
 .wizard-back { margin-bottom: 0; }
 .wizard-summary {
   display: grid;
