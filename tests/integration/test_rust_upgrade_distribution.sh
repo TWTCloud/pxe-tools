@@ -131,6 +131,10 @@ INSERT INTO users(username,password_hash)
 VALUES('fixture-admin','$2y$12$zGZhsSwt3AHDHVbliUPl5eMV46SsqfpLUsIOAcZiq1frkQPqxaEcK');
 COMMIT;
 SQL
+    admin_column=$(runuser -u www-data -- sqlite3 "$db" "SELECT name FROM pragma_table_info('users') WHERE name='is_admin'")
+    if [ "$admin_column" = is_admin ]; then
+        runuser -u www-data -- sqlite3 "$db" "UPDATE users SET is_admin=1 WHERE username='fixture-admin'"
+    fi
 PREVIOUS_INSTANCE
 key=$(docker exec "$name" sha256sum /etc/pxe-tools/master.key | cut -d ' ' -f 1)
 fingerprint=$(docker exec "$name" openssl x509 -in "$cert" -noout -fingerprint -sha256)

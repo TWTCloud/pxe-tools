@@ -39,8 +39,7 @@ impl Wizard {
         let code = credential_directory()
             .ok()
             .and_then(|directory| fs::read_to_string(directory.join("setup-code")).ok())
-            .map(|value| value.trim().to_owned())
-            .filter(|value| valid_setup_code(value));
+            .and_then(|value| normalize_setup_code(value.trim()));
         Self {
             code,
             code_help: if std::env::var("PXE_SETUP_IN_CONTAINER").as_deref() == Ok("1") {
@@ -67,33 +66,23 @@ impl Wizard {
             (Some(Stage::Database), "/init" | "/init/welcome") => ui::wizard(
                 Some(WizardStep::Storage),
                 "Configuration initiale",
-                r#"<p class="wizard-intro">Préparez le stockage, créez votre compte d’administration et choisissez le mode de fonctionnement de PXE Tools.</p>
-<div class="form-actions"><a class="button" href="/init/db">Configurer la base</a></div>"#,
+                r#"<p class="wizard-intro">Créez votre compte d’administration pour initialiser le stockage SQLite. Vous pourrez ensuite choisir le mode de fonctionnement de PXE Tools.</p>
+<div class="form-actions"><a class="button" href="/init/admin">Continuer</a></div>"#,
                 StatusCode::OK,
             ),
-            (Some(Stage::Database), "/init/db") => ui::wizard_with_setup_code(
-                WizardStep::Storage,
-                "Base SQLite",
-                self.code_help,
-                r#"<form class="form-stack" method="post" action="/init/db">
-<div class="field"><label for="setup-code">Code de configuration</label><input id="setup-code" name="code" type="password" autocomplete="off" required></div>
-<div class="form-actions"><button type="submit">Initialiser SQLite</button><a class="button button--quiet" href="/init/welcome">Retour</a></div>
-</form>"#,
-            ),
-            (Some(Stage::Database), _) => redirect(StatusCode::FOUND, "/init/db"),
-            (Some(Stage::Admin), "/init/admin") => ui::wizard_with_setup_code(
+            (Some(Stage::Database | Stage::Admin), "/init/admin") => ui::wizard_with_setup_code(
                 WizardStep::Account,
                 "Compte d’administration",
                 self.code_help,
                 r#"<form class="form-stack" method="post" action="/init/admin">
-<div class="field"><label for="setup-code">Code de configuration</label><input id="setup-code" name="code" type="password" autocomplete="off" required></div>
+<div class="field"><label for="setup-code">Code de configuration</label><input id="setup-code" name="code" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required></div>
 <div class="field"><label for="setup-user">Identifiant</label><input id="setup-user" name="username" autocomplete="username" required maxlength="256"></div>
 <div class="field"><label for="setup-password">Mot de passe</label><input id="setup-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="72" aria-describedby="setup-password-help" required><small id="setup-password-help">Au moins 8 caractères.</small></div>
 <div class="field"><label for="setup-confirm">Confirmer le mot de passe</label><input id="setup-confirm" name="password_confirm" type="password" autocomplete="new-password" minlength="8" maxlength="72" required></div>
 <div class="form-actions"><button type="submit">Créer le compte</button></div>
 </form>"#,
             ),
-            (Some(Stage::Admin), _) => redirect(StatusCode::FOUND, "/init/admin"),
+            (Some(Stage::Database | Stage::Admin), _) => redirect(StatusCode::FOUND, "/init/admin"),
             (Some(Stage::Resetting), _) => ui::wizard(
                 None,
                 "Réinitialisation PXE en cours",
@@ -106,11 +95,12 @@ impl Wizard {
     }
 
     pub(super) async fn submit(&self, path: &str, config: &Path, form: &[u8]) -> Reply {
-        let (step, back) = if path == "/init/db" {
-            (WizardStep::Storage, "/init/db")
+        let step = if path == "/init/db" {
+            WizardStep::Storage
         } else {
-            (WizardStep::Account, "/init/admin")
+            WizardStep::Account
         };
+        let back = "/init/admin";
         let mut fields = HashMap::new();
         for (name, value) in form_urlencoded::parse(form) {
             if fields
@@ -125,13 +115,15 @@ impl Wizard {
                 );
             }
         }
-        let supplied = fields.remove("code").unwrap_or_default();
-        if !valid_setup_code(&supplied)
-            || !self
-                .code
-                .as_ref()
-                .is_some_and(|expected| bool::from(supplied.as_bytes().ct_eq(expected.as_bytes())))
-        {
+        let supplied = fields
+            .remove("code")
+            .and_then(|code| normalize_setup_code(&code));
+        let valid = supplied
+            .zip(self.code.as_ref())
+            .is_some_and(|(supplied, expected)| {
+                bool::from(supplied.as_bytes().ct_eq(expected.as_bytes()))
+            });
+        if !valid {
             return ui::wizard_error(
                 step,
                 StatusCode::FORBIDDEN,
@@ -195,8 +187,11 @@ impl Wizard {
     }
 }
 
-fn valid_setup_code(code: &str) -> bool {
-    code.len() == 48 && code.bytes().all(|byte| byte.is_ascii_hexdigit())
+fn normalize_setup_code(code: &str) -> Option<String> {
+    let code = code.replace(['-', ' '], "");
+    // Also accept credentials generated by older launchers during an upgrade.
+    (matches!(code.len(), 12 | 48) && code.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| code.to_ascii_lowercase())
 }
 
 async fn read_stage(config: &Path) -> Option<Stage> {
@@ -345,7 +340,7 @@ pub(crate) fn adopt_existing_database(config: &Path, path: &Path) -> Result<(), 
 
 fn create_admin(config: &Path, username: &str, password: &str) -> Result<Reply, ErrorBox> {
     match stage(config)? {
-        Stage::Database => return Ok(redirect(StatusCode::SEE_OTHER, "/init/db")),
+        Stage::Database => initialize_database(config)?,
         Stage::Closed => return Ok(closed()),
         Stage::Resetting => return Ok(resetting()),
         Stage::Admin => {}

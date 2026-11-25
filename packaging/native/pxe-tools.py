@@ -84,7 +84,7 @@ def show_setup():
             code = SETUP_CODE.read_text(encoding='ascii').strip()
         except (OSError, UnicodeError):
             raise RuntimeError('Le code de configuration est indisponible.') from None
-        if not re.fullmatch(r'[0-9a-fA-F]{48}', code):
+        if not re.fullmatch(r'[0-9a-fA-F]{4}(?:-[0-9a-fA-F]{4}){2}|[0-9a-fA-F]{12}|[0-9a-fA-F]{48}', code):
             raise RuntimeError('Le code de configuration est invalide.')
 
     if pending:
