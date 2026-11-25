@@ -486,8 +486,22 @@ def check_lan(binary, root, tls, env):
             assert request('/', **private, headers={'Host': 'other.invalid'})[:2] == (302, origin+'/admin/')
             assert request('/admin/', **secure)[:2] == (302, '/init/welcome')
             assert request('/init/welcome', host=LAN, source=OUTSIDE_CLIENT, tls=tls)[0] == 404
-            style_status, _, style = request('/console-assets/style.css', **secure)
-            assert style_status == 200 and b'.auth-layout' in style and b'.workspace' in style
+
+            def wizard_page(path, phase, *, headers=None, form=None, expected=200):
+                status, content_type, document = request(
+                    path, **secure, headers=headers, form=form, response_header='Content-Type')
+                assert status == expected and content_type.startswith('text/html'), (path, status)
+                assert b'class="wizard-main"' in document
+                assert b'aria-current="step">' + phase.encode() + b'</li>' in document
+                link = re.search(rb'<link rel="stylesheet" href="([^"]+)">', document)
+                assert link and link[1].startswith(b'/console-assets/style.css')
+                return link[1].decode(), document
+
+            css_path, _ = wizard_page('/init/welcome', 'Stockage')
+            wizard_page('/init/db', 'Stockage')
+            style_status, css_type, style = request(css_path, **secure, response_header='Content-Type')
+            assert style_status == 200 and css_type.startswith('text/css')
+            assert b'.auth-layout' in style and b'.workspace' in style and b'.wizard-main' in style
             assert request('/console-assets/style.css', **private)[0] == 404
             assert request('/console-assets/private', **secure)[0] == 404
             status, policy, login = request('/login', **secure, response_header='Referrer-Policy')
@@ -499,17 +513,28 @@ def check_lan(binary, root, tls, env):
             else:
                 raise AssertionError('The console opened a non-private address')
             headers = {'Origin': origin, 'Content-Type': 'application/x-www-form-urlencoded'}
-            assert request('/init/db', **secure, form={'code':'b'*48}, headers=headers)[0] == 403
+            _, invalid_code = wizard_page('/init/db', 'Stockage', headers=headers,
+                                          form={'code':'b'*48}, expected=403)
+            assert b'Code de configuration invalide' in invalid_code and b'b'*48 not in invalid_code
             assert request('/init/db', **secure, form={'code':'a'*48},
                            headers={**headers, 'Origin':'https://other.invalid'})[0] == 403
             assert request('/init/db', **secure, form={'code':'a'*48}, headers=headers)[:2] == (303,'/init/admin')
+            wizard_page('/init/admin', 'Compte')
             credentials = {'username':'lan-admin', 'password':'fixture-lan-password'}
             assert request('/init/admin', **secure, headers=headers,
                            form={**credentials,'password_confirm': credentials['password'],'code':'a'*48})[:2] == (303,'/admin/devices')
             assert request('/login', **secure, headers=headers, form=credentials)[0] == 303
             authorization = base64.b64encode(b'lan-admin:fixture-lan-password').decode()
             admin = {'Authorization': 'Basic ' + authorization, **headers}
+            wizard_page('/init/network', 'Réseau', headers=admin)
+            plan = {'role':'proxy', 'pxe_interface':'lo', 'pxe_ip':LAN, 'pxe_subnet':'10.77.0.0/24'}
+            assert request('/init/network', **secure, form=plan, headers=admin)[:2] == (303,'/init/images')
+            wizard_page('/init/images', 'Réseau', headers=admin)
+            _, pending_image = wizard_page('/init/done', 'Validation', headers=admin)
+            assert b'name="confirmation"' not in pending_image
             assert request('/init/network', **secure, form={'role':'console'}, headers=admin)[:2] == (303,'/init/done')
+            _, summary = wizard_page('/init/done', 'Validation', headers=admin)
+            assert b'name="confirmation" value="yes"' in summary and b'Console seule' in summary
             status, csp, console = request('/admin/devices', **secure, headers=admin,
                                            response_header='Content-Security-Policy')
             assert status == 200 and b'class="rail"' in console and b'aria-current="page"' in console

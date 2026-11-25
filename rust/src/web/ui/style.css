@@ -289,6 +289,57 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 .active-certificate { margin: 0 0 var(--space-5); color: var(--muted); }
 .active-certificate strong { color: var(--ink); }
 
+.wizard {
+  --wizard-gutter: clamp(1rem, 3vw, 2rem);
+  min-height: 100svh;
+}
+.wizard-header {
+  display: flex;
+  align-items: center;
+  min-height: var(--header-height);
+  padding: max(var(--space-2), env(safe-area-inset-top)) max(var(--wizard-gutter), env(safe-area-inset-right)) var(--space-2) max(var(--wizard-gutter), env(safe-area-inset-left));
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.wizard-main {
+  max-width: 42rem;
+  margin-inline: auto;
+  padding-block: clamp(var(--space-5), 6vw, 4.5rem) max(var(--space-6), env(safe-area-inset-bottom));
+  padding-inline: max(var(--wizard-gutter), env(safe-area-inset-left)) max(var(--wizard-gutter), env(safe-area-inset-right));
+}
+.wizard-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0 0 var(--space-5);
+  padding: 0;
+  list-style: none;
+}
+.wizard-steps li {
+  padding-top: var(--space-2);
+  border-top: 3px solid var(--line);
+  color: var(--muted);
+  font-size: clamp(.75rem, 2.6vw, .875rem);
+  font-weight: 620;
+}
+.wizard-steps [aria-current] { border-color: var(--blue); color: var(--blue-hover); font-weight: 740; }
+.wizard-panel { padding: clamp(var(--space-4), 5vw, 2.5rem); }
+.wizard-panel h1 { margin-bottom: var(--space-2); font-size: clamp(1.7rem, 4.5vw, 2.5rem); text-wrap: wrap; }
+.wizard-intro { margin: 0 0 var(--space-5); color: var(--muted); }
+.wizard-error { padding: var(--space-3); background: var(--danger-bg); color: var(--danger); border-radius: var(--radius); }
+.wizard-network { margin: 0; }
+.wizard-back { margin-bottom: 0; }
+.wizard-summary {
+  display: grid;
+  grid-template-columns: minmax(6rem, auto) minmax(0, 1fr);
+  gap: var(--space-2) var(--space-4);
+  margin: 0 0 var(--space-5);
+}
+.wizard-summary dd { margin: 0; }
+@media (max-width: 32rem) {
+  .wizard-panel .form-actions > :is(button, .button) { width: 100%; }
+}
+
 .guest { background: var(--surface); }
 .auth-layout {
   position: relative;

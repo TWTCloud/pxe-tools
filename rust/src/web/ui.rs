@@ -28,6 +28,65 @@ fn brand() -> String {
     )
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum WizardStep {
+    Storage,
+    Account,
+    Network,
+    Confirmation,
+}
+
+pub(super) fn wizard(
+    step: Option<WizardStep>,
+    title: &str,
+    content: &str,
+    status: StatusCode,
+) -> Reply {
+    let mut layout = format!(
+        r#"<header class="wizard-header">{}</header><main class="wizard-main">"#,
+        brand()
+    );
+    if let Some(step) = step {
+        layout.push_str(r#"<ol class="wizard-steps" aria-label="Étapes de configuration">"#);
+        for (phase, label) in [
+            (WizardStep::Storage, "Stockage"),
+            (WizardStep::Account, "Compte"),
+            (WizardStep::Network, "Réseau"),
+            (WizardStep::Confirmation, "Validation"),
+        ] {
+            let current = if step == phase {
+                r#" aria-current="step""#
+            } else {
+                ""
+            };
+            write!(layout, "<li{current}>{label}</li>").expect("write to String");
+        }
+        layout.push_str("</ol>");
+    }
+    layout.push_str(r#"<section class="panel wizard-panel" aria-labelledby="wizard-title"><h1 id="wizard-title">"#);
+    escape(&mut layout, title);
+    layout.push_str("</h1>");
+    layout.push_str(content);
+    layout.push_str("</section></main>");
+    document("wizard", title, &layout, status)
+}
+
+pub(super) fn wizard_error(
+    step: WizardStep,
+    status: StatusCode,
+    message: &str,
+    back: &'static str,
+) -> Reply {
+    let mut html = String::from(r#"<p class="wizard-error">"#);
+    escape(&mut html, message.trim());
+    write!(
+        html,
+        r#"</p><div class="form-actions"><a class="button button--quiet" href="{back}">Revenir au formulaire</a></div>"#
+    )
+    .expect("write to String");
+    wizard(Some(step), "Vérifiez la configuration", &html, status)
+}
+
 fn icon(path: &str) -> String {
     format!(
         r#"<svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{path}"/></svg>"#
@@ -271,7 +330,7 @@ fn document(class: &str, title: &str, layout: &str, status: StatusCode) -> Reply
     write!(
         html,
         r#" · PXE Tools</title><link rel="icon" type="image/svg+xml" href="{MARK}">
-<link rel="stylesheet" href="/console-assets/style.css?v=6"></head><body class="{class}">{layout}"#
+<link rel="stylesheet" href="/console-assets/style.css?v=7"></head><body class="{class}">{layout}"#
     )
     .expect("write to String");
     let policy = if class == "console" {
