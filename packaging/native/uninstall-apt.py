@@ -777,7 +777,7 @@ class RemovalJournal:
                 worker['cgroup'] == '/' or '..' in Path(worker['cgroup']).parts):
             raise ValueError('invalid recorded worker identity')
         for unit, mask in value['masks'].items():
-            if (unit not in UNITS or not isinstance(mask, dict) or set(mask) != {'temporary', 'dev', 'ino', 'phase'}
+            if (unit not in PRODUCT_UNITS or not isinstance(mask, dict) or set(mask) != {'temporary', 'dev', 'ino', 'phase'}
                     or not isinstance(mask['temporary'], str)
                     or not re.fullmatch(r'\.pxe-uninstall-[0-9a-f]{32}-' + re.escape(unit), mask['temporary'])
                     or any(type(mask[k]) is not int or mask[k] < 0 for k in ('dev', 'ino'))
@@ -987,7 +987,7 @@ def persistent_masks(root, runner, units, transaction, *, owner=0, mounts=()):
     @contextmanager
     def barrier():
         names = tuple(units)
-        if len(set(names)) != len(names) or any(name not in UNITS for name in names):
+        if len(set(names)) != len(names) or any(name not in PRODUCT_UNITS for name in names):
             raise ValueError('unsupported service in removal barrier')
         directory_name = '/etc/systemd/system'
         if any(m != '/' and (directory_name == m or directory_name.startswith(m + '/')
@@ -1713,7 +1713,7 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                     source_removed, key_removed = remove_apt_config(root, mounts=mounts_provider(), owner=owner)
                     plan.update(source_removed=source_removed, key_removed=key_removed)
                     return plan
-                validate_product_units(root, runner, units, owner=owner)
+                barrier_units = validate_product_units(root, runner, units, owner=owner)
                 with upgrade_guard(lifecycle, owner=owner), removal_journal(
                         root, record, paths, ownership_identities, ownership_contents,
                         nginx_journal, owner=owner) as journal:
@@ -1730,7 +1730,7 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
                         else:
                             validate_account(record or {}, accounts['accounts'], accounts['groups'], accounts['process_uids'])
                     def after_stop(transaction):
-                        return persistent_masks(root, runner, units, transaction,
+                        return persistent_masks(root, runner, barrier_units, transaction,
                                                 owner=owner, mounts=mounts_provider())
                     with quiesced_lifecycle(lifecycle, after_stop=after_stop, journal=journal) as transaction:
                         assert_idle_database(lifecycle)
@@ -1917,8 +1917,8 @@ def recovery_masks(root, runner, journal, units, *, owner=0, mounts=(), dry_run=
         info = os.fstat(fd)
         if owner is not None and (info.st_uid != owner or info.st_mode & 0o022):
             raise ValueError('untrusted systemd directory')
-        for unit in units:
-            if unit not in UNITS:
+        for unit in dict.fromkeys((*units, *journal.state['masks'])):
+            if unit not in PRODUCT_UNITS:
                 raise ValueError('unsupported service during recovery')
             result = runner(['systemctl', 'show', '--property=ActiveState', '--value', unit],
                             check=False, text=True, stdout=-1, stderr=-1, timeout=30)
@@ -3327,7 +3327,7 @@ def require_idle_orphan(root, runner):
     if any(os.path.lexists(root / path.lstrip('/')) for path in native_paths):
         raise RuntimeError('Native PXE Tools state requires review before old instance cleanup')
     runtimes = ('docker.service', 'docker.socket', 'containerd.service', 'podman.service', 'podman.socket')
-    for unit in UNITS + runtimes:
+    for unit in PRODUCT_UNITS + runtimes:
         status = runner(['systemctl', 'show', '--property=ActiveState', '--value', unit],
                         check=False, text=True, stdout=-1, stderr=-1, timeout=30)
         if status.returncode or status.stdout.strip() not in ('inactive', 'failed'):
@@ -3842,12 +3842,28 @@ UNITS = ('pxe-tools.target', 'pxe-tools-admin.target', 'pxe-tools-worker.service
          'pxe-tools-pxe-http.service', 'pxe-tools-php.service',
          'pxe-tools-dnsmasq.service', 'pxe-tools-init.service')
 
+APT_UPDATE_UNIT = 'pxe-tools-apt-update.service'
+PRODUCT_UNITS = UNITS + (APT_UPDATE_UNIT,)
 
 UNIT_HASHES = {'pxe-tools-dnsmasq-tail.service': '86d1b7e600e0b9fc997aff6a9fba96b5c4522e3e6af5b63451a1f05662b245d2', 'pxe-tools-dnsmasq.service': '691030281153890ea1a1433cba22eca55bd0e772ce72254e695a899066e9c609', 'pxe-tools-init.service': '79785fa3530786658bb278d55c6356703517db00da975028963a470450df5187', 'pxe-tools-nginx.service': 'ee3a5893223d469f2021171339e67967387de4dd8f0e18e5075bd47943cc0b3e', 'pxe-tools-php.service': '12d0d54bbd463f424f0ed33850949aa245b4e15d8bec5391219d8745292eb04d', 'pxe-tools-pxe-http.service': '6bfbf1e6463786671154911b68d0c206d08192d792dd14134f6ef530ba9aedba', 'pxe-tools-worker.service': '654a7103bdea22658f79e4dfb9c135204a2584cb38c11658be26718c87fa8f1b', 'pxe-tools-admin.target': '280dd012f0ebe0720ed1f437c41ce9ccd9d5f63eb58c726fe980fb99ad79b2ac', 'pxe-tools.target': '8d3a636b9177d68ddc12cfde6449a13dc4a6acd138129db035ce83c8298af68c'}
+
+# These are the exact unit files produced by the native Rust package build.
+# The first Rust release used the previous HTTP listener unit.
+RUST_UNIT_HASHES = {
+    'pxe-tools.target': ('59eec753bb90211a4ca8aa52c122e0af7cee471a872944152ba4fb8cccbc6b2c',),
+    'pxe-tools-admin.target': ('075cc60949ab9efa926dae5dba3f6d8d0826e1467e7c29c589d0180b17260546',),
+    'pxe-tools-worker.service': ('4dca4a7df55c52abe758408c355c79521150887f29917061b06735e5b8bb55b4',),
+    'pxe-tools-pxe-http.service': (
+        'e40bb3b20ebbb4331afa9deaac0eb9f2a830f3af552a964a5f958cb865b1645a',
+        '0c02343f128cf9a4d38f24b8b9c9d03b78a575d21e111de6717880338e1cea3b',
+    ),
+    APT_UPDATE_UNIT: ('c357b5d3a30de1729f86149e04aecbd0e0104646f13f0aac60fcba569f0f24be',),
+}
+
 ANSIBLE_DROPIN_HASH = 'fb7578ae9bc11b1d80d4a4e9d81ae44a455cb6b52d03fffaa343dcea00e63a57'
 
 def validate_product_units(root, runner, units, *, owner=0):
-    """Refuse local overrides or altered product units before stopping anything."""
+    """Validate package units and return the exact units to mask during removal."""
     import hashlib
     import shlex
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -3902,10 +3918,19 @@ def validate_product_units(root, runner, units, *, owner=0):
             if local is not None:
                 opened.append(local)
                 local_dirs.append((parts, local))
+        units = tuple(units)
+        if APT_UPDATE_UNIT not in units:
+            try:
+                os.stat(APT_UPDATE_UNIT, dir_fd=package_dir, follow_symlinks=False)
+            except FileNotFoundError:
+                pass  # PHP and the first Rust packages predate console updates.
+            else:
+                units += (APT_UPDATE_UNIT,)
         for unit in units:
-            if unit not in UNIT_HASHES:
+            if unit not in PRODUCT_UNITS:
                 raise ValueError('unsupported product unit')
-            if digest(package_dir, unit) != UNIT_HASHES[unit]:
+            actual = digest(package_dir, unit)
+            if actual != UNIT_HASHES.get(unit) and actual not in RUST_UNIT_HASHES.get(unit, ()):
                 raise ValueError('package unit changed; preserved: ' + unit)
             allowed_masks = set()
             for parts, local in local_dirs:
@@ -3935,6 +3960,8 @@ def validate_product_units(root, runner, units, *, owner=0):
                 raise ValueError('unexpected unit fragment; preserved: ' + unit)
             if fragment in allowed_masks and show('ActiveState') not in ('inactive', 'failed'):
                 raise ValueError('masked unit is still active: ' + unit)
+            if unit == APT_UPDATE_UNIT and show('ActiveState') not in ('inactive', 'failed'):
+                raise RuntimeError('PXE Tools update is still active; wait before removing PXE Tools')
             dropins = shlex.split(show('DropInPaths'))
             permitted = {'/usr/lib/systemd/system/pxe-tools-worker.service.d/50-ansible.conf',
                          '/lib/systemd/system/pxe-tools-worker.service.d/50-ansible.conf'}
@@ -3947,6 +3974,7 @@ def validate_product_units(root, runner, units, *, owner=0):
                         raise ValueError('Ansible unit drop-in changed; preserved')
                 finally:
                     os.close(folder)
+        return units
     finally:
         for descriptor in opened:
             os.close(descriptor)

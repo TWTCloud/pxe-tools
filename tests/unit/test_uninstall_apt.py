@@ -601,6 +601,58 @@ class PackagedUnitHashTests(unittest.TestCase):
                          hashlib.sha256((SCRIPT.parent / 'ansible-worker.conf').read_bytes()).hexdigest())
 
 
+    def test_packaged_rust_units_and_optional_update_service(self):
+        import shutil
+        builder_spec = importlib.util.spec_from_file_location('native_package', SCRIPT.parent / 'build-local-package.py')
+        builder = importlib.util.module_from_spec(builder_spec)
+        builder_spec.loader.exec_module(builder)
+        with tempfile.TemporaryDirectory(prefix='pxe-rust-unit-fixture-') as temporary:
+            root = Path(temporary)
+            directory = root / 'usr/lib/systemd/system'
+            directory.mkdir(parents=True)
+            for name in uninstall.UNITS:
+                shutil.copyfile(SCRIPT.parent / name, directory / name)
+            builder.configure_guided_units(directory)
+            rust = SCRIPT.parents[2] / 'rust/packaging'
+            http_unit = 'pxe-tools-pxe-http.service'
+            shutil.copyfile(rust / http_unit, directory / http_unit)
+            update = uninstall.APT_UPDATE_UNIT
+            active = 'inactive'
+
+            def runner(command, **options):
+                prop = command[2]
+                name = command[-1]
+                if prop == '--property=FragmentPath':
+                    result = '/usr/lib/systemd/system/' + name
+                elif prop == '--property=DropInPaths':
+                    result = ''
+                elif prop == '--property=ActiveState' and name == update:
+                    result = active
+                else:
+                    raise AssertionError(command)
+                return subprocess.CompletedProcess(command, 0, stdout=result)
+
+            def validate():
+                return uninstall.validate_product_units(root, runner, uninstall.UNITS, owner=None)
+
+            self.assertEqual(validate(), uninstall.UNITS)
+            shutil.copyfile(rust / update, directory / update)
+            self.assertEqual(validate(), uninstall.PRODUCT_UNITS)
+            active = 'activating'
+            with self.assertRaisesRegex(RuntimeError, 'update is still active'):
+                validate()
+            active = 'inactive'
+            overrides = root / 'etc/systemd/system' / (update + '.d')
+            overrides.mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, 'local unit drop-in; preserved: ' + update):
+                validate()
+            overrides.rmdir()
+            unit = directory / http_unit
+            unit.write_bytes(unit.read_bytes() + b'# local edit\n')
+            with self.assertRaisesRegex(ValueError, 'package unit changed; preserved: ' + http_unit):
+                validate()
+
+
 
 class LifecycleLoaderTests(unittest.TestCase):
     def test_installed_helper_loads_from_regular_trusted_fixture(self):
