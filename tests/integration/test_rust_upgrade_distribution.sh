@@ -174,6 +174,10 @@ if [[ "$variant" == apt ]]; then
     docker exec -i "$name" bash -es <<'APT_PURGE'
         set -euo pipefail
         cd /var/tmp
+        # The guest was started in basic.target. The native freeze command
+        # needs the system D-Bus socket that a normal Debian boot provides.
+        systemctl start dbus.socket
+        systemctl is-active --quiet dbus.socket
         printf 'keep outside the PXE instance\n' > /var/tmp/unrelated-data
         args=(--allow-legacy --purge-residuals)
         python3 ./pxe-uninstall-test.py --dry-run "${args[@]}" > pxe-removal-plan
