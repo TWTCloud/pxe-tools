@@ -2,7 +2,7 @@
 
 use super::{
     bytes, credential_directory, plain,
-    ui::{self, WizardStep},
+    ui::{self, SetupCodeHelp, WizardStep},
     ErrorBox, Reply,
 };
 use crate::{configured_database, connect, setting, worker::factory_reset};
@@ -30,6 +30,7 @@ enum Stage {
 
 pub(super) struct Wizard {
     code: Option<String>,
+    code_help: SetupCodeHelp,
     write: Arc<Semaphore>,
 }
 
@@ -42,6 +43,11 @@ impl Wizard {
             .filter(|value| valid_setup_code(value));
         Self {
             code,
+            code_help: if std::env::var("PXE_SETUP_IN_CONTAINER").as_deref() == Ok("1") {
+                SetupCodeHelp::Container
+            } else {
+                SetupCodeHelp::Host
+            },
             write: Arc::new(Semaphore::new(1)),
         }
     }
@@ -65,29 +71,27 @@ impl Wizard {
 <div class="form-actions"><a class="button" href="/init/db">Configurer la base</a></div>"#,
                 StatusCode::OK,
             ),
-            (Some(Stage::Database), "/init/db") => ui::wizard(
-                Some(WizardStep::Storage),
+            (Some(Stage::Database), "/init/db") => ui::wizard_with_setup_code(
+                WizardStep::Storage,
                 "Base SQLite",
-                r#"<p class="wizard-intro">Utilisez le code fourni à l’installation pour préparer la base de données locale.</p>
-<form class="form-stack" method="post" action="/init/db">
+                self.code_help,
+                r#"<form class="form-stack" method="post" action="/init/db">
 <div class="field"><label for="setup-code">Code de configuration</label><input id="setup-code" name="code" type="password" autocomplete="off" required></div>
 <div class="form-actions"><button type="submit">Initialiser SQLite</button><a class="button button--quiet" href="/init/welcome">Retour</a></div>
 </form>"#,
-                StatusCode::OK,
             ),
             (Some(Stage::Database), _) => redirect(StatusCode::FOUND, "/init/db"),
-            (Some(Stage::Admin), "/init/admin") => ui::wizard(
-                Some(WizardStep::Account),
+            (Some(Stage::Admin), "/init/admin") => ui::wizard_with_setup_code(
+                WizardStep::Account,
                 "Compte d’administration",
-                r#"<p class="wizard-intro">Ce compte vous permettra d’accéder à la console et de terminer la configuration.</p>
-<form class="form-stack" method="post" action="/init/admin">
+                self.code_help,
+                r#"<form class="form-stack" method="post" action="/init/admin">
 <div class="field"><label for="setup-code">Code de configuration</label><input id="setup-code" name="code" type="password" autocomplete="off" required></div>
 <div class="field"><label for="setup-user">Identifiant</label><input id="setup-user" name="username" autocomplete="username" required maxlength="256"></div>
 <div class="field"><label for="setup-password">Mot de passe</label><input id="setup-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="72" aria-describedby="setup-password-help" required><small id="setup-password-help">Au moins 8 caractères.</small></div>
 <div class="field"><label for="setup-confirm">Confirmer le mot de passe</label><input id="setup-confirm" name="password_confirm" type="password" autocomplete="new-password" minlength="8" maxlength="72" required></div>
 <div class="form-actions"><button type="submit">Créer le compte</button></div>
 </form>"#,
-                StatusCode::OK,
             ),
             (Some(Stage::Admin), _) => redirect(StatusCode::FOUND, "/init/admin"),
             (Some(Stage::Resetting), _) => ui::wizard(
