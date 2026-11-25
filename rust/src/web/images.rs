@@ -354,7 +354,7 @@ fn auto_refresh(db: &Connection, fields: form_urlencoded::Parse<'_>) -> rusqlite
 pub(super) fn refresh_catalog(db: &Connection) -> rusqlite::Result<()> {
     let running = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM init_jobs
-         WHERE job_type IN ('bootstrap:refresh_catalog','bootstrap:refresh_catalog_v2')
+         WHERE job_type IN ('bootstrap:refresh_catalog','bootstrap:refresh_catalog_v2','bootstrap:auto_refresh_catalog_v2')
          AND status IN ('pending','running'))",
         [],
         |row| row.get::<_, bool>(0),

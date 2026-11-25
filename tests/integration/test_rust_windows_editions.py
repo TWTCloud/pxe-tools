@@ -561,9 +561,72 @@ def check_lan(binary, root, tls, env):
             _, manual_network = wizard_page('/init/network', 'Réseau', headers=admin)
             assert b'<option value="" selected>Saisie manuelle</option>' in manual_network
             assert b'<details open><summary>Saisir les' in manual_network
-            wizard_page('/init/images', 'Réseau', headers=admin)
+            _, loading = wizard_page('/init/images', 'Images', headers=admin)
+            assert 'Chargement du catalogue des systèmes'.encode() in loading
+            assert b'<select' not in loading and b'data-active="yes"' in loading
+            status_path = '/init/images/status'
+            assert request(status_path, **secure)[0] == 401
+            _, policy, _ = request('/init/images', **secure, headers=admin,
+                                    response_header='Content-Security-Policy')
+            digest = base64.b64encode(sha256(re.search(rb'<script>(.*?)</script>', loading, re.S)[1]).digest()).decode()
+            assert f"script-src 'sha256-{digest}'" in policy.split('; ')
+            assert "connect-src 'self'" in policy.split('; ')
+
+            def image_state():
+                code, cache, body = request(status_path, **secure, headers=admin, response_header='Cache-Control')
+                assert code == 200 and cache == 'no-store'
+                return json.loads(body)
+
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                db.execute("UPDATE init_jobs SET status='failed' WHERE job_type='bootstrap:refresh_catalog_v2'")
+            state = image_state()
+            assert not state['active'] and 'Recharger le catalogue' in state['catalog']
+            assert request('/init/images', **secure, form={'action': 'refresh'}, headers=admin)[:2] == (303, '/init/images')
+            assert image_state()['active']
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                db.execute("UPDATE init_jobs SET status='success' WHERE job_type='bootstrap:refresh_catalog_v2'")
+                db.executemany(
+                    """INSERT INTO catalog_entries(distro,version_full,arch,major,channel,extract_method)
+                       VALUES(?,?,?,?,?,?)""",
+                    [
+                        ('debian', '12.14.0', 'amd64', 12, 'oldstable', 'direct'),
+                        ('debian', '13.5.0', 'amd64', 13, 'stable', 'direct'),
+                        ('ubuntu', '24.04.5', 'arm64', 24, 'stable', 'iso_extract'),
+                        ('centos', '10', 'amd64', 10, 'stable', 'direct'),
+                    ],
+                )
+            state = image_state()
+            assert not state['active'] and 'Ubuntu Server' in state['catalog'] and 'ARM 64 bits' in state['catalog']
+            assert 'image:debian:13.5.0:amd64' not in state['catalog']
+            assert request('/init/images', **secure, form={'action': 'prepare', 'image:centos:10:amd64': 'on'},
+                           headers=admin)[0] == 422
+            selection = {'action': 'prepare', 'image:debian:12.14.0:amd64': 'on', 'image:ubuntu:24.04.5:arm64': 'on'}
+            assert request('/init/images', **secure, form=selection,
+                           headers={**admin, 'Origin': 'https://outside.example'})[0] == 403
+            for _ in range(2):
+                assert request('/init/images', **secure, form=selection, headers=admin)[:2] == (303, '/init/images')
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                images = db.execute('SELECT distro,version_full,arch,status FROM os_images ORDER BY id').fetchall()
+                assert images[0] == ('debian', '13.5.0', 'amd64', 'pending') and len(images) == 3
+                assert ('ubuntu', '24.04.5', 'arm64', 'pending') in images
+                db.execute("UPDATE os_images SET status='downloading', progress_percent=37 WHERE version_full='13.5.0'")
+            state = image_state()
+            assert state['active'] and not state['ready'] and 'value="37"' in state['downloads']
+            assert request('/init/images', **secure, form={'action': 'continue'}, headers=admin)[:2] == (303, '/init/images')
             _, pending_image = wizard_page('/init/done', 'Validation', headers=admin)
             assert b'name="confirmation"' not in pending_image
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                db.execute("UPDATE os_images SET status='failed' WHERE version_full='13.5.0'")
+            assert image_state()['retry']
+            assert request('/init/images', **secure, form={'action': 'retry'}, headers=admin)[:2] == (303, '/init/images')
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                assert db.execute("SELECT status,progress_percent FROM os_images WHERE version_full='13.5.0'").fetchone() == ('pending', 0)
+                db.execute("UPDATE os_images SET status='downloaded' WHERE version_full='13.5.0'")
+            state = image_state()
+            assert state['ready'] and state['active'] and 'Ubuntu Server' in state['downloads']
+            assert request('/init/images', **secure, form={'action': 'continue'}, headers=admin)[:2] == (303, '/init/done')
+            _, ready_summary = wizard_page('/init/done', 'Validation', headers=admin)
+            assert b'name="confirmation" value="yes"' in ready_summary
             assert request('/init/network', **secure, form={'role':'console'}, headers=admin)[:2] == (303,'/init/done')
             _, summary = wizard_page('/init/done', 'Validation', headers=admin)
             assert b'name="confirmation" value="yes"' in summary and b'Console seule' in summary

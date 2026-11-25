@@ -19,10 +19,17 @@ static STYLE_VERSION: LazyLock<String> =
     LazyLock::new(|| URL_SAFE_NO_PAD.encode(&Sha256::digest(STYLE)[..9]));
 const NAVIGATION_SCRIPT: &str = include_str!("ui/navigation.js");
 const SETUP_COMMAND_SCRIPT: &str = include_str!("ui/setup-command.js");
+const WIZARD_IMAGES_SCRIPT: &str = include_str!("ui/wizard-images.js");
 const POLICY: &str = "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 static CONSOLE_POLICY: LazyLock<String> =
     LazyLock::new(|| format!("{}; connect-src 'self'", script_policy(NAVIGATION_SCRIPT)));
 static SETUP_POLICY: LazyLock<String> = LazyLock::new(|| script_policy(SETUP_COMMAND_SCRIPT));
+static WIZARD_IMAGES_POLICY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}; connect-src 'self'",
+        script_policy(WIZARD_IMAGES_SCRIPT)
+    )
+});
 
 fn script_policy(script: &str) -> String {
     let digest = STANDARD.encode(Sha256::digest(script.as_bytes()));
@@ -44,6 +51,7 @@ pub(super) enum WizardStep {
     Storage,
     Account,
     Network,
+    Images,
     Confirmation,
 }
 
@@ -54,6 +62,16 @@ pub(super) fn wizard(
     status: StatusCode,
 ) -> Reply {
     wizard_document(step, title, content, status, None)
+}
+
+pub(super) fn wizard_images(content: &str) -> Reply {
+    wizard_document(
+        Some(WizardStep::Images),
+        "Images de démarrage",
+        content,
+        StatusCode::OK,
+        Some((WIZARD_IMAGES_SCRIPT, WIZARD_IMAGES_POLICY.as_str())),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -112,6 +130,7 @@ fn wizard_document(
             (WizardStep::Storage, "Stockage"),
             (WizardStep::Account, "Compte"),
             (WizardStep::Network, "Réseau"),
+            (WizardStep::Images, "Images"),
             (WizardStep::Confirmation, "Validation"),
         ] {
             let current = if step == phase {
