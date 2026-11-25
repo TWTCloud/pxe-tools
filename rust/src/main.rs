@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod apt_updates;
 mod catalog;
 mod discovery;
 mod disk_identity;

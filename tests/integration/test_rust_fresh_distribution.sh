@@ -9,7 +9,7 @@ cleanup() {
     if docker inspect "$container" >/dev/null 2>&1; then
         if [ "$variant" = apt ]; then
             docker exec "$container" journalctl -u pxe-tools-pxe-http.service \
-                -u pxe-tools-worker.service --no-pager -n 30 || true
+                -u pxe-tools-worker.service -u pxe-tools-apt-update.service --no-pager -n 60 || true
         else
             docker logs --tail 40 "$container" || true
         fi
@@ -101,4 +101,10 @@ docker exec "$container" bash -ec '
         [[ "$output" == *"https://$address/admin/"* && "$output" != *"$code"* ]]
     fi
 ' _ "$variant" "$address"
+if [[ "$variant" == apt ]] && docker exec "$container" test -f /usr/lib/pxe-tools/native/apt-console-update.py; then
+    docker exec -e DEBIAN_FRONTEND=noninteractive "$container" \
+        apt-get install -y --no-install-recommends apt-utils gnupg
+    docker cp tests/integration/test_apt_console_update.py "$container:/var/tmp/test_apt_console_update.py"
+    docker exec "$container" python3 /var/tmp/test_apt_console_update.py "${PXE_TEST_APT_VERSION:?}"
+fi
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"

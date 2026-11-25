@@ -14,7 +14,8 @@ const MARK: &str = "/console-assets/mark.svg?v=2";
 const NAVIGATION_SCRIPT: &str = include_str!("ui/navigation.js");
 const SETUP_COMMAND_SCRIPT: &str = include_str!("ui/setup-command.js");
 const POLICY: &str = "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
-static CONSOLE_POLICY: LazyLock<String> = LazyLock::new(|| script_policy(NAVIGATION_SCRIPT));
+static CONSOLE_POLICY: LazyLock<String> =
+    LazyLock::new(|| format!("{}; connect-src 'self'", script_policy(NAVIGATION_SCRIPT)));
 static SETUP_POLICY: LazyLock<String> = LazyLock::new(|| script_policy(SETUP_COMMAND_SCRIPT));
 
 fn script_policy(script: &str) -> String {
@@ -159,6 +160,7 @@ pub(super) enum ConsoleSection {
     Accounts,
     Tokens,
     Overview,
+    Updates,
 }
 
 impl ConsoleSection {
@@ -172,6 +174,7 @@ impl ConsoleSection {
             Self::Images => account.allows(ImagesRead),
             Self::Settings | Self::Overview => account.allows(SettingsRead),
             Self::Certificates | Self::Accounts => account.admin,
+            Self::Updates => account.admin && crate::apt_updates::enabled(),
             Self::Tokens => true,
         }
     }
@@ -239,6 +242,12 @@ const NAVIGATION: [(&str, &[NavLink]); 3] = [
                 "Certificats TLS",
                 ConsoleSection::Certificates,
                 "m12 3 8 3v5c0 5-3 8-8 10-5-2-8-5-8-10V6zm-3 9 2 2 4-4",
+            ),
+            (
+                super::updates::ROUTE,
+                "Mises à jour",
+                ConsoleSection::Updates,
+                "M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4",
             ),
         ],
     ),
@@ -361,6 +370,9 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
     .expect("write to String");
     escape(&mut layout, title);
     layout.push_str("</h1>");
+    if show(ConsoleSection::Updates) && section != ConsoleSection::Updates {
+        layout.push_str(r#"<p data-update-notice role="status"><a href="/settings/updates" hidden>Une mise à jour de PXE Tools est disponible</a></p>"#);
+    }
     layout.push_str(content);
     layout.push_str("</main></div>");
     document(

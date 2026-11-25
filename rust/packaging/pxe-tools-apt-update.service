@@ -1,0 +1,9 @@
+[Unit]
+Description=PXE Tools signed APT update
+
+[Service]
+Type=oneshot
+TimeoutStartSec=25min
+RuntimeDirectory=pxe-tools-apt-update
+ExecStart=/usr/bin/python3 /usr/lib/pxe-tools/native/apt-console-update.py
+ExecStopPost=/usr/bin/python3 /usr/lib/pxe-tools/native/apt-console-update.py --recover
