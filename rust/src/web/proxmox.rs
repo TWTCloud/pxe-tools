@@ -153,7 +153,7 @@ fn handle(
          WHERE b.client_ip=?1 AND b.default_menu='install' AND b.selected_menu='install'
            AND b.served_at>=datetime('now','-90 minutes') AND a.type='install_only'
            AND a.status IN ('pending','running') AND m.rescue_mode=0
-         ORDER BY b.id DESC LIMIT 2",
+         ORDER BY b.id DESC LIMIT 1",
     )?;
     let mut rows = query.query([peer.to_string()])?;
     let Some(row) = rows.next()? else {
@@ -324,7 +324,10 @@ for attempt in $(seq 1 60); do
         receipt=$(curl -fsS --connect-timeout 5 --max-time 15 --retry 3 \
             -H 'Authorization: Bearer {token}' -d '' \
             '{base}/api/internal/checkpoint?mac={mac}&code=os_first_boot&ack=1')
-        [ "$receipt" = accepted ] && exit 0
+        if [ "$receipt" = accepted ]; then
+            rm -f -- /var/lib/proxmox-first-boot/proxmox-first-boot
+            exit 0
+        fi
     fi
     sleep 2
 done

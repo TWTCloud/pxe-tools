@@ -30,6 +30,7 @@ jobs:
           ref: ${{ env.SOURCE }}
           persist-credentials: false
       - name: Check native KVM and install fixture tools
+        id: kvm
         env:
           ARCH: ${{ matrix.arch }}
           HYPERVISOR: ${{ matrix.hypervisor }}
@@ -39,18 +40,27 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE"
           test "$(dpkg --print-architecture)" = "$ARCH"
-          if ! test -c /dev/kvm; then
-            echo '::error::KVM unavailable on this runner. No software-emulated test was started.'
-            exit 1
-          fi
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends "$HYPERVISOR" "$FIRMWARE" "$GRUB" \
-            dnsmasq-base ipxe-qemu qemu-utils xorriso
+          if test -c /dev/kvm; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+            sudo apt-get install -y --no-install-recommends "$HYPERVISOR" "$FIRMWARE" "$GRUB" \
+              dnsmasq-base ipxe-qemu qemu-utils xorriso
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::KVM unavailable. This job will verify media preparation only.'
+            sudo apt-get install -y --no-install-recommends xorriso
+          fi
       - name: Build PXE Tools
         run: |
           rustup toolchain install 1.96.0 --profile minimal
           cargo +1.96.0 build --locked --release --manifest-path rust/Cargo.toml
+      - name: Prepare the real Proxmox ISO on this runner
+        if: steps.kvm.outputs.available == 'false'
+        run: |
+          sudo env PYTHONUNBUFFERED=1 python3 tests/integration/test_rust_proxmox_first_boot.py \
+            rust/target/release/pxe-tools-rust "$RUNNER_TEMP/proxmox-evidence" --prepare-only
       - name: Install Proxmox VE via PXE and verify the first boot
+        if: steps.kvm.outputs.available == 'true'
         run: |
           sudo env PYTHONUNBUFFERED=1 python3 tests/integration/test_rust_proxmox_first_boot.py \
             rust/target/release/pxe-tools-rust "$RUNNER_TEMP/proxmox-evidence"

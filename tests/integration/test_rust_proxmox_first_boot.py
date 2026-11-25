@@ -46,8 +46,8 @@ def stop(process):
             process.wait(timeout=5)
 
 
-def main(binary, logs):
-    if os.geteuid() != 0 or not os.access("/dev/kvm", os.R_OK | os.W_OK):
+def main(binary, logs, prepare_only):
+    if os.geteuid() != 0 or (not prepare_only and not os.access("/dev/kvm", os.R_OK | os.W_OK)):
         raise SystemExit("Le banc exige root et KVM. Aucun repli vers TCG.")
     arch = {"x86_64": "amd64", "aarch64": "arm64"}[os.uname().machine]
     qemu, grub_target, firmware, firmware_vars, machine = {
@@ -61,7 +61,7 @@ def main(binary, logs):
         "arm64": "b1619dcd1f5b1a6d67d77b59e7e2fa2033174551d1e1b9dc22b2171ec093abbd",
     }[arch]
     logs.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix="pxe-proxmox-") as directory, ExitStack() as cleanup:
+    with TemporaryDirectory(prefix="pxe-proxmox-", dir="/srv") as directory, ExitStack() as cleanup:
         root = Path(directory)
         public, tftp = root/"http", root/"tftp"
         public.mkdir()
@@ -103,6 +103,10 @@ def main(binary, logs):
         stage = public/"netboot/proxmox/9.2-1"/arch
         for name in ["linux", "initrd.gz", "source.iso"]:
             assert (stage/name).stat().st_size > 0
+
+        if prepare_only:
+            print(f"ISO et assistant officiels vérifiés sur {arch}. Fichiers PXE préparés.", flush=True)
+            return
 
         namespace = f"pxe-pve-{os.getpid()}"
         run("ip", "netns", "add", namespace)
@@ -197,4 +201,4 @@ configfile (http,{SERVER}){seed}
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]).resolve(strict=True), Path(sys.argv[2]).resolve())
+    main(Path(sys.argv[1]).resolve(strict=True), Path(sys.argv[2]).resolve(), sys.argv[3:] == ["--prepare-only"])
