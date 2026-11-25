@@ -219,7 +219,7 @@
       if (response.redirected || [401, 403, 404].includes(response.status)) return;
       if (response.ok) {
         const { status, message, progress_percent } = await response.json();
-        if (status !== 'pending' && status !== 'running') {
+        if (status !== panel.dataset.rhelState) {
           location.reload();
           return;
         }

@@ -299,7 +299,10 @@ fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
     if redhat {
         let active = matches!(job.status.as_str(), "pending" | "running");
         let poll = if active {
-            format!(r#" data-rhel-job="/jobs/{id}/status""#)
+            format!(
+                r#" data-rhel-job="/jobs/{id}/status" data-rhel-state="{}""#,
+                job.status
+            )
         } else {
             String::new()
         };
