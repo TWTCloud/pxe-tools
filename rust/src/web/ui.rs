@@ -158,6 +158,7 @@ pub(super) enum ConsoleSection {
     Certificates,
     Accounts,
     Tokens,
+    Overview,
 }
 
 impl ConsoleSection {
@@ -169,7 +170,7 @@ impl ConsoleSection {
             Self::Jobs => account.allows(JobsRead),
             Self::Presets => account.allows(PresetsRead),
             Self::Images => account.allows(ImagesRead),
-            Self::Settings => account.allows(SettingsRead),
+            Self::Settings | Self::Overview => account.allows(SettingsRead),
             Self::Certificates | Self::Accounts => account.admin,
             Self::Tokens => true,
         }
@@ -191,6 +192,12 @@ const NAVIGATION: [(&str, &[NavLink]); 3] = [
                 "Inventaire",
                 ConsoleSection::Devices,
                 "M3 4h18v12H3zM8 20h8m-4-4v4",
+            ),
+            (
+                super::overview::ROUTE,
+                "Vue d’ensemble",
+                ConsoleSection::Overview,
+                "M3 3h7v7H3zm11 0h7v7h-7zM3 14h7v7H3zm11 0h7v7h-7z",
             ),
             (
                 "/activity",

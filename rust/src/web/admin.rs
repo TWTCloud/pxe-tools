@@ -45,6 +45,7 @@ pub(super) fn device_term(term: &str) -> Option<&'static str> {
 
 pub(super) enum Action {
     Devices,
+    Overview(Option<Ipv4Addr>),
     Device(super::devices::DeviceRoute, Option<Bytes>),
     Linux(
         i64,
@@ -81,6 +82,7 @@ impl Action {
         let select = |view, edit| if read { view } else { edit };
         Some(match self {
             Self::Devices => DevicesRead,
+            Self::Overview(_) => SettingsRead,
             Self::Device(route, form) => route.permission(method, form.as_deref()),
             Self::Linux(..) => Deploy,
             Self::Register(..) => DevicesEdit,
@@ -93,7 +95,9 @@ impl Action {
                 | Preset::Import
                 | Preset::Detail(_)
                 | Preset::Snapshot(_)
-                | Preset::Push(_),
+                | Preset::Push(_)
+                | Preset::Duplicate(_)
+                | Preset::Options(_),
                 _,
             )
             | Self::PullPresets => PresetsEdit,
@@ -400,6 +404,9 @@ impl Console {
                 }
                 if let Action::Users(form) = &action {
                     return access::users(&db, &db_path, &account, form.as_deref()).ok();
+                }
+                if let Action::Overview(address) = &action {
+                    return super::overview::show(&db, &account, *address).ok();
                 }
                 if let Action::Tokens(form) = &action {
                     return access::tokens(&db, &db_path, &account, form.as_deref()).ok();

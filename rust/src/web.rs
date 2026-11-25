@@ -19,6 +19,7 @@ mod images;
 mod jobs;
 mod linux_boot;
 mod onboarding;
+mod overview;
 mod presets;
 mod sessions;
 mod settings;
@@ -597,6 +598,20 @@ async fn dispatch(
             .serve(&parts, peer, &site.database, admin::Action::Devices)
             .await;
     }
+    if path == overview::ROUTE && readable {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        return site
+            .admin
+            .serve(
+                &parts,
+                peer,
+                &site.database,
+                admin::Action::Overview(site.pxe_ip),
+            )
+            .await;
+    }
     if path == "/machines" && readable {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
@@ -794,6 +809,14 @@ async fn dispatch(
                 admin::Action::Activity(view, Arc::clone(&site.catalog)),
             )
             .await;
+    }
+    if secure
+        && readable
+        && path == "/init/network"
+        && form_urlencoded::parse(parts.uri.query().unwrap_or_default().as_bytes())
+            .any(|(name, value)| name == "from" && value == "settings")
+    {
+        return setup::redirect(StatusCode::FOUND, "/settings/network");
     }
     if onboarding::is_route(path) {
         if !secure || !setup_allowed {

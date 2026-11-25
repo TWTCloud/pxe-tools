@@ -2,6 +2,8 @@
 
 mod validation;
 
+pub(crate) use validation::validate_advanced;
+
 use crate::{configured_database, connect, migrations::integer, php_string, php_trim, php_truthy};
 use rusqlite::{
     params_from_iter,

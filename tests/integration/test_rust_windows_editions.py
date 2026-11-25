@@ -554,13 +554,70 @@ def check_lan(binary, root, tls, env):
             digest = base64.b64encode(sha256(script).digest()).decode()
             assert f"script-src 'sha256-{digest}'" in csp.split('; ')
             assert request('/pxe/linux/amd64/grub.cfg', **private)[0] == 404
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                draft, = db.execute("SELECT value FROM settings WHERE key='rust_wizard_network'").fetchone()
+            result = request('/init/complete', **secure, headers=admin,
+                             form={'confirmation': 'yes', 'plan': draft, 'image': ''})
+            assert result[:2] == (303, '/admin/devices')
             verify_access(secure, private, admin, runtime/'install.sqlite')
+            verify_restored_console(secure, private, admin, runtime/'install.sqlite', plan)
         finally:
             service.terminate()
     verify_authentik_access(binary, config, secure, origin, env)
     env['PXE_ADMIN_BIND'] = '127.0.0.1'
     assert subprocess.check_output([binary, '--admin-listen-addresses'], env=env, text=True).splitlines() == ['127.0.0.1']
     print('Default LAN console, HTTPS setup, login, origin checks and explicit loopback verified.')
+
+
+def verify_restored_console(secure, private, admin, database, plan):
+    network = '/settings/network'
+    assert request(network, **private)[0] == 404
+    assert request(network, **secure)[0] == 401
+    assert request('/init/network?from=settings', **secure, headers=admin)[:2] == (302, network)
+    assert b'Console seule' in request('/overview', **secure, headers=admin)[2]
+    assert b'name="dhcp_proxy_cidr"' in request(network, **secure, headers=admin)[2]
+    assert request(network, **secure, form=plan,
+                   headers={**admin, 'Origin': 'https://outside.example'})[0] == 403
+    assert request(network, **secure, form={**plan, 'dhcp_proxy_cidr': '10.77.1.0/24'}, headers=admin)[0] == 422
+    proxy = {**plan, 'dhcp_proxy_cidr': '10.77.0.0/25'}
+    assert request(network, **secure, form=proxy, headers=admin)[:2] == (303, network)
+    with sqlite3.connect(database) as db:
+        values = dict(db.execute('SELECT key,value FROM settings'))
+        assert values['pxe_enabled'] == 'on' and values['dhcp_proxy_enabled'] == 'on'
+        assert values['dhcp_proxy_netmask'] == '255.255.255.128' and values['pxe_subnet'] == '10.77.0.0/24'
+        jobs = json.loads(values['appliance_last_job_ids'])
+        assert [db.execute('SELECT job_type FROM init_jobs WHERE id=?', [job]).fetchone()[0] for job in jobs] == [
+            'bootstrap:build_grub', 'bootstrap:render_templates', 'bootstrap:restart_dnsmasq',
+        ]
+    assert b'PXE avec proxy DHCP' in request('/overview', **secure, headers=admin)[2]
+    assert b'value="10.77.0.0/25"' in request(network, **secure, headers=admin)[2]
+    assert request(network, **secure, form={'role': 'console'}, headers=admin)[:2] == (303, network)
+    with sqlite3.connect(database) as db:
+        values = dict(db.execute('SELECT key,value FROM settings'))
+        assert values['pxe_enabled'] == 'off' and values['pxe_ip'] == LAN
+        assert len(json.loads(values['appliance_last_job_ids'])) == 1
+        preset = db.execute(
+            """INSERT INTO presets(name,distro,codename,admin_user_login,admin_user_pwhash,advanced_config_json)
+               VALUES('modèle-source','debian','trixie','setup','fixture-hash',?) RETURNING id""",
+            [json.dumps({'apt': {'non_free': True}, 'packages': {'pkgsel_include': []}})],
+        ).fetchone()[0]
+    source = f'/presets/{preset}'
+    options, copier = source+'/options', source+'/duplicate'
+    assert b'name="keymap"' in request(options, **secure, headers=admin)[2]
+    assert request(options, **secure, form={'hostname': 'https://bad.invalid'}, headers=admin)[0] == 422
+    assert request(options, **secure, form={'locale': 'en_US.UTF-8', 'keymap': 'us', 'zone': 'UTC',
+                                           'pkgsel_include': ''}, headers=admin)[:2] == (303, options)
+    status, copy, _ = request(copier, **secure, form={'name': 'modèle-copie'}, headers=admin)
+    assert status == 303 and copy != source and copy.startswith('/presets/')
+    assert request(copier, **secure, form={'name': 'modèle-copie'}, headers=admin)[0] == 409
+    with sqlite3.connect(database) as db:
+        rows = db.execute('SELECT advanced_config_json,admin_user_pwhash FROM presets ORDER BY id').fetchall()
+        assert len(rows) == 2 and rows[0] == rows[1] and rows[0][1] == 'fixture-hash'
+        config = json.loads(rows[0][0])
+        assert config['apt'] == {'non_free': True}
+        assert config['packages'] == {'pkgsel_include': []}
+        assert config['localization'] == {'locale': 'en_US.UTF-8', 'keymap': 'us'}
+    print('Restored network settings, overview, advanced preset options and duplication verified.')
 
 
 def main(binary):
