@@ -88,6 +88,31 @@ class ScopedRemovalTests(unittest.TestCase):
             self.assertTrue((self.target / 'data').exists())
             self.assertEqual((self.outside / 'keep').read_text(), 'outside')
 
+    def test_known_parent_mount_allows_only_the_approved_tree(self):
+        import errno
+
+        def opener(parent, name):
+            if name in ('var', 'lib'):
+                raise OSError(errno.EXDEV, 'mount boundary')
+            return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+
+        mounts = ('/var', '/var/lib')
+        paths = uninstall.snapshot_legacy_paths(
+            self.root, mounts=mounts, owner=os.getuid(), opener=opener,
+            identity=lambda fd: {'dev': os.fstat(fd).st_dev, 'ino': os.fstat(fd).st_ino},
+        )
+        name = '/var/lib/pxe-tools'
+        self.assertTrue((self.target / 'data').exists())
+        sibling = self.target.parent / 'other-service'
+        sibling.mkdir()
+        with self.assertRaisesRegex(ValueError, 'mount within removal path'):
+            uninstall.remove_tree(self.root, name, mounts=(*mounts, name), owner=os.getuid(),
+                                  opener=opener, expected=paths['directories'][name])
+        uninstall.remove_tree(self.root, name, mounts=mounts, owner=os.getuid(), opener=opener,
+                              expected=paths['directories'][name])
+        self.assertFalse(self.target.exists())
+        self.assertTrue(sibling.is_dir())
+
     def test_directory_removal_is_synchronized_before_return(self):
         target_inode = self.target.stat().st_ino
         parent_inode = self.target.parent.stat().st_ino

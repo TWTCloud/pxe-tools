@@ -105,8 +105,9 @@ def clean_package_caches(root, *, owner=0, opener=_openat2_no_mount):
             os.close(fd)
 
 
-def remove_tree(root, name, *, mounts, owner=0, dry_run=False, expected=None, opener=None, generation_matches=None):
-    """Delete an allowlisted tree by FD without following a mount or symlink.
+def remove_tree(root, name, *, mounts, owner=0, dry_run=False, expected=None, opener=None,
+                generation_matches=None, capture_identity=None):
+    """Validate or delete an allowlisted tree without crossing mounts inside it.
 
     root/opener injection is internal for fixtures and never exposed via CLI.
     """
@@ -127,12 +128,20 @@ def remove_tree(root, name, *, mounts, owner=0, dry_run=False, expected=None, op
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     parent = os.open(root, flags)
     try:
+        ancestor = ''
         for component in parts[:-1]:
             info = os.fstat(parent)
             if owner is not None and (info.st_uid != owner or info.st_mode & 0o022):
                 raise ValueError('untrusted removal ancestor')
+            ancestor += '/' + component
             try:
-                child = opener(parent, component)
+                if ancestor in mounts:
+                    # A system parent such as /var can already be mounted.
+                    # Keep using the no-mount opener for unlisted ancestors,
+                    # the product directory itself and all of its contents.
+                    child = os.open(component, flags, dir_fd=parent)
+                else:
+                    child = opener(parent, component)
             except FileNotFoundError:
                 return
             os.close(parent)
@@ -156,7 +165,7 @@ def remove_tree(root, name, *, mounts, owner=0, dry_run=False, expected=None, op
             if generation_matches is not None and not generation_matches(target_fd, expected):
                 raise ValueError('recorded directory generation changed or cannot be proven')
             if dry_run:
-                return
+                return capture_identity(target_fd) if capture_identity is not None else None
             def descend(directory):
                 for child_name in os.listdir(directory):
                     info = os.stat(child_name, dir_fd=directory, follow_symlinks=False)
@@ -1441,7 +1450,7 @@ def nginx_journal_guard(root, reconciler, *, owner=0, mounts=()):
     return guarded()
 
 
-def proven_tree_paths(root, *, owner=0, record=None, generation_matches=None):
+def proven_tree_paths(root, *, mounts=(), owner=0, record=None, generation_matches=None):
     """Identify only directories recorded by the creation transaction."""
     if record is None:
         return ()
@@ -1460,7 +1469,7 @@ def proven_tree_paths(root, *, owner=0, record=None, generation_matches=None):
                     any(type(expected[key]) is not int or expected[key] < 0 for key in expected) or
                     expected['ino'] == 0 or expected['btime_nsec'] >= 1000000000):
                 raise ValueError('invalid legacy directory identity')
-            remove_tree(root, path, mounts=(), owner=owner, dry_run=True,
+            remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True,
                         expected=expected, generation_matches=generation_matches)
         return tuple(sorted(p for p in record['directories'] if p != '/var/lib/pxe-tools-native') +
                      (['/var/lib/pxe-tools-native'] if '/var/lib/pxe-tools-native' in record['directories'] else []))
@@ -1482,7 +1491,7 @@ def proven_tree_paths(root, *, owner=0, record=None, generation_matches=None):
                 expected['ino'] == 0 or expected['btime_nsec'] >= 1000000000 or
                 not isinstance(expected['nonce'], str) or len(expected['nonce']) != 64):
             raise ValueError('invalid recorded directory')
-        remove_tree(root, path, mounts=(), owner=owner, dry_run=True, expected=expected, generation_matches=generation_matches)
+        remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, expected=expected, generation_matches=generation_matches)
     # A workspace used by a pre-existing, unproven account may be shared.
     eligible = set(directories)
     if initial:
@@ -1532,15 +1541,7 @@ def legacy_identity_matches(fd, expected):
 
 def snapshot_legacy_paths(root, *, mounts, owner=0, opener=None, identity=legacy_birth_identity):
     """Inspect only allowlisted directories, without writing or claiming provenance."""
-    import sys
     root = Path(root)
-    if opener is None:
-        if sys.platform == 'linux':
-            opener = _openat2_no_mount
-        elif root != Path('/') and owner != 0:
-            opener = lambda fd, name: os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        else:
-            raise RuntimeError('Linux openat2 is required for legacy removal')
     records = {}
     preserved = []
     for path in sorted(TREES):
@@ -1555,16 +1556,11 @@ def snapshot_legacy_paths(root, *, mounts, owner=0, opener=None, identity=legacy
             if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or info.st_mode & 0o022):
                 preserved.append(path)
                 continue
-        remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, opener=opener)
-        parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            for name in Path(path).parts[1:]:
-                child = opener(parent, name)
-                os.close(parent)
-                parent = child
-            records[path] = identity(parent)
-        finally:
-            os.close(parent)
+        proof = remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, opener=opener,
+                            capture_identity=identity)
+        if proof is None:
+            raise ValueError('legacy directory disappeared during inspection: ' + path)
+        records[path] = proof
     return {'format': 3, 'source': 'explicit-legacy-consent', 'directories': records, 'preserved': preserved}
 
 
@@ -1620,12 +1616,13 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
     root = Path(root)
     original_record = record
     legacy = allow_legacy and record == {'format': 2, 'directories': {}}
+    mounts = mounts_provider()
     if legacy:
         if ownership is None:
             raise RuntimeError('legacy ownership journal is unavailable')
-        record = legacy_snapshotter(root, mounts=mounts_provider(), owner=owner)
+        record = legacy_snapshotter(root, mounts=mounts, owner=owner)
     generation_matches = legacy_matcher if legacy else ownership.generation.matches if ownership is not None else None
-    paths = proven_tree_paths(root, owner=owner, record=record, generation_matches=generation_matches)
+    paths = proven_tree_paths(root, mounts=mounts, owner=owner, record=record, generation_matches=generation_matches)
     # A previous installation may have left the dedicated Ansible identity even
     # though the current installation never created it. Its removal requires a
     # fresh, explicit preview bound to the exact unshared identity.
@@ -1643,9 +1640,6 @@ def run_uninstall(root, runner, lifecycle, units, mounts_provider, *, owner=0, a
             record = dict(record, account=approved_account)
         elif any(group.gr_name == 'pxe-tools-ansible' for group in accounts['groups']):
             raise ValueError('unproven Ansible group has no matching account; inspect before removal')
-    mounts = mounts_provider()
-    for path in paths:
-        remove_tree(root, path, mounts=mounts, owner=owner, dry_run=True, expected=record['directories'][path], generation_matches=generation_matches)
     source, key = apt_cleanup_plan(root, owner=owner)
     if legacy:
         # The preview explicitly preserves APT configuration for this legacy
