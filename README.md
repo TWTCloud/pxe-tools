@@ -11,6 +11,8 @@ serveur ARM64 a installé un client Debian 13 BIOS amd64 sur un banc isolé.
 Consultez [la documentation native](docs/native-preparation.md) pour les
 limites et instructions de sécurité.
 
+La console permet de gérer [les comptes, les droits et les jetons d’API](docs/access-api.md).
+
 ## Installation avec APT
 
 Téléchargez la clé publique, puis vérifiez son empreinte avant de l'utiliser :

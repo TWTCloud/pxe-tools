@@ -241,7 +241,8 @@ impl Console {
                 ));
             };
             if db.execute(
-                "UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE username=?1 AND password_hash=?2 AND session_epoch=?3 AND enabled=1 AND external=0",
+                "UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE username=?1
+                 AND COALESCE(managed_password_hash,password_hash)=?2 AND session_epoch=?3 AND enabled=1 AND external=0",
                 params![username, hash, epoch],
             ).ok()? != 1 {
                 return Some(unauthorized());

@@ -105,6 +105,7 @@ const LEGACY_COLUMNS: &[(&str, &[(&str, &str)])] = &[
                 "INTEGER NOT NULL DEFAULT 0 CHECK(external IN (0, 1))",
             ),
             ("session_epoch", "INTEGER NOT NULL DEFAULT 0"),
+            ("managed_password_hash", "TEXT"),
         ],
     ),
     (

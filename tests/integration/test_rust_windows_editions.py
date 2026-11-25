@@ -340,7 +340,8 @@ def verify_access(secure, private, admin, database):
                 'Origin': admin['Origin'], 'Content-Type': admin['Content-Type']}
     assert request(users, **secure, headers=admin)[0] == 200
     assert form(users, {'action':'create', **credentials, 'scope':'devices.read'})[:2] == (303, users)
-    assert request('/admin/devices', **secure, headers=observer)[0] == 200
+    visible = request('/admin/devices', **secure, headers=observer)
+    assert visible[0] == 200 and tokens.encode() in visible[2] and users.encode() not in visible[2]
     assert request(users, **secure, headers=observer)[0] == 403
     assert form(users, {'action':'create', 'username':'intrus', 'password':'fixture-attacker-password',
                         'admin':'1'}, observer)[0] == 403
@@ -348,6 +349,8 @@ def verify_access(secure, private, admin, database):
     with sqlite3.connect(database) as db:
         owner = db.execute("SELECT id FROM users WHERE username='observer'").fetchone()[0]
         first_admin = db.execute("SELECT id FROM users WHERE username='lan-admin'").fetchone()[0]
+        assert db.execute('SELECT password_hash,managed_password_hash IS NOT NULL FROM users WHERE id=?',
+                          [owner]).fetchone() == ('!', 1)
     assert form(users, {'action':'update', 'id':first_admin, 'enabled':'1'})[0] == 409
     assert form(tokens, {'action':'create', 'name':'test', 'days':'1','scope':'jobs.read'}, observer)[0] == 422
     assert form(tokens, {'action':'create', 'name':'test', 'days':'1','scope':'admin'}, observer)[0] == 422
@@ -387,6 +390,7 @@ def verify_access(secure, private, admin, database):
     assert api_call(f'/devices/{device}/actions/reboot', operator, json_body={})[0] == 202
     assert api_call('/jobs', operator)[0] == 403
     assert form(tokens, {'action':'revoke','id':token_id+1}, observer)[0] == 404
+    assert form(tokens, {'action':'rotate','id':token_id+1,'scope':'devices.read'}, observer)[0] == 404
     pending = secret(form(tokens, {'action':'create','name':'Interdit après désactivation','days':'1','scope':'devices.read'},
                           observer, response_header='Cache-Control'))
     assert form(users, {'action':'update','id':owner,'enabled':'1'})[:2] == (303, users)
@@ -408,7 +412,7 @@ def verify_access_migration(binary, root):
     config = root/'legacy-access.conf'
     with sqlite3.connect(database) as db:
         db.executescript((ROOT/'app/db/schema.sqlite.sql').read_text())
-        for column in ('is_admin', 'enabled', 'permissions', 'external', 'session_epoch'):
+        for column in ('is_admin', 'enabled', 'permissions', 'external', 'session_epoch', 'managed_password_hash'):
             db.execute(f'ALTER TABLE users DROP COLUMN {column}')
         db.execute("INSERT INTO users(username,password_hash) VALUES('legacy','legacy-hash')")
     config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
@@ -420,6 +424,38 @@ def verify_access_migration(binary, root):
     subprocess.run([binary, '--migrate-schema', config], check=True)
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT is_admin FROM users WHERE username='new'").fetchone() == (0,)
+
+
+def verify_authentik_access(binary, config, secure, origin, env):
+    users = '/admin/access/users'
+    mode = {**env, 'AUTH_MODE':'authentik', 'AUTHENTIK_TRUSTED_PROXY_CIDRS':f'{LAN_CLIENT}/32'}
+    with subprocess.Popen([binary, '--serve-guided', config], env=mode) as service:
+        try:
+            for _ in range(80):
+                if service.poll() is not None:
+                    raise RuntimeError('Authentik fixture stopped during startup')
+                try:
+                    if request('/healthz', **secure)[0] == 200:
+                        break
+                except OSError:
+                    time.sleep(.2)
+            else:
+                raise RuntimeError('Authentik fixture did not start')
+            admin = {'X-Forwarded-User':'sso-admin', 'Origin':origin,
+                     'Content-Type':'application/x-www-form-urlencoded'}
+            viewer = {**admin, 'X-Forwarded-User':'sso-viewer'}
+            assert request('/admin/devices', **secure, headers=viewer)[0] == 200
+            assert request(users, **secure, headers=admin, form={'action':'activate'})[:2] == (303, users)
+            assert request('/admin/devices', **secure, headers=viewer)[0] == 403
+            assert request(users, **secure, headers=admin,
+                           form={'action':'create','username':'sso-viewer','scope':'devices.read'})[:2] == (303, users)
+            assert request('/admin/devices', **secure, headers=viewer)[0] == 200
+            assert request('/admin/devices', **secure, headers={**viewer,'X-Forwarded-User':'SSO-VIEWER'})[0] == 403
+            assert request(users, **secure, headers=viewer)[0] == 403
+            assert request('/machines', **secure, headers=viewer, form={'mac':'02:00:00:00:20:03'})[0] == 403
+        finally:
+            service.terminate()
+    print('Verified trusted SSO transition from legacy access to explicit administrator and viewer accounts.')
 
 
 def check_lan(binary, root, tls, env):
@@ -486,6 +522,7 @@ def check_lan(binary, root, tls, env):
             verify_access(secure, private, admin, runtime/'install.sqlite')
         finally:
             service.terminate()
+    verify_authentik_access(binary, config, secure, origin, env)
     env['PXE_ADMIN_BIND'] = '127.0.0.1'
     assert subprocess.check_output([binary, '--admin-listen-addresses'], env=env, text=True).splitlines() == ['127.0.0.1']
     print('Default LAN console, HTTPS setup, login, origin checks and explicit loopback verified.')

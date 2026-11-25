@@ -165,7 +165,8 @@ pub(super) fn password_hash(db: &Connection, user: &str) -> rusqlite::Result<Opt
 
 pub(super) fn credential(db: &Connection, user: &str) -> rusqlite::Result<Option<(String, i64)>> {
     db.query_row(
-        "SELECT password_hash,session_epoch FROM users WHERE username=?1 AND enabled=1 AND external=0",
+        "SELECT COALESCE(managed_password_hash,password_hash),session_epoch FROM users
+         WHERE username=?1 AND enabled=1 AND external=0",
         [user],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )

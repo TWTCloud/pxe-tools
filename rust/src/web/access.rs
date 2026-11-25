@@ -391,11 +391,13 @@ pub(super) fn users(
                     username.to_owned()
                 };
                 if tx.execute(
-                    "INSERT INTO users(username,password_hash,is_admin,permissions,external)
-                     VALUES(?1,?2,?3,?4,?5) ON CONFLICT(username) DO NOTHING",
+                    // Old servers ignore roles. Use a separate credential
+                    // column so they cannot authenticate a managed account.
+                    "INSERT INTO users(username,password_hash,managed_password_hash,is_admin,permissions,external)
+                     VALUES(?1,'!',?2,?3,?4,?5) ON CONFLICT(username) DO NOTHING",
                     params![
                         name,
-                        hash.as_deref().unwrap_or("!"),
+                        hash,
                         administrator,
                         form.rights,
                         current.external
@@ -437,7 +439,8 @@ pub(super) fn users(
                     }
                 }
                 tx.execute(
-                    "UPDATE users SET is_admin=?2,enabled=?3,permissions=?4,password_hash=COALESCE(?5,password_hash),
+                    "UPDATE users SET is_admin=?2,enabled=?3,permissions=?4,
+                       managed_password_hash=COALESCE(?5,managed_password_hash,password_hash),password_hash='!',
                        session_epoch=session_epoch+CASE WHEN NOT ?3 OR ?5 IS NOT NULL THEN 1 ELSE 0 END
                      WHERE id=?1",
                     params![id, administrator, enabled, form.rights, hash],

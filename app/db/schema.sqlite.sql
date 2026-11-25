@@ -202,7 +202,8 @@ CREATE TABLE IF NOT EXISTS users (
     enabled         INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     permissions     INTEGER NOT NULL DEFAULT 0 CHECK(permissions >= 0),
     external        INTEGER NOT NULL DEFAULT 0 CHECK(external IN (0, 1)),
-    session_epoch   INTEGER NOT NULL DEFAULT 0
+    session_epoch   INTEGER NOT NULL DEFAULT 0,
+    managed_password_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS api_tokens (
