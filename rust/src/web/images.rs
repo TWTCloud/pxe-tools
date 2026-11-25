@@ -10,6 +10,7 @@ use super::{
 use crate::{
     connect,
     images::{Change, Changed},
+    media::{self, REDHAT_ROUTE},
     setting,
 };
 use hyper::{Method, StatusCode};
@@ -24,6 +25,7 @@ pub(super) enum Route {
     List,
     Add,
     Media(Option<&'static str>),
+    RedHat,
     Refresh,
     RefreshStatus,
     AutoRefresh,
@@ -47,6 +49,7 @@ impl Route {
                         _ => None,
                     }),
             ),
+            REDHAT_ROUTE => Self::RedHat,
             "/settings/images/refresh" => Self::Refresh,
             "/settings/images/refresh-button" => Self::RefreshStatus,
             "/settings/images/auto-refresh" => Self::AutoRefresh,
@@ -69,7 +72,12 @@ impl Route {
         match *method {
             Method::GET | Method::HEAD => matches!(
                 self,
-                Self::List | Self::Add | Self::Media(_) | Self::RefreshStatus | Self::Status
+                Self::List
+                    | Self::Add
+                    | Self::Media(_)
+                    | Self::RedHat
+                    | Self::RefreshStatus
+                    | Self::Status
             ),
             Method::POST => !matches!(self, Self::RefreshStatus | Self::Status),
             Method::DELETE => matches!(self, Self::Delete(_)),
@@ -91,6 +99,9 @@ pub(super) fn serve(
         (Route::List, None) => list(db, number, can_edit),
         (Route::Media(kind), None) => media_form(db, kind),
         (Route::Media(_), Some(form)) => queue_media(path, form),
+        (Route::RedHat, None) if can_edit => redhat_form(None),
+        (Route::RedHat, Some(form)) if can_edit => queue_redhat(path, form),
+        (Route::RedHat, _) => Ok(plain(StatusCode::FORBIDDEN, "Accès refusé\n")),
         (Route::Add, None) => catalog(db, can_edit).map(|html| {
             page(
                 ConsoleSection::Images,
@@ -155,9 +166,9 @@ fn media_form(db: &Connection, selected_kind: Option<&str>) -> Result<Reply, Err
         html.push_str("</p>");
     }
     let mut jobs = db.prepare(
-        "SELECT id,status,message FROM init_jobs WHERE job_type=?1 ORDER BY id DESC LIMIT 10",
+        "SELECT id,status,message FROM init_jobs WHERE job_type IN (?1,?2) ORDER BY id DESC LIMIT 10",
     )?;
-    let mut rows = jobs.query([crate::media::JOB])?;
+    let mut rows = jobs.query([media::JOB, media::REDHAT_JOB])?;
     html.push_str("<h2>Préparations récentes</h2>");
     let mut next = rows.next()?;
     if next.is_none() {
@@ -203,6 +214,7 @@ fn queue_media(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
         sha256: value("sha256").to_ascii_lowercase(),
         profile: value("profile").into(),
         remote: source.starts_with("https://"),
+        redhat_token: None,
     };
     if !request.valid() {
         return Ok(plain(
@@ -210,11 +222,101 @@ fn queue_media(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
             "Type de média, source ou empreinte invalide\n",
         ));
     }
+    enqueue_media(path, request)
+}
+
+fn redhat_form(error: Option<&str>) -> Result<Reply, ErrorBox> {
+    let mut html = format!(
+        r#"<nav class="page-links" aria-label="Images PXE"><a href="{ROUTE}/add">Ajouter une image</a></nav>
+<form class="panel panel--form form-stack" method="post" action="{REDHAT_ROUTE}">
+<p>PXE Tools télécharge le DVD depuis Red Hat, vérifie son empreinte et prépare les fichiers pour le démarrage réseau.</p>
+<details><summary>Où obtenir le jeton Red Hat&nbsp;?</summary>
+<ol>
+<li>Connectez-vous au <a href="https://access.redhat.com/downloads/content/rhel/">portail Red Hat</a> avec un compte autorisé à télécharger RHEL.</li>
+<li>Ouvrez la <a href="https://access.redhat.com/management/api">page des jetons API Red Hat</a> et sélectionnez <strong>Generate Token</strong>.</li>
+<li>Copiez le jeton généré dans le champ ci-dessous. Le jeton reste chiffré sur le serveur jusqu’au démarrage de la tâche.</li>
+</ol>
+<p>Si le portail ne permet pas de générer le jeton, demandez à votre administrateur Red Hat l’autorisation de consulter et renouveler les abonnements.</p>
+</details>"#,
+    );
+    if let Some(error) = error {
+        html.push_str(r#"<p class="wizard-error" role="alert">"#);
+        escape(&mut html, error);
+        html.push_str("</p>");
+    }
+    html.push_str(
+        r#"<div class="field"><label for="rhel-dvd">DVD à télécharger</label>
+<select name="image" id="rhel-dvd" required aria-describedby="rhel-dvd-help">"#,
+    );
+    for (version, arch, size, _) in media::RHEL_DVDS {
+        let label = if arch == "amd64" {
+            "Intel / AMD (64 bits)"
+        } else {
+            "ARM64"
+        };
+        write!(
+            html,
+            r#"<option value="{version}-{arch}">RHEL {version} · {label} · {size}</option>"#
+        )?;
+    }
+    write!(
+        html,
+        r#"</select>
+<small id="rhel-dvd-help">Choisissez l’architecture de l’appareil à installer. Prévoyez de l’espace pour le DVD et les fichiers extraits.</small></div>
+<div class="field"><label for="rhel-token">Jeton API Red Hat</label>
+<input type="password" id="rhel-token" name="token" maxlength="{}" autocomplete="off" spellcheck="false" required></div>
+<div class="form-actions"><button>Télécharger et préparer le DVD</button>
+<a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer un DVD déjà téléchargé</a></div></form>"#,
+        media::REDHAT_TOKEN_LIMIT,
+    )?;
+    let mut reply = page(ConsoleSection::Images, "Télécharger RHEL", &html);
+    if error.is_some() {
+        *reply.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+    }
+    Ok(reply)
+}
+
+fn queue_redhat(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
+    let mut image = None;
+    let mut token = None;
+    for (name, value) in form_urlencoded::parse(form) {
+        match name.as_ref() {
+            "image" if image.is_none() => image = Some(value),
+            "token" if token.is_none() => token = Some(value),
+            _ => return Ok(invalid()),
+        }
+    }
+    let Some((version, arch)) = image.as_deref().and_then(|input| input.split_once('-')) else {
+        return redhat_form(Some("Choisissez le DVD RHEL à télécharger."));
+    };
+    let Some((_, _, _, sha256)) = media::RHEL_DVDS
+        .into_iter()
+        .find(|(offered, cpu, _, _)| *offered == version && *cpu == arch)
+    else {
+        return redhat_form(Some("Ce DVD RHEL ne figure pas dans le catalogue."));
+    };
+    let request = media::Import {
+        kind: "rhel9".into(),
+        source: String::new(),
+        sha256: sha256.into(),
+        profile: String::new(),
+        remote: false,
+        redhat_token: token.map(|token| token.trim().to_owned()),
+    };
+    if !request.valid() {
+        return redhat_form(Some(
+            "Collez le jeton complet généré dans le portail Red Hat.",
+        ));
+    }
+    enqueue_media(path, request)
+}
+
+fn enqueue_media(path: &Path, request: media::Import) -> Result<Reply, ErrorBox> {
     let mut db = connect(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    let id = crate::media::enqueue(&mut db, request)?;
+    let id = media::enqueue(&mut db, request)?;
     Ok(redirect(StatusCode::SEE_OTHER, format!("/jobs/{id}")))
 }
 
@@ -722,8 +824,9 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
     if can_edit {
         write!(
             html,
-            r#"<article class="panel image-card">{}<p>Importez le DVD officiel de la série RHEL 9.</p>
-<div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer le DVD</a></div></article>
+            r#"<article class="panel image-card">{}<p>Préparez un DVD officiel de RHEL 9 pour le démarrage réseau.</p>
+<div class="form-actions"><a class="button" href="{REDHAT_ROUTE}">Télécharger depuis Red Hat</a>
+<a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer le DVD</a></div></article>
 <article class="panel image-card">{}<p>Importez le média d’installation et un environnement de démarrage WinPE.</p>
 <div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso">Importer les fichiers</a>
 <a class="button button--quiet" href="/settings/windows">Gérer les éditions</a></div></article>"#,

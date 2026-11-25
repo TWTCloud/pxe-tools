@@ -203,6 +203,135 @@ def create_iso(path, tree, files):
     return sha256(path.read_bytes()).hexdigest()
 
 
+
+def check_redhat_download(binary, root, public, database, tls, auth, headers, env, fixture_iso, digest):
+    route = '/settings/images/rhel'
+    assert route.encode() in request('/settings/images/add', tls=tls, headers=auth)[2]
+    assert request(route, tls=tls)[0] == 401
+    status, _, doc = request(route, tls=tls, headers=auth)
+    assert status == 200 and b'Generate Token' in doc and b'type="password"' in doc
+    assert all(f'value="{version}-{arch}"'.encode() in doc
+               for version in ('9.9', '9.8') for arch in ('amd64', 'arm64'))
+    form = {'image': '9.9-amd64', 'token': 'fixture.redhat.token'}
+    assert request(route, tls=tls, form=form, headers=auth)[0] == 403
+    for patch in ({'image': '10.3-amd64'}, {'token': 'invalid/opaque-proof'}, {'sha256': 'a'*64}):
+        status, _, doc = request(route, tls=tls, form={**form, **patch}, headers=headers)
+        assert status in (400, 422) and b'opaque-proof' not in doc
+
+    fixture_scripts = root/'redhat-scripts'
+    fixture_scripts.mkdir()
+    # Only the test runner substitutes the upstream connection. The real worker still handles
+    # credentials, allowlisting, digest verification and extraction without production overrides.
+    fixture_scripts.joinpath('prepare-pxe-media.py').write_text(f"""
+import importlib.util
+from io import BytesIO
+import json
+from pathlib import Path
+import sys
+from urllib.parse import parse_qs
+
+spec = importlib.util.spec_from_file_location("media", {str(ROOT/'docker/worker/scripts/prepare-pxe-media.py')!r})
+media = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(media)
+request = json.load(sys.stdin)
+assert request["redhat_token"] == "fixture.redhat.token"
+assert request["redhat_token"] not in sys.argv
+case = Path({str(root/'redhat-case')!r}).read_text()
+iso = Path({str(fixture_iso)!r}).read_bytes()
+calls = []
+
+class Response(BytesIO):
+    def __init__(self, status, payload=b""):
+        super().__init__(payload)
+        self.status = status
+        self.length = str(len(payload))
+
+    def getheader(self, key):
+        return self.length if key == "Content-Length" else None
+
+class RedHat:
+    def __init__(self, host, timeout):
+        self.host = host
+        calls.append(host)
+
+    def request(self, method, path, body=None, headers=None):
+        if self.host == "sso.redhat.com":
+            assert method == "POST" and path.endswith("/token")
+            assert parse_qs(body) == {{"refresh_token": ["fixture.redhat.token"],
+                                       "client_id": ["rhsm-api"], "grant_type": ["refresh_token"]}}
+            self.response = Response(400 if case == "refused" else 200, b'{{"access_token":"fixture.short.token"}}')
+        elif self.host == "api.access.redhat.com":
+            assert method == "GET" and path == "/management/v1/images/" + request["sha256"] + "/download"
+            assert headers["Authorization"] == "Bearer fixture.short.token" and body is None
+            hostname = "untrusted.invalid" if case == "redirect" else "access.cdn.redhat.com"
+            url = "https://" + hostname + "/redhat.iso?proof=opaque-proof"
+            self.response = Response(200, json.dumps({{"body": {{"href": url}}}}).encode())
+        elif self.host == "access.cdn.redhat.com":
+            assert method == "GET" and path == "/redhat.iso?proof=opaque-proof"
+            assert headers is None and body is None
+            self.response = Response(200, iso)
+        else:
+            raise AssertionError("Untrusted source contacted")
+
+    def getresponse(self):
+        return self.response
+
+    def close(self):
+        self.response.close()
+
+media.PublicHttpsConnection = RedHat
+try:
+    summary = media.prepare(request, Path({str(public)!r}), lambda percent: print(f"progress:{{percent}}", flush=True))
+except media.MediaError as error:
+    if case == "refused":
+        assert calls == ["sso.redhat.com"]
+    elif case == "redirect":
+        assert calls == ["sso.redhat.com", "api.access.redhat.com"]
+    else:
+        assert calls == ["sso.redhat.com", "api.access.redhat.com", "access.cdn.redhat.com"]
+    print(error)
+    sys.exit(1)
+print(summary)
+""", encoding='utf-8')
+    for case, expected_state, expected_progress, expected_message in [
+        ('refused', 'failed', 10, 'Jeton API Red Hat refusé'),
+        ('redirect', 'failed', 15, 'hôte HTTPS'),
+        ('mismatch', 'failed', 85, 'empreinte SHA-256'),
+        ('success', 'success', 100, 'prêt dans le menu PXE'),
+    ]:
+        (root/'redhat-case').write_text(case)
+        status, location, _ = request(route, tls=tls, form=form, headers=headers)
+        assert status == 303 and location.startswith('/jobs/')
+        job = location.rsplit('/', 1)[1]
+        key = f'media_import_request_{job}'
+        with sqlite3.connect(database) as db:
+            saved, = db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
+            assert form['token'] not in saved
+            data = json.loads(saved)
+            assert data['sha256'] == '9833bfb1888a307228cc2487912c0529d5253ffe96c79ef1a5219011e4ab067e'
+            # Substitute the synthetic ISO's content digest once catalogue selection is verified.
+            if case == 'success':
+                data['sha256'] = digest
+                db.execute('UPDATE settings SET value=? WHERE key=?', (json.dumps(data), key))
+        queued = request(location, tls=tls, headers=auth)[2]
+        assert b'<progress' in queued and (location+'/status').encode() in queued
+        subprocess.run([binary, '--run-media-import', database, job, fixture_scripts], check=True, env=env)
+        with sqlite3.connect(database) as db:
+            assert db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone() is None
+            state, percent, message = db.execute(
+                'SELECT status,progress_percent,message FROM init_jobs WHERE id=?', (job,)).fetchone()
+            assert (state, percent) == (expected_state, expected_progress), (case, state, percent, message)
+            assert expected_message in message and 'fixture.redhat.token' not in message and 'opaque-proof' not in message
+        if state == 'failed':
+            doc = request(location, tls=tls, headers=auth)[2]
+            assert b'Relancer avec un jeton Red Hat' in doc and b'/api/init-retry-job/' not in doc
+            request('/api/init-retry-job/' + job, tls=tls, form={}, headers=headers)
+            with sqlite3.connect(database) as db:
+                assert db.execute('SELECT status FROM init_jobs WHERE id=?', (job,)).fetchone() == ('failed',)
+    assert (public/'media/rhel9'/digest/'.pxe-media.json').is_file()
+    print('Verified authenticated RHEL download, private token handling, failure recovery and PXE preparation.')
+
+
 def check_media(binary, root, public, database, tls, auth, headers, env):
     inbox = public / 'media/inbox'
     inbox.mkdir(mode=0o700, parents=True)
@@ -236,7 +365,7 @@ def check_media(binary, root, public, database, tls, auth, headers, env):
         'AppStream/repodata/repomd.xml': b'appstream', 'BaseOS/Packages/example-0^20260728.rpm': b'fixture-rpm',
     })
     assert 'SHA-256' in submit('rhel9', 'rhel9.iso', 'a'*64, expected='failed')
-    submit('rhel9', 'rhel9.iso', rhel_sha)
+    check_redhat_download(binary, root, public, database, tls, auth, headers, env, inbox/'rhel9.iso', rhel_sha)
     submit('rhel9', 'absent.iso', rhel_sha)
     prefix = f'/pxe/rhel9/{rhel_sha}/'
     assert prefix.encode() in request('/pxe/linux/amd64/grub.cfg', source=WINDOWS_CLIENT)[2]
