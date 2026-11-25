@@ -4,7 +4,7 @@ use super::{
     admin::escape,
     plain,
     setup::redirect,
-    ui::{page, Section},
+    ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::{
@@ -85,17 +85,17 @@ pub(super) fn serve(
         (Route::Add, None) => catalog_form(db, ROUTE)
             .map(|form| {
                 page(
-                    Section::Images,
+                    ConsoleSection::Images,
                     "Ajouter une image",
                     &format!("{form}<p><a href=\"{ROUTE}\">Images PXE</a></p>"),
                 )
             })
             .map_err(Into::into),
         (Route::Status, None) => {
-            table(db, number).map(|html| page(Section::Images, "Images PXE", &html))
+            table(db, number).map(|html| page(ConsoleSection::Images, "Images PXE", &html))
         }
         (Route::RefreshStatus, None) => {
-            refresh_button(db).map(|html| page(Section::Images, "Catalogue PXE", &html))
+            refresh_button(db).map(|html| page(ConsoleSection::Images, "Catalogue PXE", &html))
         }
         (_, Some(form)) => update(route, method, path, form),
         _ => Ok(plain(
@@ -150,7 +150,7 @@ fn media_form(db: &Connection) -> Result<Reply, ErrorBox> {
         html.push_str("</li>");
     }
     html.push_str("</ul>");
-    Ok(page(Section::Images, "Préparer un média PXE", &html))
+    Ok(page(ConsoleSection::Images, "Préparer un média PXE", &html))
 }
 
 fn queue_media(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
@@ -400,7 +400,7 @@ fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     html.push_str("</select></label><button>Enregistrer</button></form>");
     html.push_str(&refresh_button(db)?);
     html.push_str(&table(db, number)?);
-    Ok(page(Section::Images, "Images PXE", &html))
+    Ok(page(ConsoleSection::Images, "Images PXE", &html))
 }
 
 fn refresh_button(db: &Connection) -> Result<String, ErrorBox> {

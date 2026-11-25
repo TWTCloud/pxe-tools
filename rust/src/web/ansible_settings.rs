@@ -5,7 +5,7 @@ use super::{
     onboarding::store,
     plain,
     setup::redirect,
-    ui::{page, Section},
+    ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::{connect, instance_secrets, preseed, setting};
@@ -195,7 +195,7 @@ fn render(db: &Connection, issued: Option<&str>) -> Result<Reply, ErrorBox> {
 <button>Déverrouiller</button></form>"#,
         super::ansible_webhook::ROUTE,
     ));
-    Ok(page(Section::Settings, "Module Ansible", &html))
+    Ok(page(ConsoleSection::Settings, "Module Ansible", &html))
 }
 
 fn runtime_status(db: &Connection) -> rusqlite::Result<&'static str> {

@@ -4,7 +4,7 @@ use super::{
     admin::escape,
     images, plain,
     setup::redirect,
-    ui::{page, Section},
+    ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::{connect, pxe::parse_subnet, setting};
@@ -356,12 +356,12 @@ fn network_page(plan: Option<&Network>) -> Reply {
         html.push_str(r#""></label></p>"#);
     }
     html.push_str("<button>Continuer</button></form>");
-    page(Section::Settings, "Réseau PXE", &html)
+    page(ConsoleSection::Settings, "Réseau PXE", &html)
 }
 
 fn images_page(db: &Connection) -> Result<Reply, ErrorBox> {
     Ok(page(
-        Section::Settings,
+        ConsoleSection::Settings,
         "Image de démarrage",
         &images::catalog_form(db, "/init/images")?,
     ))
@@ -404,5 +404,9 @@ fn done_page(db: &Connection, plan: &Network) -> Result<Reply, ErrorBox> {
         html.push_str(&format!(r#""><input type="hidden" name="image" value="{image}"><button name="confirmation" value="yes">Appliquer la configuration</button></form>"#));
     }
     html.push_str(r#"<p><a href="/init/network">Modifier le réseau</a></p>"#);
-    Ok(page(Section::Settings, "Confirmer la configuration", &html))
+    Ok(page(
+        ConsoleSection::Settings,
+        "Confirmer la configuration",
+        &html,
+    ))
 }

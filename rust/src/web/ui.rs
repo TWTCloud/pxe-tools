@@ -7,7 +7,7 @@ use std::fmt::Write;
 const BRAND: &str = r#"<span class="brand"><img src="/console-assets/mark.svg" width="32" height="32" alt="">PXE Tools</span>"#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Section {
+pub(super) enum ConsoleSection {
     Devices,
     Activity,
     Jobs,
@@ -17,31 +17,35 @@ pub(super) enum Section {
     Certificates,
 }
 
-const NAVIGATION: [(&str, &[(&str, &str, Section)]); 2] = [
+const NAVIGATION: [(&str, &[(&str, &str, ConsoleSection)]); 2] = [
     (
         "Opérations",
         &[
-            ("/admin/devices", "Inventaire", Section::Devices),
-            ("/activity", "Activité", Section::Activity),
-            ("/jobs", "Tâches", Section::Jobs),
+            ("/admin/devices", "Inventaire", ConsoleSection::Devices),
+            ("/activity", "Activité", ConsoleSection::Activity),
+            ("/jobs", "Tâches", ConsoleSection::Jobs),
         ],
     ),
     (
         "Configuration",
         &[
-            ("/presets", "Modèles d’installation", Section::Presets),
-            ("/settings/images", "Images PXE", Section::Images),
-            ("/settings", "Paramètres PXE", Section::Settings),
+            (
+                "/presets",
+                "Modèles d’installation",
+                ConsoleSection::Presets,
+            ),
+            ("/settings/images", "Images PXE", ConsoleSection::Images),
+            ("/settings", "Paramètres PXE", ConsoleSection::Settings),
             (
                 "/admin/certificates",
                 "Certificats TLS",
-                Section::Certificates,
+                ConsoleSection::Certificates,
             ),
         ],
     ),
 ];
 
-pub(super) fn page(section: Section, title: &str, content: &str) -> Reply {
+pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply {
     let mut layout = String::from(
         r##"<a class="skip-link" href="#main">Aller au contenu</a><header class="masthead"><a class="brand-link" href="/admin/devices">"##,
     );

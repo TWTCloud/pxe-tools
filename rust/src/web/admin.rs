@@ -5,7 +5,7 @@ use super::{
     bytes, plain,
     sessions::{self, Sessions},
     single,
-    ui::{self, Section},
+    ui::{self, ConsoleSection},
     Reply,
 };
 use crate::{configured_database, connect};
@@ -586,7 +586,7 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<Reply> {
     );
     terminology_form(&mut html, DEVICE_SETTINGS, term);
     html.push_str("</details>");
-    Ok(ui::page(Section::Devices, label, &html))
+    Ok(ui::page(ConsoleSection::Devices, label, &html))
 }
 
 pub(super) fn escape(output: &mut String, value: &str) {

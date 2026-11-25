@@ -4,7 +4,7 @@ use super::{
     admin::escape,
     bytes, plain,
     setup::redirect,
-    ui::{page, Section},
+    ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::{connect, preseed, setting};
@@ -80,7 +80,7 @@ pub(super) fn item(
     let id = match route {
         Route::New => {
             return Ok(page(
-                Section::Presets,
+                ConsoleSection::Presets,
                 "Nouveau modèle Debian 13",
                 create_form(),
             ))
@@ -179,7 +179,11 @@ pub(super) fn serve(
     }
     content.push_str("<h2>Nouveau modèle Debian 13</h2>");
     content.push_str(create_form());
-    Ok(page(Section::Presets, "Modèles d’installation", &content))
+    Ok(page(
+        ConsoleSection::Presets,
+        "Modèles d’installation",
+        &content,
+    ))
 }
 
 fn create_form() -> &'static str {
@@ -205,7 +209,7 @@ fn import_form(problem: Option<&str>) -> Reply {
 <textarea name="preset_json_raw" rows="18" cols="65" required></textarea></label>
 <p>Un modèle portant le même nom sera mis à jour.</p><button>Importer</button></form>"#,
     );
-    let mut reply = page(Section::Presets, "Importer un modèle", &html);
+    let mut reply = page(ConsoleSection::Presets, "Importer un modèle", &html);
     if problem.is_some() {
         *reply.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
     }
@@ -298,7 +302,11 @@ fn detail(db: &Connection, id: i64) -> Result<Reply, ErrorBox> {
         r#"<details><summary>Suppression</summary><form method="post" action="{ROUTE}/{id}">
 <input type="hidden" name="_method" value="DELETE"><button>Supprimer le modèle</button></form></details>"#
     )?;
-    Ok(page(Section::Presets, "Modèle d’installation", &html))
+    Ok(page(
+        ConsoleSection::Presets,
+        "Modèle d’installation",
+        &html,
+    ))
 }
 
 fn change(

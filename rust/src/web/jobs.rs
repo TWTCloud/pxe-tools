@@ -4,7 +4,7 @@ use super::{
     admin::escape,
     bytes, plain,
     setup::redirect,
-    ui::{page, Section},
+    ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::connect;
@@ -194,7 +194,7 @@ fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
         write!(html, "<a href=\"/jobs?page={}\">Suivante</a> ", number + 1)?;
     }
     html.push_str(r#"<a href="/admin/devices">Console</a></nav>"#);
-    Ok(page(Section::Jobs, "Tâches", &html))
+    Ok(page(ConsoleSection::Jobs, "Tâches", &html))
 }
 
 fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
@@ -243,5 +243,5 @@ fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
         html,
         r#"<nav><a href="/jobs/{id}">Actualiser</a> · <a href="/jobs">Tâches</a></nav>"#
     )?;
-    Ok(page(Section::Jobs, &format!("Tâche {id}"), &html))
+    Ok(page(ConsoleSection::Jobs, &format!("Tâche {id}"), &html))
 }
