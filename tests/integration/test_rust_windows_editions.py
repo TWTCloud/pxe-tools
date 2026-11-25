@@ -47,7 +47,7 @@ def media(root, profile, edition, label, index):
     }))
 
 
-def request(path, *, tls=None, source=None, form=None, headers=None, method=None, host=None,
+def request(path, *, tls=None, source=None, form=None, json_body=None, headers=None, method=None, host=None,
             response_header='Location'):
     binding = (source, 0) if source else None
     if tls:
@@ -55,8 +55,8 @@ def request(path, *, tls=None, source=None, form=None, headers=None, method=None
     else:
         connection = HTTPConnection(host or SERVER, HTTP, timeout=2, source_address=binding)
     try:
-        connection.request(method or ('GET' if form is None else 'POST'), path,
-                           None if form is None else urlencode(form), headers=headers or {})
+        body = json.dumps(json_body) if json_body is not None else None if form is None else urlencode(form)
+        connection.request(method or ('GET' if body is None else 'POST'), path, body, headers=headers or {})
         response = connection.getresponse()
         return response.status, response.getheader(response_header), response.read()
     finally:
@@ -319,6 +319,109 @@ def check_media(binary, root, public, database, tls, auth, headers, env):
     return rhel_sha
 
 
+def verify_access(secure, private, admin, database):
+    users, tokens, api = '/admin/access/users', '/admin/access/tokens', '/api/v1'
+
+    def form(path, fields, headers=admin, **kwargs):
+        return request(path, **secure, headers=headers, form=fields, **kwargs)
+
+    def secret(response):
+        assert response[0] == 200 and response[1] == 'no-store', response[0]
+        return re.search(rb'>\s*(pxe_[0-9a-f]{64})</textarea>', response[2])[1].decode()
+
+    def bearer(token):
+        return {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
+
+    def api_call(path, token, **kwargs):
+        return request(api+path, **secure, headers=bearer(token), **kwargs)
+
+    credentials = {'username':'observer', 'password':'fixture-observer-password'}
+    observer = {'Authorization': 'Basic '+base64.b64encode(b'observer:fixture-observer-password').decode(),
+                'Origin': admin['Origin'], 'Content-Type': admin['Content-Type']}
+    assert request(users, **secure, headers=admin)[0] == 200
+    assert form(users, {'action':'create', **credentials, 'scope':'devices.read'})[:2] == (303, users)
+    assert request('/admin/devices', **secure, headers=observer)[0] == 200
+    assert request(users, **secure, headers=observer)[0] == 403
+    assert form(users, {'action':'create', 'username':'intrus', 'password':'fixture-attacker-password',
+                        'admin':'1'}, observer)[0] == 403
+    assert form('/machines', {'mac':'02:00:00:00:20:01'}, observer)[0] == 403
+    with sqlite3.connect(database) as db:
+        owner = db.execute("SELECT id FROM users WHERE username='observer'").fetchone()[0]
+        first_admin = db.execute("SELECT id FROM users WHERE username='lan-admin'").fetchone()[0]
+    assert form(users, {'action':'update', 'id':first_admin, 'enabled':'1'})[0] == 409
+    assert form(tokens, {'action':'create', 'name':'test', 'days':'1','scope':'jobs.read'}, observer)[0] == 422
+    assert form(tokens, {'action':'create', 'name':'test', 'days':'1','scope':'admin'}, observer)[0] == 422
+    outside = {**observer, 'Origin':'https://outside.example'}
+    assert form(tokens, {'action':'create', 'name':'test', 'days':'1','scope':'devices.read'}, outside)[0] == 403
+    issued = secret(form(tokens, {'action':'create','name':'Inventaire seul','days':'1','scope':'devices.read'},
+                         observer, response_header='Cache-Control'))
+    assert issued.encode() not in request(tokens, **secure, headers=observer)[2]
+    with sqlite3.connect(database) as db:
+        token_id, digest = db.execute('SELECT id,secret_hash FROM api_tokens WHERE user_id=?', [owner]).fetchone()
+        assert digest == sha256(issued.encode()).digest()
+    login = form('/login', credentials, response_header='Set-Cookie')
+    assert login[0] == 303 and login[1]
+    cookie = {'Cookie':login[1].split(';', 1)[0]}
+    assert request('/admin/devices', **secure, headers=cookie)[0] == 200
+    assert request(api+'/devices', **secure, headers=cookie)[0] == 401
+    assert api_call('/devices', issued)[0] == 200
+    assert api_call('/jobs', issued)[0] == 403
+    assert api_call('/devices', issued, json_body={'mac':'02:00:00:00:20:01'})[0] == 403
+    assert request('/admin/devices', **secure, headers=bearer(issued))[0] == 401
+    assert request(api+'/devices', **private, headers=bearer(issued))[0] == 404
+    rotated = secret(form(tokens, {'action':'rotate','id':token_id,'scope':'devices.read'},
+                           observer, response_header='Cache-Control'))
+    assert rotated != issued and api_call('/devices', issued)[0] == 401
+    assert api_call('/devices', rotated)[0] == 200
+    assert form(tokens, {'action':'revoke','id':token_id}, observer)[:2] == (303, tokens)
+    assert api_call('/devices', rotated)[0] == 401
+
+    operator = secret(form(tokens, [('action','create'),('name','Automatisation'),('days','2'),
+                                    ('scope','devices.read'),('scope','devices.write'),('scope','devices.power')],
+                           response_header='Cache-Control'))
+    created = api_call('/devices', operator, json_body={'mac':'02:00:00:00:20:01','hostname':'fixture-api'})
+    assert created[0] == 201
+    device = json.loads(created[2])['id']
+    assert created[1] == f'{api}/devices/{device}'
+    assert json.loads(api_call(f'/devices/{device}', operator)[2])['hostname'] == 'fixture-api'
+    assert api_call(f'/devices/{device}/actions/reboot', operator, json_body={})[0] == 202
+    assert api_call('/jobs', operator)[0] == 403
+    assert form(tokens, {'action':'revoke','id':token_id+1}, observer)[0] == 404
+    pending = secret(form(tokens, {'action':'create','name':'Interdit après désactivation','days':'1','scope':'devices.read'},
+                          observer, response_header='Cache-Control'))
+    assert form(users, {'action':'update','id':owner,'enabled':'1'})[:2] == (303, users)
+    assert api_call('/devices', pending)[0] == 401
+    assert form(users, {'action':'update','id':owner,'enabled':'1','scope':'devices.read'})[:2] == (303, users)
+    assert api_call('/devices', pending)[0] == 401
+    assert form(users, {'action':'update','id':owner,'scope':'devices.read'})[:2] == (303, users)
+    assert request('/admin/devices', **secure, headers=observer)[0] == 401
+    assert form(users, {'action':'update','id':owner,'enabled':'1','scope':'devices.read'})[:2] == (303, users)
+    assert request('/admin/devices', **secure, headers=cookie)[0] in (302, 401)
+    with sqlite3.connect(database) as db:
+        db.execute('UPDATE api_tokens SET expires_at=unixepoch() WHERE user_id=?', [first_admin])
+    assert api_call('/devices', operator)[0] == 401
+    print('Verified independent accounts, granular browser and API permissions, hashed tokens, rotation, revocation and expiration.')
+
+
+def verify_access_migration(binary, root):
+    database = root/'legacy-access.sqlite'
+    config = root/'legacy-access.conf'
+    with sqlite3.connect(database) as db:
+        db.executescript((ROOT/'app/db/schema.sqlite.sql').read_text())
+        for column in ('is_admin', 'enabled', 'permissions', 'external', 'session_epoch'):
+            db.execute(f'ALTER TABLE users DROP COLUMN {column}')
+        db.execute("INSERT INTO users(username,password_hash) VALUES('legacy','legacy-hash')")
+    config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
+    subprocess.run([binary, '--migrate-schema', config], check=True)
+    with sqlite3.connect(database) as db:
+        assert db.execute('SELECT username,password_hash,is_admin,enabled FROM users').fetchall() == [
+            ('legacy','legacy-hash',1,1)]
+        db.execute("INSERT INTO users(username,password_hash) VALUES('new','new-hash')")
+    subprocess.run([binary, '--migrate-schema', config], check=True)
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT is_admin FROM users WHERE username='new'").fetchone() == (0,)
+
+
 def check_lan(binary, root, tls, env):
     runtime = root/'lan'
     runtime.mkdir(mode=0o700)
@@ -380,6 +483,7 @@ def check_lan(binary, root, tls, env):
             digest = base64.b64encode(sha256(script).digest()).decode()
             assert f"script-src 'sha256-{digest}'" in csp.split('; ')
             assert request('/pxe/linux/amd64/grub.cfg', **private)[0] == 404
+            verify_access(secure, private, admin, runtime/'install.sqlite')
         finally:
             service.terminate()
     env['PXE_ADMIN_BIND'] = '127.0.0.1'
@@ -392,6 +496,7 @@ def main(binary):
         subprocess.run(['ip', '-4', 'address', 'add', address+'/32', 'dev', 'lo', 'scope', 'global'], check=True)
     with tempfile.TemporaryDirectory(prefix='pxe-editions-', dir='/run') as temporary:
         root = Path(temporary)
+        verify_access_migration(binary, root)
         public = root/'http'
         media(public, 'windows10-core', 'Core', 'Windows 10 Famille', 1)
         media(public, 'windows11-professional', 'Professional', 'Windows 11 Pro & test', 6)

@@ -309,7 +309,7 @@ impl Form {
     }
 }
 
-fn bad(message: &str) -> Reply {
+fn bad(message: &'static str) -> Reply {
     plain(StatusCode::UNPROCESSABLE_ENTITY, message)
 }
 
@@ -317,7 +317,7 @@ pub(super) fn denied() -> Reply {
     plain(StatusCode::FORBIDDEN, "Droits insuffisants\n")
 }
 
-fn conflict(message: &str) -> Reply {
+fn conflict(message: &'static str) -> Reply {
     plain(StatusCode::CONFLICT, message)
 }
 

@@ -466,12 +466,17 @@ async fn dispatch(
         let Ok(_permit) = site.requests.try_acquire() else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
         };
-        return api::serve(parts, body, &site.database)
+        let mut reply = api::serve(parts, body, &site.database)
             .await
             .unwrap_or_else(|_| {
                 api::error(StatusCode::SERVICE_UNAVAILABLE, "api_unavailable")
                     .expect("valid error response")
             });
+        reply.headers_mut().insert(
+            hyper::header::X_CONTENT_TYPE_OPTIONS,
+            hyper::header::HeaderValue::from_static("nosniff"),
+        );
+        return reply;
     }
     if path == "/" && readable {
         let location = if secure {

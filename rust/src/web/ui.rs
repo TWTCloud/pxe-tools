@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::{admin::escape, bytes, Reply};
+use super::{
+    access::{Account, Permission},
+    admin::escape,
+    bytes, Reply,
+};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hyper::{header, Response, StatusCode};
 use sha2::{Digest, Sha256};
-use std::{fmt::Write, sync::LazyLock};
+use std::{cell::Cell, fmt::Write, sync::LazyLock};
 
 const MARK: &str = "/console-assets/mark.svg?v=2";
 const NAVIGATION_SCRIPT: &str = include_str!("ui/navigation.js");
@@ -31,6 +35,7 @@ fn icon(path: &str) -> String {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub(super) enum ConsoleSection {
     Devices,
     Activity,
@@ -41,6 +46,26 @@ pub(super) enum ConsoleSection {
     Certificates,
     Accounts,
     Tokens,
+}
+
+impl ConsoleSection {
+    fn visible_to(self, account: &Account) -> bool {
+        use Permission::*;
+        match self {
+            Self::Devices => account.allows(DevicesRead),
+            Self::Activity => account.allows(ActivityRead),
+            Self::Jobs => account.allows(JobsRead),
+            Self::Presets => account.allows(PresetsRead),
+            Self::Images => account.allows(ImagesRead),
+            Self::Settings => account.allows(SettingsRead),
+            Self::Certificates | Self::Accounts => account.admin,
+            Self::Tokens => true,
+        }
+    }
+
+    fn bit(self) -> u16 {
+        1 << self as u8
+    }
 }
 
 type NavLink = (&'static str, &'static str, ConsoleSection, &'static str);
@@ -117,18 +142,56 @@ const NAVIGATION: [(&str, &[NavLink]); 3] = [
     ),
 ];
 
+thread_local! {
+    // Rendering runs synchronously after authorization on the blocking worker.
+    // The mask only controls presentation and never authorizes an operation.
+    static NAVIGATION_MASK: Cell<u16> = const { Cell::new(u16::MAX) };
+}
+
+pub(super) struct NavigationGuard(u16);
+
+impl Drop for NavigationGuard {
+    fn drop(&mut self) {
+        NAVIGATION_MASK.set(self.0);
+    }
+}
+
+pub(super) fn navigation_for(account: &Account) -> NavigationGuard {
+    let mask = NAVIGATION
+        .iter()
+        .flat_map(|(_, links)| *links)
+        .filter(|(_, _, section, _)| section.visible_to(account))
+        .fold(0, |mask, (_, _, section, _)| mask | section.bit());
+    NavigationGuard(NAVIGATION_MASK.replace(mask))
+}
+
+pub(super) fn home(account: &Account) -> &'static str {
+    NAVIGATION
+        .iter()
+        .flat_map(|(_, links)| *links)
+        .find(|(_, _, section, _)| section.visible_to(account))
+        .map_or(super::access::TOKENS, |(path, ..)| *path)
+}
+
 pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply {
     let logout = matches!(
         std::env::var("AUTH_MODE").unwrap_or_default().as_str(),
         "" | "local"
     );
     let brand = brand();
+    let mask = NAVIGATION_MASK.get();
+    let show = |section: ConsoleSection| section.bit() & mask != 0;
+    let home = NAVIGATION
+        .iter()
+        .flat_map(|(_, links)| *links)
+        .find(|(_, _, section, _)| show(*section))
+        .map_or(super::access::TOKENS, |(path, ..)| *path);
     let mut layout = String::from(
         r##"<a class="skip-link" href="#main">Aller au contenu</a><header class="masthead">"##,
     );
     write!(
         layout,
-        r#"<a class="brand-link" href="/admin/devices">{brand}</a><span class="masthead-label">Console d’administration</span>
+        r#"<a class="brand-link" href="{home}">{brand}</a><span class="masthead-label">Console d’administration</span>
 <button type="button" class="button button--quiet mobile-toggle" aria-haspopup="dialog" aria-controls="mobile-navigation" aria-expanded="false">{} Menu</button>"#,
         icon(MENU),
     )
@@ -138,8 +201,14 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
     }
     let mut navigation = String::new();
     for (group, links) in NAVIGATION {
+        if !links.iter().any(|(_, _, item, _)| show(*item)) {
+            continue;
+        }
         write!(navigation, r#"<div class="rail-group"><p>{group}</p>"#).expect("write to String");
         for &(path, name, item, glyph) in links {
+            if !show(item) {
+                continue;
+            }
             let current = if item == section {
                 r#" aria-current="page""#
             } else {

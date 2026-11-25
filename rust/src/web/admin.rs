@@ -111,7 +111,15 @@ impl Action {
                 | Activity::Download(..),
                 _,
             ) => Logs,
-            Self::Activity(..) => ActivityRead,
+            Self::Activity(
+                Activity::List
+                | Activity::Fragment
+                | Activity::DeviceTasks(_)
+                | Activity::DeviceProgress(_)
+                | Activity::Task(_)
+                | Activity::Checklist(_),
+                _,
+            ) => ActivityRead,
             Self::Terminology(..) => SettingsEdit,
             Self::Settings(Setting::General | Setting::Dns | Setting::Ipxe, _) => {
                 select(SettingsRead, SettingsEdit)
@@ -240,7 +248,7 @@ impl Console {
             }
             let account = access::account(&db, &username, false).ok()??;
             let next = if matches!(next.as_str(), "/admin/" | "/admin/devices") && !account.allows(Permission::DevicesRead) {
-                access::TOKENS
+                ui::home(&account)
             } else if !account.admin || crate::setting(&db, "wizard_completed").ok()? == "1" {
                 &next
             } else {
@@ -372,11 +380,22 @@ impl Console {
                 let Some(account) = access::account(&db, &username, external).ok()? else {
                     return Some(access::denied());
                 };
+                let _navigation = ui::navigation_for(&account);
                 if action
                     .permission(&method)
                     .is_some_and(|permission| !account.allows(permission))
                 {
-                    return Some(access::denied());
+                    return Some(if path.starts_with("/api/") {
+                        access::denied()
+                    } else {
+                        let mut response = ui::page(
+                            ConsoleSection::Tokens,
+                            "Accès réservé",
+                            &format!(r#"<p>Votre compte ne dispose pas du droit nécessaire.</p><p><a href="{}">Revenir à vos rubriques</a></p>"#, ui::home(&account)),
+                        );
+                        *response.status_mut() = StatusCode::FORBIDDEN;
+                        response
+                    });
                 }
                 if let Action::Users(form) = &action {
                     return access::users(&db, &db_path, &account, form.as_deref()).ok();
