@@ -497,8 +497,19 @@ def check_lan(binary, root, tls, env):
                 assert link and link[1].startswith(b'/console-assets/style.css')
                 return link[1].decode(), document
 
-            css_path, _ = wizard_page('/init/welcome', 'Stockage')
-            wizard_page('/init/db', 'Stockage')
+            def check_setup_command(path, phase):
+                _, document = wizard_page(path, phase)
+                assert b'<input id="setup-command" type="text" value="sudo pxe-tools setup" readonly' in document
+                assert b'id="copy-setup-command"' in document
+                assert b'a'*48 not in document
+                _, policy, _ = request(path, **secure, response_header='Content-Security-Policy')
+                script = re.search(rb'<script>(.*?)</script>', document, re.S)[1]
+                digest = base64.b64encode(sha256(script).digest()).decode()
+                assert f"script-src 'sha256-{digest}'" in policy.split('; ')
+
+            css_path, welcome = wizard_page('/init/welcome', 'Stockage')
+            assert b'id="setup-command"' not in welcome and b'<script>' not in welcome
+            check_setup_command('/init/db', 'Stockage')
             style_status, css_type, style = request(css_path, **secure, response_header='Content-Type')
             assert style_status == 200 and css_type.startswith('text/css')
             assert b'.auth-layout' in style and b'.workspace' in style and b'.wizard-main' in style
@@ -519,7 +530,7 @@ def check_lan(binary, root, tls, env):
             assert request('/init/db', **secure, form={'code':'a'*48},
                            headers={**headers, 'Origin':'https://other.invalid'})[0] == 403
             assert request('/init/db', **secure, form={'code':'a'*48}, headers=headers)[:2] == (303,'/init/admin')
-            wizard_page('/init/admin', 'Compte')
+            check_setup_command('/init/admin', 'Compte')
             credentials = {'username':'lan-admin', 'password':'fixture-lan-password'}
             assert request('/init/admin', **secure, headers=headers,
                            form={**credentials,'password_confirm': credentials['password'],'code':'a'*48})[:2] == (303,'/admin/devices')

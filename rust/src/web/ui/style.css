@@ -326,6 +326,22 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 .wizard-panel { padding: clamp(var(--space-4), 5vw, 2.5rem); }
 .wizard-panel h1 { margin-bottom: var(--space-2); font-size: clamp(1.7rem, 4.5vw, 2.5rem); text-wrap: wrap; }
 .wizard-intro { margin: 0 0 var(--space-5); color: var(--muted); }
+.setup-help {
+  margin-block: var(--space-4) var(--space-5);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+.setup-help p { margin: 0; color: var(--muted); font-size: .9375rem; }
+.setup-help #setup-command-help { margin-block: var(--space-1) var(--space-3); }
+.setup-command-row { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.setup-command-row input {
+  flex: 1 1 13rem;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: .875rem;
+}
+.setup-command-row button[hidden] { display: none; }
+.setup-command-feedback:not(:empty) { margin-top: var(--space-2); }
 .wizard-error { padding: var(--space-3); background: var(--danger-bg); color: var(--danger); border-radius: var(--radius); }
 .wizard-network { margin: 0; }
 .wizard-panel form:has(#setup-role option[value="console"]:checked) .wizard-network { display: none; }

@@ -12,11 +12,15 @@ use std::{cell::Cell, fmt::Write, sync::LazyLock};
 
 const MARK: &str = "/console-assets/mark.svg?v=2";
 const NAVIGATION_SCRIPT: &str = include_str!("ui/navigation.js");
+const SETUP_COMMAND_SCRIPT: &str = include_str!("ui/setup-command.js");
 const POLICY: &str = "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
-static CONSOLE_POLICY: LazyLock<String> = LazyLock::new(|| {
-    let digest = STANDARD.encode(Sha256::digest(NAVIGATION_SCRIPT.as_bytes()));
+static CONSOLE_POLICY: LazyLock<String> = LazyLock::new(|| script_policy(NAVIGATION_SCRIPT));
+static SETUP_POLICY: LazyLock<String> = LazyLock::new(|| script_policy(SETUP_COMMAND_SCRIPT));
+
+fn script_policy(script: &str) -> String {
+    let digest = STANDARD.encode(Sha256::digest(script.as_bytes()));
     format!("{POLICY}; script-src 'sha256-{digest}'")
-});
+}
 
 const MENU: &str = "M4 6h16M4 12h16M4 18h16";
 const CLOSE: &str = "m6 6 12 12M18 6 6 18";
@@ -41,6 +45,55 @@ pub(super) fn wizard(
     title: &str,
     content: &str,
     status: StatusCode,
+) -> Reply {
+    wizard_document(step, title, content, status, None)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum SetupCodeHelp {
+    Host,
+    Container,
+}
+
+pub(super) fn wizard_with_setup_code(
+    step: WizardStep,
+    title: &str,
+    help: SetupCodeHelp,
+    form: &str,
+) -> Reply {
+    let (command, terminal) = match help {
+        SetupCodeHelp::Host => ("sudo pxe-tools setup", "sur le serveur PXE Tools"),
+        SetupCodeHelp::Container => (
+            "cat /run/pxe-tools-rust-guided/setup-code",
+            "dans le conteneur PXE Tools",
+        ),
+    };
+    let content = format!(
+        r#"<div class="setup-help">
+<label for="setup-command">Récupérer le code de configuration</label>
+<p id="setup-command-help">Exécutez cette commande dans un terminal {terminal}, puis saisissez le code affiché.</p>
+<div class="setup-command-row">
+<input id="setup-command" type="text" value="{command}" readonly spellcheck="false" aria-describedby="setup-command-help">
+<button id="copy-setup-command" class="button--quiet" type="button" aria-label="Copier la commande" hidden>Copier</button>
+</div>
+<p id="setup-command-feedback" class="setup-command-feedback" role="status"></p>
+</div>{form}"#
+    );
+    wizard_document(
+        Some(step),
+        title,
+        &content,
+        StatusCode::OK,
+        Some((SETUP_COMMAND_SCRIPT, SETUP_POLICY.as_str())),
+    )
+}
+
+fn wizard_document(
+    step: Option<WizardStep>,
+    title: &str,
+    content: &str,
+    status: StatusCode,
+    script: Option<(&str, &str)>,
 ) -> Reply {
     let mut layout = format!(
         r#"<header class="wizard-header">{}</header><main class="wizard-main">"#,
@@ -68,7 +121,7 @@ pub(super) fn wizard(
     layout.push_str("</h1>");
     layout.push_str(content);
     layout.push_str("</section></main>");
-    document("wizard", title, &layout, status)
+    document("wizard", title, &layout, status, script)
 }
 
 pub(super) fn wizard_error(
@@ -303,7 +356,13 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
     layout.push_str("</h1>");
     layout.push_str(content);
     layout.push_str("</main></div>");
-    document("console", title, &layout, StatusCode::OK)
+    document(
+        "console",
+        title,
+        &layout,
+        StatusCode::OK,
+        Some((NAVIGATION_SCRIPT, CONSOLE_POLICY.as_str())),
+    )
 }
 
 pub(super) fn guest(title: &str, content: &str, status: StatusCode) -> Reply {
@@ -318,10 +377,16 @@ pub(super) fn guest(title: &str, content: &str, status: StatusCode) -> Reply {
     layout.push_str("</h1>");
     layout.push_str(content);
     layout.push_str("</div></main></div>");
-    document("guest", title, &layout, status)
+    document("guest", title, &layout, status, None)
 }
 
-fn document(class: &str, title: &str, layout: &str, status: StatusCode) -> Reply {
+fn document(
+    class: &str,
+    title: &str,
+    layout: &str,
+    status: StatusCode,
+    script: Option<(&str, &str)>,
+) -> Reply {
     let mut html = String::from(
         r#"<!doctype html><html lang="fr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>"#,
@@ -330,12 +395,12 @@ fn document(class: &str, title: &str, layout: &str, status: StatusCode) -> Reply
     write!(
         html,
         r#" · PXE Tools</title><link rel="icon" type="image/svg+xml" href="{MARK}">
-<link rel="stylesheet" href="/console-assets/style.css?v=7"></head><body class="{class}">{layout}"#
+<link rel="stylesheet" href="/console-assets/style.css?v=8"></head><body class="{class}">{layout}"#
     )
     .expect("write to String");
-    let policy = if class == "console" {
-        write!(html, "<script>{NAVIGATION_SCRIPT}</script>").expect("write to String");
-        CONSOLE_POLICY.as_str()
+    let policy = if let Some((source, policy)) = script {
+        write!(html, "<script>{source}</script>").expect("write to String");
+        policy
     } else {
         POLICY
     };
