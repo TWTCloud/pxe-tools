@@ -4,7 +4,7 @@ use super::{
     admin::escape,
     images, plain,
     setup::redirect,
-    ui::{page, ConsoleSection},
+    ui::{self, WizardStep},
     ErrorBox, Reply,
 };
 use crate::{connect, pxe::parse_subnet, setting};
@@ -96,7 +96,7 @@ pub(super) fn serve(db: &Connection, path: &Path, endpoint: &str, form: Option<&
                 .insert(field.into_owned(), value.into_owned())
                 .is_some()
             {
-                return invalid("Le formulaire est ambigu.\n");
+                return invalid(endpoint, "Le formulaire est ambigu.");
             }
         }
         change(path, endpoint, &values)
@@ -167,7 +167,7 @@ fn change(
     }
     if endpoint == "/init/network" {
         let Some(plan) = Network::parse(fields) else {
-            return Ok(invalid("Sélectionnez une interface, une adresse IPv4 attribuée et un sous-réseau cohérent.\n"));
+            return Ok(invalid(endpoint, "Sélectionnez une interface, une adresse IPv4 attribuée et un sous-réseau cohérent."));
         };
         store(&tx, NETWORK_DRAFT, &serde_json::to_string(&plan)?)?;
         let next = if plan.role == Role::Console {
@@ -192,10 +192,10 @@ fn change(
             .ok()
             .filter(|id| *id > 0)
         else {
-            return Ok(invalid("Choisissez une image Debian.\n"));
+            return Ok(invalid(endpoint, "Choisissez une image Debian."));
         };
         let Some(id) = images::queue_image(&tx, entry, true)? else {
-            return Ok(invalid("Cette image Debian est indisponible.\n"));
+            return Ok(invalid(endpoint, "Cette image Debian est indisponible."));
         };
         store(&tx, IMAGE_DRAFT, &id.to_string())?;
         tx.commit()?;
@@ -209,18 +209,21 @@ fn change(
     }
     if field(fields, "confirmation") != "yes" {
         return Ok(invalid(
-            "Confirmez la configuration affichée avant de l’appliquer.\n",
+            endpoint,
+            "Confirmez la configuration affichée avant de l’appliquer.",
         ));
     }
     if !plan.assigned() {
         return Ok(invalid(
-            "L’adresse IPv4 sélectionnée a changé. Confirmez de nouveau le réseau.\n",
+            "/init/network",
+            "L’adresse IPv4 sélectionnée a changé. Confirmez de nouveau le réseau.",
         ));
     }
     // Bind the confirmation to the exact staged network and image.
     if field(fields, "plan") != serde_json::to_string(&plan)? {
         return Ok(invalid(
-            "Le réseau a changé depuis l’affichage du récapitulatif.\n",
+            endpoint,
+            "Le réseau a changé depuis l’affichage du récapitulatif.",
         ));
     }
     if plan.role != Role::Console {
@@ -231,7 +234,8 @@ fn change(
             != Some((field(fields, "image").to_owned(), "downloaded"))
         {
             return Ok(invalid(
-                "Attendez la fin du téléchargement de l’image Debian sélectionnée.\n",
+                endpoint,
+                "Attendez la fin du téléchargement de l’image Debian sélectionnée.",
             ));
         }
         let (network, mask) = parse_subnet(&plan.subnet).ok_or("Invalid staged PXE subnet")?;
@@ -310,14 +314,20 @@ fn selected_image(db: &Connection) -> rusqlite::Result<Option<(i64, String, Stri
     .optional()
 }
 
-fn invalid(message: &'static str) -> Reply {
-    plain(StatusCode::UNPROCESSABLE_ENTITY, message)
+fn invalid(endpoint: &str, message: &'static str) -> Reply {
+    let (step, back) = match endpoint {
+        "/init/network" => (WizardStep::Network, "/init/network"),
+        "/init/images" => (WizardStep::Network, "/init/images"),
+        _ => (WizardStep::Confirmation, "/init/done"),
+    };
+    ui::wizard_error(step, StatusCode::UNPROCESSABLE_ENTITY, message, back)
 }
 
 fn network_page(plan: Option<&Network>) -> Reply {
     let mut html = String::from(
-        r#"<form method="post" action="/init/network">
-<label>Mode <select name="role">"#,
+        r#"<p class="wizard-intro">Choisissez si cette instance doit servir des clients PXE ou héberger uniquement la console.</p>
+<form class="form-stack" method="post" action="/init/network">
+<div class="field"><label for="setup-role">Mode de fonctionnement</label><select id="setup-role" name="role">"#,
     );
     for (name, label, role) in [
         ("console", "Console seule", Role::Console),
@@ -333,80 +343,108 @@ fn network_page(plan: Option<&Network>) -> Reply {
             r#"<option value="{name}"{selected}>{label}</option>"#
         ));
     }
-    html.push_str("</select></label>");
+    html.push_str(r#"</select></div><fieldset class="form-stack wizard-network"><legend>Paramètres PXE</legend>
+<p class="muted">Renseignez ces champs si vous avez choisi un mode PXE.</p>"#);
     let address = plan
         .filter(|plan| plan.role != Role::Console)
         .map(|plan| plan.address.to_string())
         .unwrap_or_default();
-    for (key, label, value) in [
+    for (key, label, value, placeholder) in [
         (
             "pxe_interface",
             "Interface PXE",
             plan.map_or("", |plan| &plan.interface),
+            "enp1s0",
         ),
-        ("pxe_ip", "Adresse IPv4 attribuée", &address),
+        ("pxe_ip", "Adresse IPv4 attribuée", &address, "192.168.10.2"),
         (
             "pxe_subnet",
             "Sous-réseau PXE",
             plan.map_or("", |plan| &plan.subnet),
+            "192.168.10.0/24",
         ),
     ] {
-        html.push_str(&format!(r#"<p><label>{label} <input name="{key}" value=""#));
+        html.push_str(&format!(r#"<div class="field"><label for="{key}">{label}</label><input id="{key}" name="{key}" placeholder="{placeholder}" autocomplete="off" spellcheck="false" value=""#));
         escape(&mut html, value);
-        html.push_str(r#""></label></p>"#);
+        html.push_str(r#""></div>"#);
     }
-    html.push_str("<button>Continuer</button></form>");
-    page(ConsoleSection::Settings, "Réseau PXE", &html)
+    html.push_str(r#"</fieldset><div class="form-actions"><button type="submit">Continuer</button></div></form>"#);
+    ui::wizard(
+        Some(WizardStep::Network),
+        "Réseau PXE",
+        &html,
+        StatusCode::OK,
+    )
 }
 
 fn images_page(db: &Connection) -> Result<Reply, ErrorBox> {
-    Ok(page(
-        ConsoleSection::Settings,
+    let mut html = String::from(
+        r#"<p class="wizard-intro">Sélectionnez l’image Debian que les clients utiliseront pour démarrer.</p>"#,
+    );
+    html.push_str(&images::catalog_form(db, "/init/images")?);
+    html.push_str(r#"<p class="wizard-back"><a href="/init/network">Modifier le réseau</a></p>"#);
+    Ok(ui::wizard(
+        Some(WizardStep::Network),
         "Image de démarrage",
-        &images::catalog_form(db, "/init/images")?,
+        &html,
+        StatusCode::OK,
     ))
 }
 
 fn done_page(db: &Connection, plan: &Network) -> Result<Reply, ErrorBox> {
-    let mut html = String::new();
+    let mut html = String::from(
+        r#"<p class="wizard-intro">Relisez les paramètres avant de les appliquer.</p><dl class="wizard-summary"><dt>Mode</dt><dd>"#,
+    );
     let mut image = String::new();
     if plan.role == Role::Console {
-        html.push_str("<p>Console seule.</p>");
+        html.push_str("Console seule</dd>");
     } else {
-        html.push_str("<p>Interface ");
-        escape(&mut html, &plan.interface);
-        html.push_str(" · ");
-        escape(&mut html, &plan.address.to_string());
-        html.push_str(" · ");
-        escape(&mut html, &plan.subnet);
         html.push_str(if plan.role == Role::Proxy {
-            " · proxy DHCP</p>"
+            "PXE avec proxy DHCP"
         } else {
-            " · DHCP externe</p>"
+            "PXE avec DHCP externe"
         });
+        html.push_str("</dd><dt>Interface</dt><dd>");
+        escape(&mut html, &plan.interface);
+        html.push_str("</dd><dt>Adresse IPv4</dt><dd>");
+        escape(&mut html, &plan.address.to_string());
+        html.push_str("</dd><dt>Sous-réseau</dt><dd>");
+        escape(&mut html, &plan.subnet);
+        html.push_str("</dd>");
         if let Some((id, label, status)) = selected_image(db)? {
-            html.push_str("<p>Debian ");
+            html.push_str("<dt>Image</dt><dd>Debian ");
             escape(&mut html, &label);
             html.push_str(" · ");
-            escape(&mut html, &status);
-            html.push_str("</p>");
+            escape(
+                &mut html,
+                match status.as_str() {
+                    "downloaded" => "Prête",
+                    "downloading" => "Téléchargement en cours",
+                    "pending" => "En attente",
+                    "error" | "failed" => "Échec du téléchargement",
+                    _ => "Indisponible",
+                },
+            );
+            html.push_str("</dd>");
             if status == "downloaded" {
                 image = id.to_string();
             }
         }
-        if image.is_empty() {
-            html.push_str(r#"<p><a href="/init/images">Choisir une image et attendre son téléchargement</a></p>"#);
-        }
     }
+    html.push_str("</dl>");
     if plan.role == Role::Console || !image.is_empty() {
-        html.push_str(r#"<form method="post" action="/init/complete"><input type="hidden" name="plan" value=""#);
+        html.push_str(r#"<form class="form-stack" method="post" action="/init/complete"><input type="hidden" name="plan" value=""#);
         escape(&mut html, &serde_json::to_string(plan)?);
-        html.push_str(&format!(r#""><input type="hidden" name="image" value="{image}"><button name="confirmation" value="yes">Appliquer la configuration</button></form>"#));
+        html.push_str(&format!(r#""><input type="hidden" name="image" value="{image}"><div class="form-actions">
+<button type="submit" name="confirmation" value="yes">Appliquer la configuration</button><a class="button button--quiet" href="/init/network">Modifier le réseau</a></div></form>"#));
+    } else {
+        html.push_str(r#"<p class="muted">L’image Debian doit être prête pour appliquer la configuration.</p><div class="form-actions">
+<a class="button" href="/init/images">Revenir au choix de l’image</a><a class="button button--quiet" href="/init/network">Modifier le réseau</a></div>"#);
     }
-    html.push_str(r#"<p><a href="/init/network">Modifier le réseau</a></p>"#);
-    Ok(page(
-        ConsoleSection::Settings,
+    Ok(ui::wizard(
+        Some(WizardStep::Confirmation),
         "Confirmer la configuration",
         &html,
+        StatusCode::OK,
     ))
 }
