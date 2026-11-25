@@ -54,7 +54,7 @@ jobs:
         run: |
           sudo env PYTHONUNBUFFERED=1 python3 tests/integration/test_rust_proxmox_first_boot.py \
             rust/target/release/pxe-tools-rust "$RUNNER_TEMP/proxmox-evidence"
-      - uses: actions/upload-artifact@ea165f8d65e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: proxmox-first-boot-${{ matrix.arch }}
