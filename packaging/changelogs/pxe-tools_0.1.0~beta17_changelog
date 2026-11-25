@@ -1,5 +1,6 @@
 pxe-tools (0.1.0~beta17) stable; urgency=medium
 
+  * Proposer les interfaces détectées et l’ajout de PXE au DHCP existant par défaut.
   * Rétablir la vue d’ensemble et les réglages réseau PXE après l’assistant.
   * Rétablir la recherche et le filtre par état dans l’inventaire.
   * Dupliquer les modèles et retrouver leurs réglages de localisation, miroir et paquets.

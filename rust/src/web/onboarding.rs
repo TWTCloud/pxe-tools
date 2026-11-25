@@ -197,7 +197,13 @@ fn detected_networks() -> Vec<(String, Ipv4Addr, String)> {
             ) else {
                 continue;
             };
-            if !address.is_loopback() && entry["family"] == "inet" && prefix <= 32 {
+            if entry["family"] == "inet"
+                && prefix <= 32
+                && !address.is_unspecified()
+                && !address.is_loopback()
+                && !address.is_multicast()
+                && address.octets()[0] < 240
+            {
                 choices.push((interface.to_owned(), address, format!("{address}/{prefix}")));
             }
         }
@@ -438,39 +444,79 @@ pub(super) fn network_form(
     submit: &'static str,
 ) -> String {
     let mut html = format!(
-        r#"<p class="wizard-intro">Choisissez si cette instance doit servir des clients PXE ou héberger uniquement la console.</p>
-<form class="form-stack" method="post" action="{action}">
-<div class="field"><label for="setup-role">Mode de fonctionnement</label><select id="setup-role" name="role">"#,
+        r#"<form class="form-stack" method="post" action="{action}">
+<fieldset class="form-stack network-modes"><legend>Mode de fonctionnement</legend>"#,
     );
-    for (name, label, role) in [
-        ("console", "Console seule", Role::Console),
-        ("external", "PXE avec DHCP externe", Role::External),
-        ("proxy", "PXE avec proxy DHCP", Role::Proxy),
+    let current_role = plan.map_or(Role::Proxy, |saved| saved.role);
+    for (name, label, help, role) in [
+        (
+            "proxy",
+            "Ajouter PXE au DHCP existant (recommandé)",
+            "Votre DHCP continue d’attribuer les adresses IP. PXE Tools fournit les informations de démarrage par le réseau (proxy DHCP).",
+            Role::Proxy,
+        ),
+        (
+            "external",
+            "Utiliser un DHCP déjà configuré pour PXE",
+            "Votre DHCP attribue les adresses IP et indique aux appareils comment démarrer. PXE Tools fournit les fichiers de démarrage.",
+            Role::External,
+        ),
+        (
+            "console",
+            "Console seule",
+            "Utiliser uniquement la console, sans démarrage par le réseau.",
+            Role::Console,
+        ),
     ] {
-        let selected = if plan.map(|saved| saved.role) == Some(role) {
-            " selected"
-        } else {
-            ""
-        };
+        let checked = if current_role == role { " checked" } else { "" };
         html.push_str(&format!(
-            r#"<option value="{name}"{selected}>{label}</option>"#
+            r#"<label class="check-label"><input type="radio" name="role" value="{name}"{checked}>
+<span>{label}<small>{help}</small></span></label>"#
         ));
     }
-    html.push_str(r#"</select></div><fieldset class="form-stack wizard-network"><legend>Paramètres PXE</legend>
-<div class="field"><label for="network-address">Adresse détectée</label>
-<select id="network-address" name="network_address"><option value="">Configuration manuelle</option>"#);
-    for (interface, ip, subnet) in detected_networks() {
-        html.push_str("<option value=\"");
-        escape(&mut html, &format!("{interface}|{ip}"));
-        html.push_str("\">");
-        escape(&mut html, &format!("{interface} · {subnet}"));
-        html.push_str("</option>");
+    html.push_str(
+        r#"</fieldset><fieldset class="form-stack wizard-network"><legend>Paramètres PXE</legend>"#,
+    );
+    let choices = detected_networks();
+    let saved_network = plan.filter(|saved| !saved.address.is_unspecified());
+    let selected = if let Some(saved) = saved_network {
+        let subnet = parse_subnet(&saved.subnet);
+        choices.iter().position(|(interface, ip, cidr)| {
+            *interface == saved.interface && *ip == saved.address && parse_subnet(cidr) == subnet
+        })
+    } else {
+        (choices.len() == 1).then_some(0)
+    };
+    let manual = choices.is_empty() || (saved_network.is_some() && selected.is_none());
+    if choices.is_empty() {
+        html.push_str(r#"<p class="muted">Aucune adresse IPv4 utilisable n’a été détectée. Vérifiez que l’interface est active ou renseignez ses paramètres ci-dessous.</p>"#);
+    } else {
+        html.push_str(r#"<div class="field"><label for="network-address">Interface et adresse IPv4 pour PXE</label>
+<select id="network-address" name="network_address" aria-describedby="network-address-help">"#);
+        if selected.is_none() && !manual {
+            html.push_str(r#"<option value="" selected disabled>Choisir une interface et une adresse IPv4</option>"#);
+        }
+        for (index, (interface, ip, subnet)) in choices.iter().enumerate() {
+            html.push_str("<option value=\"");
+            escape(&mut html, &format!("{interface}|{ip}"));
+            html.push('"');
+            if selected == Some(index) {
+                html.push_str(" selected");
+            }
+            html.push('>');
+            escape(&mut html, &format!("{interface} · {subnet}"));
+            html.push_str("</option>");
+        }
+        let manual_selected = if manual { " selected" } else { "" };
+        html.push_str(&format!(r#"<option value=""{manual_selected}>Saisie manuelle</option></select>
+<small id="network-address-help">Choisissez l’interface reliée au réseau des appareils à démarrer.</small></div>"#));
     }
-    html.push_str(r#"</select></div><p class="muted">Une adresse détectée remplace l’interface, l’adresse IPv4 et le sous-réseau PXE saisis ci-dessous.</p>"#);
-    let address = plan
-        .filter(|plan| !plan.address.is_unspecified())
-        .map(|plan| plan.address.to_string())
-        .unwrap_or_default();
+    let open = if manual { " open" } else { "" };
+    html.push_str(&format!(r#"<details{open}><summary>Saisir les paramètres IPv4</summary><div class="form-stack network-details">"#));
+    if !choices.is_empty() {
+        html.push_str(r#"<p class="muted">Sélectionnez « Saisie manuelle » dans la liste pour utiliser ces valeurs.</p>"#);
+    }
+    let address = saved_network.map_or_else(String::new, |saved| saved.address.to_string());
     for (key, label, value, placeholder) in [
         (
             "pxe_interface",
@@ -485,18 +531,26 @@ pub(super) fn network_form(
             plan.map_or("", |plan| &plan.subnet),
             "192.168.10.0/24",
         ),
-        (
-            "dhcp_proxy_cidr",
-            "Sous-réseau du proxy DHCP (facultatif)",
-            plan.and_then(|plan| plan.proxy_subnet.as_deref())
-                .unwrap_or_default(),
-            "Même sous-réseau que PXE",
-        ),
     ] {
         html.push_str(&format!(r#"<div class="field"><label for="{key}">{label}</label><input id="{key}" name="{key}" placeholder="{placeholder}" autocomplete="off" spellcheck="false" value=""#));
         escape(&mut html, value);
         html.push_str(r#""></div>"#);
     }
+    let proxy_subnet = plan
+        .filter(|saved| saved.role == Role::Proxy)
+        .and_then(|saved| {
+            saved
+                .proxy_subnet
+                .as_deref()
+                .filter(|cidr| parse_subnet(cidr) != parse_subnet(&saved.subnet))
+        });
+    let proxy_open = if proxy_subnet.is_some() { " open" } else { "" };
+    html.push_str(&format!(r#"</div></details><details class="network-proxy-subnet"{proxy_open}>
+<summary>Sous-réseau personnalisé pour le proxy DHCP</summary><div class="field network-details">
+<label for="dhcp_proxy_cidr">Sous-réseau du proxy DHCP (facultatif)</label>
+<input id="dhcp_proxy_cidr" name="dhcp_proxy_cidr" placeholder="Même sous-réseau que PXE" autocomplete="off" spellcheck="false" value=""#));
+    escape(&mut html, proxy_subnet.unwrap_or_default());
+    html.push_str(r#""></div></details>"#);
     html.push_str(&format!(r#"</fieldset><div class="form-actions"><button type="submit">{submit}</button></div></form>"#));
     html
 }
@@ -524,9 +578,9 @@ fn done_page(db: &Connection, plan: &Network) -> Result<Reply, ErrorBox> {
         html.push_str("Console seule</dd>");
     } else {
         html.push_str(if plan.role == Role::Proxy {
-            "PXE avec proxy DHCP"
+            "Ajouter PXE au DHCP existant (proxy DHCP)"
         } else {
-            "PXE avec DHCP externe"
+            "Utiliser un DHCP déjà configuré pour PXE"
         });
         html.push_str("</dd><dt>Interface</dt><dd>");
         escape(&mut html, &plan.interface);
@@ -535,6 +589,11 @@ fn done_page(db: &Connection, plan: &Network) -> Result<Reply, ErrorBox> {
         html.push_str("</dd><dt>Sous-réseau</dt><dd>");
         escape(&mut html, &plan.subnet);
         html.push_str("</dd>");
+        if let Some(cidr) = &plan.proxy_subnet {
+            html.push_str("<dt>Sous-réseau du proxy DHCP</dt><dd>");
+            escape(&mut html, cidr);
+            html.push_str("</dd>");
+        }
         if let Some((id, label, status)) = selected_image(db)? {
             html.push_str("<dt>Image</dt><dd>Debian ");
             escape(&mut html, &label);
