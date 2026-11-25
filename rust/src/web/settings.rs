@@ -1,19 +1,35 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{
-    admin, ansible_settings, plain,
+    admin, ansible_settings, onboarding, plain,
     setup::redirect,
     ui::{page, ConsoleSection},
-    ErrorBox, Reply,
+    updates, ErrorBox, Reply,
 };
 use crate::{connect, setting, worker::factory_reset as reset_job};
 use hyper::{body::Bytes, StatusCode};
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
-use std::{net::Ipv4Addr, path::Path};
+use std::{collections::HashMap, net::Ipv4Addr, path::Path};
+
+const NETWORK: &str = "/settings/network";
+const APPLY_NETWORK: &[(&str, &str)] = &[
+    ("bootstrap:build_grub", "Préparation du chargeur UEFI"),
+    (
+        "bootstrap:render_templates",
+        "Préparation des menus et scripts PXE",
+    ),
+    (
+        "bootstrap:restart_dnsmasq",
+        "Application de la configuration réseau PXE",
+    ),
+];
 
 #[derive(Clone, Copy)]
 pub(super) enum Route {
     General,
+    Network,
+    Updates,
+    UpdateStatus,
     Ansible,
     VaultUnlock,
     Dns,
@@ -29,6 +45,9 @@ impl Route {
     pub(super) fn for_path(path: &str) -> Option<Self> {
         Some(match path {
             "/settings" => Self::General,
+            NETWORK => Self::Network,
+            updates::ROUTE => Self::Updates,
+            updates::STATUS => Self::UpdateStatus,
             ansible_settings::ROUTE => Self::Ansible,
             ansible_settings::VAULT => Self::VaultUnlock,
             "/settings/default-dns" => Self::Dns,
@@ -56,12 +75,16 @@ impl Route {
         db_path: &Path,
         form: Option<Bytes>,
     ) -> Result<Reply, ErrorBox> {
+        if matches!(self, Self::Updates | Self::UpdateStatus) {
+            return updates::serve(matches!(self, Self::UpdateStatus), db, db_path, form);
+        }
         if matches!(self, Self::Ansible | Self::VaultUnlock) {
             return ansible_settings::serve(db, db_path, matches!(self, Self::VaultUnlock), form);
         }
         let Some(form) = form else {
             return match self {
                 Self::General => self.general(db),
+                Self::Network => self.network(db),
                 Self::Ipxe => self.ipxe(db),
                 _ => Ok(plain(
                     StatusCode::METHOD_NOT_ALLOWED,
@@ -82,6 +105,7 @@ impl Route {
         let mut database = connect(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let tx = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let target = match self {
+            Self::Updates | Self::UpdateStatus => unreachable!("handled above"),
             Self::Ansible | Self::VaultUnlock => unreachable!("handled above"),
             Self::ResetDevices | Self::FactoryReset => unreachable!("handled above"),
             Self::General => {
@@ -93,6 +117,39 @@ impl Route {
                 }
                 super::onboarding::store(&tx, key, value)?;
                 "/settings"
+            }
+            Self::Network => {
+                let mut fields = HashMap::new();
+                for (key, value) in input {
+                    if !matches!(
+                        key.as_ref(),
+                        "role"
+                            | "network_address"
+                            | "pxe_interface"
+                            | "pxe_ip"
+                            | "pxe_subnet"
+                            | "dhcp_proxy_cidr"
+                    ) || fields
+                        .insert(key.into_owned(), value.into_owned())
+                        .is_some()
+                    {
+                        return Ok(invalid());
+                    }
+                }
+                let Some(plan) = onboarding::Network::parse(&fields) else {
+                    return Ok(plain(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "Sélectionnez une IPv4 attribuée et des sous-réseaux cohérents.\n",
+                    ));
+                };
+                plan.save(&tx)?;
+                let jobs = if plan.enabled() {
+                    APPLY_NETWORK
+                } else {
+                    &APPLY_NETWORK[2..]
+                };
+                enqueue(&tx, jobs, "appliance_last_job_ids")?;
+                NETWORK
             }
             Self::Dns => {
                 let mut addresses = Vec::new();
@@ -146,17 +203,7 @@ impl Route {
                             ),
                         ]
                     }
-                    Self::Apply if input.is_empty() => &[
-                        ("bootstrap:build_grub", "Préparation du chargeur UEFI"),
-                        (
-                            "bootstrap:render_templates",
-                            "Préparation des menus et scripts PXE",
-                        ),
-                        (
-                            "bootstrap:restart_dnsmasq",
-                            "Application de la configuration réseau PXE",
-                        ),
-                    ],
+                    Self::Apply if input.is_empty() => APPLY_NETWORK,
                     _ => return Ok(invalid()),
                 };
                 enqueue(&tx, jobs, "appliance_last_job_ids")?;
@@ -167,9 +214,24 @@ impl Route {
         Ok(redirect(StatusCode::SEE_OTHER, target))
     }
 
+    fn network(self, db: &Connection) -> Result<Reply, ErrorBox> {
+        let mut html = String::from(
+            r#"<nav class="page-links"><a href="/settings">Paramètres PXE</a></nav>
+<section class="panel panel--form">"#,
+        );
+        html.push_str(&onboarding::network_form(
+            Some(&onboarding::Network::current(db)?),
+            NETWORK,
+            "Enregistrer et appliquer",
+        ));
+        add_jobs(&mut html, db, "appliance_last_job_ids")?;
+        html.push_str("</section>");
+        Ok(page(ConsoleSection::Settings, "Réseau PXE", &html))
+    }
+
     fn general(self, db: &Connection) -> Result<Reply, ErrorBox> {
         let mut html = String::from(
-            r#"<nav class="page-links" aria-label="Autres paramètres"><a href="/settings/ipxe">iPXE</a><a href="/settings/ansible">Ansible</a></nav>
+            r#"<nav class="page-links" aria-label="Autres paramètres"><a href="/settings/network">Réseau PXE</a><a href="/settings/images">Images PXE</a><a href="/settings/ipxe">iPXE</a><a href="/settings/ansible">Ansible</a><a href="/admin/certificates">Certificats TLS</a></nav>
 <div class="panel-grid">
 <div class="panel-stack">
 <section class="panel"><h2>Découverte réseau</h2>
@@ -214,12 +276,6 @@ impl Route {
 <label class="check-label"><input type="checkbox" name="confirm" value="yes" required> Confirmer le changement de clé</label>
 <div class="form-actions"><button class="button--danger">Régénérer la clé MOK</button></div></form></details>"#);
         add_jobs(&mut html, db, "appliance_last_job_ids")?;
-        html.push_str(r#"</section><section class="panel"><h2>Appellation des appareils</h2>"#);
-        admin::terminology_form(
-            &mut html,
-            "/settings/terminology",
-            &setting(db, "ui_device_term")?,
-        );
         html.push_str(r#"</section></div></div><section class="settings-reset"><h2>Réinitialisation</h2>
 <details><summary>Réinitialiser le parc</summary>
 <form class="form-stack" method="post" action="/settings/reset"><p>Les fiches d’appareils et leurs historiques seront supprimés. La configuration de l’appliance et les modèles sont conservés.</p>

@@ -36,7 +36,7 @@ Version: {version}
 Architecture: {architecture}
 Maintainer: {maintainer}
 Pre-Depends: python3 (>= 3.11)
-Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, dnsmasq-base, gettext-base, git, gpgv, {grub_dependencies}, iproute2, ipxe, mokutil, {nginx_dependency}openssh-client, openssl, {php_dependencies}pxelinux, python3-jinja2, python3-nacl, sbsigntool, {shim_dependency}sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
+Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, {guided_dependencies}dnsmasq-base, gettext-base, git, gpgv, {grub_dependencies}, iproute2, ipxe, mokutil, {nginx_dependency}openssh-client, openssl, {php_dependencies}pxelinux, python3-jinja2, python3-nacl, sbsigntool, {shim_dependency}sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
 Section: admin
 Priority: optional
 Description: {description}
@@ -69,7 +69,7 @@ PRERM = '''#!/bin/sh
 set -eu
 if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
     systemctl stop pxe-tools.target pxe-tools-admin.target
-    for unit in pxe-tools-worker.service pxe-tools-dnsmasq-tail.service pxe-tools-nginx.service pxe-tools-pxe-http.service pxe-tools-php.service pxe-tools-dnsmasq.service pxe-tools-init.service; do
+    for unit in pxe-tools-apt-update.service pxe-tools-worker.service pxe-tools-dnsmasq-tail.service pxe-tools-nginx.service pxe-tools-pxe-http.service pxe-tools-php.service pxe-tools-dnsmasq.service pxe-tools-init.service; do
         if systemctl is-active --quiet "$unit"; then systemctl stop "$unit"; fi
     done
     systemctl disable pxe-tools.target pxe-tools-admin.target >/dev/null 2>&1 || true
@@ -206,6 +206,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         (control/'control').write_text(CONTROL.format(
             version=version, package_name=package_name, architecture=architecture,
             grub_dependencies=GRUB_DEPENDENCIES[architecture],
+            guided_dependencies='default-dbus-system-bus | dbus-system-bus, ' if rust_guided else '',
             nginx_dependency='' if rust_guided else 'nginx, ',
             php_dependencies='' if rust_guided else PHP_DEPENDENCIES,
             shim_dependency='shim-signed, ' if architecture == 'amd64' else '',
@@ -255,6 +256,8 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             binary.chmod(0o755)
         if rust_guided:
             shutil.copy2(checked(rust_assets/'pxe-tools-pxe-http.service'), units)
+            shutil.copy2(checked(rust_assets/'pxe-tools-apt-update.service'), units)
+            shutil.copy2(checked(ROOT/'packaging/native/apt-console-update.py'), native)
             command = root/'usr/bin/pxe-tools'
             command.parent.mkdir(parents=True)
             shutil.copyfile(checked(ROOT/'packaging/native/pxe-tools.py'), command)
@@ -265,6 +268,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             configure_guided_units(units)
             with (native/'default.env').open('a') as environment:
                 environment.write('PXE_RUST_GUIDED=1\nPXE_RUST_DIRECT_HTTP=1\n')
+                environment.write(f'PXE_APT_CONSOLE_UPDATES=1\nPXE_APT_PACKAGE_VERSION={version}\n')
         else:
             php_routes = checked(ROOT/'docker/pxe-tools/nginx/pxe-php.conf').read_text()
             (templates/'pxe-routes.conf').write_text(native_php_routes(php_routes))

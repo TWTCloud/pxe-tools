@@ -9,6 +9,7 @@ use std::{collections::HashMap, fmt::Write, path::Path};
 
 pub(super) const USERS: &str = "/admin/access/users";
 pub(super) const TOKENS: &str = "/admin/access/tokens";
+pub(super) const PERSONAL_TOKENS: &str = "/admin/profile/tokens";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Permission {
@@ -147,6 +148,10 @@ impl Account {
         self.admin || (permission != Admin && self.permissions & permission.bit() != 0)
     }
 
+    pub(super) fn is_external(&self) -> bool {
+        self.external
+    }
+
     fn token_permissions(&self) -> i64 {
         SCOPES
             .iter()
@@ -225,7 +230,12 @@ fn sso_managed(db: &Connection) -> rusqlite::Result<bool> {
     )
 }
 
-fn record(db: &Connection, actor: &Account, action: &str, target: &str) -> rusqlite::Result<()> {
+pub(super) fn record(
+    db: &Connection,
+    actor: &Account,
+    action: &str,
+    target: &str,
+) -> rusqlite::Result<()> {
     let name = if actor.external {
         format!("sso:{}", actor.username)
     } else {
@@ -474,12 +484,19 @@ pub(super) fn tokens(
     path: &Path,
     actor: &Account,
     form: Option<&[u8]>,
+    personal: bool,
 ) -> Result<Reply, ErrorBox> {
     let Some(id) = actor.id else {
         return Ok(redirect(StatusCode::SEE_OTHER, USERS));
     };
+    let route = if personal { PERSONAL_TOKENS } else { TOKENS };
+    let section = if personal || !actor.admin {
+        ConsoleSection::Tokens
+    } else {
+        ConsoleSection::Accounts
+    };
     let Some(body) = form else {
-        return tokens_page(db, actor);
+        return tokens_page(db, actor, route, section);
     };
     let Some(form) = Form::parse(body) else {
         return Ok(bad("Formulaire de jeton invalide\n"));
@@ -497,14 +514,14 @@ pub(super) fn tokens(
         if tx.execute(
             "UPDATE api_tokens SET revoked_at=unixepoch() WHERE id=?1 AND revoked_at IS NULL
                        AND (user_id=?2 OR ?3)",
-            params![token, id, actor.admin],
+            params![token, id, actor.admin && !personal],
         )? != 1
         {
             return Ok(plain(StatusCode::NOT_FOUND, "Jeton introuvable\n"));
         }
         record(&tx, &actor, "token.revoke", &token.to_string())?;
         tx.commit()?;
-        return Ok(redirect(StatusCode::SEE_OTHER, TOKENS));
+        return Ok(redirect(StatusCode::SEE_OTHER, route));
     }
     if form.rights == 0 || form.rights & !actor.token_permissions() != 0 {
         return Ok(bad("Choisissez des droits d’API dont vous disposez\n"));
@@ -556,12 +573,12 @@ pub(super) fn tokens(
     )?;
     tx.commit()?;
     Ok(super::ui::page(
-        ConsoleSection::Tokens,
+        section,
         "Nouveau secret d’API",
         &format!(
             r#"<section class="panel panel--form"><p>Copiez ce secret maintenant. Il est affiché une seule fois.</p><div class="field">
 <label for="token-secret">Jeton d’API</label><textarea id="token-secret" rows="3" readonly>{secret}</textarea></div>
-<p><a href="{TOKENS}">Retour à la liste des jetons</a></p></section>"#,
+<p><a href="{route}">Retour à la liste des jetons</a></p></section>"#,
         ),
     ))
 }
@@ -608,6 +625,10 @@ fn users_page(db: &Connection, actor: &Account) -> Result<Reply, ErrorBox> {
     } else {
         "Identifiant"
     };
+    write!(
+        html,
+        r#"<nav class="page-links" aria-label="Administration des accès"><a href="{TOKENS}">Jetons de tous les comptes</a></nav>"#
+    )?;
     write!(
         html,
         r#"<details class="panel panel--form"><summary>Ajouter un compte</summary>
@@ -693,14 +714,28 @@ fn users_page(db: &Connection, actor: &Account) -> Result<Reply, ErrorBox> {
     ))
 }
 
-fn tokens_page(db: &Connection, actor: &Account) -> Result<Reply, ErrorBox> {
-    let mut html = String::from("<p>Les jetons servent à appeler l’API HTTPS. Chaque jeton dispose de ses propres droits et expire à la date indiquée.</p>");
+fn tokens_page(
+    db: &Connection,
+    actor: &Account,
+    route: &str,
+    section: ConsoleSection,
+) -> Result<Reply, ErrorBox> {
+    let personal = route == PERSONAL_TOKENS;
+    let mut html = String::new();
+    if personal {
+        write!(
+            html,
+            r#"<nav class="page-links"><a href="{}">Mon profil</a></nav>"#,
+            super::profile::ROUTE
+        )?;
+    }
+    html.push_str("<p>Les jetons servent à appeler l’API HTTPS. Chaque jeton dispose de ses propres droits et expire à la date indiquée.</p>");
     let offered = actor.token_permissions();
     if offered != 0 {
         write!(
             html,
             r#"<details class="panel panel--form"><summary>Créer un jeton</summary>
-<form class="form-stack permission-form" method="post" action="{TOKENS}">
+<form class="form-stack permission-form" method="post" action="{route}">
 <div class="field"><label for="token-name">Nom du jeton</label><input id="token-name" name="name" maxlength="100" required></div>
 <div class="field"><label for="token-days">Durée de validité en jours</label><input id="token-days" name="days" type="number" min="1" max="365" value="30" required></div>"#
         )?;
@@ -713,8 +748,10 @@ fn tokens_page(db: &Connection, actor: &Account) -> Result<Reply, ErrorBox> {
          FROM api_tokens t JOIN users u ON u.id=t.user_id
          WHERE t.user_id=?1 OR ?2 ORDER BY t.id DESC",
     )?;
-    let mut rows = rows.query(params![actor.id, actor.admin])?;
+    let mut rows = rows.query(params![actor.id, actor.admin && !personal])?;
+    let mut found = false;
     while let Some(row) = rows.next()? {
+        found = true;
         let id: i64 = row.get(0)?;
         let own = Some(row.get::<_, i64>(2)?) == actor.id;
         let revoked: bool = row.get(7)?;
@@ -749,7 +786,7 @@ fn tokens_page(db: &Connection, actor: &Account) -> Result<Reply, ErrorBox> {
         if own && !revoked && !expired && offered != 0 {
             write!(
                 html,
-                r#"<form class="form-stack permission-form" method="post" action="{TOKENS}">
+                r#"<form class="form-stack permission-form" method="post" action="{route}">
 <input type="hidden" name="id" value="{id}"><p>La rotation invalide le secret précédent et applique les droits sélectionnés. La date d’expiration est conservée.</p>"#
             )?;
             checkboxes(&mut html, offered, rights)?;
@@ -758,15 +795,26 @@ fn tokens_page(db: &Connection, actor: &Account) -> Result<Reply, ErrorBox> {
         if !revoked && !expired {
             write!(
                 html,
-                r#"<form class="permission-form" method="post" action="{TOKENS}"><input type="hidden" name="id" value="{id}">
+                r#"<form class="permission-form" method="post" action="{route}"><input type="hidden" name="id" value="{id}">
 <button class="button--danger" name="action" value="revoke">Révoquer le jeton</button></form>"#
             )?;
         }
         html.push_str("</details>");
     }
+    if personal && !found {
+        html.push_str(if offered == 0 {
+            r#"<p class="panel panel--form">Votre compte ne dispose d’aucun droit d’API. Demandez un accès à votre administrateur.</p>"#
+        } else {
+            r#"<div class="panel panel--form table-empty"><strong>Aucun jeton d’API</strong>Créez un jeton pour autoriser un outil à accéder à l’API avec vos droits.</div>"#
+        });
+    }
     Ok(super::ui::page(
-        ConsoleSection::Tokens,
-        "Jetons d’API",
+        section,
+        if personal {
+            "Mes jetons d’API"
+        } else {
+            "Jetons d’API"
+        },
         &html,
     ))
 }

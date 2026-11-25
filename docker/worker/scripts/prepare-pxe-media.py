@@ -18,7 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 from zipfile import BadZipFile, ZipFile
 
 
@@ -42,6 +42,8 @@ RHEL_FILES = {".treeinfo", ".discinfo", "media.repo", "RPM-GPG-KEY-redhat-releas
               "RPM-GPG-KEY-redhat-beta", "images/install.img", "images/efiboot.img",
               "images/pxeboot/vmlinuz", "images/pxeboot/initrd.img"}
 RHEL_PREFIXES = ("BaseOS/", "AppStream/")
+REDHAT_CDN_HOSTS = {"access.cdn.redhat.com", "cdn.redhat.com"}
+REDHAT_JSON_LIMIT = 64 * 1024
 RHEL_BOOT = ("images/install.img", "images/pxeboot/vmlinuz", "images/pxeboot/initrd.img")
 
 
@@ -78,18 +80,19 @@ class PublicHttpsConnection(HTTPSConnection):
         raise MediaError("Le serveur de téléchargement ne répond pas.")
 
 
-def copy_bounded(source, destination, limit):
+def copy_bounded(source, destination, limit, report=None):
     written = 0
     while chunk := source.read(CHUNK):
         written += len(chunk)
         if written > limit:
             raise MediaError("La taille du média dépasse la limite de préparation.")
         destination.write(chunk)
+        if report is not None:
+            report(written)
     return written
 
 
-def download(url, target):
-    hosts = {host.strip().lower() for host in os.environ.get("PXE_MEDIA_DOWNLOAD_HOSTS", "").split(",")}
+def download(url, target, hosts, progress=None):
     for _ in range(6):
         parsed = urlsplit(url)
         if (len(url) > 4096 or parsed.scheme != "https" or not parsed.hostname
@@ -111,13 +114,72 @@ def download(url, target):
             length = response.getheader("Content-Length")
             if length is not None and (not length.isdecimal() or int(length) > MAX_MEDIA):
                 raise MediaError("La taille annoncée du média dépasse la limite de préparation.")
+            length = int(length) if length is not None else None
+            report = None
+            if progress is not None and length:
+                if length > shutil.disk_usage(target.parent).free:
+                    raise MediaError("Espace insuffisant pour télécharger le DVD RHEL.")
+                last = 15
+
+                def report(written):
+                    nonlocal last
+                    percent = min(80, 15 + 5 * (13 * written // length))
+                    if percent > last:
+                        last = percent
+                        progress(percent)
+
             with target.open("xb") as destination:
-                size = copy_bounded(response, destination, MAX_MEDIA)
-            if not size or length is not None and size != int(length):
+                size = copy_bounded(response, destination, MAX_MEDIA, report)
+            if not size or length is not None and size != length:
                 raise MediaError("Le téléchargement du média est incomplet.")
             return target
     raise MediaError("La source HTTPS a fourni trop de redirections.")
 
+
+
+def redhat_json(host, method, resource, *, body=None, headers=None, denied):
+    # Never follow a redirect from a request carrying a Red Hat credential.
+    try:
+        with closing(PublicHttpsConnection(host, timeout=30)) as connection:
+            connection.request(method, resource, body=body, headers=headers or {})
+            response = connection.getresponse()
+            if response.status in (400, 401, 403):
+                raise MediaError(denied)
+            if response.status == 404 and method == "GET":
+                raise MediaError("Ce DVD est indisponible via l’API Red Hat. Vérifiez l’accès du compte ou importez le DVD.")
+            if response.status != 200:
+                raise MediaError("Le service Red Hat est indisponible. Réessayez dans quelques instants.")
+            raw = response.read(REDHAT_JSON_LIMIT + 1)
+            if len(raw) > REDHAT_JSON_LIMIT:
+                raise ValueError("Oversized Red Hat API response")
+            result = json.loads(raw)
+            if not isinstance(result, dict):
+                raise ValueError("Invalid Red Hat API response")
+            return result
+    except (OSError, HTTPException):
+        raise MediaError("Connexion à Red Hat impossible. Vérifiez l’accès Internet du serveur.") from None
+    except ValueError:
+        raise MediaError("Réponse inattendue de Red Hat. Réessayez ou importez le DVD.") from None
+
+
+def redhat_download_url(sha, offline_token):
+    token = redhat_json(
+        "sso.redhat.com", "POST", "/auth/realms/redhat-external/protocol/openid-connect/token",
+        body=urlencode({"grant_type": "refresh_token", "client_id": "rhsm-api", "refresh_token": offline_token}),
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        denied="Jeton API Red Hat refusé. Générez un nouveau jeton dans le portail Red Hat.",
+    ).get("access_token")
+    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,8192}", token):
+        raise MediaError("Red Hat n’a pas fourni de jeton d’accès. Réessayez ou importez le DVD.")
+    result = redhat_json(
+        "api.access.redhat.com", "GET", f"/management/v1/images/{sha}/download",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        denied="Ce compte Red Hat ne peut pas télécharger le DVD. Vérifiez ses droits dans le portail Red Hat.",
+    ).get("body")
+    url = result.get("href") if isinstance(result, dict) else None
+    if not isinstance(url, str) or not url:
+        raise MediaError("Red Hat n’a pas fourni de lien pour ce DVD. Réessayez ou importez le DVD.")
+    return url
 
 def local_file(inbox, name):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", name):
@@ -276,12 +338,16 @@ def publish_winpe(archive, stage, cache, destination, bundle_sha):
     return f"Édition Windows {destination.name} prête dans la console."
 
 
-def prepare(request, root):
+def prepare(request, root, progress):
     kind, sha, profile = request["kind"], request["sha256"], request["profile"]
     if (kind not in ("rhel9", "windows-iso", "windows-wim", "windows-esd", "winpe")
             or not SHA256.fullmatch(sha)
             or (not re.fullmatch(r"[a-z0-9-]{1,40}", profile) if kind == "winpe" else profile != "")):
         raise MediaError("Le type, l’identifiant ou l’empreinte du média est invalide.")
+    offline_token = request.get("redhat_token")
+    if offline_token is not None and (kind != "rhel9" or request["remote"] or request["source"]
+                                      or not re.fullmatch(r"[A-Za-z0-9._~-]{1,4096}", offline_token)):
+        raise MediaError("Le jeton API Red Hat est invalide.")
     media = directory(root, "media")
     inbox = directory(root, "media/inbox")
     inbox.chmod(0o700)
@@ -304,11 +370,22 @@ def prepare(request, root):
             if marker.is_file() and marker.read_text(encoding="ascii").strip() == sha:
                 return f"Édition Windows {profile} déjà prête."
             raise MediaError("Cet identifiant Windows est déjà utilisé. Choisissez un autre identifiant.")
-        source = (download(request["source"], stage / "download") if request["remote"]
-                  else local_file(inbox, request["source"]))
+        if offline_token is not None:
+            progress(10)
+            url = redhat_download_url(sha, offline_token)
+            progress(15)
+            source = download(url, stage / "download", REDHAT_CDN_HOSTS, progress)
+            progress(85)
+        elif request["remote"]:
+            hosts = {host.strip().lower() for host in os.environ.get("PXE_MEDIA_DOWNLOAD_HOSTS", "").split(",")}
+            source = download(request["source"], stage / "download", hosts)
+        else:
+            source = local_file(inbox, request["source"])
         if windows.fingerprint(source) != sha:
             raise MediaError("L’empreinte SHA-256 ne correspond pas au média fourni.")
         if rhel is not None:
+            if offline_token is not None:
+                progress(95)
             return prepare_rhel(source, stage, rhel)
         if profile_path is not None:
             return publish_winpe(source, stage, cache, profile_path, sha)
@@ -324,7 +401,10 @@ if __name__ == "__main__":
     try:
         if os.geteuid() != 0:
             raise MediaError("La préparation doit être exécutée par le worker PXE Tools.")
-        print(prepare(json.loads(sys.stdin.buffer.read(16384)), Path(os.environ["HTTP_ROOT"])))
+        print(prepare(
+            json.loads(sys.stdin.buffer.read(16384)), Path(os.environ["HTTP_ROOT"]),
+            lambda percent: print(f"progress:{percent}", flush=True),
+        ))
     except MediaError as error:
         print(error)
         sys.exit(1)

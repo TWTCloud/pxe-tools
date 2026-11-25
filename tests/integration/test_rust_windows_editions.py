@@ -63,14 +63,6 @@ def request(path, *, tls=None, source=None, form=None, json_body=None, headers=N
         connection.close()
 
 
-RPM_REPOSITORIES = {
-    'centos': ('10', 'https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os'),
-    'fedora': ('44', 'https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Server/x86_64/os'),
-    'almalinux': ('9', 'https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os'),
-    'rocky': ('9', 'https://download.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os'),
-}
-
-
 def linux_media(root, db):
     db.executemany("""INSERT INTO os_images(distro,version,version_full,arch,extract_method,enabled,status)
                       VALUES('ubuntu',?,?,?,'iso_extract',?,'downloaded')""", [
@@ -90,27 +82,6 @@ def linux_media(root, db):
             (path/asset).write_bytes(b'fixture')
         if version != '22.04.5':
             (path/'source.iso').write_bytes(b'Ubuntu fixture ISO')
-    for distro, (version, repo) in RPM_REPOSITORIES.items():
-        db.execute("""INSERT INTO os_images(distro,version,version_full,arch,extract_method,enabled,status)
-                      VALUES(?,?,?,'amd64','direct',1,'downloaded')""", (distro, version, version))
-        path = root/'netboot'/distro/version/'amd64'
-        path.mkdir(parents=True)
-        for asset in ('linux', 'initrd.gz'):
-            (path/asset).write_bytes(b'RPM fixture')
-        (path/'.rpm-verified').write_text(repo+'\n')
-    db.execute("""INSERT INTO os_images(distro,version,version_full,arch,extract_method,enabled,status)
-                  VALUES('centos','9','9','amd64','direct',1,'downloaded')""")
-    path = root/'netboot'/'centos'/'9'/'amd64'
-    path.mkdir(parents=True)
-    for asset in ('linux', 'initrd.gz'):
-        (path/asset).write_bytes(b'legacy unverified fixture')
-    for arch in ('amd64', 'arm64'):
-        path = root/'netboot'/'proxmox'/'9.2-1'/arch
-        path.mkdir(parents=True)
-        for asset in ('linux', 'initrd.gz', 'source.iso'):
-            (path/asset).write_bytes(b'Proxmox fixture')
-        if arch == 'amd64':
-            (path/'.external-answer').write_text('http\n')
 
 
 def check_linux(tls, auth, form_headers):
@@ -124,17 +95,9 @@ def check_linux(tls, auth, form_headers):
     assert b'inst.repo=http://192.0.2.99:8090/rhel/9/' in grub
     assert b'linux (http,192.0.2.99:8090)/rhel/9/images/pxeboot/vmlinuz' in grub
     assert b'autoinstall' not in grub and b'inst.ks=' not in grub
-    for _, repo in RPM_REPOSITORIES.values():
-        assert f'inst.repo={repo}'.encode() in grub
-    assert b'CentOS Stream 9' not in grub
-    assert b'proxmox-start-auto-installer' in grub
-    assert b'newc:/proxmox.iso:(http,192.0.2.1:8088)/netboot/proxmox/9.2-1/amd64/source.iso' in grub
     status, _, ipxe = request('/pxe/linux/arm64/boot.ipxe', source=WINDOWS_CLIENT)
     assert status == 200 and ipxe.startswith(b'#!ipxe') and b'Ubuntu Server 26.04.1' in ipxe
     assert b'24.04.5' not in ipxe and b'Red Hat' not in ipxe
-    assert b'CentOS Stream' not in ipxe
-    assert b'initrd http://192.0.2.1:8088/netboot/proxmox/9.2-1/arm64/source.iso proxmox.iso' in ipxe
-    assert b'proxmox-tui-mode' in ipxe and b'proxmox-start-auto-installer' not in ipxe
     status, _, iso = request('/netboot/ubuntu/24.04.5/amd64/source.iso', source=WINDOWS_CLIENT,
                              headers={'Range': 'bytes=0-5'})
     assert status == 206 and iso == b'Ubuntu'
@@ -147,10 +110,9 @@ def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
     crypt = CDLL('libcrypt.so.1').crypt
     crypt.argtypes = (c_char_p, c_char_p)
     crypt.restype = c_char_p
-    selections = [('ubuntu-24.04.5', 'user-data'), ('rhel9', 'kickstart.cfg'),
-                  (f'rhel9-{rhel_sha}', 'kickstart.cfg')]
-    selections += [(f'{distro}-{version}', 'kickstart.cfg') for distro, (version, _) in RPM_REPOSITORIES.items()]
-    for offset, (image, file) in enumerate(selections, 1):
+    for offset, image, file in ((1, 'ubuntu-24.04.5', 'user-data'),
+                                (2, 'rhel9', 'kickstart.cfg'),
+                                (3, f'rhel9-{rhel_sha}', 'kickstart.cfg')):
         mac = f'02:00:00:00:50:{offset:02x}'
         serial = f'PXE-TEST-{offset}'
         inventory = {
@@ -205,9 +167,6 @@ def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
             assert b'inst.ks=' in chain and b'inst.nosave=all_ks' in chain
             if offset == 3:
                 assert f'url --url=http://{SERVER}:{HTTP}/pxe/rhel9/{rhel_sha}/'.encode() in config
-            if offset > 3:
-                repo = RPM_REPOSITORIES[image.rsplit('-', 1)[0]][1]
-                assert f'url --url={repo}'.encode() in config and f'inst.repo={repo}'.encode() in chain
             assert b'ignoredisk --only-use=vda\nclearpart --all --initlabel --drives=vda' in config
             assert b'%pre --erroronfail' in config and serial.encode() in config
             assert b'%packages\n@^minimal-environment\ncurl\n%end' in config
@@ -230,7 +189,7 @@ def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
             assert db.execute('SELECT status,local_boot_source FROM machines WHERE id=?', (device,)).fetchone() == ('installed', 'pxe')
             assert db.execute("""SELECT COUNT(*) FROM machine_events
                                  WHERE action_id=? AND checkpoint='os_first_boot'""", (action,)).fetchone() == (1,)
-    print('Ubuntu Autoinstall and RPM Kickstart console actions, private seeds and first-boot callbacks verified.')
+    print('Ubuntu Autoinstall and RHEL Kickstart console actions, private seeds and first-boot callbacks verified.')
 
 
 def create_iso(path, tree, files):
@@ -242,6 +201,135 @@ def create_iso(path, tree, files):
     subprocess.run(['genisoimage', '-R', '-o', path, tree], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return sha256(path.read_bytes()).hexdigest()
+
+
+
+def check_redhat_download(binary, root, public, database, tls, auth, headers, env, fixture_iso, digest):
+    route = '/settings/images/rhel'
+    assert route.encode() in request('/settings/images/add', tls=tls, headers=auth)[2]
+    assert request(route, tls=tls)[0] == 401
+    status, _, doc = request(route, tls=tls, headers=auth)
+    assert status == 200 and b'Generate Token' in doc and b'type="password"' in doc
+    assert all(f'value="{version}-{arch}"'.encode() in doc
+               for version in ('9.9', '9.8') for arch in ('amd64', 'arm64'))
+    form = {'image': '9.9-amd64', 'token': 'fixture.redhat.token'}
+    assert request(route, tls=tls, form=form, headers=auth)[0] == 403
+    for patch in ({'image': '10.3-amd64'}, {'token': 'invalid/opaque-proof'}, {'sha256': 'a'*64}):
+        status, _, doc = request(route, tls=tls, form={**form, **patch}, headers=headers)
+        assert status in (400, 422) and b'opaque-proof' not in doc
+
+    fixture_scripts = root/'redhat-scripts'
+    fixture_scripts.mkdir()
+    # Only the test runner substitutes the upstream connection. The real worker still handles
+    # credentials, allowlisting, digest verification and extraction without production overrides.
+    fixture_scripts.joinpath('prepare-pxe-media.py').write_text(f"""
+import importlib.util
+from io import BytesIO
+import json
+from pathlib import Path
+import sys
+from urllib.parse import parse_qs
+
+spec = importlib.util.spec_from_file_location("media", {str(ROOT/'docker/worker/scripts/prepare-pxe-media.py')!r})
+media = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(media)
+request = json.load(sys.stdin)
+assert request["redhat_token"] == "fixture.redhat.token"
+assert request["redhat_token"] not in sys.argv
+case = Path({str(root/'redhat-case')!r}).read_text()
+iso = Path({str(fixture_iso)!r}).read_bytes()
+calls = []
+
+class Response(BytesIO):
+    def __init__(self, status, payload=b""):
+        super().__init__(payload)
+        self.status = status
+        self.length = str(len(payload))
+
+    def getheader(self, key):
+        return self.length if key == "Content-Length" else None
+
+class RedHat:
+    def __init__(self, host, timeout):
+        self.host = host
+        calls.append(host)
+
+    def request(self, method, path, body=None, headers=None):
+        if self.host == "sso.redhat.com":
+            assert method == "POST" and path.endswith("/token")
+            assert parse_qs(body) == {{"refresh_token": ["fixture.redhat.token"],
+                                       "client_id": ["rhsm-api"], "grant_type": ["refresh_token"]}}
+            self.response = Response(400 if case == "refused" else 200, b'{{"access_token":"fixture.short.token"}}')
+        elif self.host == "api.access.redhat.com":
+            assert method == "GET" and path == "/management/v1/images/" + request["sha256"] + "/download"
+            assert headers["Authorization"] == "Bearer fixture.short.token" and body is None
+            hostname = "untrusted.invalid" if case == "redirect" else "access.cdn.redhat.com"
+            url = "https://" + hostname + "/redhat.iso?proof=opaque-proof"
+            self.response = Response(200, json.dumps({{"body": {{"href": url}}}}).encode())
+        elif self.host == "access.cdn.redhat.com":
+            assert method == "GET" and path == "/redhat.iso?proof=opaque-proof"
+            assert headers is None and body is None
+            self.response = Response(200, iso)
+        else:
+            raise AssertionError("Untrusted source contacted")
+
+    def getresponse(self):
+        return self.response
+
+    def close(self):
+        self.response.close()
+
+media.PublicHttpsConnection = RedHat
+try:
+    summary = media.prepare(request, Path({str(public)!r}), lambda percent: print(f"progress:{{percent}}", flush=True))
+except media.MediaError as error:
+    if case == "refused":
+        assert calls == ["sso.redhat.com"]
+    elif case == "redirect":
+        assert calls == ["sso.redhat.com", "api.access.redhat.com"]
+    else:
+        assert calls == ["sso.redhat.com", "api.access.redhat.com", "access.cdn.redhat.com"]
+    print(error)
+    sys.exit(1)
+print(summary)
+""", encoding='utf-8')
+    for case, expected_state, expected_progress, expected_message in [
+        ('refused', 'failed', 10, 'Jeton API Red Hat refusé'),
+        ('redirect', 'failed', 15, 'hôte HTTPS'),
+        ('mismatch', 'failed', 85, 'empreinte SHA-256'),
+        ('success', 'success', 100, 'prêt dans le menu PXE'),
+    ]:
+        (root/'redhat-case').write_text(case)
+        status, location, _ = request(route, tls=tls, form=form, headers=headers)
+        assert status == 303 and location.startswith('/jobs/')
+        job = location.rsplit('/', 1)[1]
+        key = f'media_import_request_{job}'
+        with sqlite3.connect(database) as db:
+            saved, = db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
+            assert form['token'] not in saved
+            data = json.loads(saved)
+            assert data['sha256'] == '9833bfb1888a307228cc2487912c0529d5253ffe96c79ef1a5219011e4ab067e'
+            # Substitute the synthetic ISO's content digest once catalogue selection is verified.
+            if case == 'success':
+                data['sha256'] = digest
+                db.execute('UPDATE settings SET value=? WHERE key=?', (json.dumps(data), key))
+        queued = request(location, tls=tls, headers=auth)[2]
+        assert b'<progress' in queued and (location+'/status').encode() in queued
+        subprocess.run([binary, '--run-media-import', database, job, fixture_scripts], check=True, env=env)
+        with sqlite3.connect(database) as db:
+            assert db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone() is None
+            state, percent, message = db.execute(
+                'SELECT status,progress_percent,message FROM init_jobs WHERE id=?', (job,)).fetchone()
+            assert (state, percent) == (expected_state, expected_progress), (case, state, percent, message)
+            assert expected_message in message and 'fixture.redhat.token' not in message and 'opaque-proof' not in message
+        if state == 'failed':
+            doc = request(location, tls=tls, headers=auth)[2]
+            assert b'Relancer avec un jeton Red Hat' in doc and b'/api/init-retry-job/' not in doc
+            request('/api/init-retry-job/' + job, tls=tls, form={}, headers=headers)
+            with sqlite3.connect(database) as db:
+                assert db.execute('SELECT status FROM init_jobs WHERE id=?', (job,)).fetchone() == ('failed',)
+    assert (public/'media/rhel9'/digest/'.pxe-media.json').is_file()
+    print('Verified authenticated RHEL download, private token handling, failure recovery and PXE preparation.')
 
 
 def check_media(binary, root, public, database, tls, auth, headers, env):
@@ -277,7 +365,7 @@ def check_media(binary, root, public, database, tls, auth, headers, env):
         'AppStream/repodata/repomd.xml': b'appstream', 'BaseOS/Packages/example-0^20260728.rpm': b'fixture-rpm',
     })
     assert 'SHA-256' in submit('rhel9', 'rhel9.iso', 'a'*64, expected='failed')
-    submit('rhel9', 'rhel9.iso', rhel_sha)
+    check_redhat_download(binary, root, public, database, tls, auth, headers, env, inbox/'rhel9.iso', rhel_sha)
     submit('rhel9', 'absent.iso', rhel_sha)
     prefix = f'/pxe/rhel9/{rhel_sha}/'
     assert prefix.encode() in request('/pxe/linux/amd64/grub.cfg', source=WINDOWS_CLIENT)[2]
@@ -362,6 +450,7 @@ def check_media(binary, root, public, database, tls, auth, headers, env):
 
 def verify_access(secure, private, admin, database):
     users, tokens, api = '/admin/access/users', '/admin/access/tokens', '/api/v1'
+    profile, personal = '/admin/profile', '/admin/profile/tokens'
 
     def form(path, fields, headers=admin, **kwargs):
         return request(path, **secure, headers=headers, form=fields, **kwargs)
@@ -382,11 +471,32 @@ def verify_access(secure, private, admin, database):
     assert request(users, **secure, headers=admin)[0] == 200
     assert form(users, {'action':'create', **credentials, 'scope':'devices.read'})[:2] == (303, users)
     visible = request('/admin/devices', **secure, headers=observer)
-    assert visible[0] == 200 and tokens.encode() in visible[2] and users.encode() not in visible[2]
+    assert visible[0] == 200 and personal.encode() in visible[2] and users.encode() not in visible[2]
+    assert b'class="profile-name">observer<' in visible[2] and b'action="/logout"' in visible[2]
+    assert request(profile, **secure)[0] == 401
+    identity = request(profile, **secure, headers=observer)
+    assert identity[0] == 200 and b'<h1>Mon profil</h1>' in identity[2] and b'name="current"' in identity[2]
     assert request(users, **secure, headers=observer)[0] == 403
     assert form(users, {'action':'create', 'username':'intrus', 'password':'fixture-attacker-password',
                         'admin':'1'}, observer)[0] == 403
     assert form('/machines', {'mac':'02:00:00:00:20:01'}, observer)[0] == 403
+    images_user = {'username': 'media-editor', 'password': 'fixture-media-editor-password'}
+    assert form(users, {'action': 'create', **images_user, 'scope': 'images.write'})[:2] == (303, users)
+    media_editor = {**admin, 'Authorization': 'Basic '+base64.b64encode(
+        b'media-editor:fixture-media-editor-password').decode()}
+    redhat = '/settings/images/rhel'
+    assert request(redhat, **secure, headers=observer)[0] == 403
+    assert request(redhat, **secure, headers=media_editor)[0] == 200
+    with sqlite3.connect(database) as db:
+        redhat_job, other_job = [
+            db.execute("INSERT INTO init_jobs(job_type,status) VALUES(?,'success') RETURNING id", (kind,)).fetchone()[0]
+            for kind in ('media:prepare:rhel', 'media:prepare')
+        ]
+    for suffix in ('', '/status', '/poll'):
+        assert request(f'/jobs/{redhat_job}{suffix}', **secure, headers=media_editor)[0] == 200
+        assert request(f'/jobs/{other_job}{suffix}', **secure, headers=media_editor)[0] == 403
+        assert request(f'/jobs/{redhat_job}{suffix}', **secure, headers=observer)[0] == 403
+    assert form(f'/api/init-retry-job/{redhat_job}', {}, media_editor)[0] == 403
     with sqlite3.connect(database) as db:
         owner = db.execute("SELECT id FROM users WHERE username='observer'").fetchone()[0]
         first_admin = db.execute("SELECT id FROM users WHERE username='lan-admin'").fetchone()[0]
@@ -397,12 +507,17 @@ def verify_access(secure, private, admin, database):
     assert form(tokens, {'action':'create', 'name':'test', 'days':'1','scope':'admin'}, observer)[0] == 422
     outside = {**observer, 'Origin':'https://outside.example'}
     assert form(tokens, {'action':'create', 'name':'test', 'days':'1','scope':'devices.read'}, outside)[0] == 403
-    issued = secret(form(tokens, {'action':'create','name':'Inventaire seul','days':'1','scope':'devices.read'},
+    issued = secret(form(personal, {'action':'create','name':'Inventaire seul','days':'1','scope':'devices.read'},
                          observer, response_header='Cache-Control'))
     assert issued.encode() not in request(tokens, **secure, headers=observer)[2]
     with sqlite3.connect(database) as db:
         token_id, digest = db.execute('SELECT id,secret_hash FROM api_tokens WHERE user_id=?', [owner]).fetchone()
         assert digest == sha256(issued.encode()).digest()
+    assert b'Inventaire seul' in request(personal, **secure, headers=observer)[2]
+    assert b'Inventaire seul' not in request(personal, **secure, headers=admin)[2]
+    assert b'Inventaire seul' in request(tokens, **secure, headers=admin)[2]
+    assert form(personal, {'action':'revoke','id':token_id}, admin)[0] == 404
+
     login = form('/login', credentials, response_header='Set-Cookie')
     assert login[0] == 303 and login[1]
     cookie = {'Cookie':login[1].split(';', 1)[0]}
@@ -413,11 +528,29 @@ def verify_access(secure, private, admin, database):
     assert api_call('/devices', issued, json_body={'mac':'02:00:00:00:20:01'})[0] == 403
     assert request('/admin/devices', **secure, headers=bearer(issued))[0] == 401
     assert request(api+'/devices', **private, headers=bearer(issued))[0] == 404
-    rotated = secret(form(tokens, {'action':'rotate','id':token_id,'scope':'devices.read'},
+    other = form('/login', credentials, response_header='Set-Cookie')
+    other_cookie = {'Cookie':other[1].split(';', 1)[0]}
+    browser = {**cookie, 'Origin':admin['Origin'], 'Content-Type':admin['Content-Type']}
+    new_password = 'fixture-renewed-observer-password'
+    change = {'current':credentials['password'], 'password':new_password, 'confirm':new_password}
+    assert form(profile, change, {**browser, 'Origin':'https://outside.example'})[0] == 403
+    assert form(profile, {**change, 'current':'incorrect-password'}, browser)[0] == 422
+    assert form(profile, {**change, 'confirm':'other-confirmation'}, browser)[0] == 422
+    changed = form(profile, change, browser, response_header='Set-Cookie')
+    assert changed[0] == 303 and changed[1] and changed[1].split(';', 1)[0] != cookie['Cookie']
+    renewed = {'Cookie':changed[1].split(';', 1)[0]}
+    confirmed = request(profile+'?password=updated', **secure, headers=renewed)
+    assert confirmed[0] == 200 and 'Mot de passe modifié'.encode() in confirmed[2]
+    assert request(profile, **secure, headers=other_cookie)[0] == 401
+    assert request(profile, **secure, headers=cookie)[0] == 401
+    assert request(profile, **secure, headers=observer)[0] == 401
+    observer['Authorization'] = 'Basic '+base64.b64encode(f'observer:{new_password}'.encode()).decode()
+    assert api_call('/devices', issued)[0] == 200
+    rotated = secret(form(personal, {'action':'rotate','id':token_id,'scope':'devices.read'},
                            observer, response_header='Cache-Control'))
     assert rotated != issued and api_call('/devices', issued)[0] == 401
     assert api_call('/devices', rotated)[0] == 200
-    assert form(tokens, {'action':'revoke','id':token_id}, observer)[:2] == (303, tokens)
+    assert form(personal, {'action':'revoke','id':token_id}, observer)[:2] == (303, personal)
     assert api_call('/devices', rotated)[0] == 401
 
     operator = secret(form(tokens, [('action','create'),('name','Automatisation'),('days','2'),
@@ -493,6 +626,9 @@ def verify_authentik_access(binary, config, secure, origin, env):
             assert request('/admin/devices', **secure, headers=viewer)[0] == 200
             assert request('/admin/devices', **secure, headers={**viewer,'X-Forwarded-User':'SSO-VIEWER'})[0] == 403
             assert request(users, **secure, headers=viewer)[0] == 403
+            profile = request('/admin/profile', **secure, headers=viewer)
+            assert profile[0] == 200 and b'Authentik' in profile[2] and b'name="current"' not in profile[2]
+            assert request('/admin/profile', **secure, headers=viewer, form={'current':'test'})[0] == 403
             assert request('/machines', **secure, headers=viewer, form={'mac':'02:00:00:00:20:03'})[0] == 403
         finally:
             service.terminate()
@@ -577,33 +713,97 @@ def check_lan(binary, root, tls, env):
             assert request('/login', **secure, headers=headers, form=credentials)[0] == 303
             authorization = base64.b64encode(b'lan-admin:fixture-lan-password').decode()
             admin = {'Authorization': 'Basic ' + authorization, **headers}
-            wizard_page('/init/network', 'Réseau', headers=admin)
+            _, network_page = wizard_page('/init/network', 'Réseau', headers=admin)
+            assert b'name="role" value="proxy" checked' in network_page
+            assert b'Ajouter PXE au DHCP existant' in network_page
+            assert b'Votre DHCP continue' in network_page
+            assert b'<option value="" selected disabled>' in network_page
+            for address in (LAN, LAN_CLIENT):
+                assert f'<option value="lo|{address}">'.encode() in network_page
+            assert b'lo|127.0.0.1' not in network_page
             plan = {'role':'proxy', 'pxe_interface':'lo', 'pxe_ip':LAN, 'pxe_subnet':'10.77.0.0/24'}
+            assert request('/init/network', **secure, form={**plan, 'network_address': 'other|10.77.0.1'},
+                           headers=admin)[0] == 422
+            detected = {'role': 'proxy', 'network_address': f'lo|{LAN}', 'pxe_ip': 'invalid'}
+            assert request('/init/network', **secure, form=detected, headers=admin)[:2] == (303,'/init/images')
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                values = dict(db.execute('SELECT key,value FROM settings'))
+                assert json.loads(values['rust_wizard_network']) == {
+                    'role': 'proxy', 'interface': 'lo', 'address': LAN, 'subnet': f'{LAN}/32',
+                }
+                assert values.get('pxe_enabled') != 'on' and values.get('dhcp_proxy_enabled') != 'on'
+            _, resumed_network = wizard_page('/init/network', 'Réseau', headers=admin)
+            assert f'<option value="lo|{LAN}" selected>'.encode() in resumed_network
             assert request('/init/network', **secure, form=plan, headers=admin)[:2] == (303,'/init/images')
+            _, manual_network = wizard_page('/init/network', 'Réseau', headers=admin)
+            assert b'<option value="" selected>Saisie manuelle</option>' in manual_network
+            assert b'<details open><summary>Saisir les' in manual_network
+            _, loading = wizard_page('/init/images', 'Images', headers=admin)
+            assert 'Chargement du catalogue des systèmes'.encode() in loading
+            assert b'<select' not in loading and b'data-active="yes"' in loading
+            status_path = '/init/images/status'
+            assert request(status_path, **secure)[0] == 401
+            _, policy, _ = request('/init/images', **secure, headers=admin,
+                                    response_header='Content-Security-Policy')
+            digest = base64.b64encode(sha256(re.search(rb'<script>(.*?)</script>', loading, re.S)[1]).digest()).decode()
+            assert f"script-src 'sha256-{digest}'" in policy.split('; ')
+            assert "connect-src 'self'" in policy.split('; ')
+
+            def image_state():
+                code, cache, body = request(status_path, **secure, headers=admin, response_header='Cache-Control')
+                assert code == 200 and cache == 'no-store'
+                return json.loads(body)
+
             with sqlite3.connect(runtime/'install.sqlite') as db:
+                db.execute("UPDATE init_jobs SET status='failed' WHERE job_type='bootstrap:refresh_catalog_v2'")
+            state = image_state()
+            assert not state['active'] and 'Recharger le catalogue' in state['catalog']
+            assert request('/init/images', **secure, form={'action': 'refresh'}, headers=admin)[:2] == (303, '/init/images')
+            assert image_state()['active']
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                db.execute("UPDATE init_jobs SET status='success' WHERE job_type='bootstrap:refresh_catalog_v2'")
                 db.executemany(
-                    "INSERT INTO catalog_entries(id,distro,version_full,arch,extract_method) VALUES(?,?,?,'amd64',?)",
-                    [(9001, 'debian', '13.5.0', 'direct'), (9002, 'ubuntu', '24.04.5', 'iso_extract')]
-                    + [(9003+i, distro, version, 'direct')
-                       for i, (distro, (version, _)) in enumerate(RPM_REPOSITORIES.items())],
+                    """INSERT INTO catalog_entries(distro,version_full,arch,major,channel,extract_method)
+                       VALUES(?,?,?,?,?,?)""",
+                    [
+                        ('debian', '12.14.0', 'amd64', 12, 'oldstable', 'direct'),
+                        ('debian', '13.5.0', 'amd64', 13, 'stable', 'direct'),
+                        ('ubuntu', '24.04.5', 'arm64', 24, 'stable', 'iso_extract'),
+                        ('centos', '10', 'amd64', 10, 'stable', 'direct'),
+                    ],
                 )
-            _, picker = wizard_page('/init/images', 'Réseau', headers=admin)
-            rescue = re.search(rb'name="image">(.*?)</select>', picker, re.S)[1]
-            assert b'9001' in rescue and b'9002' not in rescue and b'9003' not in rescue
-            for expected in (b'Ubuntu Server', b'CentOS Stream', b'AlmaLinux', b'Rocky Linux', b'Fedora Server'):
-                assert expected in picker
-            assert request('/init/images', **secure, form={'image': '9002'}, headers=admin)[0] == 422
-            assert request('/init/images', **secure, form=[('image', '9001'), ('extra[]', '9002'),
-                           ('extra[]', '9999')], headers=admin)[0] == 422
-            with sqlite3.connect(runtime/'install.sqlite') as db:
-                assert db.execute("SELECT COUNT(*) FROM os_images").fetchone() == (0,)
-            images = [('image', '9001')] + [('extra[]', str(i)) for i in range(9002, 9007)]
+            state = image_state()
+            assert not state['active'] and 'Ubuntu Server' in state['catalog'] and 'ARM 64 bits' in state['catalog']
+            assert 'image:debian:13.5.0:amd64' not in state['catalog']
+            assert request('/init/images', **secure, form={'action': 'prepare', 'image:centos:10:amd64': 'on'},
+                           headers=admin)[0] == 422
+            selection = {'action': 'prepare', 'image:debian:12.14.0:amd64': 'on', 'image:ubuntu:24.04.5:arm64': 'on'}
+            assert request('/init/images', **secure, form=selection,
+                           headers={**admin, 'Origin': 'https://outside.example'})[0] == 403
             for _ in range(2):
-                assert request('/init/images', **secure, form=images, headers=admin)[:2] == (303, '/init/done')
+                assert request('/init/images', **secure, form=selection, headers=admin)[:2] == (303, '/init/images')
             with sqlite3.connect(runtime/'install.sqlite') as db:
-                assert db.execute("SELECT COUNT(*) FROM os_images WHERE enabled=1 AND status='pending'").fetchone() == (6,)
+                images = db.execute('SELECT distro,version_full,arch,status FROM os_images ORDER BY id').fetchall()
+                assert images[0] == ('debian', '13.5.0', 'amd64', 'pending') and len(images) == 3
+                assert ('ubuntu', '24.04.5', 'arm64', 'pending') in images
+                db.execute("UPDATE os_images SET status='downloading', progress_percent=37 WHERE version_full='13.5.0'")
+            state = image_state()
+            assert state['active'] and not state['ready'] and 'value="37"' in state['downloads']
+            assert request('/init/images', **secure, form={'action': 'continue'}, headers=admin)[:2] == (303, '/init/images')
             _, pending_image = wizard_page('/init/done', 'Validation', headers=admin)
             assert b'name="confirmation"' not in pending_image
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                db.execute("UPDATE os_images SET status='failed' WHERE version_full='13.5.0'")
+            assert image_state()['retry']
+            assert request('/init/images', **secure, form={'action': 'retry'}, headers=admin)[:2] == (303, '/init/images')
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                assert db.execute("SELECT status,progress_percent FROM os_images WHERE version_full='13.5.0'").fetchone() == ('pending', 0)
+                db.execute("UPDATE os_images SET status='downloaded' WHERE version_full='13.5.0'")
+            state = image_state()
+            assert state['ready'] and state['active'] and 'Ubuntu Server' in state['downloads']
+            assert request('/init/images', **secure, form={'action': 'continue'}, headers=admin)[:2] == (303, '/init/done')
+            _, ready_summary = wizard_page('/init/done', 'Validation', headers=admin)
+            assert b'name="confirmation" value="yes"' in ready_summary
             assert request('/init/network', **secure, form={'role':'console'}, headers=admin)[:2] == (303,'/init/done')
             _, summary = wizard_page('/init/done', 'Validation', headers=admin)
             assert b'name="confirmation" value="yes"' in summary and b'Console seule' in summary
@@ -616,13 +816,100 @@ def check_lan(binary, root, tls, env):
             digest = base64.b64encode(sha256(script).digest()).decode()
             assert f"script-src 'sha256-{digest}'" in csp.split('; ')
             assert request('/pxe/linux/amd64/grub.cfg', **private)[0] == 404
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                draft, = db.execute("SELECT value FROM settings WHERE key='rust_wizard_network'").fetchone()
+            result = request('/init/complete', **secure, headers=admin,
+                             form={'confirmation': 'yes', 'plan': draft, 'image': ''})
+            assert result[:2] == (303, '/admin/devices')
             verify_access(secure, private, admin, runtime/'install.sqlite')
+            verify_restored_console(secure, private, admin, runtime/'install.sqlite', plan)
         finally:
             service.terminate()
     verify_authentik_access(binary, config, secure, origin, env)
     env['PXE_ADMIN_BIND'] = '127.0.0.1'
     assert subprocess.check_output([binary, '--admin-listen-addresses'], env=env, text=True).splitlines() == ['127.0.0.1']
     print('Default LAN console, HTTPS setup, login, origin checks and explicit loopback verified.')
+
+
+def verify_restored_console(secure, private, admin, database, plan):
+    network = '/settings/network'
+    image_status = request('/api/images-status', **secure, headers=admin)
+    assert image_status[0] == 200
+    assert b'data-state="pending"' in image_status[2] and b'data-state="downloaded"' in image_status[2]
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE os_images SET status='downloading',progress_percent=37 WHERE distro='ubuntu'")
+    download = request('/api/images-status', **secure, headers=admin)[2]
+    assert b'<progress value="37" max="100"' in download and b'37 %' in download
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE os_images SET status='pending',progress_percent=0 WHERE distro='ubuntu'")
+    images = request('/settings/images', **secure, headers=admin)[2]
+    assert b'/console-assets/debian.svg' in images and b'/console-assets/ubuntu.svg' in images
+    assert b'/settings/images/media?kind=windows-iso' in images and b'Confirmer la suppression' in images
+    windows_media = request('/settings/images/media?kind=windows-iso', **secure, headers=admin)[2]
+    assert b'<option value="windows-iso" selected>' in windows_media
+    assert request(network, **private)[0] == 404
+    assert request(network, **secure)[0] == 401
+    assert request('/init/network?from=settings', **secure, headers=admin)[:2] == (302, network)
+    assert b'Console seule' in request('/overview', **secure, headers=admin)[2]
+    network_page = request(network, **secure, headers=admin)[2]
+    assert b'name="dhcp_proxy_cidr"' in network_page
+    assert b'name="role" value="console" checked' in network_page
+    assert request(network, **secure, form=plan,
+                   headers={**admin, 'Origin': 'https://outside.example'})[0] == 403
+    assert request(network, **secure, form={**plan, 'dhcp_proxy_cidr': '10.77.1.0/24'}, headers=admin)[0] == 422
+    proxy = {**plan, 'dhcp_proxy_cidr': '10.77.0.0/25'}
+    assert request(network, **secure, form=proxy, headers=admin)[:2] == (303, network)
+    with sqlite3.connect(database) as db:
+        values = dict(db.execute('SELECT key,value FROM settings'))
+        assert values['pxe_enabled'] == 'on' and values['dhcp_proxy_enabled'] == 'on'
+        assert values['dhcp_proxy_netmask'] == '255.255.255.128' and values['pxe_subnet'] == '10.77.0.0/24'
+        jobs = json.loads(values['appliance_last_job_ids'])
+        assert [db.execute('SELECT job_type FROM init_jobs WHERE id=?', [job]).fetchone()[0] for job in jobs] == [
+            'bootstrap:build_grub', 'bootstrap:render_templates', 'bootstrap:restart_dnsmasq',
+        ]
+    assert b'PXE avec proxy DHCP' in request('/overview', **secure, headers=admin)[2]
+    assert b'value="10.77.0.0/25"' in request(network, **secure, headers=admin)[2]
+    assert request(network, **secure, form={'role': 'console'}, headers=admin)[:2] == (303, network)
+    with sqlite3.connect(database) as db:
+        values = dict(db.execute('SELECT key,value FROM settings'))
+        assert values['pxe_enabled'] == 'off' and values['pxe_ip'] == LAN
+        assert len(json.loads(values['appliance_last_job_ids'])) == 1
+        preset = db.execute(
+            """INSERT INTO presets(name,distro,codename,admin_user_login,admin_user_pwhash,advanced_config_json)
+               VALUES('modèle-source','debian','trixie','setup','fixture-hash',?) RETURNING id""",
+            [json.dumps({'apt': {'non_free': True}, 'packages': {'pkgsel_include': []}})],
+        ).fetchone()[0]
+    source = f'/presets/{preset}'
+    options, copier = source+'/options', source+'/duplicate'
+    assert b'name="keymap"' in request(options, **secure, headers=admin)[2]
+    assert request(options, **secure, form={'hostname': 'https://bad.invalid'}, headers=admin)[0] == 422
+    assert request(options, **secure, form={'locale': 'en_US.UTF-8', 'keymap': 'us', 'zone': 'UTC',
+                                           'pkgsel_include': ''}, headers=admin)[:2] == (303, options)
+    status, copy, _ = request(copier, **secure, form={'name': 'modèle-copie'}, headers=admin)
+    assert status == 303 and copy != source and copy.startswith('/presets/')
+    assert request(copier, **secure, form={'name': 'modèle-copie'}, headers=admin)[0] == 409
+    with sqlite3.connect(database) as db:
+        rows = db.execute('SELECT advanced_config_json,admin_user_pwhash FROM presets ORDER BY id').fetchall()
+        assert len(rows) == 2 and rows[0] == rows[1] and rows[0][1] == 'fixture-hash'
+        config = json.loads(rows[0][0])
+        assert config['apt'] == {'non_free': True}
+        assert config['packages'] == {'pkgsel_include': []}
+        assert config['localization'] == {'locale': 'en_US.UTF-8', 'keymap': 'us'}
+        simple = db.execute(
+            """INSERT INTO presets(name,distro,codename,admin_user_login,admin_user_pwhash)
+               VALUES('modele-guide','debian','trixie','setup','fixture-hash') RETURNING id""",
+        ).fetchone()[0]
+        db.execute("INSERT INTO machines(mac,hostname,status) VALUES('02:00:00:00:20:07','server_xyz','installed')")
+        db.execute("INSERT INTO machines(mac,hostname,status) VALUES('02:00:00:00:20:08','server-xyz','discovered')")
+    guided = f'/presets/{simple}/options'
+    assert request(guided, **secure, form={'keymap': 'us'}, headers=admin)[:2] == (303, guided)
+    preset_list = request('/presets', **secure, headers=admin)[2]
+    assert re.search(rb'modele-guide</a></td><td>[^<]+</td><td>Compatible', preset_list)
+    inventory = request('/admin/devices?' + urlencode({'q': 'SERVER_'}), **secure, headers=admin)[2]
+    assert b'server_xyz' in inventory and b'server-xyz' not in inventory
+    inventory = request('/admin/devices?status=discovered', **secure, headers=admin)[2]
+    assert b'server-xyz' in inventory and b'server_xyz' not in inventory
+    print('Restored network settings, overview, inventory filters, preset options and duplication verified.')
 
 
 def main(binary):

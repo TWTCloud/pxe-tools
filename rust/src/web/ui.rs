@@ -5,17 +5,31 @@ use super::{
     admin::escape,
     bytes, Reply,
 };
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use hyper::{header, Response, StatusCode};
 use sha2::{Digest, Sha256};
-use std::{cell::Cell, fmt::Write, sync::LazyLock};
+use std::{cell::RefCell, fmt::Write, sync::LazyLock};
 
 const MARK: &str = "/console-assets/mark.svg?v=2";
+const STYLE: &[u8] = include_bytes!("ui/style.css");
+static STYLE_VERSION: LazyLock<String> =
+    LazyLock::new(|| URL_SAFE_NO_PAD.encode(&Sha256::digest(STYLE)[..9]));
 const NAVIGATION_SCRIPT: &str = include_str!("ui/navigation.js");
 const SETUP_COMMAND_SCRIPT: &str = include_str!("ui/setup-command.js");
+const WIZARD_IMAGES_SCRIPT: &str = include_str!("ui/wizard-images.js");
 const POLICY: &str = "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
-static CONSOLE_POLICY: LazyLock<String> = LazyLock::new(|| script_policy(NAVIGATION_SCRIPT));
+static CONSOLE_POLICY: LazyLock<String> =
+    LazyLock::new(|| format!("{}; connect-src 'self'", script_policy(NAVIGATION_SCRIPT)));
 static SETUP_POLICY: LazyLock<String> = LazyLock::new(|| script_policy(SETUP_COMMAND_SCRIPT));
+static WIZARD_IMAGES_POLICY: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}; connect-src 'self'",
+        script_policy(WIZARD_IMAGES_SCRIPT)
+    )
+});
 
 fn script_policy(script: &str) -> String {
     let digest = STANDARD.encode(Sha256::digest(script.as_bytes()));
@@ -24,7 +38,10 @@ fn script_policy(script: &str) -> String {
 
 const MENU: &str = "M4 6h16M4 12h16M4 18h16";
 const CLOSE: &str = "m6 6 12 12M18 6 6 18";
-const LOGOUT: &str = r#"<form method="post" action="/logout"><button class="button button--quiet">Se déconnecter</button></form>"#;
+const PERSON: &str = "M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M14 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0z";
+const KEY: &str = "M21 7a5 5 0 0 1-6.4 4.8L7 19H3v-4l7.2-7.6A5 5 0 1 1 21 7zm-5 0h.01";
+const LOGOUT: &str = "M10 4H4v16h6m-1-8h11m-4-4 4 4-4 4";
+const CHEVRON: &str = "m6 9 6 6 6-6";
 
 fn brand() -> String {
     format!(
@@ -37,6 +54,7 @@ pub(super) enum WizardStep {
     Storage,
     Account,
     Network,
+    Images,
     Confirmation,
 }
 
@@ -47,6 +65,16 @@ pub(super) fn wizard(
     status: StatusCode,
 ) -> Reply {
     wizard_document(step, title, content, status, None)
+}
+
+pub(super) fn wizard_images(content: &str) -> Reply {
+    wizard_document(
+        Some(WizardStep::Images),
+        "Images de démarrage",
+        content,
+        StatusCode::OK,
+        Some((WIZARD_IMAGES_SCRIPT, WIZARD_IMAGES_POLICY.as_str())),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -105,6 +133,7 @@ fn wizard_document(
             (WizardStep::Storage, "Stockage"),
             (WizardStep::Account, "Compte"),
             (WizardStep::Network, "Réseau"),
+            (WizardStep::Images, "Images"),
             (WizardStep::Confirmation, "Validation"),
         ] {
             let current = if step == phase {
@@ -140,10 +169,26 @@ pub(super) fn wizard_error(
     wizard(Some(step), "Vérifiez la configuration", &html, status)
 }
 
-fn icon(path: &str) -> String {
+pub(super) fn icon(path: &str) -> String {
     format!(
         r#"<svg class="nav-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{path}"/></svg>"#
     )
+}
+
+pub(super) fn status_badge(output: &mut String, status: &str, label: &str) {
+    let tone = match status {
+        "success" | "downloaded" => "success",
+        "running" | "downloading" => "active",
+        "failed" | "error" => "error",
+        _ => "neutral",
+    };
+    write!(
+        output,
+        r#"<span class="status-badge status-badge--{tone}">"#
+    )
+    .expect("write to String");
+    escape(output, label);
+    output.push_str("</span>");
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -158,6 +203,9 @@ pub(super) enum ConsoleSection {
     Certificates,
     Accounts,
     Tokens,
+    Profile,
+    Overview,
+    Updates,
 }
 
 impl ConsoleSection {
@@ -169,9 +217,10 @@ impl ConsoleSection {
             Self::Jobs => account.allows(JobsRead),
             Self::Presets => account.allows(PresetsRead),
             Self::Images => account.allows(ImagesRead),
-            Self::Settings => account.allows(SettingsRead),
+            Self::Settings | Self::Overview => account.allows(SettingsRead),
             Self::Certificates | Self::Accounts => account.admin,
-            Self::Tokens => true,
+            Self::Updates => account.admin && crate::apt_updates::enabled(),
+            Self::Tokens | Self::Profile => true,
         }
     }
 
@@ -191,6 +240,12 @@ const NAVIGATION: [(&str, &[NavLink]); 3] = [
                 "Inventaire",
                 ConsoleSection::Devices,
                 "M3 4h18v12H3zM8 20h8m-4-4v4",
+            ),
+            (
+                super::overview::ROUTE,
+                "Vue d’ensemble",
+                ConsoleSection::Overview,
+                "M3 3h7v7H3zm11 0h7v7h-7zM3 14h7v7H3zm11 0h7v7h-7z",
             ),
             (
                 "/activity",
@@ -233,38 +288,41 @@ const NAVIGATION: [(&str, &[NavLink]); 3] = [
                 ConsoleSection::Certificates,
                 "m12 3 8 3v5c0 5-3 8-8 10-5-2-8-5-8-10V6zm-3 9 2 2 4-4",
             ),
+            (
+                super::updates::ROUTE,
+                "Mises à jour",
+                ConsoleSection::Updates,
+                "M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4",
+            ),
         ],
     ),
     (
         "Accès",
-        &[
-            (
-                super::access::USERS,
-                "Comptes et droits",
-                ConsoleSection::Accounts,
-                "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-4M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0zm5-4a4 4 0 0 1 0 8",
-            ),
-            (
-                super::access::TOKENS,
-                "Jetons d’API",
-                ConsoleSection::Tokens,
-                "M21 7a5 5 0 0 1-6.4 4.8L7 19H3v-4l7.2-7.6A5 5 0 1 1 21 7zm-5 0h.01",
-            ),
-        ],
+        &[(
+            super::access::USERS,
+            "Comptes et droits",
+            ConsoleSection::Accounts,
+            "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-4M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0zm5-4a4 4 0 0 1 0 8",
+        )],
     ),
 ];
 
-thread_local! {
-    // Rendering runs synchronously after authorization on the blocking worker.
-    // The mask only controls presentation and never authorizes an operation.
-    static NAVIGATION_MASK: Cell<u16> = const { Cell::new(u16::MAX) };
+struct Navigation {
+    mask: u16,
+    account: Account,
 }
 
-pub(super) struct NavigationGuard(u16);
+thread_local! {
+    // Rendering runs synchronously on the blocking worker. This state only
+    // controls presentation and never authorizes an operation.
+    static NAVIGATION_CONTEXT: RefCell<Option<Navigation>> = const { RefCell::new(None) };
+}
+
+pub(super) struct NavigationGuard(Option<Navigation>);
 
 impl Drop for NavigationGuard {
     fn drop(&mut self) {
-        NAVIGATION_MASK.set(self.0);
+        NAVIGATION_CONTEXT.replace(self.0.take());
     }
 }
 
@@ -274,7 +332,10 @@ pub(super) fn navigation_for(account: &Account) -> NavigationGuard {
         .flat_map(|(_, links)| *links)
         .filter(|(_, _, section, _)| section.visible_to(account))
         .fold(0, |mask, (_, _, section, _)| mask | section.bit());
-    NavigationGuard(NAVIGATION_MASK.replace(mask))
+    NavigationGuard(NAVIGATION_CONTEXT.replace(Some(Navigation {
+        mask,
+        account: account.clone(),
+    })))
 }
 
 pub(super) fn home(account: &Account) -> &'static str {
@@ -282,22 +343,70 @@ pub(super) fn home(account: &Account) -> &'static str {
         .iter()
         .flat_map(|(_, links)| *links)
         .find(|(_, _, section, _)| section.visible_to(account))
-        .map_or(super::access::TOKENS, |(path, ..)| *path)
+        .map_or(super::profile::ROUTE, |(path, ..)| *path)
+}
+
+fn profile_menu(account: &Account, section: ConsoleSection) -> String {
+    let mut html = format!(
+        r#"<details class="profile-menu"><summary class="button button--quiet">{}<span class="profile-name">"#,
+        icon(PERSON),
+    );
+    escape(&mut html, &account.username);
+    write!(
+        html,
+        r#"</span>{}</summary><div class="profile-options">"#,
+        icon(CHEVRON)
+    )
+    .expect("write to String");
+    let mut link = |path, label, item, glyph| {
+        let current = if section == item {
+            r#" aria-current="page""#
+        } else {
+            ""
+        };
+        write!(
+            html,
+            r#"<a class="profile-option" href="{path}"{current}>{}<span>{label}</span></a>"#,
+            icon(glyph)
+        )
+        .expect("write to String");
+    };
+    link(
+        super::profile::ROUTE,
+        "Mon profil",
+        ConsoleSection::Profile,
+        PERSON,
+    );
+    if account.id.is_some() {
+        link(
+            super::access::PERSONAL_TOKENS,
+            "Mes jetons d’API",
+            ConsoleSection::Tokens,
+            KEY,
+        );
+    }
+    if !account.is_external() {
+        write!(html, r#"<form method="post" action="/logout"><button type="submit" class="profile-option">{}<span>Se déconnecter</span></button></form>"#, icon(LOGOUT))
+            .expect("write to String");
+    }
+    html.push_str("</div></details>");
+    html
 }
 
 pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply {
-    let logout = matches!(
-        std::env::var("AUTH_MODE").unwrap_or_default().as_str(),
-        "" | "local"
-    );
     let brand = brand();
-    let mask = NAVIGATION_MASK.get();
+    let (mask, profile) = NAVIGATION_CONTEXT.with_borrow(|context| {
+        context.as_ref().map_or_else(
+            || (u16::MAX, String::new()),
+            |nav| (nav.mask, profile_menu(&nav.account, section)),
+        )
+    });
     let show = |section: ConsoleSection| section.bit() & mask != 0;
     let home = NAVIGATION
         .iter()
         .flat_map(|(_, links)| *links)
         .find(|(_, _, section, _)| show(*section))
-        .map_or(super::access::TOKENS, |(path, ..)| *path);
+        .map_or(super::profile::ROUTE, |(path, ..)| *path);
     let mut layout = String::from(
         r##"<a class="skip-link" href="#main">Aller au contenu</a><header class="masthead">"##,
     );
@@ -308,9 +417,7 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
         icon(MENU),
     )
     .expect("write to String");
-    if logout {
-        layout.push_str(LOGOUT);
-    }
+    layout.push_str(&profile);
     let mut navigation = String::new();
     for (group, links) in NAVIGATION {
         if !links.iter().any(|(_, _, item, _)| show(*item)) {
@@ -339,14 +446,10 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
         layout,
         r#"</header><dialog id="mobile-navigation" class="mobile-drawer" aria-label="Navigation PXE Tools">
 <div class="drawer-body"><div class="drawer-header">{brand}<form method="dialog"><button type="submit" class="button button--quiet drawer-close" aria-label="Fermer le menu" autofocus>{}</button></form></div>
-<nav class="rail" aria-label="Navigation principale">{navigation}</nav>"#,
+{profile}<nav class="rail" aria-label="Navigation principale">{navigation}</nav>"#,
         icon(CLOSE)
     )
     .expect("write to String");
-    if logout {
-        write!(layout, r#"<footer class="drawer-footer">{LOGOUT}</footer>"#)
-            .expect("write to String");
-    }
     write!(
         layout,
         r#"</div></dialog><div class="workspace"><nav class="rail" aria-label="Navigation principale">{navigation}</nav><main id="main" class="console-main" tabindex="-1"><h1>"#
@@ -354,6 +457,9 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
     .expect("write to String");
     escape(&mut layout, title);
     layout.push_str("</h1>");
+    if show(ConsoleSection::Updates) && section != ConsoleSection::Updates {
+        layout.push_str(r#"<p data-update-notice role="status"><a href="/settings/updates" hidden>Une mise à jour de PXE Tools est disponible</a></p>"#);
+    }
     layout.push_str(content);
     layout.push_str("</main></div>");
     document(
@@ -392,10 +498,11 @@ fn document(
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>"#,
     );
     escape(&mut html, title);
+    let style_version = STYLE_VERSION.as_str();
     write!(
         html,
         r#" · PXE Tools</title><link rel="icon" type="image/svg+xml" href="{MARK}">
-<link rel="stylesheet" href="/console-assets/style.css?v=8"></head><body class="{class}">{layout}"#
+<link rel="stylesheet" href="/console-assets/style.css?v={style_version}"></head><body class="{class}">{layout}"#
     )
     .expect("write to String");
     let policy = if let Some((source, policy)) = script {
@@ -420,7 +527,7 @@ fn document(
 
 pub(super) fn asset(path: &str, head: bool) -> Option<Reply> {
     let (kind, data): (&str, &'static [u8]) = match path {
-        "/console-assets/style.css" => ("text/css; charset=utf-8", include_bytes!("ui/style.css")),
+        "/console-assets/style.css" => ("text/css; charset=utf-8", STYLE),
         "/console-assets/mark.svg" => (
             "image/svg+xml",
             include_bytes!("../../../app/public/favicon.svg"),
@@ -428,6 +535,35 @@ pub(super) fn asset(path: &str, head: bool) -> Option<Reply> {
         "/console-assets/mona.woff2" => (
             "font/woff2",
             include_bytes!("../../../app/public/fonts/mona-sans-latin-wght-normal.woff2"),
+        ),
+        "/console-assets/chevron.svg" => ("image/svg+xml", include_bytes!("ui/chevron.svg")),
+        "/console-assets/almalinux.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/almalinux.svg"),
+        ),
+        "/console-assets/centos.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/centos.svg"),
+        ),
+        "/console-assets/fedora.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/fedora.svg"),
+        ),
+        "/console-assets/proxmox.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/proxmox.svg"),
+        ),
+        "/console-assets/rocky.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/rocky.svg"),
+        ),
+        "/console-assets/debian.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/debian.svg"),
+        ),
+        "/console-assets/ubuntu.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../app/public/img/distros/ubuntu.svg"),
         ),
         "/console-assets/server-room.webp" => ("image/webp", include_bytes!("ui/server-room.webp")),
         _ => return None,

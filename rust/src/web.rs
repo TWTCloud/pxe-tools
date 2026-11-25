@@ -19,11 +19,14 @@ mod images;
 mod jobs;
 mod linux_boot;
 mod onboarding;
+mod overview;
 mod presets;
+mod profile;
 mod sessions;
 mod settings;
 mod setup;
 mod ui;
+mod updates;
 mod winpe;
 
 pub(crate) use setup::adopt_existing_database;
@@ -564,7 +567,10 @@ async fn dispatch(
             .login(&parts, peer, &site.database, Some(form))
             .await;
     }
-    if matches!(path, access::USERS | access::TOKENS) {
+    if matches!(
+        path,
+        access::USERS | access::TOKENS | access::PERSONAL_TOKENS | profile::ROUTE
+    ) {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
@@ -581,10 +587,10 @@ async fn dispatch(
         } else {
             return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
         };
-        let action = if path == access::USERS {
-            admin::Action::Users(form)
-        } else {
-            admin::Action::Tokens(form)
+        let action = match path {
+            access::USERS => admin::Action::Users(form),
+            profile::ROUTE => admin::Action::Profile(form),
+            _ => admin::Action::Tokens(form, path == access::PERSONAL_TOKENS),
         };
         return site.admin.serve(&parts, peer, &site.database, action).await;
     }
@@ -595,6 +601,20 @@ async fn dispatch(
         return site
             .admin
             .serve(&parts, peer, &site.database, admin::Action::Devices)
+            .await;
+    }
+    if path == overview::ROUTE && readable {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        return site
+            .admin
+            .serve(
+                &parts,
+                peer,
+                &site.database,
+                admin::Action::Overview(site.pxe_ip),
+            )
             .await;
     }
     if path == "/machines" && readable {
@@ -795,6 +815,14 @@ async fn dispatch(
             )
             .await;
     }
+    if secure
+        && readable
+        && path == "/init/network"
+        && form_urlencoded::parse(parts.uri.query().unwrap_or_default().as_bytes())
+            .any(|(name, value)| name == "from" && value == "settings")
+    {
+        return setup::redirect(StatusCode::FOUND, "/settings/network");
+    }
     if onboarding::is_route(path) {
         if !secure || !setup_allowed {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
@@ -804,7 +832,8 @@ async fn dispatch(
             if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
-            match read_form(&parts.headers, body, 2048).await {
+            let limit = if path == "/init/images" { 4096 } else { 2048 };
+            match read_form(&parts.headers, body, limit).await {
                 Ok(form) => Some(form),
                 Err(reply) => return reply,
             }
@@ -823,7 +852,7 @@ async fn dispatch(
             )
             .await;
     }
-    if let Some(route) = images::Route::for_path(path) {
+    if let Some(route) = images::Route::for_path(path, parts.uri.query().unwrap_or_default()) {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }

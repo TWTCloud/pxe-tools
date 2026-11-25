@@ -604,12 +604,13 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
             "Image Debian indisponible pour cet appareil\n",
         ));
     };
-    let Some((login, password, fullname, keys)) = tx.query_row(
-        &format!("SELECT admin_user_login,admin_user_pwhash,admin_user_fullname,admin_user_pubkeys FROM presets
+    let Some((login, password, fullname, keys, advanced)) = tx.query_row(
+        &format!("SELECT admin_user_login,admin_user_pwhash,admin_user_fullname,admin_user_pubkeys,advanced_config_json FROM presets
                  WHERE id=? AND {GUIDED} AND (version_full IS NULL OR version_full='' OR version_full=?)"),
         params![selection.preset, version],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-                   row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?)),
+                   row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
+                   row.get::<_, Option<String>>(4)?)),
     ).optional()? else {
         return Ok(plain(StatusCode::CONFLICT, "Modèle incompatible ou indisponible\n"));
     };
@@ -636,6 +637,9 @@ fn schedule(path: &Path, id: i64, form: &[u8], username: &str) -> Result<Reply, 
         "admin_user_login":login,"admin_user_pwhash":password,"admin_user_fullname":fullname,
         "admin_user_pubkeys":keys,"admin_user_groups":"sudo",
     });
+    if let Some(advanced) = advanced.filter(|raw| !matches!(raw.as_str(), "" | "{}" | "[]")) {
+        snapshot["advanced_config_json"] = json!(advanced);
+    }
     snapshot
         .as_object_mut()
         .expect("installation object")

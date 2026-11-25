@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod options;
+
 use super::{
     admin::escape,
     bytes, plain,
@@ -18,7 +20,22 @@ pub(super) const GUIDED: &str = "distro='debian' AND variant='debian' AND networ
      AND partition_mode='default' AND root_login_mode='disabled'
      AND COALESCE(pre_wipe_mode,'aucun') IN ('aucun','none') AND COALESCE(pre_wipe_mode_json,'')=''
      AND COALESCE(ansible_role,'')='' AND COALESCE(ansible_extra_vars,'')=''
-     AND COALESCE(advanced_config_json,'') IN ('','{}','[]')
+     AND CASE WHEN COALESCE(advanced_config_json,'') IN ('','{}','[]') THEN 1
+         WHEN json_valid(advanced_config_json) THEN json_type(advanced_config_json)='object'
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(advanced_config_json) section
+             WHERE section.type<>'object' OR section.key NOT IN ('localization','timezone','mirror','packages')
+               OR EXISTS (
+                 SELECT 1 FROM json_each(CASE WHEN section.type='object' THEN section.value ELSE '{}' END) option
+                 WHERE NOT (
+                   (section.key='localization' AND option.key IN ('locale','keymap') AND option.type='text')
+                   OR (section.key='timezone' AND option.key IN ('zone','ntp_server') AND option.type='text')
+                   OR (section.key='mirror' AND option.key IN ('hostname','directory') AND option.type='text')
+                   OR (section.key='packages' AND option.key='pkgsel_include' AND option.type='array')
+                 )
+               )
+           )
+         ELSE 0 END
      AND COALESCE(NULLIF(admin_user_groups,''),'sudo')='sudo'
      AND (codename IS NULL OR codename='' OR codename='trixie')
      AND COALESCE(admin_user_pwhash,'')<>''";
@@ -30,6 +47,8 @@ pub(super) enum Route {
     Detail(i64),
     Snapshot(i64),
     Push(i64),
+    Duplicate(i64),
+    Options(i64),
 }
 
 impl Route {
@@ -48,6 +67,12 @@ impl Route {
         if let Some(id) = suffix.strip_suffix("/push-github") {
             return parse(id).map(Self::Push);
         }
+        if let Some(id) = suffix.strip_suffix("/duplicate") {
+            return parse(id).map(Self::Duplicate);
+        }
+        if let Some(id) = suffix.strip_suffix("/options") {
+            return parse(id).map(Self::Options);
+        }
         parse(suffix).map(Self::Detail)
     }
 
@@ -55,6 +80,7 @@ impl Route {
         match (self, method) {
             (Self::Push(_), &Method::POST) => true,
             (Self::Import, &Method::POST) => true,
+            (Self::Duplicate(_) | Self::Options(_), &Method::POST) => true,
             (Self::Push(_), _) => false,
             (_, &Method::GET | &Method::HEAD) => true,
             (Self::Detail(_), &Method::PUT | &Method::POST | &Method::DELETE) => true,
@@ -91,6 +117,8 @@ pub(super) fn item(
                 None => Ok(import_form(None)),
             }
         }
+        Route::Duplicate(id) => return duplicate(db, path, id, form),
+        Route::Options(id) => return options::serve(db, path, id, form),
         Route::Detail(id) | Route::Snapshot(id) | Route::Push(id) => id,
     };
     if matches!(route, Route::Snapshot(_)) {
@@ -290,6 +318,11 @@ fn detail(db: &Connection, id: i64) -> Result<Reply, ErrorBox> {
         html.push_str(r#""></label></p><p><label>Nouveau mot de passe <input type="password" name="password" autocomplete="new-password" maxlength="128"></label></p>
 <p><label>Confirmation <input type="password" name="confirm" autocomplete="new-password" maxlength="128"></label></p>
 <button>Enregistrer</button></form>"#);
+        write!(
+            html,
+            r#"<div class="form-actions"><a class="button button--quiet" href="{ROUTE}/{id}/options">Réglages de déploiement</a>
+<a class="button button--quiet" href="{ROUTE}/{id}/duplicate">Dupliquer le modèle</a></div>"#
+        )?;
     }
     if repository_configured(db)? {
         write!(
@@ -307,6 +340,85 @@ fn detail(db: &Connection, id: i64) -> Result<Reply, ErrorBox> {
         "Modèle d’installation",
         &html,
     ))
+}
+
+fn duplicate(
+    db: &Connection,
+    path: &Path,
+    id: i64,
+    form: Option<&[u8]>,
+) -> Result<Reply, ErrorBox> {
+    let Some(form) = form else {
+        let name: Option<String> = db
+            .query_row(
+                "SELECT name FROM presets WHERE id=?1 AND variant<>'proxmox-ve'",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(name) = name else {
+            return Ok(not_found());
+        };
+        let mut html =
+            String::from(r#"<section class="panel panel--form"><p>Modèle source&nbsp;: <strong>"#);
+        escape(&mut html, &name);
+        write!(
+            html,
+            r#"</strong></p><p>La copie reprend les paramètres de déploiement et les identifiants enregistrés.</p>
+<form class="form-stack" method="post" action="{ROUTE}/{id}/duplicate">
+<div class="field"><label for="duplicate-name">Nom de la copie</label><input id="duplicate-name" name="name" maxlength="100" required></div>
+<div class="form-actions"><button>Créer la copie</button><a class="button button--quiet" href="{ROUTE}/{id}">Annuler</a></div></form></section>"#
+        )?;
+        return Ok(page(ConsoleSection::Presets, "Dupliquer un modèle", &html));
+    };
+    let mut fields = form_urlencoded::parse(form);
+    let (Some((key, value)), None) = (fields.next(), fields.next()) else {
+        return Ok(invalid());
+    };
+    let name = value.trim();
+    if key != "name" || !valid_profile_name(name) {
+        return Ok(invalid());
+    }
+    let mut target = connect(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let tx = target.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    const CONFIG: &str = "description,distro,codename,version_full,network_mode,static_ip,static_netmask,static_cidr,static_gateway,static_dns,
+        partition_mode,partition_custom_json,admin_user_login,admin_user_pwhash,admin_user_password_cipher,admin_user_groups,admin_user_pubkeys,
+        ansible_role,ansible_extra_vars,advanced_config_json,root_login_mode,admin_user_fullname,domain,pre_wipe_mode,pre_wipe_mode_json,
+        based_on_machine_id,hostname_pattern,hostname_random,variant";
+    let copied: Option<i64> = tx
+        .query_row(
+            &format!(
+                "INSERT INTO presets(name,{CONFIG}) SELECT ?2,{CONFIG} FROM presets
+                  WHERE id=?1 AND variant<>'proxmox-ve' ON CONFLICT(name) DO NOTHING RETURNING id"
+            ),
+            params![id, name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(copied) = copied else {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM presets WHERE id=?1 AND variant<>'proxmox-ve')",
+            [id],
+            |row| row.get(0),
+        )?;
+        return Ok(if exists {
+            plain(StatusCode::CONFLICT, "Ce nom de modèle est déjà utilisé\n")
+        } else {
+            not_found()
+        });
+    };
+    if repository_configured(&tx)? {
+        enqueue(
+            &tx,
+            &format!("preset:push_github:{copied}"),
+            "Synchronisation de la copie demandée",
+        )?;
+    }
+    tx.commit()?;
+    Ok(redirect(StatusCode::SEE_OTHER, format!("{ROUTE}/{copied}")))
 }
 
 fn change(
