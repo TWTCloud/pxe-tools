@@ -111,8 +111,8 @@ pub(super) fn serve(
 
 fn media_form(db: &Connection) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
-        r#"<nav><a href="/settings/images">Catalogue des images</a> · <a href="/settings/windows">Éditions Windows</a></nav>
-<form class="media-form" method="post" action="/settings/images/media">
+        r#"<nav class="page-links" aria-label="Images PXE"><a href="/settings/images">Catalogue des images</a><a href="/settings/windows">Éditions Windows</a></nav>
+<form class="panel panel--form form-stack" method="post" action="/settings/images/media">
 <div class="field"><label for="media-kind">Type de média</label><select id="media-kind" name="kind" required>
 <option value="rhel9">DVD RHEL 9</option>
 <option value="windows-iso">ISO Windows</option>
@@ -128,7 +128,7 @@ fn media_form(db: &Connection) -> Result<Reply, ErrorBox> {
 <div class="field"><label for="media-profile">Identifiant de l’édition</label>
 <input id="media-profile" name="profile" pattern="[a-z0-9-]{1,40}" aria-describedby="media-profile-help">
 <small id="media-profile-help">Pour une archive WinPE uniquement.</small></div>
-<div class="media-submit"><button>Préparer le média</button></div>
+<div class="form-actions"><button>Préparer le média</button></div>
 </form>
 <p>Les fichiers locaux se placent dans le dossier privé <code>media/inbox</code> du stockage HTTP PXE. Importez le fichier Windows avant l’archive WinPE de l’édition.</p>"#,
     );
@@ -378,7 +378,8 @@ pub(super) fn refresh_catalog(db: &Connection) -> rusqlite::Result<()> {
 
 fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
-        r#"<nav><a href="/admin/devices">Console</a> · <a href="/settings/images/media">Préparer un média RHEL ou Windows</a> · <a href="/settings/windows">Éditions Windows</a></nav>"#,
+        r#"<nav class="device-actions" aria-label="Gestion des images"><a class="button" href="/settings/images/media">Préparer un média RHEL ou Windows</a><a class="button button--quiet" href="/settings/windows">Éditions Windows</a></nav>
+<div class="panel-grid"><section class="panel"><h2>Catalogue des distributions</h2>"#,
     );
     html.push_str(&catalog_form(db, ROUTE)?);
     let enabled = if setting(db, "catalog_auto_refresh_enabled")? == "on" {
@@ -394,9 +395,10 @@ fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     };
     write!(
         html,
-        r#"<form method="post" action="{ROUTE}/auto-refresh"><label>
+        r#"</section><section class="panel"><h2>Actualisation automatique</h2>
+<form class="form-stack" method="post" action="{ROUTE}/auto-refresh"><label class="check-label">
 <input type="checkbox" name="catalog_auto_refresh_enabled" value="on"{enabled}> Actualiser automatiquement le catalogue</label>
-<label>Fréquence <select name="catalog_auto_refresh_interval_hours">"#
+<div class="field"><label for="catalog-frequency">Fréquence</label><select id="catalog-frequency" name="catalog_auto_refresh_interval_hours">"#
     )?;
     for (hours, label) in [
         ("24", "Chaque jour"),
@@ -409,7 +411,7 @@ fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
             r#"<option value="{hours}"{selected}>{label}</option>"#
         )?;
     }
-    html.push_str("</select></label><button>Enregistrer</button></form>");
+    html.push_str(r#"</select></div><div class="form-actions"><button>Enregistrer la fréquence</button></div></form></section></div>"#);
     html.push_str(&refresh_button(db)?);
     html.push_str(&table(db, number)?);
     Ok(page(ConsoleSection::Images, "Images PXE", &html))
@@ -459,9 +461,11 @@ fn table(db: &Connection, number: u32) -> Result<String, ErrorBox> {
         write!(
             html,
             r#"<td>{percent} %</td><td>{active}</td><td>
-<form method="post" action="{ROUTE}/{id}/toggle"><button name="enabled" value="{next}">{label}</button></form>
-<form method="post" action="{ROUTE}/{id}/download"><button>Relancer le téléchargement</button></form>
-<details><summary>Suppression</summary><form method="post" action="{ROUTE}/{id}"><button name="_method" value="DELETE">Supprimer cette image</button></form></details>
+<div class="form-actions">
+<form method="post" action="{ROUTE}/{id}/toggle"><button class="button--quiet" name="enabled" value="{next}">{label}</button></form>
+<form method="post" action="{ROUTE}/{id}/download"><button class="button--quiet">Relancer le téléchargement</button></form>
+</div>
+<details><summary>Suppression</summary><form method="post" action="{ROUTE}/{id}"><button class="button--danger" name="_method" value="DELETE">Supprimer cette image</button></form></details>
 </td></tr>"#
         )?;
     }
@@ -518,8 +522,8 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
 pub(super) fn catalog_form(db: &Connection, action: &'static str) -> rusqlite::Result<String> {
     let include_ubuntu = action == ROUTE;
     let mut html = format!(
-        r#"<form method="post" action="{action}">
-<label>Image PXE <select name="image">"#,
+        r#"<form class="form-stack" method="post" action="{action}">
+<div class="field"><label for="catalog-image">Image PXE</label><select id="catalog-image" name="image">"#,
     );
     let mut query = db.prepare(
         "SELECT id,version_full,arch,distro FROM catalog_entries
@@ -543,12 +547,15 @@ pub(super) fn catalog_form(db: &Connection, action: &'static str) -> rusqlite::R
         escape(&mut html, &row.get::<_, String>(2)?);
         html.push_str("</option>");
     }
-    html.push_str("</select></label>");
+    if count == 0 {
+        html.push_str(r#"<option value="">Aucune image disponible</option>"#);
+    }
+    html.push_str(r#"</select></div><div class="form-actions">"#);
     if count != 0 {
         html.push_str("<button>Télécharger cette image</button>");
     }
     html.push_str(
-        r#"<button name="action" value="refresh">Actualiser le catalogue</button></form>"#,
+        r#"<button class="button--quiet" name="action" value="refresh">Actualiser le catalogue</button></div></form>"#,
     );
     Ok(html)
 }

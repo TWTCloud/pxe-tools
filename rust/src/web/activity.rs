@@ -435,9 +435,13 @@ fn list(db: &Connection, filter: &Filter, number: u32, fragment: bool) -> Result
         PAGE_SIZE + 1,
         i64::from(number - 1) * PAGE_SIZE
     ])?;
-    let mut output = String::from("<table><thead><tr><th>Opération</th><th>Cible et auteur</th><th>État</th><th>Dernière activité (UTC)</th></tr></thead><tbody>");
+    let mut output = String::from(
+        r#"<div class="table-region" role="region" aria-label="Liste des opérations" tabindex="0"><table><thead><tr><th scope="col">Opération</th><th scope="col">Cible et auteur</th><th scope="col">État</th><th scope="col">Dernière activité (UTC)</th></tr></thead><tbody>"#,
+    );
+    let mut found = false;
     for _ in 0..PAGE_SIZE {
         let Some(row) = rows.next()? else { break };
+        found = true;
         let id: i64 = row.get(0)?;
         let source: String = row.get(1)?;
         let kind: String = row.get(2)?;
@@ -478,8 +482,11 @@ fn list(db: &Connection, filter: &Filter, number: u32, fragment: bool) -> Result
         escape(&mut output, updated.as_deref().unwrap_or_default());
         output.push_str("</td></tr>");
     }
+    if !found {
+        output.push_str(r#"<tr><td class="table-empty muted" colspan="4">Aucune opération à afficher.</td></tr>"#);
+    }
     let has_next = rows.next()?.is_some() && number < u32::MAX;
-    output.push_str("</tbody></table><nav aria-label=\"Pages de l’activité\">");
+    output.push_str("</tbody></table></div><nav aria-label=\"Pages de l’activité\">");
     for (allowed, target, caption) in [
         (number > 1, number.saturating_sub(1), "Précédente"),
         (has_next, number.saturating_add(1), "Suivante"),
@@ -506,14 +513,21 @@ fn list(db: &Connection, filter: &Filter, number: u32, fragment: bool) -> Result
             .header("Cache-Control", "no-store")
             .body(bytes(section))?);
     }
-    let mut form = String::from("<nav><a href=\"/admin/devices\">Appareils</a> · <a href=\"/installations\">Installations</a></nav><form method=\"get\" action=\"/activity\"><label>Rechercher <input name=\"q\" type=\"search\" maxlength=\"120\" value=\"");
+    let mut form = String::from(
+        r#"<nav class="page-links" aria-label="Vues de suivi"><a href="/installations">Installations</a></nav>
+<form class="panel filter-form" method="get" action="/activity" aria-label="Filtrer l’activité">
+<div class="field"><label for="activity-search">Rechercher</label><input id="activity-search" name="q" type="search" maxlength="120" value=""#,
+    );
     escape(&mut form, &filter.search);
-    form.push_str("\"></label> ");
+    form.push_str("\"></div>");
     for (name, title, values, selection) in [
         ("type", "Type", TYPES, &filter.kind),
         ("status", "État", STATUSES, &filter.status),
     ] {
-        write!(form, "<label>{title} <select name=\"{name}\">")?;
+        write!(
+            form,
+            r#"<div class="field"><label for="activity-{name}">{title}</label><select id="activity-{name}" name="{name}">"#
+        )?;
         for (value, caption) in values {
             let selected = if selection == value { " selected" } else { "" };
             write!(
@@ -521,9 +535,13 @@ fn list(db: &Connection, filter: &Filter, number: u32, fragment: bool) -> Result
                 "<option value=\"{value}\"{selected}>{caption}</option>"
             )?;
         }
-        form.push_str("</select></label> ");
+        form.push_str("</select></div>");
     }
-    write!(form, "<input type=\"hidden\" name=\"machine\" value=\"{}\"><button>Filtrer</button> <a href=\"/activity\">Réinitialiser</a></form>{section}", filter.machine)?;
+    write!(
+        form,
+        r#"<input type="hidden" name="machine" value="{}"><div class="form-actions"><button>Filtrer</button><a class="button button--quiet" href="/activity">Réinitialiser</a></div></form>{section}"#,
+        filter.machine
+    )?;
     Ok(page(ConsoleSection::Activity, "Activité", &form))
 }
 

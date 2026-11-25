@@ -244,12 +244,12 @@ pub(super) fn login_page(next: &str, warning: Option<&str>, status: StatusCode) 
         form.push_str("</p>");
     }
     form.push_str(
-        r#"<form method="post" action="/login"><input type="hidden" name="next" value=""#,
+        r#"<form class="form-stack" method="post" action="/login"><input type="hidden" name="next" value=""#,
     );
     super::admin::escape(&mut form, next);
     form.push_str(r#"">
-<label for="login-username">Identifiant<input id="login-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
-<label for="login-password">Mot de passe<input id="login-password" type="password" name="password" autocomplete="current-password" required></label>
+<div class="field"><label for="login-username">Identifiant</label><input id="login-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></div>
+<div class="field"><label for="login-password">Mot de passe</label><input id="login-password" type="password" name="password" autocomplete="current-password" required></div>
 <button type="submit">Se connecter</button></form>"#);
     ui::guest("Connexion", &form, status)
 }

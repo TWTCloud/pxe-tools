@@ -32,12 +32,11 @@ pub(super) fn register(path: &Path, form: Option<&[u8]>) -> Result<Reply, ErrorB
             ConsoleSection::Devices,
             "Ajouter un appareil",
             r#"
-<form method="post" action="/machines">
-<label>Adresse MAC <input name="mac" required placeholder="02:00:00:00:00:01"></label>
-<label>Nom d’hôte (facultatif) <input name="hostname"></label>
-<button>Créer</button>
+<form class="panel panel--form form-stack" method="post" action="/machines">
+<div class="field"><label for="device-mac">Adresse MAC</label><input id="device-mac" name="mac" required autocapitalize="none" spellcheck="false" aria-describedby="device-mac-help"><small id="device-mac-help">Exemple : 02:00:00:00:00:01</small></div>
+<div class="field"><label for="device-hostname">Nom d’hôte (facultatif)</label><input id="device-hostname" name="hostname" autocapitalize="none" spellcheck="false"></div>
+<div class="form-actions"><button>Ajouter l’appareil</button><a class="button button--quiet" href="/admin/devices">Annuler</a></div>
 </form>
-<p><a href="/admin/devices">Retour aux appareils</a></p>
 "#,
         ));
     };
@@ -282,43 +281,44 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
         escape(&mut output, &serial);
         output.push_str("</li>");
     }
-    write!(output, "</ul><nav><a href=\"/machines/{id}/install\">Programmer une installation Debian</a> · <a href=\"/activity?machine={id}\">Activité</a> · <a href=\"/admin/devices\">Appareils</a></nav>")?;
+    write!(output, "</ul><nav class=\"device-actions\" aria-label=\"Actions de l’appareil\"><a class=\"button\" href=\"/machines/{id}/install\">Programmer une installation Debian</a><a class=\"button button--quiet\" href=\"/activity?machine={id}\">Activité</a>")?;
     if linux::supports(device) {
-        write!(output, "<p><a href=\"/machines/{id}/install/linux\">Programmer une installation Ubuntu ou RHEL</a></p>")?;
+        write!(output, "<a class=\"button button--quiet\" href=\"/machines/{id}/install/linux\">Programmer une installation Ubuntu ou RHEL</a>")?;
     }
-    output.push_str("<h2>Opérations PXE</h2>");
+    output.push_str(r#"<a class="button button--quiet" href="/admin/devices">Inventaire</a></nav><h2>Opérations PXE</h2><div class="form-actions">"#);
     write!(
         output,
-        r#"<p><a href="/machines/{id}/wipe-disks">Effacer des disques</a></p>"#
+        r#"<a class="button button--danger" href="/machines/{id}/wipe-disks">Effacer des disques</a>"#
     )?;
     if device.status == "testing" {
         write!(
             output,
-            r#"<form method="post" action="/machines/{id}/disktest-cancel"><button>Annuler le diagnostic</button></form>"#
+            r#"<form method="post" action="/machines/{id}/disktest-cancel"><button class="button--quiet">Annuler le diagnostic</button></form>"#
         )?;
     } else {
         write!(
             output,
-            r#"<p><a href="/machines/{id}/disktest">Programmer un diagnostic de disque</a></p>"#
+            r#"<a class="button button--quiet" href="/machines/{id}/disktest">Programmer un diagnostic de disque</a>"#
         )?;
     }
     write!(
         output,
-        r#"<form method="post" action="/machines/{id}/reboot"><button>Redémarrer</button></form>
-<form method="post" action="/machines/{id}/shutdown"><button>Arrêter</button></form>"#
+        r#"<form method="post" action="/machines/{id}/reboot"><button class="button--quiet">Redémarrer</button></form>
+<form method="post" action="/machines/{id}/shutdown"><button class="button--quiet">Arrêter</button></form>"#
     )?;
     if device.rescue {
         write!(
             output,
-            r#"<form method="post" action="/machines/{id}/rescue/exit"><button>Quitter le mode récupération</button></form>"#
+            r#"<form method="post" action="/machines/{id}/rescue/exit"><button class="button--quiet">Quitter le mode récupération</button></form>"#
         )?;
     } else {
         write!(
             output,
-            r#"<form method="post" action="/machines/{id}/rediscover"><button>Redémarrer pour refaire l’inventaire</button></form>
-<form method="post" action="/machines/{id}/rescue"><button>Redémarrer en mode récupération</button></form>"#
+            r#"<form method="post" action="/machines/{id}/rediscover"><button class="button--quiet">Redémarrer pour refaire l’inventaire</button></form>
+<form method="post" action="/machines/{id}/rescue"><button class="button--quiet">Redémarrer en mode récupération</button></form>"#
         )?;
     }
+    output.push_str("</div>");
     super::device_settings::form(db, id, &mut output)?;
     write!(
         output,
@@ -327,7 +327,7 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
 <input type="hidden" name="_method" value="DELETE">
 <p>La suppression efface la fiche et son historique. Une opération déjà lancée peut continuer sur l’appareil.</p>
 <label>Saisissez SUPPRIMER <input name="confirm" required autocomplete="off"></label>
-<button>Supprimer l’appareil</button></form></details>"#
+<button class="button--danger">Supprimer l’appareil</button></form></details>"#
     )?;
     device_ansible::form(db, id, &mut output)?;
     write!(
@@ -355,9 +355,12 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
     let Some(arch @ ("amd64" | "arm64")) = device.arch.as_deref() else {
         return Ok(plain(StatusCode::CONFLICT, "Inventaire PXE requis\n"));
     };
-    let mut output = format!("<form method=\"post\" action=\"/machines/{id}/install\"><p><label>Nom d’hôte <input name=\"hostname\" maxlength=\"63\" required value=\"");
+    let mut output = format!(
+        r#"<form class="panel panel--form form-stack" method="post" action="/machines/{id}/install">
+<div class="field"><label for="install-hostname">Nom d’hôte</label><input id="install-hostname" name="hostname" maxlength="63" required value=""#
+    );
     escape(&mut output, &device.hostname);
-    output.push_str("\"></label></p><p><label>Disque vérifié <select name=\"disk\" required><option value=\"\">Sélectionner</option>");
+    output.push_str(r#""></div><div class="field"><label for="install-disk">Disque vérifié</label><select id="install-disk" name="disk" required><option value="">Sélectionner</option>"#);
     for (path, serial, _) in device.disks() {
         output.push_str("<option value=\"");
         escape(&mut output, &format!("{path}:{serial}"));
@@ -367,7 +370,7 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
         escape(&mut output, &serial);
         output.push_str("</option>");
     }
-    output.push_str("</select></label></p><p><label>Image Debian <select name=\"image\" required><option value=\"\">Sélectionner</option>");
+    output.push_str(r#"</select></div><div class="field"><label for="install-image">Image Debian</label><select id="install-image" name="image" required><option value="">Sélectionner</option>"#);
     let mut images = db.prepare(
         "SELECT id,version_full FROM os_images WHERE enabled=1 AND status='downloaded'
          AND arch=? AND distro='debian' AND codename='trixie' AND version_full IS NOT NULL
@@ -379,7 +382,7 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
         escape(&mut output, &row.get::<_, String>(1)?);
         write!(output, " · {arch}</option>")?;
     }
-    output.push_str("</select></label></p><p><label>Modèle DHCP <select name=\"preset\" required><option value=\"\">Sélectionner</option>");
+    output.push_str(r#"</select></div><div class="field"><label for="install-preset">Modèle DHCP</label><select id="install-preset" name="preset" required><option value="">Sélectionner</option>"#);
     let mut presets = db.prepare(&format!(
         "SELECT id,name FROM presets WHERE {GUIDED} ORDER BY name"
     ))?;
@@ -389,8 +392,8 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
         escape(&mut output, &row.get::<_, String>(1)?);
         output.push_str("</option>");
     }
-    output.push_str(r#"</select></label> <a href="/presets">Gérer les modèles</a></p>
-<p><label>Réseau de l’appareil <select name="network_mode"><option value="dhcp">DHCP</option><option value="static">IPv4 statique</option></select></label></p>
+    output.push_str(r#"</select><small><a href="/presets">Gérer les modèles</a></small></div>
+<div class="field"><label for="install-network">Réseau de l’appareil</label><select id="install-network" name="network_mode"><option value="dhcp">DHCP</option><option value="static">IPv4 statique</option></select></div>
 <details><summary>Paramètres IPv4 statiques</summary>
 <p><label>Adresse IPv4 <input name="static_ip"></label></p>
 <p><label>Préfixe réseau <input name="static_cidr" type="number" min="1" max="32" value="24"></label></p>
@@ -400,9 +403,9 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
     escape(&mut output, &defaults.join(" "));
     output.push_str(r#""></label></p></details>"#);
     if device.status == "testing" {
-        output.push_str(r#"<p><label><input type="checkbox" name="after_diagnostic" value="yes" required> Attendre la qualification du disque avant d’autoriser le prochain démarrage PXE</label></p>"#);
+        output.push_str(r#"<label class="check-label"><input type="checkbox" name="after_diagnostic" value="yes" required> Attendre la qualification du disque avant d’autoriser le prochain démarrage PXE</label>"#);
     }
-    output.push_str(r#"<p><label><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE</label></p><button>Programmer</button></form>"#);
+    output.push_str(r#"<label class="check-label"><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE</label><div class="form-actions"><button>Programmer l’installation</button></div></form>"#);
     write!(
         output,
         r#"<p><a href="/machines/{id}/install/advanced">Utiliser un modèle de partition personnalisée</a></p>"#
