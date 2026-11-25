@@ -123,7 +123,10 @@ l'envoi au registre. Les archives de sources et de reliage des outils
 statiques font l'objet du même contrôle que pour APT.
 
 Le registre prévu pour la version publique est
-`ghcr.io/williamboglietti/pxe-tools-appliance`. Une publication crée un index
+`ghcr.io/twtcloud/pxe-tools`. Une publication crée un index
 pour les deux plateformes sous le tag de la release. Vérifier le
 téléchargement anonyme des deux images après le réglage de visibilité du
 nouveau paquet.
+
+Le test de mise à niveau Docker prend comme départ l’image publique épinglée dans
+`docker-upgrade-from.json`, indépendante de la version approuvée pour APT.
