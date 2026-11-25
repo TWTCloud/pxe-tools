@@ -196,6 +196,23 @@ if [[ "$variant" == apt ]]; then
         rm "$dropin/90-local.conf"
         rmdir "$dropin"
 
+        # Upgrade starts bootstrap jobs. Exercise a normal purge once the worker
+        # has finished them and the guard can identify just its main process.
+        worker=pxe-tools-worker.service
+        ready=false
+        for _ in {1..90}; do
+            pid=$(systemctl show --property=MainPID --value "$worker")
+            group=$(systemctl show --property=ControlGroup --value "$worker")
+            busy=$(sqlite3 -readonly /var/lib/pxe-tools/pxe-tools.sqlite \
+                "SELECT EXISTS (SELECT 1 FROM init_jobs WHERE status IN ('pending','running'));")
+            if [[ "$pid" =~ ^[1-9][0-9]*$ && "$group" == /* && "$busy" == 0 ]] &&
+                [[ "$(cat "/sys/fs/cgroup$group/cgroup.procs" 2>/dev/null)" == "$pid" ]]; then
+                ready=true
+                break
+            fi
+            sleep 1
+        done
+        test "$ready" = true
         python3 ./pxe-uninstall-test.py "${args[@]}"
         for package in pxe-tools pxe-tools-ansible; do
             if dpkg-query -W "$package" >/dev/null 2>&1; then exit 1; fi
