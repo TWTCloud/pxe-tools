@@ -358,6 +358,8 @@ form:has(.network-modes input[value="external"]:checked) .network-proxy-subnet {
   margin: 0 0 var(--space-5);
 }
 .wizard-summary dd { margin: 0; }
+.update-versions { grid-template-columns: minmax(0, max-content) minmax(6.25rem, 1fr); }
+.update-versions dd { font-variant-numeric: tabular-nums; }
 @media (max-width: 32rem) {
   .wizard-panel .form-actions > :is(button, .button) { width: 100%; }
 }

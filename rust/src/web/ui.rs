@@ -5,12 +5,18 @@ use super::{
     admin::escape,
     bytes, Reply,
 };
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use hyper::{header, Response, StatusCode};
 use sha2::{Digest, Sha256};
 use std::{cell::Cell, fmt::Write, sync::LazyLock};
 
 const MARK: &str = "/console-assets/mark.svg?v=2";
+const STYLE: &[u8] = include_bytes!("ui/style.css");
+static STYLE_VERSION: LazyLock<String> =
+    LazyLock::new(|| URL_SAFE_NO_PAD.encode(&Sha256::digest(STYLE)[..9]));
 const NAVIGATION_SCRIPT: &str = include_str!("ui/navigation.js");
 const SETUP_COMMAND_SCRIPT: &str = include_str!("ui/setup-command.js");
 const POLICY: &str = "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
@@ -411,10 +417,11 @@ fn document(
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>"#,
     );
     escape(&mut html, title);
+    let style_version = STYLE_VERSION.as_str();
     write!(
         html,
         r#" · PXE Tools</title><link rel="icon" type="image/svg+xml" href="{MARK}">
-<link rel="stylesheet" href="/console-assets/style.css?v=8"></head><body class="{class}">{layout}"#
+<link rel="stylesheet" href="/console-assets/style.css?v={style_version}"></head><body class="{class}">{layout}"#
     )
     .expect("write to String");
     let policy = if let Some((source, policy)) = script {
@@ -439,7 +446,7 @@ fn document(
 
 pub(super) fn asset(path: &str, head: bool) -> Option<Reply> {
     let (kind, data): (&str, &'static [u8]) = match path {
-        "/console-assets/style.css" => ("text/css; charset=utf-8", include_bytes!("ui/style.css")),
+        "/console-assets/style.css" => ("text/css; charset=utf-8", STYLE),
         "/console-assets/mark.svg" => (
             "image/svg+xml",
             include_bytes!("../../../app/public/favicon.svg"),

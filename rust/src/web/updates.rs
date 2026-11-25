@@ -102,7 +102,7 @@ fn page(state: &State) -> Result<Reply, ErrorBox> {
     let phase = serde_json::to_string(&state.phase)?;
     let mut html = format!(
         r#"<section class="panel panel--form" data-update-phase="{}">
-<h2>{title}</h2><p>{description}</p><dl class="wizard-summary">
+<h2>{title}</h2><p>{description}</p><dl class="wizard-summary update-versions">
 <dt>PXE Tools installé</dt><dd>"#,
         phase.trim_matches('"'),
     );
