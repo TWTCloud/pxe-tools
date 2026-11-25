@@ -64,6 +64,11 @@ pub(crate) fn run(config: &Path, helper: &Path) -> Result<(), ErrorBox> {
     };
     super::recover(&database)?;
     enqueue_initial(&database, &worker.tftp)?;
+    if let Err(error) =
+        crate::apt_updates::dispatch(&open(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?, true)
+    {
+        eprintln!("[worker] {error}");
+    }
     println!("[worker] Boucle Rust active");
     let mut last_runtime = None;
     let mut last_catalog = None;
@@ -82,6 +87,9 @@ pub(crate) fn run(config: &Path, helper: &Path) -> Result<(), ErrorBox> {
         paused = false;
         let work = (|| -> Result<bool, ErrorBox> {
             let db = open(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            if crate::apt_updates::dispatch(&db, false)? {
+                return Ok(false);
+            }
             let ansible_enabled = setting(&db, "ansible_enabled")? == "on";
             if ansible_enabled && !workspace_ready {
                 if let Err(error) = worker.python("startup", Some(&database), None) {

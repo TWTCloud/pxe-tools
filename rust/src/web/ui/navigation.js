@@ -23,3 +23,35 @@
   });
   document.documentElement.classList.add('navigation-ready');
 })();
+
+(() => {
+  const notice = document.querySelector('[data-update-notice] a');
+  const panel = document.querySelector('[data-update-phase]');
+  if (!notice && !panel) return;
+  const pending = ['queued', 'checking', 'install_queued', 'installing'];
+  const refresh = Boolean(panel && pending.includes(panel.dataset.updatePhase));
+  const route = '/settings/updates';
+  let attempts = refresh ? 150 : 18;
+
+  async function check(automatic) {
+    try {
+      const response = automatic
+        ? await fetch(route, { method: 'POST', body: new URLSearchParams({ action: 'auto' }) })
+        : await fetch(route + '/status');
+      if (response.redirected || response.status === 401 || response.status === 403) return;
+      if (response.ok) {
+        const { phase, available } = await response.json();
+        if (notice) notice.hidden = !available || pending.includes(phase);
+        if (!pending.includes(phase)) {
+          if (refresh || (panel && !automatic)) location.reload();
+          return;
+        }
+      }
+    } catch {
+      // The web service may be restarting while APT replaces the package.
+    }
+    if (--attempts > 0) setTimeout(() => check(false), refresh ? 7000 : 5000);
+  }
+
+  check(!refresh);
+})();

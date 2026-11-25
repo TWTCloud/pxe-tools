@@ -25,6 +25,7 @@ mod sessions;
 mod settings;
 mod setup;
 mod ui;
+mod updates;
 mod winpe;
 
 pub(crate) use setup::adopt_existing_database;

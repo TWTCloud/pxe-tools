@@ -246,6 +246,8 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 .panel > h2 { margin: 0 0 var(--space-4); font-size: 1.22rem; }
 .panel > :last-child { margin-bottom: 0; }
 .panel--form { max-width: 44rem; }
+[data-update-notice]:has(a[hidden]) { margin: 0; }
+[data-update-notice] a:not([hidden]) { display: inline-block; padding: var(--space-2) 0; font-weight: 650; }
 .panel-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -356,6 +358,8 @@ form:has(.network-modes input[value="external"]:checked) .network-proxy-subnet {
   margin: 0 0 var(--space-5);
 }
 .wizard-summary dd { margin: 0; }
+.update-versions { grid-template-columns: minmax(0, max-content) minmax(6.25rem, 1fr); }
+.update-versions dd { font-variant-numeric: tabular-nums; }
 @media (max-width: 32rem) {
   .wizard-panel .form-actions > :is(button, .button) { width: 100%; }
 }

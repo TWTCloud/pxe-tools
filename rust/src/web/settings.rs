@@ -4,7 +4,7 @@ use super::{
     admin, ansible_settings, onboarding, plain,
     setup::redirect,
     ui::{page, ConsoleSection},
-    ErrorBox, Reply,
+    updates, ErrorBox, Reply,
 };
 use crate::{connect, setting, worker::factory_reset as reset_job};
 use hyper::{body::Bytes, StatusCode};
@@ -28,6 +28,8 @@ const APPLY_NETWORK: &[(&str, &str)] = &[
 pub(super) enum Route {
     General,
     Network,
+    Updates,
+    UpdateStatus,
     Ansible,
     VaultUnlock,
     Dns,
@@ -44,6 +46,8 @@ impl Route {
         Some(match path {
             "/settings" => Self::General,
             NETWORK => Self::Network,
+            updates::ROUTE => Self::Updates,
+            updates::STATUS => Self::UpdateStatus,
             ansible_settings::ROUTE => Self::Ansible,
             ansible_settings::VAULT => Self::VaultUnlock,
             "/settings/default-dns" => Self::Dns,
@@ -71,6 +75,9 @@ impl Route {
         db_path: &Path,
         form: Option<Bytes>,
     ) -> Result<Reply, ErrorBox> {
+        if matches!(self, Self::Updates | Self::UpdateStatus) {
+            return updates::serve(matches!(self, Self::UpdateStatus), db, db_path, form);
+        }
         if matches!(self, Self::Ansible | Self::VaultUnlock) {
             return ansible_settings::serve(db, db_path, matches!(self, Self::VaultUnlock), form);
         }
@@ -98,6 +105,7 @@ impl Route {
         let mut database = connect(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let tx = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let target = match self {
+            Self::Updates | Self::UpdateStatus => unreachable!("handled above"),
             Self::Ansible | Self::VaultUnlock => unreachable!("handled above"),
             Self::ResetDevices | Self::FactoryReset => unreachable!("handled above"),
             Self::General => {
