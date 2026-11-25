@@ -61,6 +61,16 @@ apt-get "${opts[@]}" --print-uris changelog "pxe-tools=$version" | sed 's/%7[eE]
 grep -F "'https://packages.pxetools.com/apt/changelogs/$changelog'" "$fixture/changelog-uri"
 cmp "$root/packaging/changelogs/${changelog##*/}" "$fixture/changelog-repository/changelogs/$changelog"
 grep -F "pxe-tools-ansible ($version)" "$fixture/changelog-repository/changelogs/main/p/pxe-tools-ansible/pxe-tools-ansible_${version}_changelog"
+deb_path=$(awk '/^Filename: / {print $2}' "$fixture/changelog-repository/dists/stable/main/binary-amd64/Packages")
+updater_changelog="${deb_path%.deb}.changelog"
+canonical_changelog="$fixture/changelog-repository/changelogs/$changelog"
+cmp "$canonical_changelog" "$fixture/changelog-repository/$updater_changelog"
+python3 "$root/packaging/native/prepare-static-apt.py" "$fixture/changelog-repository" "$fixture/changelog-assets" \
+    --keyring "$fixture/key.gpg" --primary-fingerprint "$fingerprint" --signing-fingerprint "$fingerprint" >/dev/null
+cmp "$canonical_changelog" "$fixture/changelog-assets/apt/$updater_changelog"
+python3 "$builder" "$fixture/good.deb" "$fixture/changelog-next" --gnupg-home "$gnupg" --fingerprint "$fingerprint" \
+    --previous "$fixture/changelog-repository" >/dev/null
+cmp "$canonical_changelog" "$fixture/changelog-next/$updater_changelog"
 printf 'deb [signed-by=%s/key.gpg] file:%s/repository stable main\n' "$fixture" "$fixture" > "$fixture/source.list"
 sed -i 's/^Version: .*/Version: 1.0~fixture1/' "$fixture/pkg-pxe-tools/DEBIAN/control"
 

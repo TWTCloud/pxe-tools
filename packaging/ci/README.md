@@ -3,8 +3,10 @@
 Pour chaque version APT, ajouter les notes du socle et du module Ansible
 dans `packaging/changelogs/`, au format Debian et sous le nom
 `PAQUET_VERSION_changelog`. Le premier en-tête donne le nom et la version
-exacts. L’index signé annonce leur URL et le dépôt conserve les fichiers
-des versions précédentes.
+exacts. L’index signé annonce leur URL pour APT. Le dépôt publie aussi une
+copie `.changelog` à côté de chaque `.deb` qui a des notes, pour le
+gestionnaire de mises à jour d’Ubuntu et de Zorin. Les notes restent
+disponibles pour les anciennes versions conservées.
 
 Pour les limites actuelles de rotation de clé, la reprise des instantanés et la portée des essais APT, voir [état de la rotation et reprise](../../docs/apt-trust-and-recovery.md).
 
