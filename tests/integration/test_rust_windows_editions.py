@@ -371,8 +371,14 @@ def check_lan(binary, root, tls, env):
             authorization = base64.b64encode(b'lan-admin:fixture-lan-password').decode()
             admin = {'Authorization': 'Basic ' + authorization, **headers}
             assert request('/init/network', **secure, form={'role':'console'}, headers=admin)[:2] == (303,'/init/done')
-            status, _, console = request('/admin/devices', **secure, headers=admin)
+            status, csp, console = request('/admin/devices', **secure, headers=admin,
+                                           response_header='Content-Security-Policy')
             assert status == 200 and b'class="rail"' in console and b'aria-current="page"' in console
+            assert b'aria-controls="mobile-navigation"' in console
+            assert b'<dialog id="mobile-navigation"' in console
+            script = re.search(rb'<script>(.*?)</script>', console, re.S)[1]
+            digest = base64.b64encode(sha256(script).digest()).decode()
+            assert f"script-src 'sha256-{digest}'" in csp.split('; ')
             assert request('/pxe/linux/amd64/grub.cfg', **private)[0] == 404
         finally:
             service.terminate()

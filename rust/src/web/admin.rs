@@ -525,7 +525,7 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<Reply> {
     )?;
     let mut rows = rows.query([PAGE_SIZE as u64 + 1, u64::from(page - 1) * PAGE_SIZE as u64])?;
     let mut html = String::from(
-        r#"<nav class="device-actions" aria-label="Actions de l’inventaire">
+        r#"<nav class="device-actions inventory-actions" aria-label="Actions de l’inventaire">
 <a class="button" href="/machines/new">Ajouter un appareil</a>
 <a class="button button--quiet" href="/machines/bulk">Déployer par lots</a>
 <a class="button button--quiet" href="/machines/bulk-delete">Supprimer par lots</a></nav>"#,
@@ -533,7 +533,7 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<Reply> {
     if crate::setting(db, "wizard_completed")? != "1" {
         html.push_str(r#"<p><a href="/init/network">Poursuivre la configuration initiale</a></p>"#);
     }
-    html.push_str(r#"<div class="table-region" role="region" aria-label="Inventaire des appareils" tabindex="0"><table><thead><tr><th scope="col">Nom d’hôte</th><th scope="col">Adresse MAC</th><th scope="col">État</th></tr></thead><tbody>"#);
+    html.push_str(r#"<div class="table-region device-inventory" role="region" aria-label="Inventaire des appareils" tabindex="0"><table role="table"><thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">Nom d’hôte</th><th scope="col" role="columnheader">Adresse MAC</th><th scope="col" role="columnheader">État</th></tr></thead><tbody role="rowgroup">"#);
     let mut count = 0;
     let mut has_next = false;
     while let Some(row) = rows.next()? {
@@ -542,7 +542,9 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<Reply> {
             break;
         }
         let id = row.get::<_, i64>(3)?;
-        html.push_str(&format!("<tr><td><a href=\"/machines/{id}\">"));
+        html.push_str(&format!(
+            r#"<tr class="inventory-row" role="row"><td class="inventory-host" role="cell"><a href="/machines/{id}">"#
+        ));
         let hostname = row.get::<_, String>(0)?;
         escape(
             &mut html,
@@ -553,16 +555,36 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<Reply> {
             },
         );
         html.push_str("</a></td>");
-        html.push_str(r#"<td class="table-mac">"#);
+        html.push_str(r#"<td class="table-mac" role="cell">"#);
         escape(&mut html, &row.get::<_, String>(1)?);
-        html.push_str(r#"</td><td><span class="device-state">"#);
-        escape(&mut html, &row.get::<_, String>(2)?);
+        html.push_str(
+            r#"</td><td class="inventory-state" role="cell"><span class="device-state">"#,
+        );
+        let status: String = row.get(2)?;
+        escape(
+            &mut html,
+            match status.as_str() {
+                "unknown" => "Inconnu",
+                "inventorying" => "Inventaire en cours",
+                "discovered" => "Détecté",
+                "configured" => "Configuré",
+                "installing" => "Installation en cours",
+                "installed" => "Installé",
+                "provisioned" => "Provisionné",
+                "failed" => "Échec",
+                "wiping" => "Effacement en cours",
+                "wiped" => "Effacé",
+                "testing" => "Diagnostic en cours",
+                "tested" => "Diagnostic terminé",
+                value => value,
+            },
+        );
         html.push_str("</span></td>");
         html.push_str("</tr>");
         count += 1;
     }
     if count == 0 {
-        html.push_str(r#"<tr><td colspan="3" class="table-empty"><strong>Aucun appareil dans l’inventaire</strong>Les appareils détectés par PXE apparaîtront ici.</td></tr>"#);
+        html.push_str(r#"<tr role="row"><td colspan="3" class="table-empty" role="cell"><strong>Aucun appareil dans l’inventaire</strong>Les appareils détectés par PXE apparaîtront ici.</td></tr>"#);
     }
     html.push_str("</tbody></table></div>");
     if page > 1 || has_next {
