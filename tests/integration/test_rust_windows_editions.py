@@ -536,9 +536,31 @@ def check_lan(binary, root, tls, env):
             assert request('/login', **secure, headers=headers, form=credentials)[0] == 303
             authorization = base64.b64encode(b'lan-admin:fixture-lan-password').decode()
             admin = {'Authorization': 'Basic ' + authorization, **headers}
-            wizard_page('/init/network', 'Réseau', headers=admin)
+            _, network_page = wizard_page('/init/network', 'Réseau', headers=admin)
+            assert b'name="role" value="proxy" checked' in network_page
+            assert b'Ajouter PXE au DHCP existant' in network_page
+            assert b'Votre DHCP continue' in network_page
+            assert b'<option value="" selected disabled>' in network_page
+            for address in (LAN, LAN_CLIENT):
+                assert f'<option value="lo|{address}">'.encode() in network_page
+            assert b'lo|127.0.0.1' not in network_page
             plan = {'role':'proxy', 'pxe_interface':'lo', 'pxe_ip':LAN, 'pxe_subnet':'10.77.0.0/24'}
+            assert request('/init/network', **secure, form={**plan, 'network_address': 'other|10.77.0.1'},
+                           headers=admin)[0] == 422
+            detected = {'role': 'proxy', 'network_address': f'lo|{LAN}', 'pxe_ip': 'invalid'}
+            assert request('/init/network', **secure, form=detected, headers=admin)[:2] == (303,'/init/images')
+            with sqlite3.connect(runtime/'install.sqlite') as db:
+                values = dict(db.execute('SELECT key,value FROM settings'))
+                assert json.loads(values['rust_wizard_network']) == {
+                    'role': 'proxy', 'interface': 'lo', 'address': LAN, 'subnet': f'{LAN}/32',
+                }
+                assert values.get('pxe_enabled') != 'on' and values.get('dhcp_proxy_enabled') != 'on'
+            _, resumed_network = wizard_page('/init/network', 'Réseau', headers=admin)
+            assert f'<option value="lo|{LAN}" selected>'.encode() in resumed_network
             assert request('/init/network', **secure, form=plan, headers=admin)[:2] == (303,'/init/images')
+            _, manual_network = wizard_page('/init/network', 'Réseau', headers=admin)
+            assert b'<option value="" selected>Saisie manuelle</option>' in manual_network
+            assert b'<details open><summary>Saisir les' in manual_network
             wizard_page('/init/images', 'Réseau', headers=admin)
             _, pending_image = wizard_page('/init/done', 'Validation', headers=admin)
             assert b'name="confirmation"' not in pending_image
@@ -575,7 +597,9 @@ def verify_restored_console(secure, private, admin, database, plan):
     assert request(network, **secure)[0] == 401
     assert request('/init/network?from=settings', **secure, headers=admin)[:2] == (302, network)
     assert b'Console seule' in request('/overview', **secure, headers=admin)[2]
-    assert b'name="dhcp_proxy_cidr"' in request(network, **secure, headers=admin)[2]
+    network_page = request(network, **secure, headers=admin)[2]
+    assert b'name="dhcp_proxy_cidr"' in network_page
+    assert b'name="role" value="console" checked' in network_page
     assert request(network, **secure, form=plan,
                    headers={**admin, 'Origin': 'https://outside.example'})[0] == 403
     assert request(network, **secure, form={**plan, 'dhcp_proxy_cidr': '10.77.1.0/24'}, headers=admin)[0] == 422

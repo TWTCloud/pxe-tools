@@ -343,8 +343,11 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 .setup-command-row button[hidden] { display: none; }
 .setup-command-feedback:not(:empty) { margin-top: var(--space-2); }
 .wizard-error { padding: var(--space-3); background: var(--danger-bg); color: var(--danger); border-radius: var(--radius); }
-.wizard-network { margin: 0; }
-.wizard-panel form:has(#setup-role option[value="console"]:checked) .wizard-network { display: none; }
+.wizard-network, .network-modes { margin: 0; }
+.network-modes small { display: block; margin-top: var(--space-1); color: var(--muted); }
+.network-details { margin-top: var(--space-3); }
+form:has(.network-modes input[value="console"]:checked) .wizard-network,
+form:has(.network-modes input[value="external"]:checked) .network-proxy-subnet { display: none; }
 .wizard-back { margin-bottom: 0; }
 .wizard-summary {
   display: grid;
