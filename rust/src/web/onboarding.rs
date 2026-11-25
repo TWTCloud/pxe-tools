@@ -25,15 +25,17 @@ enum Role {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Network {
+pub(super) struct Network {
     role: Role,
     interface: String,
     address: Ipv4Addr,
     subnet: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_subnet: Option<String>,
 }
 
 impl Network {
-    fn parse(fields: &HashMap<String, String>) -> Option<Self> {
+    pub(super) fn parse(fields: &HashMap<String, String>) -> Option<Self> {
         let role = match field(fields, "role") {
             "console" => Role::Console,
             "external" => Role::External,
@@ -46,12 +48,22 @@ impl Network {
                 interface: String::new(),
                 address: Ipv4Addr::UNSPECIFIED,
                 subnet: String::new(),
+                proxy_subnet: None,
             });
         }
-        let interface = field(fields, "pxe_interface").to_owned();
-        let address: Ipv4Addr = field(fields, "pxe_ip").parse().ok()?;
-        let input = field(fields, "pxe_subnet");
-        let (network, mask) = parse_subnet(input)?;
+        let detected = field(fields, "network_address");
+        let (interface, address, subnet) = if detected.is_empty() {
+            (
+                field(fields, "pxe_interface").to_owned(),
+                field(fields, "pxe_ip").parse::<Ipv4Addr>().ok()?,
+                field(fields, "pxe_subnet").to_owned(),
+            )
+        } else {
+            detected_networks()
+                .into_iter()
+                .find(|(interface, address, _)| format!("{interface}|{address}") == detected)?
+        };
+        let (network, mask) = parse_subnet(&subnet)?;
         if address.is_unspecified()
             || address.is_multicast()
             || address.is_broadcast()
@@ -66,8 +78,83 @@ impl Network {
             interface,
             address,
             subnet: format!("{}/{}", Ipv4Addr::from(network), mask.count_ones()),
+            proxy_subnet: if role == Role::Proxy && !field(fields, "dhcp_proxy_cidr").is_empty() {
+                let (network, mask) = parse_subnet(field(fields, "dhcp_proxy_cidr"))?;
+                if u32::from(address) & mask != network {
+                    return None;
+                }
+                Some(format!("{}/{}", Ipv4Addr::from(network), mask.count_ones()))
+            } else {
+                None
+            },
         };
         plan.assigned().then_some(plan)
+    }
+
+    pub(super) fn current(db: &Connection) -> rusqlite::Result<Self> {
+        let address = setting(db, "pxe_ip")?
+            .parse()
+            .unwrap_or(Ipv4Addr::UNSPECIFIED);
+        let enabled = setting(db, "pxe_enabled")?;
+        let role = if enabled == "off" || (enabled.is_empty() && address.is_unspecified()) {
+            Role::Console
+        } else if setting(db, "dhcp_proxy_enabled")? == "on" {
+            Role::Proxy
+        } else {
+            Role::External
+        };
+        let proxy = setting(db, "dhcp_proxy_network")?;
+        let proxy_subnet = proxy
+            .parse::<Ipv4Addr>()
+            .ok()
+            .zip(setting(db, "dhcp_proxy_netmask")?.parse::<Ipv4Addr>().ok())
+            .and_then(|(network, mask)| {
+                let mask = u32::from(mask);
+                (mask.leading_ones() == mask.count_ones())
+                    .then(|| format!("{network}/{}", mask.count_ones()))
+            });
+        Ok(Self {
+            role,
+            interface: setting(db, "pxe_interface")?,
+            address,
+            subnet: setting(db, "pxe_subnet")?,
+            proxy_subnet,
+        })
+    }
+
+    pub(super) fn enabled(&self) -> bool {
+        self.role != Role::Console
+    }
+
+    pub(super) fn save(&self, db: &Connection) -> Result<(), ErrorBox> {
+        if self.enabled() {
+            store(db, "pxe_interface", &self.interface)?;
+            store(db, "pxe_ip", &self.address.to_string())?;
+            store(db, "pxe_subnet", &self.subnet)?;
+            store(db, "network_override", "off")?;
+        }
+        if self.role == Role::Proxy {
+            let (network, mask) =
+                parse_subnet(self.proxy_subnet.as_deref().unwrap_or(&self.subnet))
+                    .ok_or("Invalid staged DHCP proxy subnet")?;
+            store(
+                db,
+                "dhcp_proxy_network",
+                &Ipv4Addr::from(network).to_string(),
+            )?;
+            store(db, "dhcp_proxy_netmask", &Ipv4Addr::from(mask).to_string())?;
+        }
+        store(db, "pxe_enabled", if self.enabled() { "on" } else { "off" })?;
+        store(
+            db,
+            "dhcp_proxy_enabled",
+            if self.role == Role::Proxy {
+                "on"
+            } else {
+                "off"
+            },
+        )?;
+        Ok(())
     }
 
     fn assigned(&self) -> bool {
@@ -79,6 +166,43 @@ impl Network {
         #[cfg(not(target_os = "linux"))]
         false
     }
+}
+
+fn detected_networks() -> Vec<(String, Ipv4Addr, String)> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    let Ok(output) = std::process::Command::new("/usr/bin/ip")
+        .args(["-j", "-4", "addr", "show", "up"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let Ok(links) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout) else {
+        return Vec::new();
+    };
+    let mut choices = Vec::new();
+    for link in links {
+        let (Some(interface), Some(addresses)) =
+            (link["ifname"].as_str(), link["addr_info"].as_array())
+        else {
+            continue;
+        };
+        for entry in addresses {
+            let (Some(address), Some(prefix)) = (
+                entry["local"]
+                    .as_str()
+                    .and_then(|ip| ip.parse::<Ipv4Addr>().ok()),
+                entry["prefixlen"].as_u64(),
+            ) else {
+                continue;
+            };
+            if !address.is_loopback() && entry["family"] == "inet" && prefix <= 32 {
+                choices.push((interface.to_owned(), address, format!("{address}/{prefix}")));
+            }
+        }
+    }
+    choices
 }
 
 pub(super) fn is_route(path: &str) -> bool {
@@ -238,18 +362,6 @@ fn change(
                 "Attendez la fin du téléchargement de l’image Debian sélectionnée.",
             ));
         }
-        let (network, mask) = parse_subnet(&plan.subnet).ok_or("Invalid staged PXE subnet")?;
-        store(&tx, "pxe_interface", &plan.interface)?;
-        store(&tx, "pxe_ip", &plan.address.to_string())?;
-        store(&tx, "pxe_subnet", &plan.subnet)?;
-        if plan.role == Role::Proxy {
-            store(
-                &tx,
-                "dhcp_proxy_network",
-                &Ipv4Addr::from(network).to_string(),
-            )?;
-            store(&tx, "dhcp_proxy_netmask", &Ipv4Addr::from(mask).to_string())?;
-        }
         enqueue(&tx, "bootstrap:build_grub", "Préparation du chargeur UEFI")?;
         enqueue(
             &tx,
@@ -257,21 +369,8 @@ fn change(
             "Préparation des menus PXE",
         )?;
         enqueue(&tx, "bootstrap:restart_dnsmasq", "Activation du réseau PXE")?;
-        store(&tx, "pxe_enabled", "on")?;
-        store(
-            &tx,
-            "dhcp_proxy_enabled",
-            if plan.role == Role::Proxy {
-                "on"
-            } else {
-                "off"
-            },
-        )?;
     }
-    if plan.role == Role::Console {
-        store(&tx, "pxe_enabled", "off")?;
-        store(&tx, "dhcp_proxy_enabled", "off")?;
-    }
+    plan.save(&tx)?;
     store(&tx, "https_enabled", "on")?;
     store(&tx, "network_override", "off")?;
     store(&tx, "wizard_completed", "1")?;
@@ -324,9 +423,23 @@ fn invalid(endpoint: &str, message: &'static str) -> Reply {
 }
 
 fn network_page(plan: Option<&Network>) -> Reply {
-    let mut html = String::from(
+    let html = network_form(plan, "/init/network", "Continuer");
+    ui::wizard(
+        Some(WizardStep::Network),
+        "Réseau PXE",
+        &html,
+        StatusCode::OK,
+    )
+}
+
+pub(super) fn network_form(
+    plan: Option<&Network>,
+    action: &'static str,
+    submit: &'static str,
+) -> String {
+    let mut html = format!(
         r#"<p class="wizard-intro">Choisissez si cette instance doit servir des clients PXE ou héberger uniquement la console.</p>
-<form class="form-stack" method="post" action="/init/network">
+<form class="form-stack" method="post" action="{action}">
 <div class="field"><label for="setup-role">Mode de fonctionnement</label><select id="setup-role" name="role">"#,
     );
     for (name, label, role) in [
@@ -344,9 +457,18 @@ fn network_page(plan: Option<&Network>) -> Reply {
         ));
     }
     html.push_str(r#"</select></div><fieldset class="form-stack wizard-network"><legend>Paramètres PXE</legend>
-<p class="muted">Renseignez ces champs si vous avez choisi un mode PXE.</p>"#);
+<div class="field"><label for="network-address">Adresse détectée</label>
+<select id="network-address" name="network_address"><option value="">Configuration manuelle</option>"#);
+    for (interface, ip, subnet) in detected_networks() {
+        html.push_str("<option value=\"");
+        escape(&mut html, &format!("{interface}|{ip}"));
+        html.push_str("\">");
+        escape(&mut html, &format!("{interface} · {subnet}"));
+        html.push_str("</option>");
+    }
+    html.push_str(r#"</select></div><p class="muted">Une adresse détectée remplace l’interface, l’adresse IPv4 et le sous-réseau PXE saisis ci-dessous.</p>"#);
     let address = plan
-        .filter(|plan| plan.role != Role::Console)
+        .filter(|plan| !plan.address.is_unspecified())
         .map(|plan| plan.address.to_string())
         .unwrap_or_default();
     for (key, label, value, placeholder) in [
@@ -363,18 +485,20 @@ fn network_page(plan: Option<&Network>) -> Reply {
             plan.map_or("", |plan| &plan.subnet),
             "192.168.10.0/24",
         ),
+        (
+            "dhcp_proxy_cidr",
+            "Sous-réseau du proxy DHCP (facultatif)",
+            plan.and_then(|plan| plan.proxy_subnet.as_deref())
+                .unwrap_or_default(),
+            "Même sous-réseau que PXE",
+        ),
     ] {
         html.push_str(&format!(r#"<div class="field"><label for="{key}">{label}</label><input id="{key}" name="{key}" placeholder="{placeholder}" autocomplete="off" spellcheck="false" value=""#));
         escape(&mut html, value);
         html.push_str(r#""></div>"#);
     }
-    html.push_str(r#"</fieldset><div class="form-actions"><button type="submit">Continuer</button></div></form>"#);
-    ui::wizard(
-        Some(WizardStep::Network),
-        "Réseau PXE",
-        &html,
-        StatusCode::OK,
-    )
+    html.push_str(&format!(r#"</fieldset><div class="form-actions"><button type="submit">{submit}</button></div></form>"#));
+    html
 }
 
 fn images_page(db: &Connection) -> Result<Reply, ErrorBox> {

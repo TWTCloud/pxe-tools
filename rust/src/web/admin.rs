@@ -20,7 +20,7 @@ use hyper::{
 use rusqlite::{params, Connection, OpenFlags};
 use std::{
     collections::HashMap,
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr},
     path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -29,6 +29,20 @@ use tokio::{sync::Semaphore, task};
 
 pub(super) const DEVICE_SETTINGS: &str = "/admin/settings/device-terminology";
 const PAGE_SIZE: usize = 100;
+const DEVICE_STATES: &[(&str, &str)] = &[
+    ("unknown", "Inconnu"),
+    ("inventorying", "Inventaire en cours"),
+    ("discovered", "Détecté"),
+    ("configured", "Configuré"),
+    ("installing", "Installation en cours"),
+    ("installed", "Installé"),
+    ("provisioned", "Provisionné"),
+    ("failed", "Échec"),
+    ("wiping", "Effacement en cours"),
+    ("wiped", "Effacé"),
+    ("testing", "Diagnostic en cours"),
+    ("tested", "Diagnostic terminé"),
+];
 const DEVICE_TERMS: [(&str, &str, &str); 4] = [
     ("machine", "Machine", "Machines"),
     ("client", "Client PXE", "Clients PXE"),
@@ -45,6 +59,7 @@ pub(super) fn device_term(term: &str) -> Option<&'static str> {
 
 pub(super) enum Action {
     Devices,
+    Overview(Option<Ipv4Addr>),
     Device(super::devices::DeviceRoute, Option<Bytes>),
     Linux(
         i64,
@@ -81,6 +96,7 @@ impl Action {
         let select = |view, edit| if read { view } else { edit };
         Some(match self {
             Self::Devices => DevicesRead,
+            Self::Overview(_) => SettingsRead,
             Self::Device(route, form) => route.permission(method, form.as_deref()),
             Self::Linux(..) => Deploy,
             Self::Register(..) => DevicesEdit,
@@ -93,7 +109,9 @@ impl Action {
                 | Preset::Import
                 | Preset::Detail(_)
                 | Preset::Snapshot(_)
-                | Preset::Push(_),
+                | Preset::Push(_)
+                | Preset::Duplicate(_)
+                | Preset::Options(_),
                 _,
             )
             | Self::PullPresets => PresetsEdit,
@@ -401,6 +419,9 @@ impl Console {
                 if let Action::Users(form) = &action {
                     return access::users(&db, &db_path, &account, form.as_deref()).ok();
                 }
+                if let Action::Overview(address) = &action {
+                    return super::overview::show(&db, &account, *address).ok();
+                }
                 if let Action::Tokens(form) = &action {
                     return access::tokens(&db, &db_path, &account, form.as_deref()).ok();
                 }
@@ -495,7 +516,7 @@ impl Console {
                             .expect("valid settings redirect"),
                     );
                 }
-                render_devices(&db, page).ok()
+                render_devices(&db, page, &query).ok()
             })();
             (reply, authenticated)
         })
@@ -611,16 +632,42 @@ pub(super) fn terminology_form(html: &mut String, action: &str, term: &str) {
     html.push_str(r#"</select></div><div class="form-actions"><button>Enregistrer l’appellation</button></div></form>"#);
 }
 
-fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<Reply> {
+fn render_devices(db: &Connection, page: u32, query: &str) -> rusqlite::Result<Reply> {
     let term = crate::setting(db, "ui_device_term")?;
     let (term, _, label) = DEVICE_TERMS
         .iter()
         .find(|(key, _, _)| *key == term)
         .unwrap_or(&DEVICE_TERMS[0]);
+    let mut search = String::new();
+    let mut state = "";
+    for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+        if key == "q" {
+            search = value.trim().chars().take(120).collect();
+        } else if key == "status" {
+            state = DEVICE_STATES
+                .iter()
+                .find(|(key, _)| *key == value)
+                .map_or("", |(key, _)| *key);
+        }
+    }
+    let pattern = format!(
+        "%{}%",
+        search
+            .replace('!', "!!")
+            .replace('%', "!%")
+            .replace('_', "!_")
+    );
     let mut rows = db.prepare(
-        "SELECT COALESCE(hostname,''), mac, status, id FROM machines ORDER BY id LIMIT ? OFFSET ?",
+        "SELECT COALESCE(hostname,''), mac, status, id FROM machines
+         WHERE (?1='' OR status=?1) AND (?2='%%' OR hostname LIKE ?2 ESCAPE '!' OR mac LIKE ?2 ESCAPE '!')
+         ORDER BY id LIMIT ?3 OFFSET ?4",
     )?;
-    let mut rows = rows.query([PAGE_SIZE as u64 + 1, u64::from(page - 1) * PAGE_SIZE as u64])?;
+    let mut rows = rows.query(params![
+        state,
+        pattern,
+        PAGE_SIZE as u64 + 1,
+        u64::from(page - 1) * PAGE_SIZE as u64
+    ])?;
     let mut html = String::from(
         r#"<nav class="device-actions inventory-actions" aria-label="Actions de l’inventaire">
 <a class="button" href="/machines/new">Ajouter un appareil</a>
@@ -630,6 +677,17 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<Reply> {
     if crate::setting(db, "wizard_completed")? != "1" {
         html.push_str(r#"<p><a href="/init/network">Poursuivre la configuration initiale</a></p>"#);
     }
+    html.push_str(r#"<form class="form-actions" method="get" action="/admin/devices">
+<div class="field"><label for="inventory-search">Recherche</label><input id="inventory-search" name="q" maxlength="120" placeholder="Nom d’hôte ou adresse MAC" value=""#);
+    escape(&mut html, &search);
+    html.push_str(r#""></div><div class="field"><label for="inventory-filter">État</label><select id="inventory-filter" name="status"><option value="">Tous les états</option>"#);
+    for &(key, label) in DEVICE_STATES {
+        let selected = if key == state { " selected" } else { "" };
+        html.push_str(&format!(
+            r#"<option value="{key}"{selected}>{label}</option>"#
+        ));
+    }
+    html.push_str(r#"</select></div><button>Filtrer</button><a class="button button--quiet" href="/admin/devices">Effacer les filtres</a></form>"#);
     html.push_str(r#"<div class="table-region device-inventory" role="region" aria-label="Inventaire des appareils" tabindex="0"><table role="table"><thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">Nom d’hôte</th><th scope="col" role="columnheader">Adresse MAC</th><th scope="col" role="columnheader">État</th></tr></thead><tbody role="rowgroup">"#);
     let mut count = 0;
     let mut has_next = false;
@@ -660,43 +718,41 @@ fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<Reply> {
         let status: String = row.get(2)?;
         escape(
             &mut html,
-            match status.as_str() {
-                "unknown" => "Inconnu",
-                "inventorying" => "Inventaire en cours",
-                "discovered" => "Détecté",
-                "configured" => "Configuré",
-                "installing" => "Installation en cours",
-                "installed" => "Installé",
-                "provisioned" => "Provisionné",
-                "failed" => "Échec",
-                "wiping" => "Effacement en cours",
-                "wiped" => "Effacé",
-                "testing" => "Diagnostic en cours",
-                "tested" => "Diagnostic terminé",
-                value => value,
-            },
+            DEVICE_STATES
+                .iter()
+                .find(|(key, _)| *key == status)
+                .map_or(status.as_str(), |(_, label)| *label),
         );
         html.push_str("</span></td>");
         html.push_str("</tr>");
         count += 1;
     }
     if count == 0 {
-        html.push_str(r#"<tr role="row"><td colspan="3" class="table-empty" role="cell"><strong>Aucun appareil dans l’inventaire</strong>Les appareils détectés par PXE apparaîtront ici.</td></tr>"#);
+        html.push_str(if search.is_empty() && state.is_empty() {
+            r#"<tr role="row"><td colspan="3" class="table-empty" role="cell"><strong>Aucun appareil dans l’inventaire</strong>Les appareils détectés par PXE apparaîtront ici.</td></tr>"#
+        } else {
+            r#"<tr role="row"><td colspan="3" class="table-empty" role="cell">Aucun appareil ne correspond aux filtres.</td></tr>"#
+        });
     }
     html.push_str("</tbody></table></div>");
     if page > 1 || has_next {
         html.push_str(r#"<nav aria-label="Pagination">"#);
+        let link = |number: u32| {
+            form_urlencoded::Serializer::new(String::new())
+                .append_pair("page", &number.to_string())
+                .append_pair("q", &search)
+                .append_pair("status", state)
+                .finish()
+        };
         if page > 1 {
-            html.push_str(&format!(
-                r#"<a rel="prev" href="/admin/devices?page={}">Précédente</a> "#,
-                page - 1
-            ));
+            html.push_str(r#"<a rel="prev" href="/admin/devices?"#);
+            escape(&mut html, &link(page - 1));
+            html.push_str(r#"">Précédente</a> "#);
         }
         if has_next && page < u32::MAX {
-            html.push_str(&format!(
-                r#"<a rel="next" href="/admin/devices?page={}">Suivante</a>"#,
-                page + 1
-            ));
+            html.push_str(r#"<a rel="next" href="/admin/devices?"#);
+            escape(&mut html, &link(page + 1));
+            html.push_str(r#"">Suivante</a>"#);
         }
         html.push_str("</nav>");
     }

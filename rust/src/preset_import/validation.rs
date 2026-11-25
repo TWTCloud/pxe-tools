@@ -289,7 +289,7 @@ fn string_or_default<'a>(value: &'a Value, default: &'a str) -> &'a str {
     }
 }
 
-fn validate_advanced(value: &Value) -> Result<(), ErrorBox> {
+pub(crate) fn validate_advanced(value: &Value) -> Result<(), ErrorBox> {
     let zone = value["timezone"]["zone"].as_str().unwrap_or_default();
     if !zone.is_empty()
         && zone != "UTC"
