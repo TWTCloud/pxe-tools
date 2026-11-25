@@ -8,7 +8,7 @@ use crate::web::{
     ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
-use hyper::StatusCode;
+use hyper::{Response, StatusCode};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::{Map, Value};
 use std::{collections::HashMap, fmt::Write, path::Path};
@@ -176,10 +176,11 @@ pub(super) fn serve(
     }
     let json = Value::Object(config);
     if let Err(error) = crate::preset_import::validate_advanced(&json) {
-        return Ok(plain(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            &format!("{error}\n"),
-        ));
+        return Ok(Response::builder()
+            .status(StatusCode::UNPROCESSABLE_ENTITY)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .header("Cache-Control", "no-store")
+            .body(crate::web::bytes(format!("{error}\n")))?);
     }
     tx.execute(
         "UPDATE presets SET advanced_config_json=NULLIF(?2,'{}'),updated_at=CURRENT_TIMESTAMP WHERE id=?1",

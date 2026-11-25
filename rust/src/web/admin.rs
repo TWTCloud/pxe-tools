@@ -20,7 +20,7 @@ use hyper::{
 use rusqlite::{params, Connection, OpenFlags};
 use std::{
     collections::HashMap,
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr},
     path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
