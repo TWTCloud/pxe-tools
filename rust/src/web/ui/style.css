@@ -384,6 +384,7 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 }
 .operation-link svg { width: 1em; height: 1em; }
 .pagination { margin-top: var(--space-4); }
+#catalogue { scroll-margin-top: calc(var(--header-height) + var(--space-4)); }
 .image-list { display: grid; gap: var(--space-3); }
 .image-catalog { align-items: stretch; }
 .image-card > header, .image-actions {

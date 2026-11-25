@@ -477,7 +477,7 @@ fn heading(distro: &str, label: &str) -> String {
 
 fn managed_images(db: &Connection, number: u32, can_edit: bool) -> Result<String, ErrorBox> {
     let mut html = String::from(
-        r#"<section data-image-progress aria-labelledby="managed-images"><header class="section-heading"><h2 id="managed-images">Images sur ce serveur</h2></header><div class="image-list">"#,
+        r#"<section data-image-progress aria-labelledby="managed-images"><header class="section-heading"><h2 id="managed-images">Images sur ce serveur</h2><a class="button button--quiet" href="/settings/images#catalogue">Parcourir le catalogue</a></header><div class="image-list">"#,
     );
     let mut query = db.prepare(
         "SELECT distro, COALESCE(NULLIF(version_full,''),version), arch, status, progress_percent,

@@ -656,8 +656,8 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
         raise RuntimeError('Expected the devices list to require authentication')
     login=('--user','fixture-admin:fixture-login-password')
     devices=request(tls_url+'/admin/devices',*login)
-    if not devices.startswith('HTTP/1.1 200 ') or '<h1>Ordinateurs</h1>' not in devices:
-        raise RuntimeError('The Rust console did not apply the existing device label')
+    if not devices.startswith('HTTP/1.1 200 ') or '<h1>Inventaire</h1>' not in devices:
+        raise RuntimeError('The Rust console did not display the stable inventory title')
     settings_url=tls_url+'/admin/settings/device-terminology'
     change=(*login,'--data','ui_device_term=serveur')
     # Basic credentials are attached automatically by browsers. Require a
@@ -667,8 +667,8 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     saved=request(settings_url,*change,'--header','Origin: '+tls_url)
     if not saved.startswith('HTTP/1.1 303 ') or 'location: /admin/devices' not in saved.lower():
         raise RuntimeError('Expected the label form to redirect to the canonical devices list')
-    if '<h1>Serveurs</h1>' not in request(tls_url+'/admin/devices',*login):
-        raise RuntimeError('The device label change did not preserve the canonical URL')
+    if '<h1>Inventaire</h1>' not in request(tls_url+'/admin/devices',*login):
+        raise RuntimeError('The legacy terminology setting changed the stable inventory title')
     if amd64:
         windows=pxe_url+'/pxe/windows/'
         boot=request(windows+'boot.ipxe')
