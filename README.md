@@ -52,6 +52,10 @@ le code de l’assistant avec `sudo cat /run/pxe-tools-rust-guided/setup-code`.
 Le proxy DHCP s’active après votre confirmation de la configuration réseau
 dans l’assistant.
 
+Les builds actuels de la branche principale ouvrent aussi la console sur
+les IPv4 privées actives du serveur. Depuis un autre poste du réseau,
+ouvrez `https://<IPv4-du-serveur>/admin/`.
+
 Pour Secure Boot, la clé MOK de votre instance doit être enrôlée sur chaque
 client x86 concerné avant d'utiliser le chargeur signé par cette instance.
 

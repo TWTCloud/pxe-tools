@@ -87,6 +87,14 @@ fn configured_database(config: &Path) -> Option<PathBuf> {
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if let [flag] = args.as_slice() {
+        if flag == "--admin-listen-addresses" {
+            for address in web::admin_addresses()? {
+                println!("{address}");
+            }
+            return Ok(());
+        }
+    }
     if let [flag, config] = args.as_slice() {
         if flag == "--migrate-schema" && Path::new(config).is_absolute() {
             return migrations::schema(Path::new(config));

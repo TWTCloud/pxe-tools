@@ -63,6 +63,7 @@ services:
       # === TLS (Spec A) ===
       TLS_CN: ${TLS_CN:-pxe-tools.local}
       PXE_PUBLIC_HOST: ${PXE_PUBLIC_HOST:-}
+      PXE_ADMIN_BIND: ${PXE_ADMIN_BIND:-}
       PXE_ACME: ${PXE_ACME:-}
       PXE_ACME_EMAIL: ${PXE_ACME_EMAIL:-}
       PXE_ACME_DIRECTORY_URL: ${PXE_ACME_DIRECTORY_URL:-}

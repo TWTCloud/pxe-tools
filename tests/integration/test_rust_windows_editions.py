@@ -32,6 +32,8 @@ SETTINGS = '/settings/windows'
 BOOT = '/pxe/windows/boot.ipxe'
 MEDIA = '/settings/images/media'
 CDN = '93.184.216.34'
+LAN = '10.77.0.1'
+LAN_CLIENT = '10.77.0.2'
 
 
 def media(root, profile, edition, label, index):
@@ -45,11 +47,12 @@ def media(root, profile, edition, label, index):
     }))
 
 
-def request(path, *, tls=None, source=None, form=None, headers=None, method=None):
+def request(path, *, tls=None, source=None, form=None, headers=None, method=None, host=None):
+    binding = (source, 0) if source else None
     if tls:
-        connection = HTTPSConnection('127.0.0.1', HTTPS, context=tls, timeout=2)
+        connection = HTTPSConnection(host or '127.0.0.1', HTTPS, context=tls, timeout=2, source_address=binding)
     else:
-        connection = HTTPConnection(SERVER, HTTP, timeout=2, source_address=(source, 0))
+        connection = HTTPConnection(host or SERVER, HTTP, timeout=2, source_address=binding)
     try:
         connection.request(method or ('GET' if form is None else 'POST'), path,
                            None if form is None else urlencode(form), headers=headers or {})
@@ -315,7 +318,64 @@ def check_media(binary, root, public, database, tls, auth, headers, env):
     return rhel_sha
 
 
+def check_lan(binary, root, tls, env):
+    runtime = root/'lan'
+    runtime.mkdir(mode=0o700)
+    sessions = runtime/'sessions'
+    sessions.mkdir(mode=0o700)
+    (root/'setup-code').write_text('a'*48)
+    config = runtime/'db.conf'
+    private = {'host': LAN, 'source': LAN_CLIENT}
+    secure = {**private, 'tls': tls}
+    origin = f'https://{LAN}:{HTTPS}'
+    env = {**env, 'PXE_SETUP_DATA_ROOT': str(runtime), 'PXE_DB_PATH': str(runtime/'install.sqlite'),
+           'PXE_SESSION_DIR': str(sessions), 'PXE_ADMIN_BIND': ''}
+    with subprocess.Popen([binary, '--serve-guided', config], env=env) as service:
+        try:
+            for _ in range(80):
+                if service.poll() is not None:
+                    raise RuntimeError('LAN listener stopped during startup')
+                try:
+                    if request('/healthz', **secure)[0] == 200:
+                        break
+                except OSError:
+                    time.sleep(.2)
+            else:
+                raise RuntimeError('LAN fixture was not ready')
+            assert request('/', **private)[:2] == (302, origin+'/admin/')
+            assert request('/', **private, headers={'Host': 'other.invalid'})[:2] == (302, origin+'/admin/')
+            assert request('/admin/', **secure)[:2] == (302, '/init/welcome')
+            assert request('/init/welcome', host=LAN, source=OUTSIDE_CLIENT, tls=tls)[0] == 404
+            try:
+                request('/healthz', tls=tls, host=CDN)
+            except ConnectionRefusedError:
+                pass
+            else:
+                raise AssertionError('The console opened a non-private address')
+            headers = {'Origin': origin, 'Content-Type': 'application/x-www-form-urlencoded'}
+            assert request('/init/db', **secure, form={'code':'b'*48}, headers=headers)[0] == 403
+            assert request('/init/db', **secure, form={'code':'a'*48},
+                           headers={**headers, 'Origin':'https://other.invalid'})[0] == 403
+            assert request('/init/db', **secure, form={'code':'a'*48}, headers=headers)[:2] == (303,'/init/admin')
+            credentials = {'username':'lan-admin', 'password':'fixture-lan-password'}
+            assert request('/init/admin', **secure, headers=headers,
+                           form={**credentials,'password_confirm': credentials['password'],'code':'a'*48})[:2] == (303,'/admin/devices')
+            assert request('/login', **secure, headers=headers, form=credentials)[0] == 303
+            authorization = base64.b64encode(b'lan-admin:fixture-lan-password').decode()
+            admin = {'Authorization': 'Basic ' + authorization, **headers}
+            assert request('/init/network', **secure, form={'role':'console'}, headers=admin)[:2] == (303,'/init/done')
+            assert request('/admin/devices', **secure, headers=admin)[0] == 200
+            assert request('/pxe/linux/amd64/grub.cfg', **private)[0] == 404
+        finally:
+            service.terminate()
+    env['PXE_ADMIN_BIND'] = '127.0.0.1'
+    assert subprocess.check_output([binary, '--admin-listen-addresses'], env=env, text=True).splitlines() == ['127.0.0.1']
+    print('Default LAN console, HTTPS setup, login, origin checks and explicit loopback verified.')
+
+
 def main(binary):
+    for address in (LAN, LAN_CLIENT):
+        subprocess.run(['ip', '-4', 'address', 'add', address+'/32', 'dev', 'lo', 'scope', 'global'], check=True)
     with tempfile.TemporaryDirectory(prefix='pxe-editions-', dir='/run') as temporary:
         root = Path(temporary)
         public = root/'http'
@@ -336,7 +396,7 @@ def main(binary):
         config.write_text(json.dumps({'driver': 'sqlite', 'path': str(database)}))
         subprocess.run([
             'openssl', 'req', '-new', '-x509', '-newkey', 'rsa:2048', '-nodes',
-            '-subj', '/CN=127.0.0.1', '-addext', f'subjectAltName=IP:127.0.0.1,IP:{CDN}',
+            '-subj', '/CN=127.0.0.1', '-addext', f'subjectAltName=IP:127.0.0.1,IP:{CDN},IP:{LAN}',
             '-days', '1', '-keyout', str(root/'key.pem'), '-out', str(root/'cert.pem'),
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         tls = ssl.create_default_context(cafile=str(root/'cert.pem'))
@@ -354,6 +414,7 @@ def main(binary):
                'PXE_WINPE_CLIENT_IP': WINDOWS_CLIENT,
                'PXE_RHEL9_AMD64_REPO': 'http://192.0.2.99:8090/rhel/9/',
                'PXE_RHEL9_ARM64_REPO': 'http://192.0.2.99/rhel/9/?secret=fixture'}
+        check_lan(binary, root, tls, env)
         with subprocess.Popen([binary, '--serve-guided', config], env=env) as service:
             try:
                 for _ in range(80):
@@ -368,6 +429,8 @@ def main(binary):
                     raise RuntimeError('Rust Windows edition fixture was not ready')
 
                 assert request(SETTINGS, tls=tls)[0] == 401
+                assert request(SETTINGS, tls=tls, host=LAN, source=LAN_CLIENT, headers=auth)[0] == 200
+                assert request('/pxe/linux/amd64/grub.cfg', host=LAN, source=LAN_CLIENT)[0] == 404
                 status, _, page = request(SETTINGS, tls=tls, headers=auth)
                 assert status == 200 and b'Windows 10 Famille' in page and b'Windows 11 Pro &amp; test' in page
                 assert request(BOOT, source=WINDOWS_CLIENT)[0] == 409

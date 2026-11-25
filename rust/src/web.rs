@@ -70,6 +70,7 @@ struct Site {
     assets: assets::Assets,
     catalog: Arc<monitoring::Catalog>,
     pxe_ip: Option<Ipv4Addr>,
+    addresses: Vec<Ipv4Addr>,
     https_port: u16,
     http_port: u16,
     winpe_client: Option<Ipv4Addr>,
@@ -93,6 +94,12 @@ pub fn serve(config: &Path) -> Result<(), ErrorBox> {
 
 async fn run(config: &Path) -> Result<(), ErrorBox> {
     let pxe_ip = active_pxe_address(config)?;
+    let mut addresses = admin_addresses()?;
+    if let Some(address) = pxe_ip {
+        if !addresses.contains(&address) {
+            addresses.push(address);
+        }
+    }
     let public_host = env::var("PXE_PUBLIC_HOST")
         .ok()
         .filter(|name| !name.is_empty())
@@ -122,6 +129,7 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         assets,
         catalog: Arc::new(serde_json::from_str(include_str!("checkpoints.json"))?),
         pxe_ip,
+        addresses,
         https_port,
         http_port,
         winpe_client: winpe::configured_client()?,
@@ -134,27 +142,77 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         acme_challenge,
     });
     let mut listeners = Vec::new();
-    // Keep the loopback API used by the worker while exposing PXE only on its configured address.
-    for address in std::iter::once(Ipv4Addr::LOCALHOST).chain(pxe_ip.filter(|ip| !ip.is_loopback()))
-    {
-        listeners.push((TcpListener::bind((address, http_port)).await?, false));
-        listeners.push((TcpListener::bind((address, https_port)).await?, true));
+    for &address in &site.addresses {
+        for (port, tls) in [(http_port, false), (https_port, true)] {
+            let listener = TcpListener::bind((address, port))
+                .await
+                .map_err(|error| format!("Unable to listen on {address}:{port}: {error}"))?;
+            listeners.push((listener, address, tls));
+        }
     }
     let connections = Arc::new(Semaphore::new(64));
     let mut servers = task::JoinSet::new();
-    for (listener, tls) in listeners {
-        servers.spawn(accept(listener, tls, site.clone(), connections.clone()));
+    for (listener, address, tls) in listeners {
+        servers.spawn(accept(
+            listener,
+            address,
+            tls,
+            site.clone(),
+            connections.clone(),
+        ));
     }
     let tls = site.tls.clone();
     let challenge = site.acme_challenge.clone();
     task::spawn(async move { acme::run(tls.acme_configuration(), &challenge, &tls).await });
     notify_ready().map_err(|error| format!("Systemd readiness notification: {error}"))?;
-    let ip = pxe_ip.unwrap_or(Ipv4Addr::LOCALHOST);
-    println!("PXE Tools Rust HTTP/HTTPS ready on {ip}:{http_port} and {ip}:{https_port}");
+    for address in &site.addresses {
+        println!(
+            "PXE Tools Rust HTTP/HTTPS ready on {address}:{http_port} and {address}:{https_port}"
+        );
+    }
     tokio::select! {
         result = servers.join_next() => result.ok_or("HTTP listeners unavailable")??,
         signal = tokio::signal::ctrl_c() => signal.map_err(Into::into),
     }
+}
+
+pub(crate) fn admin_addresses() -> Result<Vec<Ipv4Addr>, ErrorBox> {
+    let mut addresses = vec![Ipv4Addr::LOCALHOST];
+    if let Some(configured) = env::var_os("PXE_ADMIN_BIND").filter(|value| !value.is_empty()) {
+        let address: Ipv4Addr = configured
+            .to_str()
+            .ok_or("PXE_ADMIN_BIND must be an IPv4 address")?
+            .parse()?;
+        if address != Ipv4Addr::LOCALHOST && !address.is_private() {
+            return Err("PXE_ADMIN_BIND must be a private IPv4 address or 127.0.0.1".into());
+        }
+        if address != Ipv4Addr::LOCALHOST {
+            addresses.push(address);
+        }
+        return Ok(addresses);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let output = std::process::Command::new("/usr/bin/ip")
+            .args(["-j", "-4", "address", "show", "up", "scope", "global"])
+            .output()
+            .map_err(|error| format!("LAN address inspection: {error}"))?;
+        if !output.status.success() {
+            return Err("Unable to list the LAN addresses".into());
+        }
+        let links: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)?;
+        addresses.extend(
+            links
+                .iter()
+                .filter_map(|link| link["addr_info"].as_array())
+                .flatten()
+                .filter_map(|entry| entry["local"].as_str()?.parse::<Ipv4Addr>().ok())
+                .filter(Ipv4Addr::is_private),
+        );
+        addresses.sort_unstable();
+        addresses.dedup();
+    }
+    Ok(addresses)
 }
 
 fn active_pxe_address(config: &Path) -> Result<Option<Ipv4Addr>, ErrorBox> {
@@ -281,6 +339,7 @@ fn notify_ready() -> io::Result<()> {
 
 async fn accept(
     listener: TcpListener,
+    local: Ipv4Addr,
     tls: bool,
     site: Arc<Site>,
     connections: Arc<Semaphore>,
@@ -296,16 +355,16 @@ async fn accept(
             if tls {
                 let tls = site.tls.acceptor();
                 if let Ok(Ok(stream)) = timeout(Duration::from_secs(10), tls.accept(stream)).await {
-                    connection(stream, peer, true, site).await;
+                    connection(stream, peer, local, true, site).await;
                 }
             } else {
-                connection::<TcpStream>(stream, peer, false, site).await;
+                connection::<TcpStream>(stream, peer, local, false, site).await;
             }
         });
     }
 }
 
-async fn connection<S>(stream: S, peer: SocketAddr, secure: bool, site: Arc<Site>)
+async fn connection<S>(stream: S, peer: SocketAddr, local: Ipv4Addr, secure: bool, site: Arc<Site>)
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
@@ -330,7 +389,7 @@ where
                 && winpe::allowed(site.winpe_client, peer.ip())
                 && winpe::logs_request(path))
             .then(|| path.to_owned());
-            let reply = dispatch(request, peer.ip(), secure, &site).await;
+            let reply = dispatch(request, peer.ip(), local, secure, &site).await;
             if let Some(asset) = asset {
                 let length = single(reply.headers(), CONTENT_LENGTH.as_str()).unwrap_or("-");
                 println!(
@@ -378,6 +437,7 @@ async fn windows_editions(site: &Site) -> Arc<winpe::Editions> {
 async fn dispatch(
     request: Request<Incoming>,
     peer: IpAddr,
+    local: Ipv4Addr,
     secure: bool,
     site: &Arc<Site>,
 ) -> Reply {
@@ -396,19 +456,23 @@ async fn dispatch(
         let location = if secure {
             "/admin/".to_owned()
         } else {
+            let requested_host = single(&parts.headers, HOST.as_str())
+                .filter(|value| !value.contains('@'))
+                .and_then(|value| value.parse::<Authority>().ok());
             let host = site
                 .pxe_ip
+                .filter(|address| *address == local)
                 .and(site.public_host.as_deref())
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    single(&parts.headers, HOST.as_str())
-                        .and_then(|value| value.parse::<Authority>().ok())
-                        .filter(|authority| authority.host() == "localhost" && peer.is_loopback())
-                        .map_or_else(
-                            || site.pxe_ip.unwrap_or(Ipv4Addr::LOCALHOST).to_string(),
-                            |_| "localhost".to_owned(),
-                        )
-                });
+                .or_else(|| {
+                    requested_host.as_ref().map(Authority::host).filter(|name| {
+                        (local.is_loopback() && name.eq_ignore_ascii_case("localhost"))
+                            || site
+                                .public_host
+                                .as_deref()
+                                .is_some_and(|host| host.eq_ignore_ascii_case(name))
+                    })
+                })
+                .map_or_else(|| local.to_string(), str::to_owned);
             let port = if site.https_port == 443 {
                 String::new()
             } else {
@@ -422,13 +486,16 @@ async fn dispatch(
             .body(bytes(""))
             .expect("valid redirect");
     }
-    if secure && readable && path == "/admin/" && peer.is_loopback() && site.pxe_ip.is_none() {
+    let setup_allowed = site.pxe_ip.is_none()
+        && (peer.is_loopback()
+            || (local.is_private() && matches!(peer, IpAddr::V4(address) if address.is_private())));
+    if secure && readable && path == "/admin/" && setup_allowed {
         if let Some(reply) = site.setup.landing(&site.database).await {
             return reply;
         }
     }
     if matches!(path, "/init" | "/init/welcome" | "/init/db" | "/init/admin") {
-        if !secure || !peer.is_loopback() || site.pxe_ip.is_some() {
+        if !secure || !setup_allowed {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
         if readable {
@@ -679,7 +746,7 @@ async fn dispatch(
             .await;
     }
     if onboarding::is_route(path) {
-        if !secure || !peer.is_loopback() || site.pxe_ip.is_some() {
+        if !secure || !setup_allowed {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
         let endpoint = path.to_owned();
@@ -883,7 +950,10 @@ async fn dispatch(
         };
     }
 
-    let Some(server) = site.pxe_ip else {
+    let Some(server) = site
+        .pxe_ip
+        .filter(|address| local.is_loopback() || local == *address)
+    else {
         return plain(StatusCode::NOT_FOUND, "Not found\n");
     };
     if readable && path.starts_with(crate::media::RHEL_PREFIX) {
@@ -1112,9 +1182,10 @@ fn admin_origin(headers: &HeaderMap, peer: IpAddr, site: &Site) -> bool {
     let name = host.host();
     let external_port = host.port_u16().unwrap_or(443);
     if (!forwarded && external_port != site.https_port)
-        || !(site.pxe_ip.is_some_and(|ip| name == ip.to_string())
+        || !(name
+            .parse::<Ipv4Addr>()
+            .is_ok_and(|ip| site.addresses.contains(&ip))
             || name.eq_ignore_ascii_case("localhost")
-            || name == "127.0.0.1"
             || site
                 .public_host
                 .as_ref()
