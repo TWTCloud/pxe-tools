@@ -95,8 +95,13 @@ else
     if [ -n "${PXE_DOCKER_DOCUMENTATION:-}" ]; then
         labels+=(--label "org.opencontainers.image.documentation=$PXE_DOCKER_DOCUMENTATION")
     fi
-    docker build --platform "linux/$architecture" --build-arg "APP_VERSION=${PXE_TEST_APT_VERSION:-0.1.0~lab1}" \
+    target=()
+    if [ "${PXE_DOCKER_BUILD_TARGET:-}" = rust-guided ]; then target=(--target rust-guided); fi
+    docker build "${target[@]}" --platform "linux/$architecture" --build-arg "APP_VERSION=${PXE_TEST_APT_VERSION:-0.1.0~lab1}" \
         "${labels[@]}" -f docker/pxe-tools/Dockerfile -t "$image" .
+    if [ "${PXE_DOCKER_BUILD_TARGET:-}" = rust-guided ]; then
+        PXE_RUST_GUIDED_DOCKER_IMAGE="$image" bash tests/integration/test_rust_fresh_distribution.sh docker
+    fi
     docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes {{.Id}}' "$image"
     docker run -d --name "$name" "$image" >/dev/null
     docker exec "$name" dpkg-query -W -f='Debian source: ${source:Package} ${source:Version}\n' | sort -u
@@ -105,12 +110,18 @@ else
     fi
 fi
 
+admin_probe=(curl -fsS http://127.0.0.1:8080/healthz)
+admin_init=(curl -fsSL http://127.0.0.1:8080/init)
+if [ "$mode" = docker ] && [ "${PXE_DOCKER_BUILD_TARGET:-}" = rust-guided ]; then
+    admin_probe=(curl -kfsS https://127.0.0.1/healthz)
+    admin_init=(curl -kfsSL https://127.0.0.1/admin/)
+fi
 for attempt in {1..90}; do
-    if docker exec "$name" curl -fsS --max-time 2 http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
+    if docker exec "$name" "${admin_probe[@]}" --max-time 2 >/dev/null 2>&1; then break; fi
     sleep 1
 done
-docker exec "$name" curl -fsS --max-time 5 http://127.0.0.1:8080/healthz
-docker exec "$name" curl -fsSL --max-time 10 http://127.0.0.1:8080/init >/dev/null
+docker exec "$name" "${admin_probe[@]}" --max-time 5
+docker exec "$name" "${admin_init[@]}" --max-time 10 >/dev/null
 
 docker exec -i "$name" bash -eus -- "$mode" "$architecture" <<'GUEST'
 if [ "$1" = apt ]; then

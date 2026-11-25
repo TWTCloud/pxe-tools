@@ -1,6 +1,12 @@
 name: Build reviewed APT package
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/apt-package-candidate.yml
+      - packaging/ci/release-version.txt
+      - packaging/changelogs/**
+      - tests/integration/test_rust_*distribution.sh
   workflow_dispatch:
 
 permissions:
@@ -10,56 +16,140 @@ jobs:
   application-behavior:
     uses: ./.github/workflows/application-ci.yml
 
-  package:
-    needs: application-behavior
-    if: github.ref == 'refs/heads/main' && github.ref_protected
+  ansible:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 5
+    env:
+      SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ env.SOURCE }}
           persist-credentials: false
-      - name: Build exact package for the tracked version
+      - name: Build the exact Ansible module
+        run: |
+          set -euo pipefail
+          bash packaging/ci/verify-clean-checkout.sh "$SOURCE"
+          version=$(cat packaging/ci/release-version.txt)
+          asset_version=${version//\~/-}
+          mkdir -p "$RUNNER_TEMP/module"
+          module="$RUNNER_TEMP/module/pxe-tools-ansible_${asset_version}_all.deb"
+          python3 packaging/native/build-local-ansible-package.py "$module" --release --version "$version"
+          [[ "$(dpkg-deb --field "$module" Package)" == pxe-tools-ansible ]]
+          [[ "$(dpkg-deb --field "$module" Version)" == "$version" ]]
+          [[ "$(dpkg-deb --field "$module" Architecture)" == all ]]
+          [[ "$(stat -c %s "$module")" -le 26214400 ]]
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pxe-apt-module
+          path: ${{ runner.temp }}/module/
+          if-no-files-found: error
+          retention-days: 3
+
+  core:
+    needs: [application-behavior, ansible]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { architecture: amd64, runner: ubuntu-24.04 }
+          - { architecture: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCH: ${{ matrix.architecture }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.SOURCE }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pxe-apt-module
+          path: ${{ runner.temp }}/module
+      - name: Build exact Rust package for the tracked version
         shell: bash
         run: |
           set -euo pipefail
           umask 022
-          bash packaging/ci/verify-clean-checkout.sh "$GITHUB_SHA"
+          bash packaging/ci/verify-clean-checkout.sh "$SOURCE"
+          test "$(dpkg --print-architecture)" = "$ARCH"
           version=$(cat packaging/ci/release-version.txt)
           [[ "$version" =~ ^[0-9][A-Za-z0-9.+~_-]{0,100}$ ]]
           dpkg --validate-version "$version"
           mkdir -p "$RUNNER_TEMP/package"
           asset_version=${version//\~/-}
           [[ "$asset_version" =~ ^[A-Za-z0-9._-]+$ ]]
-          for architecture in amd64 arm64; do
-            checksum_file=package.sha256
-            if [[ "$architecture" == arm64 ]]; then checksum_file=arm64-package.sha256; fi
-            package="$RUNNER_TEMP/package/pxe-tools_${asset_version}_$architecture.deb"
-            python3 packaging/native/build-apt-package-candidate.py "$package" --version "$version" --architecture "$architecture" \
-              --maintainer 'PXE Tools <security@pxetools.com>'
-            [[ "$(dpkg-deb --field "$package" Package)" == pxe-tools ]]
-            [[ "$(dpkg-deb --field "$package" Version)" == "$version" ]]
-            [[ "$(dpkg-deb --field "$package" Architecture)" == "$architecture" ]]
-            [[ "$(stat -c %s "$package")" -le 26214400 ]]
-            dpkg-deb --fsys-tarfile "$package" > "$RUNNER_TEMP/package-content.tar"
-            tar -tvf "$RUNNER_TEMP/package-content.tar" > "$RUNNER_TEMP/package-content.txt"
-            awk '$NF == "./usr/lib/pxe-tools/app/" && $1 == "drwxr-xr-x" {found=1} END {exit !found}' "$RUNNER_TEMP/package-content.txt"
-            awk '$NF == "./usr/lib/pxe-tools/app/public/" && $1 == "drwxr-xr-x" {found=1} END {exit !found}' "$RUNNER_TEMP/package-content.txt"
-            awk '$NF == "./usr/lib/pxe-tools/app/public/index.php" && $1 == "-rw-r--r--" {found=1} END {exit !found}' "$RUNNER_TEMP/package-content.txt"
-            sha256sum "$package" | awk '{print $1}' > "$RUNNER_TEMP/package/$checksum_file"
-          done
+          rustup toolchain install 1.96.0 --profile minimal
+          cargo +1.96.0 build --locked --release --manifest-path rust/Cargo.toml
+          binary=rust/target/release/pxe-tools-rust
+          strip "$binary"
+          package="$RUNNER_TEMP/package/pxe-tools_${asset_version}_$ARCH.deb"
+          python3 packaging/native/build-apt-package-candidate.py "$package" --version "$version" --architecture "$ARCH" \
+            --rust-binary "$binary" --maintainer 'PXE Tools <security@pxetools.com>'
+          [[ "$(dpkg-deb --field "$package" Package)" == pxe-tools ]]
+          [[ "$(dpkg-deb --field "$package" Version)" == "$version" ]]
+          [[ "$(dpkg-deb --field "$package" Architecture)" == "$ARCH" ]]
+          [[ "$(stat -c %s "$package")" -le 26214400 ]]
+          dpkg-deb --contents "$package" > "$RUNNER_TEMP/package-content.txt"
+          awk '$NF == "./usr/lib/pxe-tools/pxe-tools-rust" && $1 == "-rwxr-xr-x" {found=1} END {exit !found}' "$RUNNER_TEMP/package-content.txt"
+          stat -c 'Rust .deb: %s bytes' "$package"
+          {
+            echo "PXE_GUIDED_DEB=$package"
+            echo "PXE_GUIDED_ANSIBLE_DEB=$RUNNER_TEMP/module/pxe-tools-ansible_${asset_version}_all.deb"
+            echo "PXE_TEST_APT_VERSION=$version"
+            echo "PXE_FRESH_APT_IMAGE=pxe-apt-release:local"
+          } >> "$GITHUB_ENV"
+      - name: Exercise the native Rust package
+        run: |
+          docker build --tag "$PXE_FRESH_APT_IMAGE" - <<'DOCKERFILE'
+          FROM debian:13-slim
+          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates systemd systemd-sysv && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+          bash tests/integration/test_rust_fresh_distribution.sh apt
+          bash tests/integration/test_rust_upgrade_distribution.sh apt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pxe-apt-core-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/package/
+          if-no-files-found: error
+          retention-days: 3
+
+  package:
+    needs: core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.SOURCE }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: pxe-apt-*
+          path: ${{ runner.temp }}/package
+          merge-multiple: true
+      - name: Assemble the verified packages and the optional Ansible module
+        run: |
+          set -euo pipefail
+          bash packaging/ci/verify-clean-checkout.sh "$SOURCE"
+          version=$(cat packaging/ci/release-version.txt)
+          asset_version=${version//\~/-}
+          sha256sum "$RUNNER_TEMP/package/pxe-tools_${asset_version}_amd64.deb" | cut -d ' ' -f 1 > "$RUNNER_TEMP/package/package.sha256"
+          sha256sum "$RUNNER_TEMP/package/pxe-tools_${asset_version}_arm64.deb" | cut -d ' ' -f 1 > "$RUNNER_TEMP/package/arm64-package.sha256"
           module="$RUNNER_TEMP/package/pxe-tools-ansible_${asset_version}_all.deb"
-          python3 packaging/native/build-local-ansible-package.py "$module" --release --version "$version"
-          [[ "$(dpkg-deb --field "$module" Package)" == pxe-tools-ansible ]]
-          [[ "$(dpkg-deb --field "$module" Version)" == "$version" ]]
-          [[ "$(dpkg-deb --field "$module" Architecture)" == all ]]
-          [[ "$(stat -c %s "$module")" -le 26214400 ]]
           sha256sum "$module" | awk '{print $1}' > "$RUNNER_TEMP/package/ansible-package.sha256"
-          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/package/source-commit.txt"
+          printf '%s\n' "$SOURCE" > "$RUNNER_TEMP/package/source-commit.txt"
       - name: Retain package for human review and release promotion
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pxe-debian-package
           path: ${{ runner.temp }}/package/
           if-no-files-found: error
-          retention-days: 90
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 90 || 3 }}

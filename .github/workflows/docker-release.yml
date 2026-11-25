@@ -1,6 +1,13 @@
 name: Publish reviewed multiarchitecture Docker image
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/docker-release.yml
+      - docker/pxe-tools/Dockerfile
+      - packaging/ci/release-version.txt
+      - tests/integration/test_server_architecture.sh
+      - tests/integration/test_rust_*distribution.sh
   workflow_dispatch:
     inputs:
       tag:
@@ -20,29 +27,38 @@ env:
 
 jobs:
   plan:
-    if: github.repository == 'williamboglietti/pxe-tools' && github.ref == 'refs/heads/main' && github.ref_protected
+    if: >-
+      github.repository == 'williamboglietti/pxe-tools' &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected) ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-24.04
     outputs:
       source: ${{ steps.release.outputs.source }}
       version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Bind the tag to the reviewed source
+      - name: Determine the exact release source
         id: release
         env:
-          TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$ ]]
-          source=$(git rev-parse "refs/tags/${TAG}^{commit}")
-          git merge-base --is-ancestor "$source" "$GITHUB_SHA"
+          source=$(git rev-parse HEAD)
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta[0-9]+$ ]]
+            source=$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")
+            git merge-base --is-ancestor "$source" "$GITHUB_SHA"
+          fi
           version=$(git show "$source:packaging/ci/release-version.txt")
-          asset_version=${version//\~/-}
-          test "$TAG" = "v$asset_version"
-          printf 'source=%s\nversion=%s\n' "$source" "$version" >> "$GITHUB_OUTPUT"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+~beta[0-9]+$ ]]
+          tag="v${version//\~/-}"
+          [[ "$GITHUB_EVENT_NAME" == pull_request || "$RELEASE_TAG" == "$tag" ]]
+          printf 'source=%s\nversion=%s\ntag=%s\n' "$source" "$version" "$tag" >> "$GITHUB_OUTPUT"
 
   build:
     needs: plan
@@ -57,7 +73,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     env:
-      TAG: ${{ inputs.tag }}
+      TAG: ${{ needs.plan.outputs.tag }}
       ARCH: ${{ matrix.architecture }}
       SOURCE: ${{ needs.plan.outputs.source }}
       PXE_TEST_APT_VERSION: ${{ needs.plan.outputs.version }}
@@ -73,9 +89,11 @@ jobs:
           out="$RUNNER_TEMP/docker-candidate"
           mkdir -p "$out"
           export PXE_DOCKER_TEST_IMAGE="$REGISTRY_IMAGE:$TAG-$ARCH"
+          export PXE_DOCKER_BUILD_TARGET=rust-guided
           export PXE_DOCKER_SOURCE_OFFER="$out/docker-sources-$ARCH.json"
           export PXE_DOCKER_DOCUMENTATION="https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
           bash tests/integration/test_server_architecture.sh docker "$ARCH"
+          PXE_RUST_GUIDED_DOCKER_IMAGE="$PXE_DOCKER_TEST_IMAGE" bash tests/integration/test_rust_upgrade_distribution.sh docker
           test "$(jq -r .architecture "$PXE_DOCKER_SOURCE_OFFER")" = "$ARCH"
           test "$(jq -r .pxe_tools_source "$PXE_DOCKER_SOURCE_OFFER")" = "$SOURCE"
           docker image save "$PXE_DOCKER_TEST_IMAGE" | gzip -3 > "$out/image-$ARCH.tar.gz"
@@ -88,6 +106,7 @@ jobs:
 
   publish:
     needs: [plan, build]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected
     environment: prod
     runs-on: ubuntu-24.04
     timeout-minutes: 20

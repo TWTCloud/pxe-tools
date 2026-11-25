@@ -28,10 +28,10 @@ case "$variant" in
             if docker exec "$container" systemctl list-units --no-legend >/dev/null 2>&1; then break; fi
             sleep 1
         done
-        docker exec -i -e DEBIAN_FRONTEND=noninteractive "$container" bash -es <<'APT_GUEST'
+        docker exec -i -e DEBIAN_FRONTEND=noninteractive "$container" bash -es -- "${PXE_TEST_APT_VERSION:-0.1.0~guided1}" <<'APT_GUEST'
             apt-get update -qq
             apt-get install -y --no-install-recommends /var/tmp/pxe-tools.deb
-            test "$(dpkg-query -W -f='${Version}' pxe-tools)" = "0.1.0~guided1"
+            test "$(dpkg-query -W -f='${Version}' pxe-tools)" = "$1"
             systemctl is-active --quiet pxe-tools-admin.target
             systemctl is-active --quiet pxe-tools-worker.service
             if systemctl is-active --quiet pxe-tools-dnsmasq.service; then exit 1; fi
