@@ -21,6 +21,7 @@ mod linux_boot;
 mod onboarding;
 mod overview;
 mod presets;
+mod profile;
 mod sessions;
 mod settings;
 mod setup;
@@ -566,7 +567,10 @@ async fn dispatch(
             .login(&parts, peer, &site.database, Some(form))
             .await;
     }
-    if matches!(path, access::USERS | access::TOKENS) {
+    if matches!(
+        path,
+        access::USERS | access::TOKENS | access::PERSONAL_TOKENS | profile::ROUTE
+    ) {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
@@ -583,10 +587,10 @@ async fn dispatch(
         } else {
             return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
         };
-        let action = if path == access::USERS {
-            admin::Action::Users(form)
-        } else {
-            admin::Action::Tokens(form)
+        let action = match path {
+            access::USERS => admin::Action::Users(form),
+            profile::ROUTE => admin::Action::Profile(form),
+            _ => admin::Action::Tokens(form, path == access::PERSONAL_TOKENS),
         };
         return site.admin.serve(&parts, peer, &site.database, action).await;
     }
