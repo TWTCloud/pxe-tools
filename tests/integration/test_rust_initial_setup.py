@@ -203,12 +203,12 @@ def verify_configuration(client, database, authorization, packaged, boot_fixture
         assert request('/init/network', form=plan, origin='https://other.example')[0] == 403
         assert request('/init/network', form=plan)[:2] == (303, '/init/images')
         with closing(sqlite3.connect(database)) as db, db:
-            db.execute("""INSERT INTO catalog_entries(id,distro,version_full,codename,major,arch,extract_method)
-                          VALUES(9001,'debian','13.0','trixie',13,'amd64','direct')""")
+            db.execute("""INSERT INTO catalog_entries(id,distro,version_full,codename,major,arch,channel,extract_method)
+                          VALUES(9001,'debian','13.0','trixie',13,'amd64','stable','direct')""")
         assert b'13.0' in request('/init/images')[2]
         assert request('/init/images', form={'image':'9002'})[0] == 422
         for _ in range(2):
-            assert request('/init/images', form={'image':'9001'})[:2] == (303, '/init/done')
+            assert request('/init/images', form={'action':'prepare'})[:2] == (303, '/init/images')
         with closing(sqlite3.connect(database)) as db:
             values = dict(db.execute('SELECT key,value FROM settings'))
             assert db.execute("SELECT COUNT(*) FROM os_images WHERE version_full='13.0'").fetchone() == (1,)

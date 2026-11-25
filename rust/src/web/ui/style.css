@@ -311,7 +311,7 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 }
 .wizard-steps {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--space-2);
   margin: 0 0 var(--space-5);
   padding: 0;
@@ -328,6 +328,25 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 .wizard-panel { padding: clamp(var(--space-4), 5vw, 2.5rem); }
 .wizard-panel h1 { margin-bottom: var(--space-2); font-size: clamp(1.7rem, 4.5vw, 2.5rem); text-wrap: wrap; }
 .wizard-intro { margin: 0 0 var(--space-5); color: var(--muted); }
+.wizard-catalog-loading { display: flex; align-items: center; gap: var(--space-3); }
+.wizard-catalog-loading span {
+  flex: none;
+  width: 1.1rem;
+  height: 1.1rem;
+  border: 2px solid var(--line);
+  border-inline-start-color: var(--blue);
+  border-radius: 50%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .wizard-catalog-loading span { animation: catalog-loading .8s linear infinite; }
+  @keyframes catalog-loading { to { transform: rotate(1turn); } }
+}
+.wizard-downloads { display: grid; gap: var(--space-3); padding: 0; list-style: none; }
+.wizard-downloads li { display: grid; gap: var(--space-1); }
+.wizard-downloads li > span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.wizard-downloads progress { width: 100%; accent-color: var(--blue); }
+[data-image-ready]:not([hidden]) { margin-block: var(--space-4); }
+[data-image-feedback]:empty { display: none; }
 .setup-help {
   margin-block: var(--space-4) var(--space-5);
   padding-bottom: var(--space-4);

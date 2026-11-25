@@ -105,6 +105,6 @@ if [[ "$variant" == apt ]] && docker exec "$container" test -f /usr/lib/pxe-tool
     docker exec -e DEBIAN_FRONTEND=noninteractive "$container" \
         apt-get install -y --no-install-recommends apt-utils gnupg
     docker cp tests/integration/test_apt_console_update.py "$container:/var/tmp/test_apt_console_update.py"
-    docker exec "$container" python3 /var/tmp/test_apt_console_update.py "${PXE_TEST_APT_VERSION:?}"
+    docker exec "$container" python3 /var/tmp/test_apt_console_update.py "${PXE_TEST_APT_VERSION:-0.1.0~guided1}"
 fi
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"

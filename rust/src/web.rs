@@ -828,7 +828,8 @@ async fn dispatch(
             if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
-            match read_form(&parts.headers, body, 2048).await {
+            let limit = if path == "/init/images" { 4096 } else { 2048 };
+            match read_form(&parts.headers, body, limit).await {
                 Ok(form) => Some(form),
                 Err(reply) => return reply,
             }

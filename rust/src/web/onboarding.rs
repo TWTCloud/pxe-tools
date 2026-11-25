@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod image_setup;
+
 use super::{
     admin::escape,
     images, plain,
@@ -9,12 +11,11 @@ use super::{
 };
 use crate::{connect, pxe::parse_subnet, setting};
 use hyper::StatusCode;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::Ipv4Addr, path::Path};
 
 const NETWORK_DRAFT: &str = "rust_wizard_network";
-const IMAGE_DRAFT: &str = "rust_wizard_image";
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -214,7 +215,7 @@ fn detected_networks() -> Vec<(String, Ipv4Addr, String)> {
 pub(super) fn is_route(path: &str) -> bool {
     matches!(
         path,
-        "/init/network" | "/init/images" | "/init/done" | "/init/complete"
+        "/init/network" | "/init/images" | "/init/images/status" | "/init/done" | "/init/complete"
     )
 }
 
@@ -272,7 +273,8 @@ fn view(db: &Connection, endpoint: &str) -> Result<Reply, ErrorBox> {
         return Ok(redirect(StatusCode::FOUND, "/init/network"));
     };
     match endpoint {
-        "/init/images" if plan.role != Role::Console => images_page(db),
+        "/init/images" if plan.role != Role::Console => image_setup::page(db),
+        "/init/images/status" if plan.role != Role::Console => image_setup::status(db),
         "/init/images" => Ok(redirect(StatusCode::FOUND, "/init/done")),
         "/init/done" => done_page(db, &plan),
         _ => Ok(plain(
@@ -303,6 +305,9 @@ fn change(
         let next = if plan.role == Role::Console {
             "/init/done"
         } else {
+            if image_setup::needs_catalog(&tx)? {
+                images::refresh_catalog(&tx)?;
+            }
             "/init/images"
         };
         tx.commit()?;
@@ -312,24 +317,9 @@ fn change(
         return Ok(redirect(StatusCode::SEE_OTHER, "/init/network"));
     };
     if endpoint == "/init/images" && plan.role != Role::Console {
-        if field(fields, "action") == "refresh" {
-            images::refresh_catalog(&tx)?;
-            tx.commit()?;
-            return Ok(redirect(StatusCode::SEE_OTHER, "/init/images"));
-        }
-        let Some(entry) = field(fields, "image")
-            .parse::<i64>()
-            .ok()
-            .filter(|id| *id > 0)
-        else {
-            return Ok(invalid(endpoint, "Choisissez une image Debian."));
-        };
-        let Some(id) = images::queue_image(&tx, entry, true)? else {
-            return Ok(invalid(endpoint, "Cette image Debian est indisponible."));
-        };
-        store(&tx, IMAGE_DRAFT, &id.to_string())?;
+        let reply = image_setup::submit(&tx, fields)?;
         tx.commit()?;
-        return Ok(redirect(StatusCode::SEE_OTHER, "/init/done"));
+        return Ok(reply);
     }
     if endpoint != "/init/complete" {
         return Ok(plain(
@@ -357,10 +347,10 @@ fn change(
         ));
     }
     if plan.role != Role::Console {
-        let current = selected_image(&tx)?;
+        let current = image_setup::base(&tx)?;
         if current
             .as_ref()
-            .map(|(id, _, status)| (id.to_string(), status.as_str()))
+            .map(|image| (image.id.to_string(), image.status.as_str()))
             != Some((field(fields, "image").to_owned(), "downloaded"))
         {
             return Ok(invalid(
@@ -381,8 +371,12 @@ fn change(
     store(&tx, "network_override", "off")?;
     store(&tx, "wizard_completed", "1")?;
     tx.execute(
-        "DELETE FROM settings WHERE key IN (?1, ?2, 'init_completed')",
-        params![NETWORK_DRAFT, IMAGE_DRAFT],
+        "DELETE FROM settings WHERE key IN (?1, ?2, ?3, 'init_completed')",
+        params![
+            NETWORK_DRAFT,
+            image_setup::BASE_DRAFT,
+            image_setup::EXTRAS_DRAFT
+        ],
     )?;
     tx.commit()?;
     Ok(redirect(StatusCode::SEE_OTHER, "/admin/devices"))
@@ -408,21 +402,10 @@ fn enqueue(db: &Connection, kind: &str, message: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn selected_image(db: &Connection) -> rusqlite::Result<Option<(i64, String, String)>> {
-    let id = setting(db, IMAGE_DRAFT)?.parse::<i64>().unwrap_or_default();
-    db.query_row(
-        "SELECT id,version_full || ' · ' || arch,status FROM os_images
-                  WHERE id=?1 AND distro='debian' AND extract_method='direct' AND enabled=1",
-        [id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )
-    .optional()
-}
-
 fn invalid(endpoint: &str, message: &'static str) -> Reply {
     let (step, back) = match endpoint {
         "/init/network" => (WizardStep::Network, "/init/network"),
-        "/init/images" => (WizardStep::Network, "/init/images"),
+        "/init/images" => (WizardStep::Images, "/init/images"),
         _ => (WizardStep::Confirmation, "/init/done"),
     };
     ui::wizard_error(step, StatusCode::UNPROCESSABLE_ENTITY, message, back)
@@ -555,20 +538,6 @@ pub(super) fn network_form(
     html
 }
 
-fn images_page(db: &Connection) -> Result<Reply, ErrorBox> {
-    let mut html = String::from(
-        r#"<p class="wizard-intro">Sélectionnez l’image Debian que les clients utiliseront pour démarrer.</p>"#,
-    );
-    html.push_str(&images::catalog_form(db, "/init/images")?);
-    html.push_str(r#"<p class="wizard-back"><a href="/init/network">Modifier le réseau</a></p>"#);
-    Ok(ui::wizard(
-        Some(WizardStep::Network),
-        "Image de démarrage",
-        &html,
-        StatusCode::OK,
-    ))
-}
-
 fn done_page(db: &Connection, plan: &Network) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
         r#"<p class="wizard-intro">Relisez les paramètres avant de les appliquer.</p><dl class="wizard-summary"><dt>Mode</dt><dd>"#,
@@ -594,24 +563,14 @@ fn done_page(db: &Connection, plan: &Network) -> Result<Reply, ErrorBox> {
             escape(&mut html, cidr);
             html.push_str("</dd>");
         }
-        if let Some((id, label, status)) = selected_image(db)? {
-            html.push_str("<dt>Image</dt><dd>Debian ");
-            escape(&mut html, &label);
-            html.push_str(" · ");
-            escape(
-                &mut html,
-                match status.as_str() {
-                    "downloaded" => "Prête",
-                    "downloading" => "Téléchargement en cours",
-                    "pending" => "En attente",
-                    "error" | "failed" => "Échec du téléchargement",
-                    _ => "Indisponible",
-                },
-            );
-            html.push_str("</dd>");
-            if status == "downloaded" {
-                image = id.to_string();
+        if let Some(base) = image_setup::base(db)? {
+            html.push_str("<dt>Image de service</dt><dd>");
+            escape(&mut html, &base.label());
+            if base.status == "downloaded" {
+                html.push_str(" · Prête");
+                image = base.id.to_string();
             }
+            html.push_str("</dd>");
         }
     }
     html.push_str("</dl>");
@@ -620,9 +579,12 @@ fn done_page(db: &Connection, plan: &Network) -> Result<Reply, ErrorBox> {
         escape(&mut html, &serde_json::to_string(plan)?);
         html.push_str(&format!(r#""><input type="hidden" name="image" value="{image}"><div class="form-actions">
 <button type="submit" name="confirmation" value="yes">Appliquer la configuration</button><a class="button button--quiet" href="/init/network">Modifier le réseau</a></div></form>"#));
+        if plan.enabled() {
+            html.push_str(r#"<p class="muted">Les systèmes supplémentaires continuent à se préparer en arrière-plan. Retrouvez-les dans Images PXE.</p>"#);
+        }
     } else {
-        html.push_str(r#"<p class="muted">L’image Debian doit être prête pour appliquer la configuration.</p><div class="form-actions">
-<a class="button" href="/init/images">Revenir au choix de l’image</a><a class="button button--quiet" href="/init/network">Modifier le réseau</a></div>"#);
+        html.push_str(r#"<p class="muted">Suivez la préparation de l’image de service pour pouvoir activer PXE.</p><div class="form-actions">
+<a class="button" href="/init/images">Voir les téléchargements</a><a class="button button--quiet" href="/init/network">Modifier le réseau</a></div>"#);
     }
     Ok(ui::wizard(
         Some(WizardStep::Confirmation),
