@@ -56,6 +56,13 @@ bêta 14, lisez le code avec `sudo cat /run/pxe-tools-rust-guided/setup-code`.
 Le proxy DHCP s’active après votre confirmation de la configuration
 réseau dans l’assistant.
 
+À partir de la bêta 18, un administrateur peut ouvrir **Mises à jour** depuis
+la console. La vérification à la connexion consulte le dépôt APT officiel signé
+au plus une fois toutes les six heures. Vous pouvez aussi vérifier manuellement,
+lire les notes de version et confirmer l’installation des paquets proposés.
+Si des opérations PXE sont en cours, la console vous invite à réessayer après
+leur fin. Elle peut être brièvement indisponible pendant le redémarrage.
+
 Pour Secure Boot, la clé MOK de votre instance doit être enrôlée sur chaque
 client x86 concerné avant d'utiliser le chargeur signé par cette instance.
 

@@ -102,6 +102,13 @@ def signed_fixture(current, target):
     assert not module['official_source']()
     official.unlink()
     keyring.unlink()
+    legacy_source = module['LEGACY_SOURCE']
+    legacy_keyring = module['LEGACY_KEYRING']
+    legacy_keyring.write_bytes(key.read_bytes())
+    legacy_source.write_text(f'deb [signed-by={legacy_keyring}] {module["REPOSITORY"]}/ stable main\n')
+    assert module['legacy_source']()
+    legacy_source.unlink()
+    legacy_keyring.unlink()
 
     launcher = WORK / 'launch.py'
     launcher.write_text(f"""

@@ -19,6 +19,8 @@ CORE = 'pxe-tools'
 MODULE = 'pxe-tools-ansible'
 SOURCE = Path('/etc/apt/sources.list.d/pxe-tools.sources')
 KEYRING = Path('/etc/apt/keyrings/pxe-tools-archive-keyring.gpg')
+LEGACY_SOURCE = Path('/etc/apt/sources.list.d/pxe-tools.list')
+LEGACY_KEYRING = Path('/usr/share/keyrings/pxe-tools-archive-keyring.gpg')
 LISTS = Path('/run/pxe-tools-apt-update/lists')
 REPOSITORY = 'https://packages.pxetools.com/apt'
 VERSION = re.compile(r'[0-9][A-Za-z0-9.+:~\-]{0,127}')
@@ -54,6 +56,18 @@ def official_source():
     return arches <= {'amd64', 'arm64'} and uri == REPOSITORY and enabled == 'yes' and fields == {
         'types': 'deb', 'suites': 'stable', 'components': 'main', 'signed-by': str(KEYRING),
     }
+
+
+def legacy_source():
+    try:
+        if not (trusted_file(LEGACY_SOURCE) and trusted_file(LEGACY_KEYRING)):
+            return False
+        lines = [line.strip() for line in LEGACY_SOURCE.read_text().splitlines()]
+    except FileNotFoundError:
+        return False
+    entries = [line for line in lines if line and not line.startswith('#')]
+    prefix = f'deb [signed-by={LEGACY_KEYRING}] {REPOSITORY}'
+    return entries in ([f'{prefix} stable main'], [f'{prefix}/ stable main'])
 
 
 class Apt:
@@ -186,7 +200,13 @@ def main():
         return
     with closing(sqlite3.connect(database.as_uri() + '?mode=rw', timeout=5, uri=True)) as db:
         db.execute('PRAGMA trusted_schema=OFF')
-        apt = Apt(SOURCE, LISTS) if not arguments and official_source() else None
+        source = None
+        if not arguments:
+            if official_source():
+                source = SOURCE
+            elif legacy_source():
+                source = LEGACY_SOURCE
+        apt = Apt(source, LISTS) if source else None
         process(db, apt, lifecycle_class.busy, recover=bool(arguments))
 
 
