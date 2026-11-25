@@ -4,7 +4,13 @@ use super::{admin::escape, bytes, Reply};
 use hyper::{header, Response, StatusCode};
 use std::fmt::Write;
 
-const BRAND: &str = r#"<span class="brand"><img src="/console-assets/mark.svg" width="32" height="32" alt="">PXE Tools</span>"#;
+const MARK: &str = "/console-assets/mark.svg?v=2";
+
+fn brand() -> String {
+    format!(
+        r#"<span class="brand"><img src="{MARK}" width="32" height="32" alt="">PXE Tools</span>"#
+    )
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConsoleSection {
@@ -49,7 +55,7 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
     let mut layout = String::from(
         r##"<a class="skip-link" href="#main">Aller au contenu</a><header class="masthead"><a class="brand-link" href="/admin/devices">"##,
     );
-    layout.push_str(BRAND);
+    layout.push_str(&brand());
     layout.push_str(r#"</a><span class="masthead-label">Console d’administration</span>"#);
     if matches!(
         std::env::var("AUTH_MODE").unwrap_or_default().as_str(),
@@ -83,9 +89,10 @@ pub(super) fn page(section: ConsoleSection, title: &str, content: &str) -> Reply
 pub(super) fn guest(title: &str, content: &str, status: StatusCode) -> Reply {
     let mut layout = format!(
         r#"<div class="auth-layout">
-<header class="auth-brand">{BRAND}</header>
+<header class="auth-brand">{}</header>
 <div class="auth-image"><p>Inventaire et<br>déploiement réseau</p></div>
-<main class="auth-main"><div class="auth-content"><h1>"#
+<main class="auth-main"><div class="auth-content"><h1>"#,
+        brand()
     );
     escape(&mut layout, title);
     layout.push_str("</h1>");
@@ -102,8 +109,8 @@ fn document(class: &str, title: &str, layout: &str, status: StatusCode) -> Reply
     escape(&mut html, title);
     write!(
         html,
-        r#" · PXE Tools</title><link rel="icon" href="/console-assets/mark.svg">
-<link rel="stylesheet" href="/console-assets/style.css"></head><body class="{class}">{layout}</body></html>"#
+        r#" · PXE Tools</title><link rel="icon" type="image/svg+xml" href="{MARK}">
+<link rel="stylesheet" href="/console-assets/style.css?v=2"></head><body class="{class}">{layout}</body></html>"#
     )
     .expect("write to String");
     Response::builder()

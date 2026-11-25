@@ -200,12 +200,14 @@ impl Certificates {
             ConsoleSection::Certificates,
             "Certificats TLS",
             &format!(
-                r#"<p>Certificat actif · {status}</p>
-<form method="post" action="{ROUTE}">
-<p><label>Certificat et chaîne PEM<br><textarea name="certificate" rows="8" cols="64" required spellcheck="false"></textarea></label></p>
-<p><label>Clé privée PEM<br><textarea name="private_key" rows="8" cols="64" required spellcheck="false" autocomplete="off"></textarea></label></p>
-<button>Importer et appliquer</button>
-</form>{acme}<p><a href="/admin/devices">Retour à la console</a></p>"#
+                r#"<p class="active-certificate">Certificat actif · <strong>{status}</strong></p>
+<div class="panel-grid">
+<section class="panel"><h2>Importer un certificat</h2>
+<form class="form-stack" method="post" action="{ROUTE}">
+<div class="field"><label for="tls-certificate">Certificat et chaîne PEM</label><textarea id="tls-certificate" name="certificate" rows="6" required spellcheck="false"></textarea></div>
+<div class="field"><label for="tls-key">Clé privée PEM</label><textarea id="tls-key" name="private_key" rows="6" required spellcheck="false" autocomplete="off"></textarea></div>
+<div class="form-actions"><button>Importer et appliquer</button></div>
+</form></section><section class="panel">{acme}</section></div>"#
             ),
         )
     }
@@ -243,15 +245,16 @@ impl Certificates {
         };
         format!(
             r#"{heading}<p>L’autorité doit pouvoir joindre {host} sur le port HTTP 80.</p>
-<form method="post" action="{ACME_ROUTE}">
-<p><label>Mode <select name="mode">
+<form class="form-stack" method="post" action="{ACME_ROUTE}">
+<div class="field"><label for="acme-mode">Mode</label><select id="acme-mode" name="mode">
 <option value="off"{off}>Désactivé</option>
 <option value="staging"{staging}>Test</option>
 <option value="production"{production}>Production</option>
-{private}</select></label></p>
-<p><label>Adresse de contact <input name="email" type="email" maxlength="254" value="{email}"></label></p>
-<p><label><input type="checkbox" name="terms"> J’accepte les conditions de l’autorité choisie. <a href="https://letsencrypt.org/repository/">Conditions de Let’s Encrypt</a>.</label></p>
-<button>Enregistrer le mode ACME</button>
+{private}</select></div>
+<div class="field"><label for="acme-email">Adresse de contact</label><input id="acme-email" name="email" type="email" maxlength="254" value="{email}"></div>
+<div class="field"><label class="check-label"><input type="checkbox" name="terms" aria-describedby="acme-terms"> J’accepte les conditions de l’autorité choisie.</label>
+<small id="acme-terms"><a href="https://letsencrypt.org/repository/">Conditions de Let’s Encrypt</a></small></div>
+<div class="form-actions"><button>Enregistrer le mode ACME</button></div>
 </form>"#
         )
     }

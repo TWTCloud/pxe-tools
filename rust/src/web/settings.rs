@@ -169,10 +169,13 @@ impl Route {
 
     fn general(self, db: &Connection) -> Result<Reply, ErrorBox> {
         let mut html = String::from(
-            r#"<nav><a href="/admin/devices">Console</a> · <a href="/settings/images">Images</a> · <a href="/admin/certificates">Certificats TLS</a> · <a href="/settings/ipxe">iPXE</a> · <a href="/settings/ansible">Ansible</a></nav>
-<section><h2>Découverte réseau</h2>
-<form method="post" action="/settings"><label>Protocole
-<select name="discovery_boot_proto">"#,
+            r#"<nav class="page-links" aria-label="Autres paramètres"><a href="/settings/ipxe">iPXE</a><a href="/settings/ansible">Ansible</a></nav>
+<div class="panel-grid">
+<div class="panel-stack">
+<section class="panel"><h2>Découverte réseau</h2>
+<form class="form-stack" method="post" action="/settings">
+<div class="field"><label for="discovery-protocol">Protocole</label>
+<select id="discovery-protocol" name="discovery_boot_proto">"#,
         );
         let protocol = setting(db, "discovery_boot_proto")?;
         if protocol == "tftp" {
@@ -185,40 +188,48 @@ impl Route {
             );
         }
         html.push_str(
-            r#"</select></label> <button>Enregistrer</button></form></section>
-<section><h2>DNS par défaut</h2><form method="post" action="/settings/default-dns">"#,
+            r#"</select></div><div class="form-actions"><button>Enregistrer le protocole</button></div></form></section>
+<section class="panel"><h2>DNS par défaut</h2><form class="form-stack" method="post" action="/settings/default-dns">"#,
         );
         let mut addresses =
             serde_json::from_str::<Vec<String>>(&setting(db, "default_dns")?).unwrap_or_default();
         addresses.resize(addresses.len().max(2) + 1, String::new());
-        for address in addresses {
-            html.push_str(r#"<p><label>Serveur DNS IPv4 <input name="default_dns[]" value=""#);
+        for (index, address) in addresses.into_iter().enumerate() {
+            let number = index + 1;
+            html.push_str(&format!(
+                r#"<div class="field"><label for="dns-{number}">Serveur DNS IPv4 {number}</label><input id="dns-{number}" name="default_dns[]" value=""#
+            ));
             admin::escape(&mut html, &address);
-            html.push_str(r#""></label></p>"#);
+            html.push_str(r#""></div>"#);
         }
-        html.push_str(r#"<button>Enregistrer les DNS</button></form></section>
-<section><h2>Configuration PXE</h2>
+        html.push_str(r#"<div class="form-actions"><button>Enregistrer les DNS</button></div></form></section></div>
+<div class="panel-stack">
+<section class="panel"><h2>Configuration PXE</h2>
+<div class="form-actions">
 <form method="post" action="/settings/apply-config"><button>Appliquer la configuration</button></form>
-<form method="post" action="/settings/rebuild-grub"><button>Reconstruire GRUB</button></form>
-<form method="post" action="/settings/regenerate-mok"><p>Les clients qui utilisent la clé Secure Boot actuelle devront enrôler la nouvelle clé.</p>
-<label><input type="checkbox" name="confirm" value="yes" required> Confirmer le changement de clé</label>
-<button>Régénérer la clé MOK</button></form>"#);
+<form method="post" action="/settings/rebuild-grub"><button class="button--quiet">Reconstruire GRUB</button></form>
+</div>
+<details class="maintenance-form"><summary>Renouveler la clé Secure Boot</summary>
+<form class="form-stack" method="post" action="/settings/regenerate-mok"><p>Les clients qui utilisent la clé Secure Boot actuelle devront enrôler la nouvelle clé.</p>
+<label class="check-label"><input type="checkbox" name="confirm" value="yes" required> Confirmer le changement de clé</label>
+<div class="form-actions"><button class="button--danger">Régénérer la clé MOK</button></div></form></details>"#);
         add_jobs(&mut html, db, "appliance_last_job_ids")?;
-        html.push_str("</section><section><h2>Appellation des appareils</h2>");
+        html.push_str(r#"</section><section class="panel"><h2>Appellation des appareils</h2>"#);
         admin::terminology_form(
             &mut html,
             "/settings/terminology",
             &setting(db, "ui_device_term")?,
         );
-        html.push_str(r#"</section><details><summary>Réinitialiser le parc</summary>
-<form method="post" action="/settings/reset"><p>Les fiches d’appareils et leurs historiques seront supprimés. La configuration de l’appliance et les modèles sont conservés.</p>
-<p><label>Saisissez RESET <input name="confirm" required autocomplete="off"></label></p>
-<button>Réinitialiser le parc</button></form></details>
+        html.push_str(r#"</section></div></div><section class="settings-reset"><h2>Réinitialisation</h2>
+<details><summary>Réinitialiser le parc</summary>
+<form class="form-stack" method="post" action="/settings/reset"><p>Les fiches d’appareils et leurs historiques seront supprimés. La configuration de l’appliance et les modèles sont conservés.</p>
+<div class="field"><label for="reset-devices">Saisissez RESET</label><input id="reset-devices" name="confirm" required autocomplete="off"></div>
+<div class="form-actions"><button class="button--danger">Réinitialiser le parc</button></div></form></details>
 <details><summary>Réinitialiser l’appliance</summary>
-<form method="post" action="/settings/factory-reset">
+<form class="form-stack" method="post" action="/settings/factory-reset">
 <p>Les comptes, paramètres, modèles, inventaires, images de démarrage et clés MOK de cette instance seront supprimés. Le PXE sera désactivé. Accédez ensuite à la console locale avec le code de configuration pour recréer le compte.</p>
-<p><label>Saisissez REINITIALISER <input name="confirm" required autocomplete="off"></label></p>
-<button>Réinitialiser l’appliance</button></form></details>"#);
+<div class="field"><label for="factory-reset">Saisissez REINITIALISER</label><input id="factory-reset" name="confirm" required autocomplete="off"></div>
+<div class="form-actions"><button class="button--danger">Réinitialiser l’appliance</button></div></form></details></section>"#);
         Ok(page(ConsoleSection::Settings, "Paramètres PXE", &html))
     }
 

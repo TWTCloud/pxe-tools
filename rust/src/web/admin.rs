@@ -501,8 +501,8 @@ pub(super) fn unauthorized() -> Reply {
 
 pub(super) fn terminology_form(html: &mut String, action: &str, term: &str) {
     html.push_str(&format!(
-        r#"<form method="post" action="{action}">
-<label for="ui-device-term">Appellation dans la console</label>
+        r#"<form class="form-stack" method="post" action="{action}">
+<div class="field"><label for="ui-device-term">Appellation dans la console</label>
 <select name="ui_device_term" id="ui-device-term">"#
     ));
     for (key, option, _) in DEVICE_TERMS {
@@ -511,7 +511,7 @@ pub(super) fn terminology_form(html: &mut String, action: &str, term: &str) {
             r#"<option value="{key}"{selected}>{option}</option>"#
         ));
     }
-    html.push_str("</select><button>Enregistrer</button></form>");
+    html.push_str(r#"</select></div><div class="form-actions"><button>Enregistrer l’appellation</button></div></form>"#);
 }
 
 fn render_devices(db: &Connection, page: u32) -> rusqlite::Result<Reply> {
