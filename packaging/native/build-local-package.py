@@ -36,7 +36,7 @@ Version: {version}
 Architecture: {architecture}
 Maintainer: {maintainer}
 Pre-Depends: python3 (>= 3.11)
-Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, dnsmasq-base, gettext-base, git, gpgv, {grub_dependencies}, iproute2, ipxe, mokutil, {nginx_dependency}openssh-client, openssl, {php_dependencies}pxelinux, python3-jinja2, python3-nacl, sbsigntool, {shim_dependency}sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
+Depends: adduser, ca-certificates, cpio, curl, debian-archive-keyring, {guided_dependencies}dnsmasq-base, gettext-base, git, gpgv, {grub_dependencies}, iproute2, ipxe, mokutil, {nginx_dependency}openssh-client, openssl, {php_dependencies}pxelinux, python3-jinja2, python3-nacl, sbsigntool, {shim_dependency}sqlite3, sshpass, syslinux-common, syslinux-efi, systemd, util-linux, wget, xz-utils, 7zip | p7zip-full
 Section: admin
 Priority: optional
 Description: {description}
@@ -206,6 +206,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         (control/'control').write_text(CONTROL.format(
             version=version, package_name=package_name, architecture=architecture,
             grub_dependencies=GRUB_DEPENDENCIES[architecture],
+            guided_dependencies='default-dbus-system-bus | dbus-system-bus, ' if rust_guided else '',
             nginx_dependency='' if rust_guided else 'nginx, ',
             php_dependencies='' if rust_guided else PHP_DEPENDENCIES,
             shim_dependency='shim-signed, ' if architecture == 'amd64' else '',

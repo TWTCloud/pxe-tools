@@ -47,6 +47,8 @@ def wait_for(expected, timeout=100):
                 latest = json.loads(body)['phase']
                 if latest == expected:
                     return
+                if latest not in ('queued', 'checking', 'install_queued', 'installing'):
+                    break
         except (OSError, TimeoutError):
             pass  # the console restarts during the actual upgrade
         time.sleep(1)
@@ -142,6 +144,7 @@ def main():
     wait_for('unavailable')
     code, response = request(ROUTE, {'action': 'auto'})
     assert code == 200 and json.loads(response)['phase'] == 'unavailable'
+    command('systemctl', 'is-active', '--quiet', 'dbus.socket')
 
     signed_fixture(current, target)
     assert request(ROUTE, {'action': 'check'})[0] == 303
