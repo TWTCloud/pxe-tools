@@ -70,7 +70,6 @@ pub(super) fn show(
             r#"<section class="panel"><h2>Images PXE</h2><p>{count} image(s) active(s) téléchargée(s)</p><a href="/settings/images">Ouvrir les images</a></section>"#
         )?;
     }
-    html.push_str("</div>");
     if account.allows(Permission::ActivityRead) {
         let active: u64 = db.query_row(
             "SELECT COUNT(*) FROM actions WHERE status IN ('pending','running')",
@@ -82,5 +81,6 @@ pub(super) fn show(
             r#"<section class="panel"><h2>Activité</h2><p>{active} action(s) en attente ou en cours</p><a href="/activity">Ouvrir l’activité</a></section>"#
         )?;
     }
+    html.push_str("</div>");
     Ok(page(ConsoleSection::Overview, "Vue d’ensemble", &html))
 }

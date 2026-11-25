@@ -4,7 +4,7 @@ use super::{
     admin::escape,
     plain,
     setup::redirect,
-    ui::{page, ConsoleSection},
+    ui::{icon, page, status_badge, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::{
@@ -23,7 +23,7 @@ const PAGE_SIZE: u64 = 100;
 pub(super) enum Route {
     List,
     Add,
-    Media,
+    Media(Option<&'static str>),
     Refresh,
     RefreshStatus,
     AutoRefresh,
@@ -34,11 +34,19 @@ pub(super) enum Route {
 }
 
 impl Route {
-    pub(super) fn for_path(path: &str) -> Option<Self> {
+    pub(super) fn for_path(path: &str, query: &str) -> Option<Self> {
         Some(match path {
             ROUTE => Self::List,
             "/settings/images/add" => Self::Add,
-            "/settings/images/media" => Self::Media,
+            "/settings/images/media" => Self::Media(
+                form_urlencoded::parse(query.as_bytes())
+                    .find(|(key, _)| key == "kind")
+                    .and_then(|(_, value)| match value.as_ref() {
+                        "rhel9" => Some("rhel9"),
+                        "windows-iso" => Some("windows-iso"),
+                        _ => None,
+                    }),
+            ),
             "/settings/images/refresh" => Self::Refresh,
             "/settings/images/refresh-button" => Self::RefreshStatus,
             "/settings/images/auto-refresh" => Self::AutoRefresh,
@@ -61,7 +69,7 @@ impl Route {
         match *method {
             Method::GET | Method::HEAD => matches!(
                 self,
-                Self::List | Self::Add | Self::Media | Self::RefreshStatus | Self::Status
+                Self::List | Self::Add | Self::Media(_) | Self::RefreshStatus | Self::Status
             ),
             Method::POST => !matches!(self, Self::RefreshStatus | Self::Status),
             Method::DELETE => matches!(self, Self::Delete(_)),
@@ -77,23 +85,21 @@ pub(super) fn serve(
     path: &Path,
     number: u32,
     form: Option<&[u8]>,
+    can_edit: bool,
 ) -> Reply {
     let result = match (route, form) {
-        (Route::List, None) => list(db, number),
-        (Route::Media, None) => media_form(db),
-        (Route::Media, Some(form)) => queue_media(path, form),
-        (Route::Add, None) => catalog_form(db, ROUTE)
-            .map(|form| {
-                page(
-                    ConsoleSection::Images,
-                    "Ajouter une image",
-                    &format!("{form}<p><a href=\"{ROUTE}\">Images PXE</a></p>"),
-                )
-            })
-            .map_err(Into::into),
-        (Route::Status, None) => {
-            table(db, number).map(|html| page(ConsoleSection::Images, "Images PXE", &html))
-        }
+        (Route::List, None) => list(db, number, can_edit),
+        (Route::Media(kind), None) => media_form(db, kind),
+        (Route::Media(_), Some(form)) => queue_media(path, form),
+        (Route::Add, None) => catalog(db, can_edit).map(|html| {
+            page(
+                ConsoleSection::Images,
+                "Ajouter une image",
+                &format!(r#"<nav class="page-links"><a href="{ROUTE}">Images PXE</a></nav>{html}"#),
+            )
+        }),
+        (Route::Status, None) => managed_images(db, number, can_edit)
+            .map(|html| page(ConsoleSection::Images, "Images PXE", &html)),
         (Route::RefreshStatus, None) => {
             refresh_button(db).map(|html| page(ConsoleSection::Images, "Catalogue PXE", &html))
         }
@@ -109,17 +115,27 @@ pub(super) fn serve(
     })
 }
 
-fn media_form(db: &Connection) -> Result<Reply, ErrorBox> {
+fn media_form(db: &Connection, selected_kind: Option<&str>) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
-        r#"<nav class="page-links" aria-label="Images PXE"><a href="/settings/images">Catalogue des images</a><a href="/settings/windows">Éditions Windows</a></nav>
+        r#"<nav class="page-links" aria-label="Images PXE"><a href="/settings/images">Images PXE</a></nav>
 <form class="panel panel--form form-stack" method="post" action="/settings/images/media">
-<div class="field"><label for="media-kind">Type de média</label><select id="media-kind" name="kind" required>
-<option value="rhel9">DVD RHEL 9</option>
-<option value="windows-iso">ISO Windows</option>
-<option value="windows-wim">Fichier install.wim</option>
-<option value="windows-esd">Fichier install.esd</option>
-<option value="winpe">Archive WinPE préparée</option>
-</select></div>
+<div class="field"><label for="media-kind">Type de média</label><select id="media-kind" name="kind" required>"#,
+    );
+    for (kind, label) in [
+        ("rhel9", "DVD RHEL 9"),
+        ("windows-iso", "ISO Windows"),
+        ("windows-wim", "Fichier install.wim"),
+        ("windows-esd", "Fichier install.esd"),
+        ("winpe", "Archive WinPE préparée"),
+    ] {
+        let selected = if selected_kind == Some(kind) {
+            " selected"
+        } else {
+            ""
+        };
+        write!(html, r#"<option value="{kind}"{selected}>{label}</option>"#)?;
+    }
+    html.push_str(r#"</select></div>
 <div class="field"><label for="media-source">Source du média</label>
 <input id="media-source" name="source" maxlength="4096" aria-describedby="media-source-help" required>
 <small id="media-source-help">Nom du fichier sur le serveur ou URL HTTPS autorisée.</small></div>
@@ -376,12 +392,21 @@ pub(super) fn refresh_catalog(db: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
+fn list(db: &Connection, number: u32, can_edit: bool) -> Result<Reply, ErrorBox> {
+    let mut html = String::from(r#"<div class="panel-stack">"#);
+    html.push_str(&managed_images(db, number, can_edit)?);
+    html.push_str(&catalog(db, can_edit)?);
+    if can_edit {
+        html.push_str(&refresh_settings(db)?);
+    }
+    html.push_str("</div>");
+    Ok(page(ConsoleSection::Images, "Images PXE", &html))
+}
+
+fn refresh_settings(db: &Connection) -> Result<String, ErrorBox> {
     let mut html = String::from(
-        r#"<nav class="device-actions" aria-label="Gestion des images"><a class="button" href="/settings/images/media">Préparer un média RHEL ou Windows</a><a class="button button--quiet" href="/settings/windows">Éditions Windows</a></nav>
-<div class="panel-grid"><section class="panel"><h2>Catalogue des distributions</h2>"#,
+        r#"<details class="panel catalog-settings"><summary>Actualisation automatique du catalogue</summary>"#,
     );
-    html.push_str(&catalog_form(db, ROUTE)?);
     let enabled = if setting(db, "catalog_auto_refresh_enabled")? == "on" {
         " checked"
     } else {
@@ -395,8 +420,7 @@ fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     };
     write!(
         html,
-        r#"</section><section class="panel"><h2>Actualisation automatique</h2>
-<form class="form-stack" method="post" action="{ROUTE}/auto-refresh"><label class="check-label">
+        r#"<form class="form-stack" method="post" action="{ROUTE}/auto-refresh"><label class="check-label">
 <input type="checkbox" name="catalog_auto_refresh_enabled" value="on"{enabled}> Actualiser automatiquement le catalogue</label>
 <div class="field"><label for="catalog-frequency">Fréquence</label><select id="catalog-frequency" name="catalog_auto_refresh_interval_hours">"#
     )?;
@@ -411,10 +435,8 @@ fn list(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
             r#"<option value="{hours}"{selected}>{label}</option>"#
         )?;
     }
-    html.push_str(r#"</select></div><div class="form-actions"><button>Enregistrer la fréquence</button></div></form></section></div>"#);
-    html.push_str(&refresh_button(db)?);
-    html.push_str(&table(db, number)?);
-    Ok(page(ConsoleSection::Images, "Images PXE", &html))
+    html.push_str(r#"</select></div><div class="form-actions"><button>Enregistrer la fréquence</button></div></form></details>"#);
+    Ok(html)
 }
 
 fn refresh_button(db: &Connection) -> Result<String, ErrorBox> {
@@ -429,19 +451,39 @@ fn refresh_button(db: &Connection) -> Result<String, ErrorBox> {
         )
         .optional()?
     {
-        html.push_str("<p>Actualisation du catalogue · ");
-        escape(&mut html, &status);
+        html.push_str(r#"<p class="record-meta">Dernière actualisation du catalogue&nbsp; "#);
+        status_badge(&mut html, &status, super::activity::status_label(&status));
         html.push_str("</p>");
     }
     Ok(html)
 }
 
-fn table(db: &Connection, number: u32) -> Result<String, ErrorBox> {
+fn distro_icon(code: &str) -> String {
+    match code {
+        "almalinux" | "centos" | "debian" | "fedora" | "proxmox" | "rocky" | "ubuntu" => format!(
+            r#"<img class="distro-icon" src="/console-assets/{code}.svg" width="28" height="28" alt="">"#
+        ),
+        "windows" => icon("M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"),
+        _ => icon("M4 4h16v16H4zM8 8h8m-8 4h8m-8 4h4"),
+    }
+}
+
+fn heading(distro: &str, label: &str) -> String {
+    let mut html = format!(r#"<h3 class="image-name">{}<span>"#, distro_icon(distro));
+    escape(&mut html, label);
+    html.push_str("</span></h3>");
+    html
+}
+
+fn managed_images(db: &Connection, number: u32, can_edit: bool) -> Result<String, ErrorBox> {
     let mut html = String::from(
-        r#"<div class="table-region" role="region" aria-label="Images PXE gérées" tabindex="0"><table data-image-progress-table><thead><tr><th scope="col">Distribution</th><th scope="col">Version</th><th scope="col">Architecture</th><th scope="col">État</th><th scope="col">Progression</th><th scope="col">Activée</th><th scope="col">Actions</th></tr></thead><tbody>"#,
+        r#"<section data-image-progress aria-labelledby="managed-images"><header class="section-heading"><h2 id="managed-images">Images sur ce serveur</h2></header><div class="image-list">"#,
     );
     let mut query = db.prepare(
-        "SELECT distro, COALESCE(version_full,version), arch, status, progress_percent, enabled,id
+        "SELECT distro, COALESCE(NULLIF(version_full,''),version), arch, status, progress_percent,
+                enabled, id, error_msg,
+                EXISTS(SELECT 1 FROM init_jobs WHERE job_type='image:delete:' || os_images.id
+                       AND status IN ('pending','running'))
          FROM os_images ORDER BY distro,major DESC,version_full DESC,arch,id LIMIT ? OFFSET ?",
     )?;
     let mut rows = query.query([PAGE_SIZE + 1, u64::from(number - 1) * PAGE_SIZE])?;
@@ -449,62 +491,119 @@ fn table(db: &Connection, number: u32) -> Result<String, ErrorBox> {
     for _ in 0..PAGE_SIZE {
         let Some(row) = rows.next()? else { break };
         found = true;
-        let id: i64 = row.get(6)?;
+        let distro: String = row.get(0)?;
+        let version: String = row.get(1)?;
+        let arch: String = row.get(2)?;
         let status: String = row.get(3)?;
-        let (state, status_label) = download_status(&status);
-        write!(html, r#"<tr data-image-id="{id}" data-state="{state}">"#)?;
-        for col in 0..3 {
-            html.push_str("<td>");
-            escape(&mut html, &row.get::<_, String>(col)?);
-            html.push_str("</td>");
-        }
-        let percent = row.get::<_, i64>(4)?.clamp(0, 100);
-        let percent = if state == "downloaded" { 100 } else { percent };
-        let (active, next, label) = if row.get::<_, bool>(5)? {
-            ("Oui", 0, "Désactiver")
-        } else {
-            ("Non", 1, "Activer")
+        let enabled: bool = row.get(5)?;
+        let id: i64 = row.get(6)?;
+        let deleting: bool = row.get(8)?;
+        let (state, tone, status_label) = match (status.as_str(), enabled, deleting) {
+            (_, _, true) => ("deleting", "running", "Suppression en cours"),
+            ("pending", true, _) => ("pending", "pending", "Téléchargement en attente"),
+            ("downloading", _, _) => ("downloading", "downloading", "Téléchargement en cours"),
+            ("downloaded", true, _) => ("downloaded", "downloaded", "Téléchargée"),
+            ("downloaded", false, _) => ("disabled", "neutral", "Téléchargée · désactivée"),
+            ("pending", false, _) => ("disabled", "neutral", "Téléchargement désactivé"),
+            ("failed" | "error", _, _) => ("failed", "failed", "Échec du téléchargement"),
+            _ => ("unavailable", "neutral", "Indisponible"),
         };
+        let title = match distro.as_str() {
+            "debian" => "Debian",
+            "ubuntu" => "Ubuntu Server",
+            _ => &distro,
+        };
+        let title = format!("{title} {version}");
         write!(
             html,
-            r#"<td data-download-status>{status_label}</td><td data-download-percent>{percent} %</td><td>{active}</td><td>
-<div class="form-actions">
-<form method="post" action="{ROUTE}/{id}/toggle"><button class="button--quiet" name="enabled" value="{next}">{label}</button></form>
-<form method="post" action="{ROUTE}/{id}/download"><button class="button--quiet">Relancer le téléchargement</button></form>
-</div>
-<details><summary>Suppression</summary><form method="post" action="{ROUTE}/{id}"><button class="button--danger" name="_method" value="DELETE">Supprimer cette image</button></form></details>
-</td></tr>"#
+            r#"<article class="panel image-card" data-image-id="{id}" data-state="{state}"><header><div>{}<span class="record-meta">"#,
+            heading(&distro, &title)
         )?;
+        escape(&mut html, architecture(&arch));
+        html.push_str("</span></div><div data-download-status>");
+        status_badge(&mut html, tone, status_label);
+        html.push_str("</div></header>");
+        html.push_str(r#"<div data-image-details>"#);
+        if state == "downloading" {
+            let percent = row.get::<_, i64>(4)?.clamp(0, 100);
+            write!(
+                html,
+                r#"<div class="image-progress"><progress value="{percent}" max="100" aria-label="Téléchargement"></progress><span class="record-meta">{percent} %</span></div>"#
+            )?;
+        }
+        if state == "failed" {
+            if let Some(error) = row
+                .get::<_, Option<String>>(7)?
+                .filter(|text| !text.trim().is_empty())
+            {
+                html.push_str(r#"<p class="image-error">"#);
+                escape(&mut html, &error);
+                html.push_str("</p>");
+            }
+        }
+        html.push_str("</div>");
+        if can_edit {
+            let (next, label) = if enabled {
+                (0, "Désactiver")
+            } else {
+                (1, "Activer")
+            };
+            let busy = matches!(state, "pending" | "downloading" | "deleting");
+            let disabled = if busy { " disabled" } else { "" };
+            let download = if matches!(status.as_str(), "failed" | "error" | "downloaded") {
+                "Relancer le téléchargement"
+            } else {
+                "Télécharger"
+            };
+            write!(
+                html,
+                r#"<div class="image-actions" data-image-actions><div class="form-actions">
+<form method="post" action="{ROUTE}/{id}/toggle"><button class="button--quiet" name="enabled" value="{next}"{disabled}>{label}</button></form>
+<form method="post" action="{ROUTE}/{id}/download"><button class="button--quiet"{disabled}>{download}</button></form>
+</div>"#
+            )?;
+            if !busy {
+                write!(
+                    html,
+                    r#"<details class="image-delete"><summary>Supprimer…</summary><form method="post" action="{ROUTE}/{id}"><p>Supprimer cette image et ses fichiers locaux&nbsp;?</p><button class="button--danger" name="_method" value="DELETE">Confirmer la suppression</button></form></details>"#
+                )?;
+            }
+            html.push_str("</div>");
+        }
+        html.push_str("</article>");
     }
     if !found {
-        html.push_str(r#"<tr><td class="table-empty muted" colspan="7">Aucune image PXE à afficher.</td></tr>"#);
+        html.push_str(r#"<div class="panel table-empty"><strong>Aucune image téléchargée ou demandée</strong>Choisissez une version dans le catalogue ci-dessous.</div>"#);
     }
-    html.push_str("</tbody></table></div><nav aria-label=\"Pagination\">");
-    if number > 1 {
-        write!(
-            html,
-            r#"<a rel="prev" href="{ROUTE}?page={}">Précédente</a> "#,
-            number - 1
-        )?;
+    html.push_str("</div>");
+    let has_next = rows.next()?.is_some() && number < u32::MAX;
+    if number > 1 || has_next {
+        html.push_str(r#"<nav class="form-actions pagination" aria-label="Pages des images">"#);
+        if number > 1 {
+            write!(
+                html,
+                r#"<a class="button button--quiet" rel="prev" href="{ROUTE}?page={}">Précédente</a>"#,
+                number - 1
+            )?;
+        }
+        if has_next {
+            write!(
+                html,
+                r#"<a class="button button--quiet" rel="next" href="{ROUTE}?page={}">Suivante</a>"#,
+                number + 1
+            )?;
+        }
+        html.push_str("</nav>");
     }
-    if rows.next()?.is_some() && number < u32::MAX {
-        write!(
-            html,
-            r#"<a rel="next" href="{ROUTE}?page={}">Suivante</a>"#,
-            number + 1
-        )?;
-    }
-    html.push_str("</nav>");
+    html.push_str("</section>");
     Ok(html)
 }
 
-fn download_status(status: &str) -> (&'static str, &'static str) {
-    match status {
-        "pending" => ("pending", "En attente"),
-        "downloading" => ("downloading", "Téléchargement en cours"),
-        "downloaded" => ("downloaded", "Prête"),
-        "failed" | "error" => ("failed", "Échec du téléchargement"),
-        _ => ("unavailable", "Indisponible"),
+fn architecture(arch: &str) -> &str {
+    match arch {
+        "amd64" => "Intel / AMD 64 bits",
+        "arm64" => "ARM 64 bits",
+        _ => arch,
     }
 }
 
@@ -539,43 +638,99 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
     .optional()
 }
 
-pub(super) fn catalog_form(db: &Connection, action: &'static str) -> rusqlite::Result<String> {
-    let include_ubuntu = action == ROUTE;
-    let mut html = format!(
-        r#"<form class="form-stack" method="post" action="{action}">
-<div class="field"><label for="catalog-image">Image PXE</label><select id="catalog-image" name="image">"#,
+fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
+    let mut html = String::from(
+        r#"<section id="catalogue" aria-labelledby="catalog-title"><header class="section-heading">
+<div><h2 id="catalog-title">Catalogue des systèmes</h2><p class="record-meta">Téléchargez les images disponibles depuis leurs éditeurs ou importez vos propres médias.</p></div>"#,
     );
+    if can_edit {
+        write!(
+            html,
+            r#"<form method="post" action="{ROUTE}/refresh"><button class="button--quiet">Actualiser le catalogue</button></form>"#
+        )?;
+    }
+    html.push_str("</header>");
+    html.push_str(&refresh_button(db)?);
+    html.push_str(r#"<div class="panel-grid image-catalog">"#);
     let mut query = db.prepare(
-        "SELECT id,version_full,arch,distro FROM catalog_entries
-        WHERE arch IN ('amd64','arm64') AND ((distro='debian' AND extract_method='direct')
-          OR (?1 AND distro='ubuntu' AND extract_method='iso_extract'))
-        ORDER BY distro,major DESC,version_full DESC,arch,id LIMIT 50",
+        "SELECT c.id,c.version_full,c.arch, EXISTS(
+            SELECT 1 FROM os_images i WHERE i.distro=c.distro AND i.arch=c.arch
+                AND COALESCE(NULLIF(i.version_full,''),i.version)=c.version_full
+         ) AS managed FROM catalog_entries c
+         WHERE c.distro=?1 AND c.arch IN ('amd64','arm64')
+           AND ((c.distro='debian' AND c.extract_method='direct')
+             OR (c.distro='ubuntu' AND c.extract_method='iso_extract'))
+         ORDER BY c.major DESC,c.version_full DESC,c.arch,c.id LIMIT 50",
     )?;
-    let mut rows = query.query([include_ubuntu])?;
-    let mut count = 0;
-    while let Some(row) = rows.next()? {
-        count += 1;
-        let id: i64 = row.get(0)?;
-        let distro = if row.get::<_, String>(3)? == "ubuntu" {
-            "Ubuntu Server"
+    for (code, title, description) in [
+        (
+            "debian",
+            "Debian",
+            "Fichiers de démarrage et d’installation réseau.",
+        ),
+        (
+            "ubuntu",
+            "Ubuntu Server",
+            "ISO officielle et fichiers de démarrage extraits sur le serveur.",
+        ),
+    ] {
+        write!(
+            html,
+            r#"<article class="panel image-card">{}<p>{description}</p>"#,
+            heading(code, title)
+        )?;
+        let mut rows = query.query([code])?;
+        let mut options = String::new();
+        let mut count = 0;
+        let mut available = 0;
+        while let Some(row) = rows.next()? {
+            count += 1;
+            let id: i64 = row.get(0)?;
+            let version: String = row.get(1)?;
+            let arch: String = row.get(2)?;
+            let managed: bool = row.get(3)?;
+            available += usize::from(!managed);
+            let disabled = if managed { " disabled" } else { "" };
+            write!(options, r#"<option value="{id}"{disabled}>{title} "#)?;
+            escape(&mut options, &version);
+            options.push_str(" · ");
+            escape(&mut options, architecture(&arch));
+            if managed {
+                options.push_str(" · Sur ce serveur");
+            }
+            options.push_str("</option>");
+        }
+        if count == 0 {
+            html.push_str(r#"<p class="record-meta">Aucune version dans le catalogue. Actualisez-le pour rechercher les images.</p>"#);
+        } else if can_edit {
+            let disabled = if available == 0 { " disabled" } else { "" };
+            write!(
+                html,
+                r#"<form class="form-stack" method="post" action="{ROUTE}">
+<div class="field"><label for="image-{code}">Version et architecture</label><select id="image-{code}" name="image" required{disabled}>
+<option value="" selected disabled>Choisir une version de {title}</option>{options}</select></div>
+<div class="form-actions"><button{disabled}>Télécharger</button></div></form>"#
+            )?;
         } else {
-            "Debian"
-        };
-        html.push_str(&format!(r#"<option value="{id}">{distro} "#));
-        escape(&mut html, &row.get::<_, String>(1)?);
-        html.push_str(" · ");
-        escape(&mut html, &row.get::<_, String>(2)?);
-        html.push_str("</option>");
+            write!(
+                html,
+                r#"<p class="record-meta">Versions et architectures au catalogue&nbsp; {count}</p>"#
+            )?;
+        }
+        html.push_str("</article>");
     }
-    if count == 0 {
-        html.push_str(r#"<option value="">Aucune image disponible</option>"#);
+    if can_edit {
+        write!(
+            html,
+            r#"<article class="panel image-card">{}<p>Importez le DVD officiel de la série RHEL 9.</p>
+<div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer le DVD</a></div></article>
+<article class="panel image-card">{}<p>Importez le média d’installation et un environnement de démarrage WinPE.</p>
+<div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso">Importer les fichiers</a>
+<a class="button button--quiet" href="/settings/windows">Gérer les éditions</a></div></article>"#,
+            heading("rhel9", "Red Hat Enterprise Linux"),
+            heading("windows", "Windows")
+        )?;
     }
-    html.push_str(r#"</select></div><div class="form-actions">"#);
-    if count != 0 {
-        html.push_str("<button>Télécharger cette image</button>");
-    }
-    html.push_str(
-        r#"<button class="button--quiet" name="action" value="refresh">Actualiser le catalogue</button></div></form>"#,
-    );
+    html.push_str("</div></section>");
     Ok(html)
 }

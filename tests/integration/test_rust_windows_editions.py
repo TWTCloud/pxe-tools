@@ -658,7 +658,18 @@ def verify_restored_console(secure, private, admin, database, plan):
     network = '/settings/network'
     image_status = request('/api/images-status', **secure, headers=admin)
     assert image_status[0] == 200
-    assert b'data-state="pending"' in image_status[2] and b'data-download-percent>100 %' in image_status[2]
+    assert b'data-state="pending"' in image_status[2] and b'data-state="downloaded"' in image_status[2]
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE os_images SET status='downloading',progress_percent=37 WHERE distro='ubuntu'")
+    download = request('/api/images-status', **secure, headers=admin)[2]
+    assert b'<progress value="37" max="100"' in download and b'37 %' in download
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE os_images SET status='pending',progress_percent=0 WHERE distro='ubuntu'")
+    images = request('/settings/images', **secure, headers=admin)[2]
+    assert b'/console-assets/debian.svg' in images and b'/console-assets/ubuntu.svg' in images
+    assert b'/settings/images/media?kind=windows-iso' in images and b'Confirmer la suppression' in images
+    windows_media = request('/settings/images/media?kind=windows-iso', **secure, headers=admin)[2]
+    assert b'<option value="windows-iso" selected>' in windows_media
     assert request(network, **private)[0] == 404
     assert request(network, **secure)[0] == 401
     assert request('/init/network?from=settings', **secure, headers=admin)[:2] == (302, network)

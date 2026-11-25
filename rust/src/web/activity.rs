@@ -6,7 +6,7 @@ use super::{
     admin::escape,
     bytes, plain,
     setup::redirect,
-    ui::{page, ConsoleSection},
+    ui::{page, status_badge, ConsoleSection},
     ErrorBox, Reply,
 };
 use crate::{connect, monitoring::Catalog};
@@ -413,6 +413,10 @@ fn label<'a>(values: &[(&str, &'a str)], key: &'a str) -> &'a str {
         .map_or(key, |(_, label)| *label)
 }
 
+pub(super) fn status_label(state: &str) -> &str {
+    label(STATUSES, state)
+}
+
 fn list(db: &Connection, filter: &Filter, number: u32, fragment: bool) -> Result<Reply, ErrorBox> {
     let term = if filter.search.is_empty() {
         String::new()
@@ -436,7 +440,7 @@ fn list(db: &Connection, filter: &Filter, number: u32, fragment: bool) -> Result
         i64::from(number - 1) * PAGE_SIZE
     ])?;
     let mut output = String::from(
-        r#"<div class="table-region" role="region" aria-label="Liste des opérations" tabindex="0"><table><thead><tr><th scope="col">Opération</th><th scope="col">Cible et auteur</th><th scope="col">État</th><th scope="col">Dernière activité (UTC)</th></tr></thead><tbody>"#,
+        r#"<header class="section-heading"><h2>Historique des opérations</h2><span class="record-meta">Dates en UTC</span></header><ul class="activity-list">"#,
     );
     let mut found = false;
     for _ in 0..PAGE_SIZE {
@@ -457,47 +461,70 @@ fn list(db: &Connection, filter: &Filter, number: u32, fragment: bool) -> Result
             "wipe" => "/wipes",
             _ => "/disktests",
         };
-        write!(output, "<tr><td><a href=\"{route}/{id}\">")?;
-        escape(
-            &mut output,
-            match kind.as_str() {
-                "install_only" | "reinstall" => "Installation",
-                "wipe_only" => "Effacement",
-                _ => label(TYPES, &kind),
-            },
-        );
-        write!(output, " #{id}</a></td><td>")?;
+        let title = match (source.as_str(), kind.as_str()) {
+            ("job", _) => super::jobs::title(&kind),
+            (_, "install_only" | "reinstall") => "Installation",
+            (_, "wipe" | "wipe_only") => "Effacement des disques",
+            (_, "disktest") => "Test des disques",
+            _ => label(TYPES, &kind),
+        };
+        write!(
+            output,
+            r#"<li class="activity-row"><div><a class="operation-name" href="{route}/{id}">"#
+        )?;
+        escape(&mut output, title);
+        write!(
+            output,
+            r#" <span class="operation-id">#{id}</span></a><span class="record-meta">"#
+        )?;
         escape(&mut output, &target);
         if let Some(author) = author.filter(|value| !value.is_empty()) {
             output.push_str(" · ");
             escape(&mut output, &author);
         }
-        output.push_str("</td><td>");
-        escape(&mut output, label(STATUSES, &state));
+        output.push_str("</span></div><div>");
+        status_badge(&mut output, &state, status_label(&state));
         if let Some(message) = message.filter(|value| !value.is_empty()) {
-            output.push_str("<br>");
+            output.push_str(r#"<p class="activity-message">"#);
             escape(&mut output, &message);
+            output.push_str("</p>");
         }
-        output.push_str("</td><td>");
-        escape(&mut output, updated.as_deref().unwrap_or_default());
-        output.push_str("</td></tr>");
+        output.push_str(r#"</div><div class="activity-date"><span class="record-meta">"#);
+        escape(&mut output, updated.as_deref().unwrap_or("—"));
+        write!(
+            output,
+            r#"</span><a href="{route}/{id}" class="operation-link" aria-label="Voir le suivi · "#
+        )?;
+        escape(&mut output, title);
+        write!(
+            output,
+            r#" #{id}">Voir le suivi {}</a></div></li>"#,
+            super::ui::icon("M5 12h14m-6-6 6 6-6 6")
+        )?;
     }
     if !found {
-        output.push_str(r#"<tr><td class="table-empty muted" colspan="4">Aucune opération à afficher.</td></tr>"#);
+        output.push_str(r#"<li class="table-empty"><strong>Aucune opération à afficher</strong>Les opérations PXE et les tâches du serveur apparaîtront ici.</li>"#);
     }
+    output.push_str("</ul>");
     let has_next = rows.next()?.is_some() && number < u32::MAX;
-    output.push_str("</tbody></table></div><nav aria-label=\"Pages de l’activité\">");
-    for (allowed, target, caption) in [
-        (number > 1, number.saturating_sub(1), "Précédente"),
-        (has_next, number.saturating_add(1), "Suivante"),
-    ] {
-        if allowed {
-            output.push_str("<a href=\"/activity?");
-            escape(&mut output, &filter.link(target));
-            write!(output, "\">{caption}</a> ")?;
+    if number > 1 || has_next {
+        output
+            .push_str(r#"<nav class="form-actions pagination" aria-label="Pages de l’activité">"#);
+        for (allowed, target, caption, relationship) in [
+            (number > 1, number.saturating_sub(1), "Précédente", "prev"),
+            (has_next, number.saturating_add(1), "Suivante", "next"),
+        ] {
+            if allowed {
+                write!(
+                    output,
+                    r#"<a class="button button--quiet" rel="{relationship}" href="/activity?"#
+                )?;
+                escape(&mut output, &filter.link(target));
+                write!(output, r#"">{caption}</a>"#)?;
+            }
         }
+        output.push_str("</nav>");
     }
-    output.push_str("</nav>");
     let mut hash = DefaultHasher::new();
     output.hash(&mut hash);
     let signature = format!("{:016x}", hash.finish());
@@ -537,9 +564,10 @@ fn list(db: &Connection, filter: &Filter, number: u32, fragment: bool) -> Result
         }
         form.push_str("</select></div>");
     }
+    let utc: String = db.query_row("SELECT strftime('%H:%M:%S', 'now')", [], |row| row.get(0))?;
     write!(
         form,
-        r#"<input type="hidden" name="machine" value="{}"><div class="form-actions"><button>Filtrer</button><a class="button button--quiet" href="/activity">Réinitialiser</a></div></form>{section}"#,
+        r#"<input type="hidden" name="machine" value="{}"><div class="form-actions"><button>Filtrer</button><a class="button button--quiet" href="/activity">Effacer les filtres</a></div></form><p class="record-meta activity-refresh" role="status" data-activity-refresh>Dernière actualisation à {utc} UTC</p>{section}"#,
         filter.machine
     )?;
     Ok(page(ConsoleSection::Activity, "Activité", &form))

@@ -102,9 +102,18 @@ fn page(state: &State) -> Result<Reply, ErrorBox> {
     let phase = serde_json::to_string(&state.phase)?;
     let mut html = format!(
         r#"<section class="panel panel--form" data-update-phase="{}">
-<h2>{title}</h2><p>{description}</p><dl class="wizard-summary update-versions">
+<h2>{title}</h2><p>{description}</p>
+<div class="update-progress" data-update-progress role="status"{}>
+<p data-update-message>{}</p><div class="update-loading" role="progressbar" aria-label="Progression de la mise à jour"></div>
+</div><dl class="wizard-summary update-versions">
 <dt>PXE Tools installé</dt><dd>"#,
         phase.trim_matches('"'),
+        if state.phase.pending() { "" } else { " hidden" },
+        if matches!(state.phase, Phase::InstallQueued | Phase::Installing) {
+            "Installation des paquets en cours…"
+        } else {
+            "Vérification auprès du dépôt APT…"
+        },
     );
     escape(
         &mut html,
@@ -142,7 +151,7 @@ fn page(state: &State) -> Result<Reply, ErrorBox> {
             html.push_str(r#""><div class="form-actions"><button>Installer la mise à jour</button>
 <a class="button button--quiet" href="https://github.com/TWTCloud/pxe-tools/releases">Notes de version</a></div></form>"#);
         }
-        html.push_str(r#"<form method="post" action="/settings/updates" class="maintenance-form"><button class="button--quiet" name="action" value="check">Vérifier les mises à jour</button></form>"#);
+        html.push_str(r#"<form method="post" action="/settings/updates" class="maintenance-form" data-update-check><button class="button--quiet" name="action" value="check">Vérifier les mises à jour</button></form>"#);
     } else {
         html.push_str(r#"<p><a href="/settings/updates">Actualiser l’état</a></p>"#);
     }
