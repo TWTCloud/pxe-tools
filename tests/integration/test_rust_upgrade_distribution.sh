@@ -167,3 +167,67 @@ served=$(docker exec "$name" bash -o pipefail -c 'openssl s_client -connect 127.
 test "$served" = "$fingerprint"
 test -z "$(docker exec "$name" ss -Hlun '( sport = :67 or sport = :4011 )')"
 printf 'Rust %s upgrade from %s preserved SQLite, the account, the master key and TLS.\n' "$variant" "$previous"
+
+if [[ "$variant" == apt ]]; then
+    # Use the candidate public script against the upgraded official APT instance.
+    docker cp packaging/native/uninstall-apt.py "$name:/var/tmp/pxe-uninstall-test.py"
+    docker exec -i "$name" bash -es <<'APT_PURGE'
+        set -euo pipefail
+        cd /var/tmp
+        # The guest was started in basic.target. The native freeze command
+        # needs the system D-Bus socket that a normal Debian boot provides.
+        systemctl start dbus.socket
+        systemctl is-active --quiet dbus.socket
+        printf 'keep outside the PXE instance\n' > /var/tmp/unrelated-data
+        args=(--allow-legacy --purge-residuals)
+        python3 ./pxe-uninstall-test.py --dry-run "${args[@]}" > pxe-removal-plan
+        residual=$(awk '/^Residual plan SHA256: / { print $4 }' pxe-removal-plan)
+        legacy=$(awk '/^Legacy plan SHA256: / { print $4 }' pxe-removal-plan)
+        [[ "$residual" =~ ^[a-f0-9]{64}$ ]]
+        args+=(--yes --residual-plan-sha256 "$residual")
+        if [[ -n "$legacy" ]]; then args+=(--legacy-plan-sha256 "$legacy"); fi
+
+        dropin=/etc/systemd/system/pxe-tools.target.d
+        mkdir "$dropin"
+        printf '[Unit]\nDescription=local PXE setting\n' > "$dropin/90-local.conf"
+        if python3 ./pxe-uninstall-test.py "${args[@]}" > pxe-guard.log 2>&1; then
+            exit 1
+        fi
+        cat pxe-guard.log
+        grep -Fq 'local unit drop-in; preserved: pxe-tools.target' pxe-guard.log
+        systemctl is-active --quiet pxe-tools-worker.service
+        test -s /var/lib/pxe-tools/pxe-tools.sqlite
+        rm "$dropin/90-local.conf"
+        rmdir "$dropin"
+
+        # Upgrade starts bootstrap jobs. Exercise a normal purge once the worker
+        # has finished them and the guard can identify just its main process.
+        worker=pxe-tools-worker.service
+        ready=false
+        for _ in {1..90}; do
+            pid=$(systemctl show --property=MainPID --value "$worker")
+            group=$(systemctl show --property=ControlGroup --value "$worker")
+            busy=$(sqlite3 -readonly /var/lib/pxe-tools/pxe-tools.sqlite \
+                "SELECT EXISTS (SELECT 1 FROM init_jobs WHERE status IN ('pending','running'));")
+            if [[ "$pid" =~ ^[1-9][0-9]*$ && "$group" == /* && "$busy" == 0 ]] &&
+                [[ "$(cat "/sys/fs/cgroup$group/cgroup.procs" 2>/dev/null)" == "$pid" ]]; then
+                ready=true
+                break
+            fi
+            sleep 1
+        done
+        test "$ready" = true
+        # In CI, retain the exception chain behind the public CLI's concise error.
+        python3 -c 'import runpy, sys; sys.exit(runpy.run_path(sys.argv[1])["main"](sys.argv[2:]))' \
+            ./pxe-uninstall-test.py "${args[@]}"
+        for package in pxe-tools pxe-tools-ansible; do
+            if dpkg-query -W "$package" >/dev/null 2>&1; then exit 1; fi
+        done
+        for path in /etc/pxe-tools /var/lib/pxe-tools /var/lib/pxe-tools-native /opt/pxe-tools; do
+            test ! -e "$path"
+        done
+        test ! -L /etc/systemd/system/pxe-tools-apt-update.service
+        test "$(cat /var/tmp/unrelated-data)" = 'keep outside the PXE instance'
+APT_PURGE
+    printf 'Rust APT uninstall completed with real systemd and dpkg.\n'
+fi
