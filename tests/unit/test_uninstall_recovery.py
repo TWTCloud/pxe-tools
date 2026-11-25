@@ -442,6 +442,30 @@ def stable_nginx_lock(root=Path('/'), *, owner=0):
         self.assert_barrier_held()
         self.fixture.assert_external_survives()
 
+    def test_optional_update_mask_is_recovered_and_blocks_if_active(self):
+        unit = uninstall.APT_UPDATE_UNIT
+        packaged = self.root / 'usr/lib/systemd/system' / unit
+        packaged.write_bytes((ROOT / 'rust/packaging' / unit).read_bytes())
+        self.fixture.systemd.active[unit] = 'inactive'
+        self.interrupt_after_purge()
+        packaged.unlink()  # Model removal of this additional package unit.
+        mask = self.root / 'etc/systemd/system' / unit
+        self.assertTrue(mask.is_symlink())
+        self.assertIn(unit, json.loads(self.receipt.read_text())['masks'])
+
+        self.fixture.systemd.active[unit] = 'active'
+        with self.assertRaisesRegex(RuntimeError, 'service is active during recovery: ' + unit):
+            self.resume()
+        self.assertTrue(self.data.is_file())
+        self.assertTrue(mask.is_symlink())
+
+        self.fixture.systemd.active[unit] = 'inactive'
+        self.resume()
+        self.assertFalse(os.path.lexists(mask))
+        self.assertFalse(self.receipt.exists())
+        self.assertFalse(self.data.exists())
+        self.fixture.assert_external_survives()
+
     def test_inactive_service_with_residual_cgroup_process_blocks_recovery(self):
         self.interrupt_after_purge()
         unit = UNITS[0]

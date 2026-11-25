@@ -1917,7 +1917,9 @@ def recovery_masks(root, runner, journal, units, *, owner=0, mounts=(), dry_run=
         info = os.fstat(fd)
         if owner is not None and (info.st_uid != owner or info.st_mode & 0o022):
             raise ValueError('untrusted systemd directory')
-        for unit in dict.fromkeys((*units, *journal.state['masks'])):
+        if APT_UPDATE_UNIT in journal.state['masks'] and APT_UPDATE_UNIT not in units:
+            units = (*units, APT_UPDATE_UNIT)
+        for unit in units:
             if unit not in PRODUCT_UNITS:
                 raise ValueError('unsupported service during recovery')
             result = runner(['systemctl', 'show', '--property=ActiveState', '--value', unit],
@@ -2206,7 +2208,7 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
             return 'retry-legacy' if legacy or original_ownership_record(state['record']) != state['record'] else 'retry'
         if not packages_absent(runner):
             recovery_masks(root, runner, journal, units, owner=owner, mounts=mounts_provider(), dry_run=True)
-            for unit in units:
+            for unit in dict.fromkeys((*units, *state['masks'])):
                 status = runner(['systemctl', 'show', '--property=LoadState', '--value', unit],
                                 check=False, text=True, stdout=-1, stderr=-1, timeout=30)
                 if status.returncode or status.stdout.strip() != 'masked':
