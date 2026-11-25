@@ -44,12 +44,17 @@ import ipaddress
 import os
 import re
 import sqlite3
+import subprocess
 from contextlib import closing
 from pathlib import Path
 
 from database_selection import select_database
 
 names = []
+binary = Path('/usr/lib/pxe-tools/pxe-tools-rust')
+if binary.is_file():
+    addresses = subprocess.check_output([binary, '--admin-listen-addresses'], text=True)
+    names.extend('IP:' + line for line in addresses.splitlines() if line != '127.0.0.1')
 host = os.environ.get('PXE_PUBLIC_HOST', '')
 if host:
     try:

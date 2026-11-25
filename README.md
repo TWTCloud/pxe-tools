@@ -46,11 +46,12 @@ sudo apt install --no-install-recommends pxe-tools-ansible
 Consultez le [guide du module natif](modules/ansible/NATIVE.md) pour préparer
 les accès, redémarrer le worker et activer explicitement le module.
 
-Une instance neuve ouvre la console HTTPS sur la boucle locale. Accédez à
-`https://127.0.0.1/admin/` depuis le serveur ou par un tunnel SSH, puis lisez
-le code de l’assistant avec `sudo cat /run/pxe-tools-rust-guided/setup-code`.
-Le proxy DHCP s’active après votre confirmation de la configuration réseau
-dans l’assistant.
+À partir de la bêta 14, une instance neuve ouvre la console HTTPS sur
+les IPv4 privées actives du serveur. Depuis un autre poste du réseau,
+ouvrez `https://<IPv4-du-serveur>/admin/`. Lisez le code de l’assistant
+sur le serveur avec `sudo cat /run/pxe-tools-rust-guided/setup-code`.
+Le proxy DHCP s’active après votre confirmation de la configuration
+réseau dans l’assistant.
 
 Pour Secure Boot, la clé MOK de votre instance doit être enrôlée sur chaque
 client x86 concerné avant d'utiliser le chargeur signé par cette instance.

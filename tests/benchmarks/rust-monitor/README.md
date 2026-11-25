@@ -98,13 +98,19 @@ python3 packaging/native/build-apt-package-candidate.py /tmp/pxe-tools-candidat.
 ```
 
 Ces variantes réutilisent le `db.conf`, la clé maître et les données
-d'une instance SQLite existante. Sur une instance vierge, la console
-écoute uniquement sur `127.0.0.1`. Ouvrir
-`https://127.0.0.1/admin/` localement ou par un tunnel SSH vers cette
-boucle locale. Le compte root peut lire le code de configuration dans
+d’une instance SQLite existante. La console écoute sur `127.0.0.1` et
+sur les adresses IPv4 privées actives du serveur au démarrage. Un
+poste du réseau privé peut ouvrir `https://<IPv4-du-serveur>/admin/`
+dès le premier démarrage. Le compte root peut lire le code de configuration dans
 `/run/pxe-tools-rust-guided/setup-code`. Pour Docker, utiliser
 `docker exec` depuis l'hôte pour lire le code à l'intérieur du conteneur.
 Le lanceur génère un nouveau code à chaque démarrage du service.
+
+Pour choisir une seule adresse privée d’administration, définir
+`PXE_ADMIN_BIND` sur cette IPv4. La valeur `127.0.0.1` permet un accès
+local ou par tunnel. L’adresse PXE configurée conserve son écoute et ses
+routes de démarrage. Le contrôle des formulaires accepte les adresses
+d’écoute et le nom éventuel défini par `PXE_PUBLIC_HOST`.
 
 L'assistant crée la base SQLite et le premier compte local. Après la
 connexion, il propose la console seule, le DHCP externe ou le proxy
@@ -116,11 +122,13 @@ déploiement déjà configuré peut démarrer le paquet avec
 `systemctl start pxe-tools.target`. L'image utilise ses volumes et son
 superviseur s6.
 
-Le binaire Rust écoute sur le port 80 et le port 443 de l’adresse IPv4 PXE.
+Le binaire Rust écoute sur les ports HTTP 80 et HTTPS 443.
 La racine HTTP redirige vers `/admin/` en HTTPS. Le preseed, les ressources
-de démarrage et les retours d’installation restent disponibles en HTTP.
+de démarrage et les retours d’installation utilisent l’adresse PXE
+configurée. La boucle locale reste disponible au worker.
 Rust sert aussi ces ressources sur HTTPS. Le certificat auto-signé est
-créé au premier démarrage et conservé dans le répertoire TLS de l’instance.
+créé au premier démarrage avec les adresses privées détectées et conservé
+dans le répertoire TLS de l’instance.
 Pour Docker, réutiliser un volume nommé monté sur `/var/lib/pxe-tools-tls`
 pour garder le certificat en recréant le conteneur. Pour reprendre une
 paire existante, placer `cert.pem` et `key.pem` dans ce volume avant le

@@ -15,6 +15,9 @@ cleanup() {
         fi
         docker rm -fv "$container" >/dev/null
     fi
+    if [ "$variant" = docker ] && docker network inspect "$container" >/dev/null 2>&1; then
+        docker network rm "$container" >/dev/null
+    fi
 }
 trap cleanup EXIT
 
@@ -38,7 +41,8 @@ case "$variant" in
 APT_GUEST
         ;;
     docker)
-        docker run -d --name "$container" --network none "${PXE_RUST_GUIDED_DOCKER_IMAGE:?}" >/dev/null
+        docker network create --internal "$container" >/dev/null
+        docker run -d --name "$container" --network "$container" "${PXE_RUST_GUIDED_DOCKER_IMAGE:?}" >/dev/null
         ;;
     *) exit 2 ;;
 esac
@@ -57,4 +61,8 @@ docker exec "$container" bash -ec '
     done
     test -z "$(ss -Hlun "( sport = :67 or sport = :4011 )")"
 '
+address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container")
+test -n "$address"
+docker exec "$container" curl -fsS --max-time 5 --cacert /run/pxe-tools-rust-guided/cert.pem \
+    "https://$address/init/welcome" >/dev/null
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"
