@@ -18,28 +18,38 @@ carte réseau avant le partitionnement.
 
 ## Proxmox VE
 
-Préparez l’ISO officielle sur un hôte Linux disposant de
-`proxmox-auto-install-assistant` avec l’option `--pxe`. Vérifiez au préalable
-son empreinte avec celle publiée sur le site de Proxmox.
+Dans **Images → Ajouter une image → Proxmox VE**, choisissez l’architecture
+du client et lancez **Télécharger et préparer**. PXE Tools télécharge l’ISO
+officielle de Proxmox VE 9.2-1 ainsi que l’assistant de l’éditeur, vérifie les
+empreintes, puis prépare le noyau, l’initrd et l’ISO avec `prepare-iso --pxe`.
+Prévoyez au moins 8 Gio libres sur le serveur et 6 Gio de mémoire sur le client
+pour charger l’ISO en RAM.
 
-```bash
-proxmox-auto-install-assistant prepare-iso proxmox-ve_9.2-1.iso \
-  --fetch-from http --url https://answer.example.net/proxmox \
-  --pxe --output ./proxmox-pxe
-```
+Le menu **Installateurs Linux** propose une installation interactive.
+Pour une installation automatisée, inventoriez le client en UEFI, puis
+ouvrez **Installation automatique Linux** sur sa fiche. Choisissez
+Proxmox VE et le disque à effacer par son chemin et son numéro de série.
+Saisissez un nom complet (par exemple `pve01.exemple.fr`), un e-mail et le mot
+de passe de `root`. Ce parcours utilise la configuration réseau reçue via
+DHCP, le format ext4 et les paramètres régionaux France.
 
-Dans le stockage HTTP de PXE Tools, créez `netboot/proxmox/<version>/<arch>/`
-avec `amd64` ou `arm64` selon l’ISO préparée. Copiez les fichiers produits sous
-les noms `linux` (le `vmlinuz`), `initrd.gz` (l’`initrd.img`) et
-`source.iso` (l’ISO préparée). Le menu PXE propose alors l’installateur
-guidé Proxmox pour cette architecture.
+PXE Tools fournit le fichier de réponse en HTTPS à l’installateur du client
+sélectionné. L’ISO préparée référence l’empreinte du certificat TLS du serveur.
+Relancez **Télécharger et préparer** après un changement de certificat, de
+port HTTPS ou d’adresse PXE. Le suivi distingue la fin de l’installation et
+le premier démarrage du système, signalé après le lancement de `pveproxy`
+sur le port 8006.
 
-Pour afficher également l’entrée automatique, placez la ligne `http` dans
-un fichier nommé `.external-answer` dans ce dossier. L’ISO doit alors avoir été préparée
-avec `--fetch-from http`. Le serveur de réponses HTTPS doit autoriser
-uniquement les machines prévues et fournir une sélection explicite du disque.
-Les trois fichiers du dossier sont lisibles par les clients PXE. Gardez
-les mots de passe, les jetons et les fichiers de réponse sur le serveur HTTPS.
+### Média préparé à l’extérieur
 
-[ISO officielles Proxmox VE](https://proxmox.com/en/downloads/proxmox-virtual-environment/iso) ·
-[Assistant Proxmox](https://github.com/proxmox/pve-installer/tree/master/proxmox-auto-install-assistant)
+Les médias préparés avec `proxmox-auto-install-assistant prepare-iso --pxe`
+peuvent aussi être placés dans `netboot/proxmox/<version>/<arch>/` sous les noms
+`linux` (vmlinuz), `initrd.gz` (initrd.img) et `source.iso`. Pour ajouter
+l’entrée automatique externe, placez la ligne `http` dans `.external-answer`
+et utilisez une ISO préparée avec un serveur de réponses HTTPS. Le serveur
+externe doit autoriser uniquement les clients prévus et imposer une sélection
+explicite du disque. Les clients PXE peuvent lire les trois fichiers de média,
+donc gardez les mots de passe, les jetons et les réponses sur le serveur HTTPS.
+
+[ISO officielles Proxmox VE](https://www.proxmox.com/en/downloads/proxmox-virtual-environment/) ·
+[Assistant Proxmox et préparation PXE](https://github.com/proxmox/pve-installer/tree/master/proxmox-auto-install-assistant)

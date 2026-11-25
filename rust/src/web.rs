@@ -299,7 +299,10 @@ fn port(name: &str, default: u16) -> Result<u16, ErrorBox> {
 
 fn certificate_pin(der: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(der))
+    Sha256::digest(der)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn tls_config() -> Result<(TlsAcceptor, String), ErrorBox> {
