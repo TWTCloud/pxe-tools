@@ -46,29 +46,37 @@ sudo apt install --no-install-recommends pxe-tools-ansible
 Consultez le [guide du module natif](modules/ansible/NATIVE.md) pour préparer
 les accès, redémarrer le worker et activer explicitement le module.
 
-Ouvrez ensuite `http://adresse-du-serveur:8080/` et suivez l'assistant. Aucun
-proxy DHCP PXE n'est activé avant votre confirmation réseau. Un serveur DHCP
-approprié et un réseau PXE sont nécessaires. Si un autre service occupe le
-port 80, l'assistant permet d'examiner le conflit ; l'arrêt de `nginx.service`
-nécessite une confirmation explicite.
+Une instance neuve ouvre la console HTTPS sur la boucle locale. Accédez à
+`https://127.0.0.1/admin/` depuis le serveur ou par un tunnel SSH, puis lisez
+le code de l’assistant avec `sudo cat /run/pxe-tools-rust-guided/setup-code`.
+Le proxy DHCP s’active après votre confirmation de la configuration réseau
+dans l’assistant.
 
 Pour Secure Boot, la clé MOK de votre instance doit être enrôlée sur chaque
 client x86 concerné avant d'utiliser le chargeur signé par cette instance.
 
 ## Installation avec Docker
 
-L'image bêta 12 est disponible pour Linux amd64 et arm64. Depuis la racine
+L’image bêta 13 est disponible pour Linux amd64 et arm64. Depuis la racine
 du dépôt sur un hôte Docker Linux, téléchargez l'image et démarrez l'appliance.
 
 ```sh
-docker pull ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta12
-PXE_TOOLS_IMAGE=ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta12 \
+docker pull ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta13
+PXE_TOOLS_IMAGE=ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta13 \
   docker compose -f compose/docker-compose.yml up -d
 ```
 
-Le fichier Compose utilise le réseau de l'hôte pour le PXE. Ouvrez la console
-sur le port 8080 et confirmez l'interface PXE dans l'assistant. Les offres de
-sources des deux images accompagnent la [release bêta 12](https://github.com/williamboglietti/pxe-tools/releases/tag/v0.1.0-beta12).
+Le fichier Compose utilise le réseau de l’hôte pour le PXE. Ouvrez
+`https://127.0.0.1/admin/` depuis l’hôte et lisez le code de l’assistant
+dans le conteneur.
+
+```sh
+PXE_TOOLS_IMAGE=ghcr.io/williamboglietti/pxe-tools-appliance:v0.1.0-beta13 \
+  docker compose -f compose/docker-compose.yml exec pxe-tools cat /run/pxe-tools-rust-guided/setup-code
+```
+
+Les notes de mise à niveau et les offres de sources accompagnent la
+[bêta 13](https://github.com/williamboglietti/pxe-tools/releases/tag/v0.1.0-beta13).
 
 ## Données et limites
 
