@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import sqlite3
 import ssl
 import subprocess
@@ -128,13 +129,15 @@ def main(binary, logs, prepare_only):
         # Only the first-stage EFI loader is a fixture. The menu and all installation
         # responses are supplied by the product.
         grub = root/"grub.cfg"
-        grub.write_text(f"""insmod efinet
+        grub.write_text(f"""serial --unit=0 --speed=115200
+terminal_output console serial
+insmod efinet
 insmod net
 insmod http
 net_bootp
-configfile (http,{SERVER}){seed}
+configfile "(http,{SERVER}){seed}"
 """)
-        run("grub-mkstandalone", "-O", grub_target, "--modules=efinet net http configfile normal linux",
+        run("grub-mkstandalone", "-O", grub_target, "--modules=efinet net http configfile normal linux serial",
             "-o", tftp/"grub.efi", f"boot/grub/grub.cfg={grub}")
         launch("dhcp", "dnsmasq", "--no-daemon", "--log-dhcp", "--user=root", "--port=0",
                "--interface=pxetap", "--bind-interfaces", "--dhcp-authoritative",
@@ -177,21 +180,37 @@ configfile (http,{SERVER}){seed}
                        "-device", f"scsi-hd,drive=target,serial={SERIAL},bootindex=1")
         print("Client UEFI démarré avec KVM sur le LAN isolé", flush=True)
 
-        def installed():
+        def reached(sql):
             if guest.poll() is not None:
                 raise RuntimeError("Le client KVM s’est arrêté avant la confirmation du premier démarrage")
             with sqlite3.connect(dbfile) as db:
-                return db.execute("""SELECT EXISTS(
-                    SELECT 1 FROM machine_events e JOIN installations i ON i.action_id=e.action_id
-                    WHERE e.machine_id=? AND e.checkpoint='os_first_boot' AND i.install_status='success')""",
-                                  (device,)).fetchone()[0]
+                return db.execute(sql, (device,)).fetchone()
 
         try:
-            wait_for(installed, "le premier démarrage de Proxmox VE", 1200)
+            wait_for(lambda: reached("SELECT id FROM boot_sessions WHERE machine_id=?"), "le menu PXE UEFI", 120)
+            print("Menu PXE UEFI servi au client", flush=True)
+            wait_for(lambda: reached("SELECT id FROM installations WHERE machine_id=?"),
+                     "la récupération de la réponse par l’installateur officiel", 270)
+            print("L’installateur officiel a obtenu sa réponse HTTPS", flush=True)
+            wait_for(lambda: reached("""SELECT e.id FROM machine_events e
+                JOIN installations i ON i.action_id=e.action_id WHERE e.machine_id=?
+                AND e.checkpoint='os_first_boot' AND i.install_status='success'"""),
+                "le premier démarrage de Proxmox VE", 750)
             version = wait_for(lambda: curl("-k", f"https://{CLIENT}:8006/").stdout,
                                "l’interface Proxmox sur le port 8006", 90)
             if not re.search(rb"Proxmox (Virtual Environment|VE)", version, re.I):
                 raise RuntimeError("Le port 8006 ne présente pas la console Proxmox")
+        except Exception:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as monitor:
+                    monitor.settimeout(2)
+                    monitor.connect(str(root/"monitor.sock"))
+                    monitor.recv(4096)
+                    monitor.sendall(f"screendump {logs / 'screen.ppm'}\n".encode())
+                    monitor.recv(4096)
+            except OSError:
+                pass
+            raise
         finally:
             with sqlite3.connect(dbfile) as db:
                 diagnostics = db.execute("SELECT status,local_boot_source FROM machines").fetchall(), \
