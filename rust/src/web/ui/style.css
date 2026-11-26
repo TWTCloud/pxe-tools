@@ -485,6 +485,7 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 .image-name { display: flex; align-items: center; gap: var(--space-3); margin: 0; text-wrap: wrap; }
 :is(.distro-icon, .image-name .nav-icon) { flex: none; width: 1.75rem; height: 1.75rem; object-fit: contain; }
 .image-name .nav-icon { color: var(--muted); }
+.windows-wordmark { width: min(12rem, 100%); height: 2rem; object-fit: cover; }
 .image-card > p { margin: var(--space-2) 0 var(--space-4); color: var(--muted); }
 .image-card > p:last-child { margin-bottom: 0; }
 .image-actions { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--line); }

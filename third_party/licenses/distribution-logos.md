@@ -32,3 +32,14 @@ here does not imply endorsement.
 This notice records upstream metadata and the owner's confirmation; it does not
 purport to resolve the different Rocky Linux metadata or replace the applicable
 permissions, attribution and trademark conditions.
+
+The project owner also confirmed authorization to use the following vendor
+assets in the PXE image catalogue. The original PNGs are embedded in the Rust
+console. They remain the property of their respective trademark owners.
+
+- **Red Hat Enterprise Linux technology icon:** Red Hat, LLC.
+  https://www.redhat.com/rhdc/managed-files/rhel-tech-icon-2x.png
+  https://www.redhat.com/en/about/brand/standards/icons/technology-icons
+- **Windows 11 logo and wordmark:** Microsoft Corporation.
+  https://msftstories.thesourcemediaassets.com/sites/612/2021/06/Windows-11-Logo-1000x404.png
+  https://news.microsoft.com/june-24-2021/

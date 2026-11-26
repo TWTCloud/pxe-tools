@@ -154,8 +154,14 @@ def check_catalog_selection(database, tls, auth, form_headers):
         ).lastrowid for choice in choices]
     status, _, page = request(catalogue, tls=tls, headers=auth)
     assert status == 200 and 'Télécharger la sélection'.encode() in page
-    assert b'Versions de Debian' in page and b'Versions de Fedora Server' in page
+    assert 'Debian · Versions et architectures'.encode() in page
+    assert 'Fedora Server · Versions et architectures'.encode() in page
     assert b'amd64' in page and b'arm64' in page
+    for asset in ('windows-11.png', 'red-hat-enterprise-linux.png'):
+        path = '/console-assets/' + asset
+        assert path.encode() in page
+        response = request(path, tls=tls, response_header='Content-Type')
+        assert response[:2] == (200, 'image/png') and response[2].startswith(b'\x89PNG\r\n\x1a\n')
     for identifier in ids:
         assert f'type="checkbox" name="image" value="{identifier}"'.encode() in page
     selection = [('image', str(identifier)) for identifier in ids]
