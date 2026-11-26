@@ -154,9 +154,16 @@ def check_catalog_selection(database, tls, auth, form_headers):
         ).lastrowid for choice in choices]
     status, _, page = request(catalogue, tls=tls, headers=auth)
     assert status == 200 and 'Télécharger la sélection'.encode() in page
-    assert 'Debian · Versions et architectures'.encode() in page
-    assert 'Fedora Server · Versions et architectures'.encode() in page
-    assert b'amd64' in page and b'arm64' in page
+    assert page.count(b'<table class="catalog-versions" aria-labelledby="catalog-title">') == 1
+    assert b'<th scope="col">Distribution</th><th scope="col">Version</th>' in page
+    assert b'Intel / AMD<br><small>amd64</small>' in page
+    assert b'ARM 64 bits<br><small>arm64</small>' in page
+    assert 'Debian 13.99 · ARM 64 bits'.encode() in page
+    assert 'Fedora Server 45 · Intel / AMD 64 bits'.encode() in page
+    assert b'<table class="catalog-media-table" aria-labelledby="catalog-media-title">' in page
+    assert b'<form method="post" action="/settings/images/proxmox"' in page
+    assert b'href="/settings/images/rhel"' in page
+    assert b'href="/settings/images/media?kind=windows-iso"' in page
     for asset in ('windows-11.png', 'red-hat-enterprise-linux.png'):
         path = '/console-assets/' + asset
         assert path.encode() in page
