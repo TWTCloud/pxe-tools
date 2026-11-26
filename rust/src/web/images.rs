@@ -792,8 +792,12 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
 fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
     let mut html = String::from(
         r#"<section id="catalogue" aria-labelledby="catalog-title"><header class="section-heading">
-<div><h2 id="catalog-title">Catalogue des systèmes</h2><p class="record-meta">Ouvrez une distribution pour voir les versions et architectures au catalogue.</p></div>"#,
+<div><h2 id="catalog-title">Catalogue des systèmes</h2>"#,
     );
+    if can_edit {
+        html.push_str(r#"<p class="record-meta">Cochez les images à télécharger.</p>"#);
+    }
+    html.push_str("</div>");
     if can_edit {
         write!(
             html,
@@ -808,6 +812,12 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
             r#"<form class="catalog-selection" method="post" action="{ROUTE}/add" data-catalog-selection>"#,
         )?;
     }
+    html.push_str(
+        r#"<div class="table-region catalog-table"><table class="catalog-versions" aria-labelledby="catalog-title">
+<thead><tr><th scope="col">Distribution</th><th scope="col">Version</th>
+<th scope="col">Intel / AMD<br><small>amd64</small></th>
+<th scope="col">ARM 64 bits<br><small>arm64</small></th></tr></thead><tbody>"#,
+    );
     let mut query = db.prepare(
         "WITH entries AS (
             SELECT c.id,c.version_full,c.arch,c.major, EXISTS(
@@ -828,68 +838,59 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
          FROM entries GROUP BY version_full
          ORDER BY MAX(major) DESC,version_full DESC",
     )?;
-    let mut opened = false;
     let mut available = false;
     for (code, title) in DISTRIBUTIONS {
         let mut rows = query.query(rusqlite::params![code, CATALOG_PER_DISTRIBUTION as i64])?;
-        let row = rows.next()?;
-        let open = if !opened && row.is_some() {
-            opened = true;
-            " open"
-        } else {
-            ""
-        };
-        write!(
-            html,
-            r#"<details class="catalog-distribution"{open}><summary class="image-name">{}<span>{title}</span></summary>"#,
-            distro_icon(code)
-        )?;
-        if let Some(row) = row {
+        let icon = distro_icon(code);
+        let mut row = rows.next()?;
+        if row.is_none() {
             write!(
                 html,
-                r#"<table class="catalog-versions" aria-label="{title} · Versions et architectures"><thead><tr>
-<th scope="col">Version</th><th scope="col">Intel / AMD<br><small>amd64</small></th>
-<th scope="col">ARM 64 bits<br><small>arm64</small></th></tr></thead><tbody>"#,
+                r#"<tr><th scope="row"><span class="image-name">{icon}<span>{title}</span></span></th>
+<td colspan="3"><span class="record-meta">Aucune version disponible</span></td></tr>"#,
             )?;
-            catalog_version(&mut html, title, row, can_edit, &mut available)?;
-            while let Some(row) = rows.next()? {
-                catalog_version(&mut html, title, row, can_edit, &mut available)?;
-            }
-            html.push_str("</tbody></table>");
-        } else {
-            html.push_str(r#"<p class="record-meta">Aucune version disponible. Actualisez le catalogue pour rechercher des images.</p>"#);
         }
-        html.push_str("</details>");
+        while let Some(version) = row {
+            write!(
+                html,
+                r#"<tr><th scope="row"><span class="image-name">{icon}<span>{title}</span></span></th>"#,
+            )?;
+            catalog_version(&mut html, title, version, can_edit, &mut available)?;
+            row = rows.next()?;
+        }
     }
+    html.push_str("</tbody></table></div>");
     if can_edit {
         let disabled = if available { "" } else { " disabled" };
         write!(
             html,
-            r#"<div class="form-actions"><button type="submit"{disabled}>Télécharger la sélection</button></div></form>
-<div class="panel-grid image-catalog">"#,
+            r#"<div class="catalog-submit form-actions"><button type="submit"{disabled}>Télécharger la sélection</button></div></form>"#,
         )?;
         write!(
             html,
-            r#"<article class="panel image-card">{}<p>Installez Proxmox VE directement avec l’ISO officielle.</p>
-<form method="post" action="{ROUTE}/proxmox" class="form-stack">
-<div class="field"><label for="image-proxmox">Version et architecture</label>
-<select id="image-proxmox" name="arch" required><option value="amd64">Proxmox VE {} · Intel/AMD</option>
-<option value="arm64">Proxmox VE {} · ARM64</option></select></div>
-<p class="record-meta">Prévoyez 8 Gio libres sur le serveur et au moins 6 Gio de RAM sur le client PXE.</p>
-<div class="form-actions"><button>Télécharger et préparer</button></div></form></article>
-<article class="panel image-card">{}<p>Préparez un DVD officiel de RHEL 9 pour le démarrage réseau.</p>
-<div class="form-actions"><a class="button" href="{REDHAT_ROUTE}">Télécharger depuis Red Hat</a>
-<a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer le DVD</a></div></article>
-<article class="panel image-card"><h3 class="image-name"><img class="windows-wordmark" src="/console-assets/windows-11.png" width="192" height="32" alt="Windows 11"></h3>
-<p>Importez le média d’installation et un environnement de démarrage WinPE.</p>
-<div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso">Importer les fichiers</a>
-<a class="button button--quiet" href="/settings/windows">Gérer les éditions</a></div></article>"#,
-            heading("proxmox", "Proxmox VE"),
+            r#"<section class="catalog-media" aria-labelledby="catalog-media-title">
+<header class="section-heading"><h2 id="catalog-media-title">Médias d’installation</h2></header>
+<div class="table-region catalog-table"><table class="catalog-media-table" aria-labelledby="catalog-media-title">
+<thead><tr><th scope="col">Système</th><th scope="col">Préparation</th></tr></thead><tbody>
+<tr><th scope="row"><span class="image-name">{}<span>Proxmox VE {}</span></span></th>
+<td><form method="post" action="{ROUTE}/proxmox" class="catalog-media-form">
+<div class="form-actions"><select name="arch" aria-label="Architecture de Proxmox VE" aria-describedby="proxmox-requirements" required>
+<option value="amd64">Intel / AMD (amd64)</option><option value="arm64">ARM64</option></select>
+<button>Télécharger et préparer</button></div>
+<p class="record-meta" id="proxmox-requirements">8 Gio libres sur le serveur et au moins 6 Gio de RAM sur le client PXE.</p>
+</form></td></tr>
+<tr><th scope="row"><span class="image-name">{}<span>Red Hat Enterprise Linux 9</span></span></th>
+<td><div class="form-actions"><a class="button" href="{REDHAT_ROUTE}">Télécharger depuis Red Hat</a>
+<a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer le DVD</a></div></td></tr>
+<tr><th scope="row"><img class="windows-wordmark" src="/console-assets/windows-11.png" width="192" height="32" alt="Windows 11"></th>
+<td><div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso">Importer les fichiers</a>
+<a class="button button--quiet" href="/settings/windows">Gérer les éditions</a></div>
+<p class="record-meta">Média d’installation et environnement de démarrage WinPE.</p></td></tr>
+</tbody></table></div></section>"#,
+            distro_icon("proxmox"),
             media::PROXMOX_VERSION,
-            media::PROXMOX_VERSION,
-            heading("rhel9", "Red Hat Enterprise Linux")
+            distro_icon("rhel9")
         )?;
-        html.push_str("</div>");
     }
     html.push_str("</section>");
     Ok(html)
@@ -903,9 +904,9 @@ fn catalog_version(
     available: &mut bool,
 ) -> Result<(), ErrorBox> {
     let version: String = row.get(0)?;
-    html.push_str(r#"<tr><th scope="row">"#);
+    html.push_str(r#"<td class="catalog-version">"#);
     escape(html, &version);
-    html.push_str("</th>");
+    html.push_str("</td>");
     for (arch, column) in [("amd64", 1), ("arm64", 3)] {
         let id: Option<i64> = row.get(column)?;
         let managed: bool = row.get(column + 1)?;
@@ -922,7 +923,7 @@ fn catalog_version(
             }
             (Some(_), true) => html.push_str(r#"<span class="record-meta">Ajoutée</span>"#),
             (Some(_), false) => html.push_str("Disponible"),
-            (None, _) => html.push_str(r#"<span class="record-meta">Indisponible</span>"#),
+            (None, _) => html.push_str(r#"<span class="record-meta">Non proposée</span>"#),
         }
         html.push_str("</td>");
     }
