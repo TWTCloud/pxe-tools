@@ -317,3 +317,19 @@
 
   setTimeout(refresh, 1000);
 })();
+
+(() => {
+  const mode = document.querySelector('[data-acme-mode]');
+  const privateFields = document.querySelector('[data-acme-private]');
+  if (!mode || !privateFields) return;
+
+  function syncMode() {
+    const active = mode.value === 'private';
+    for (const field of privateFields.querySelectorAll('input, textarea')) field.disabled = !active;
+  }
+  mode.addEventListener('change', () => {
+    syncMode();
+    privateFields.open = mode.value === 'private';
+  });
+  syncMode();
+})();

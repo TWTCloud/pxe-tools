@@ -163,32 +163,33 @@ et `PXE_PUBLIC_HOST` accepte le nom DNS public. Rust vérifie le pair
 réseau, l’unicité de l’en-tête d’identité et l’origine HTTPS du formulaire.
 Le test isolé simule les en-têtes pour les pairs autorisés et refusés.
 
-Pour activer ACME, définir `PXE_PUBLIC_HOST` avec le nom DNS, puis ouvrir
-`/admin/certificates` et choisir le mode de test ou de production de
-Let’s Encrypt. Le formulaire enregistre le consentement et peut renseigner
-un contact. Le nom DNS doit permettre à l’autorité d’atteindre le port
-HTTP 80. Le serveur répond au défi HTTP-01 sur ce port. Il renouvelle
-le certificat au dernier tiers de sa durée de vie et conserve la paire
-précédente si le renouvellement échoue. La désactivation rétablit le
-certificat de l’instance. Le certificat externe importé est prioritaire.
+Dans **Certificats TLS** (`/admin/certificates`), choisir le mode ACME et
+renseigner le nom DNS de l’instance. Pour une **Autorité privée**, saisir
+l’URL HTTPS du répertoire ACME et coller le certificat racine public au
+format PEM. Après enregistrement, la demande démarre en arrière-plan.
+Le défi HTTP-01 exige que l’autorité puisse résoudre ce nom et atteindre
+le port HTTP 80. Les navigateurs doivent faire confiance à la racine interne.
 
-Les exploitants peuvent imposer un mode en définissant `PXE_ACME`
-(`off`, `staging`, `production` ou `private`) et un contact facultatif
-`PXE_ACME_EMAIL`. Sur APT, placer ces variables dans
-`/etc/pxe-tools/acme.env`. Pour Docker, utiliser l’environnement du conteneur. Le fichier Compose
-transmet ces variables et conserve la paire d’instance dans le volume
-nommé `pxe_tls`.
-Pour une autorité privée, fournir son URL HTTPS dans
-`PXE_ACME_DIRECTORY_URL` et un chemin absolu lisible vers son autorité de
-confiance dans `PXE_ACME_CA_FILE`. Ces deux valeurs rendent également
-l’autorité privée disponible dans la console quand le mode est piloté
-depuis la console. Les fichiers `acme-settings.json`, `acme-account.json`
-et `acme-certificate.json` restent dans le dossier privé d’import TLS.
+PXE Tools active la paire en cours de service, renouvelle le certificat
+au dernier tiers de sa durée de vie et conserve la paire précédente si
+une tentative échoue. La page affiche l’état de la demande et l’expiration
+du certificat géré. Désactiver ACME rétablit le certificat de l’instance.
+Pour passer d’un certificat importé à ACME, retirer la paire importée
+depuis cette même page.
 
-Le banc `test_rust_acme_pebble.py` active le mode privé depuis la console,
-exerce deux défis HTTP-01, vérifie la reprise sans l’autorité après
-redémarrage, puis désactive ACME. Pebble et son serveur DNS restent sur
-la boucle locale.
+Les installations administrées par `PXE_ACME` conservent la priorité du
+mode fixé par le service. Sur APT, l’environnement est lu dans
+`/etc/pxe-tools/acme.env`. Pour Docker, les variables appartiennent à
+l’environnement du conteneur. Les valeurs `PXE_PUBLIC_HOST`,
+`PXE_ACME_DIRECTORY_URL` et `PXE_ACME_CA_FILE` continuent de servir de
+configuration existante. Les paramètres web, le compte ACME et la paire
+gérée restent dans le dossier privé d’import TLS.
+
+Le scénario de la console vérifie l’émission, le défi HTTP-01 et le
+renouvellement avec une autorité isolée. Le banc
+`test_rust_acme_pebble.py` utilise aussi la configuration web et couvre
+le redémarrage avec un certificat géré, puis la désactivation d’ACME.
+
 La page `/settings/images` affiche l’état du catalogue et la progression des
 images enregistrées. Elle permet de demander une actualisation du catalogue
 et d’ajouter une image Debian amd64 ou arm64. Le téléchargement reste assuré
