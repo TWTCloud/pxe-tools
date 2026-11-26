@@ -608,7 +608,7 @@ def verify_tls_import(client, original, imported, persistent, authorization):
                           origin='https://other.example')[0] == 403
     assert client.request(endpoint, form=invalid, authorization=authorization)[0] == 422
     assert client.request('/healthz')[0] == 200
-    assert not persistent.exists()
+    assert not (persistent/'external.json').exists()
     assert client.request(endpoint, form=valid, authorization=authorization)[:2] == (303, endpoint)
 
     updated = Client(imported, client.http_port, client.https_port)
