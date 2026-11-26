@@ -148,7 +148,7 @@ impl View {
             _ => {}
         }
         let (section, rest) = if let Some(rest) = path.strip_prefix("/admin/inventaire/") {
-            ("inventaire", rest)
+            ("admin/inventaire", rest)
         } else {
             path.strip_prefix('/')?.split_once('/')?
         };
@@ -162,8 +162,8 @@ impl View {
         match (section, endpoint) {
             ("tasks", "") => Some(Self::Task(id)),
             ("tasks", "checklist") => Some(Self::Checklist(id)),
-            ("inventaire", "tasks") => Some(Self::DeviceTasks(id)),
-            ("inventaire", endpoint) => {
+            ("admin/inventaire", "tasks") => Some(Self::DeviceTasks(id)),
+            ("admin/inventaire", endpoint) => {
                 let (legacy, kind) = Operation::from_segment(endpoint.strip_prefix("tasks/")?)?;
                 Some(Self::Legacy(legacy, kind, Some(id)))
             }

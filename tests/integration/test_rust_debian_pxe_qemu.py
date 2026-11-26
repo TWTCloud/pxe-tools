@@ -118,7 +118,7 @@ def setup(root, inputs, keyring):
         (http / item).symlink_to(inputs / item)
     (http / "static-bin").symlink_to(ROOT / "docker/pxe-tools/static-bin", target_is_directory=True)
     (http / "discover.sh").write_text(render_fixture(
-        "discover.sh.j2", pxe_ip=PXE_IP, pxe_console_port_suffix="",
+        "discover.sh.j2", pxe_ip=PXE_IP, pxe_console_scheme="https", pxe_console_port_suffix="",
     ))
     discovery = render_fixture("discovery-preseed.cfg.j2", pxe_ip=PXE_IP, ansible_managed="Disposable fixture")
     # Debian Installer's serial frontend only offers English and C.
