@@ -176,6 +176,71 @@
 })();
 
 (() => {
+  const rail = document.querySelector('[data-catalog-tabs]');
+  if (!rail) return;
+  const list = rail.querySelector('[role="tablist"]');
+  const tabs = [...list.querySelectorAll('[role="tab"]')];
+  const panels = tabs.map(tab => document.getElementById(tab.getAttribute('aria-controls')));
+  const previous = rail.querySelector('[data-tab-scroll="-1"]');
+  const next = rail.querySelector('[data-tab-scroll="1"]');
+  if (!tabs.length || panels.some(panel => !panel)) return;
+
+  function activate(index, reveal = false) {
+    tabs.forEach((tab, position) => {
+      const selected = position === index;
+      tab.setAttribute('aria-selected', String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+      panels[position].hidden = !selected;
+    });
+    if (reveal) tabs[index].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  function updateArrows() {
+    const overflow = list.scrollWidth > rail.clientWidth + 1;
+    previous.hidden = next.hidden = !overflow;
+    previous.disabled = list.scrollLeft <= 1;
+    next.disabled = list.scrollLeft + list.clientWidth >= list.scrollWidth - 1;
+  }
+
+  tabs.forEach((tab, index) => {
+    const panel = panels[index];
+    panel.setAttribute('role', 'tabpanel');
+    panel.setAttribute('aria-labelledby', tab.id);
+    panel.tabIndex = 0;
+    tab.addEventListener('click', () => activate(index, true));
+  });
+  list.addEventListener('keydown', event => {
+    const index = tabs.indexOf(event.target);
+    if (index < 0) return;
+    let target;
+    switch (event.key) {
+      case 'ArrowLeft': target = (index + tabs.length - 1) % tabs.length; break;
+      case 'ArrowRight': target = (index + 1) % tabs.length; break;
+      case 'Home': target = 0; break;
+      case 'End': target = tabs.length - 1; break;
+      default: return;
+    }
+    event.preventDefault();
+    activate(target, true);
+    tabs[target].focus({ preventScroll: true });
+  });
+  for (const arrow of [previous, next]) {
+    arrow.addEventListener('click', () => {
+      const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      list.scrollBy({ left: Number(arrow.dataset.tabScroll) * list.clientWidth,
+        behavior: reducedMotion ? 'auto' : 'smooth' });
+    });
+  }
+  list.addEventListener('scroll', updateArrows, { passive: true });
+  activate(0);
+  rail.hidden = false;
+  const observer = new ResizeObserver(updateArrows);
+  observer.observe(rail);
+  tabs.forEach(tab => observer.observe(tab));
+  updateArrows();
+})();
+
+(() => {
   const form = document.querySelector('[data-catalog-selection]');
   if (!form) return;
   const submit = form.querySelector('button[type="submit"]');
