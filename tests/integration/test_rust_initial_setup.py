@@ -587,6 +587,9 @@ def verify_private_acme(client, credentials, authorization, root):
         page = https.request(console, authorization=authorization)
         assert page[0] == 200 and host.encode() in page[2] and b'Certificat ACME' in page[2]
         address = f'{host}:{client.https_port}'
+        assert client.request('/', secure=False, extra_headers={'Host':host})[:2] == (
+            302, 'https://' + address + '/admin/',
+        )
         result = https.request(route, form={'mode': 'off'}, authorization=authorization,
                                extra_headers={'Host': address}, origin='https://' + address)
         assert result[:2] == (303, console), result

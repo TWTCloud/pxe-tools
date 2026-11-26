@@ -120,7 +120,7 @@ impl Certificates {
                 renewal: None,
             }
         } else {
-            let cached = acme.as_ref().and_then(|_| {
+            let cached = acme.as_ref().and_then(|config| {
                 let certificate = load::<Managed>(&directory, MANAGED);
                 match certificate {
                     Ok(Some(managed)) => match managed.active() {
@@ -210,6 +210,15 @@ impl Certificates {
         Ok(())
     }
 
+    pub(super) fn issued_host(&self) -> Option<String> {
+        self.active
+            .read()
+            .expect("TLS config lock")
+            .renewal
+            .as_ref()
+            .map(|renewal| renewal.host.clone())
+    }
+
     pub(super) fn allowed_acme_host(&self, host: &str) -> bool {
         let active = self.active.read().expect("TLS config lock");
         self.acme
@@ -245,10 +254,10 @@ impl Certificates {
     }
 
     pub(super) fn page(&self) -> Reply {
-        self.render_page(None)
+        self.render_page(None, None)
     }
 
-    fn render_page(&self, error: Option<&str>) -> Reply {
+    fn render_page(&self, error: Option<&str>, draft: Option<&acme::Preference>) -> Reply {
         let active = self.active.read().expect("TLS config lock");
         let status = if active.external {
             "Certificat externe"
@@ -263,7 +272,7 @@ impl Certificates {
             escape(&mut feedback, error);
             feedback.push_str("</p>");
         }
-        let acme = self.acme_form(&active, &feedback);
+        let acme = self.acme_form(&active, &feedback, draft);
         let restore = if active.external {
             format!(
                 r#"<details><summary>Revenir au certificat de l’instance</summary>
@@ -294,7 +303,12 @@ impl Certificates {
         reply
     }
 
-    fn acme_form(&self, active: &Active, feedback: &str) -> String {
+    fn acme_form(
+        &self,
+        active: &Active,
+        feedback: &str,
+        draft: Option<&acme::Preference>,
+    ) -> String {
         let mut status = String::new();
         if let Some(config) = self.acme.borrow().as_ref() {
             status.push_str(r#"<p class="record-meta" role="status">"#);
@@ -323,10 +337,11 @@ impl Certificates {
                 "{status}<p>Le mode ACME est défini dans la configuration du service.</p>"
             );
         }
-        let pref: acme::Preference = load(&self.directory, PREFERENCE)
+        let saved: acme::Preference = load(&self.directory, PREFERENCE)
             .ok()
             .flatten()
             .unwrap_or_default();
+        let pref = draft.unwrap_or(&saved);
         let selection = |value| if value { " selected" } else { "" };
         let off = selection(matches!(pref.mode, acme::Mode::Off));
         let staging = selection(matches!(pref.mode, acme::Mode::Staging));
@@ -353,7 +368,7 @@ impl Certificates {
             &mut directory,
             pref.private_url.as_deref().unwrap_or_default(),
         );
-        escape(&mut root, pref.root_pem.as_deref().unwrap_or_default());
+        escape(&mut root, saved.root_pem.as_deref().unwrap_or_default());
         let existing = if acme::Config::private_endpoint().is_ok() && pref.private_url.is_none() {
             "<p class=\"record-meta\">Si ces deux champs restent vides, PXE Tools utilise l’autorité privée définie par le service.</p>"
         } else {
@@ -370,11 +385,11 @@ impl Certificates {
 <div class="field"><label for="acme-host">Nom DNS de cette instance</label><input id="acme-host" name="host" type="text" maxlength="253" autocomplete="off" spellcheck="false" aria-describedby="acme-host-help" value="{host}">
 <small id="acme-host-help">L’autorité doit pouvoir résoudre ce nom et atteindre le port HTTP 80.</small></div>
 <details data-acme-private{open}><summary>Configuration de l’autorité privée</summary>
-{existing}
+<div class="form-stack">{existing}
 <div class="field"><label for="acme-directory">URL HTTPS du répertoire ACME</label><input id="acme-directory" name="directory" type="url" maxlength="2048" autocomplete="off" spellcheck="false" value="{directory}"></div>
 <div class="field"><label for="acme-root">Certificat racine PEM</label><textarea id="acme-root" name="root_ca" rows="5" maxlength="12288" spellcheck="false" autocomplete="off" aria-describedby="acme-root-help">{root}</textarea>
 <small id="acme-root-help">Collez le certificat racine public de votre autorité.</small></div>
-</details>
+</div></details>
 <div class="field"><label for="acme-email">Adresse de contact (facultative)</label><input id="acme-email" name="email" type="email" maxlength="254" value="{email}"></div>
 <label class="check-label"><input type="checkbox" name="terms"> J’accepte les conditions de l’autorité choisie.</label>
 <div class="form-actions"><button>Enregistrer le mode ACME</button><a class="button button--quiet" href="{ROUTE}">Actualiser l’état</a></div>
@@ -383,14 +398,18 @@ impl Certificates {
     }
 
     pub(super) fn configure_acme(&self, form: &[u8]) -> Reply {
-        let Some(pref) = acme::Preference::parse(form) else {
-            return self.render_page(Some(
-                "Vérifiez le mode ACME et confirmez les conditions d’utilisation.",
-            ));
+        let Some(mut pref) = acme::Preference::parse(form) else {
+            return self.render_page(
+                Some("Vérifiez le mode ACME et confirmez les conditions d’utilisation."),
+                None,
+            );
         };
         let config = match pref.config(self.public_host.as_deref()) {
             Ok(config) => config,
-            Err(error) => return self.render_page(Some(&error.to_string())),
+            Err(error) => {
+                pref.root_pem = None;
+                return self.render_page(Some(&error.to_string()), Some(&pref));
+            }
         };
         let Ok(mut active) = self.active.write() else {
             return plain(

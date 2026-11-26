@@ -521,17 +521,16 @@ async fn dispatch(
             let requested_host = single(&parts.headers, HOST.as_str())
                 .filter(|value| !value.contains('@'))
                 .and_then(|value| value.parse::<Authority>().ok());
+            let issued_host = site.tls.issued_host();
+            let public_host = issued_host.as_deref().or(site.public_host.as_deref());
             let host = site
                 .pxe_ip
                 .filter(|address| *address == local)
-                .and(site.public_host.as_deref())
+                .and(public_host)
                 .or_else(|| {
                     requested_host.as_ref().map(Authority::host).filter(|name| {
                         (local.is_loopback() && name.eq_ignore_ascii_case("localhost"))
-                            || site
-                                .public_host
-                                .as_deref()
-                                .is_some_and(|host| host.eq_ignore_ascii_case(name))
+                            || public_host.is_some_and(|host| host.eq_ignore_ascii_case(name))
                     })
                 })
                 .map_or_else(|| local.to_string(), str::to_owned);
