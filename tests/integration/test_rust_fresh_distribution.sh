@@ -56,6 +56,7 @@ docker exec "$container" bash -ec '
     test "$(curl -kfsS --max-time 5 -o /dev/null -w "%{redirect_url}" https://127.0.0.1/admin/)" = "https://127.0.0.1/init/welcome"
     curl -kfsS --max-time 5 https://127.0.0.1/init/welcome >/dev/null
     test -s /run/pxe-tools-rust-guided/setup-code
+    wimlib-imagex --version
     for executable in php php-fpm8.4 nginx ansible; do
         if command -v "$executable"; then exit 1; fi
     done

@@ -1127,7 +1127,12 @@ async fn dispatch(
                     if let Some(media) = shared.filter(|media| media.iso_sha256 == id) {
                         if let Some(reply) = site
                             .assets
-                            .serve_shared_windows(&media, name, &parts.headers, head)
+                            .serve_shared_windows(
+                                &media,
+                                name,
+                                &parts.headers,
+                                parts.method == Method::HEAD,
+                            )
                             .await
                         {
                             return reply;
