@@ -129,15 +129,16 @@ def setup(client, credentials, config, database, *, probe_pending_reset=False):
 
 def verify_browser_login(client, database, authorization, *, first_run=False):
     browser = {'Accept': 'text/html'}
-    result = client.request('/admin/inventaire?page=2', extra_headers=browser)
-    assert result[:2] == (302, '/login?next=%2Fadmin%2Fdevices%3Fpage%3D2'), result
+    inventory_page = '/admin/inventaire?page=2'
+    result = client.request(inventory_page, extra_headers=browser)
+    assert result[:2] == (302, '/login?' + urlencode({'next': inventory_page})), result
     form = client.request(result[1], extra_headers=browser)
     assert form[0] == 200 and b'name="password"' in form[2]
     assert client.request('/login', secure=False)[0] == 404
     assert client.request('/logout')[0] == 405
 
     username, password = authorization.split(':', 1)
-    credentials = {'username': username, 'password': password, 'next': '/admin/inventaire?page=2'}
+    credentials = {'username': username, 'password': password, 'next': inventory_page}
     assert client.request('/login', form=credentials, origin='https://other.example')[0] == 403
     assert client.request('/login', form={**credentials, 'password': 'wrong'})[0] == 401
     assert client.request('/login', form={**credentials, 'username':'not-a-pxe-account'})[0] == 401
