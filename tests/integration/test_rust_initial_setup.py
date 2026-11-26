@@ -109,11 +109,11 @@ def setup(client, credentials, config, database, *, probe_pending_reset=False):
         results = dict(zip(('operator','other'), pool.map(create, ('operator','other')), strict=True))
     assert sorted(result[0] for result in results.values()) == [303, 409]
     winner = next(name for name, result in results.items() if result[0] == 303)
-    assert results[winner][1] == '/admin/devices'
+    assert results[winner][1] == '/admin/inventaire'
     assert create('replacement')[0] == 409
-    assert client.request('/init/admin')[:2] == (302, '/admin/devices')
-    assert client.request('/admin/devices')[0] == 401
-    assert client.request('/admin/devices', authorization=winner+':fixture-password')[0] == 200
+    assert client.request('/init/admin')[:2] == (302, '/admin/inventaire')
+    assert client.request('/admin/inventaire')[0] == 401
+    assert client.request('/admin/inventaire', authorization=winner+':fixture-password')[0] == 200
     assert json.loads(config.read_text()) == {'driver': 'sqlite', 'path': str(database)}
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
     assert stat.S_IMODE(database.stat().st_mode) == 0o600
@@ -129,15 +129,16 @@ def setup(client, credentials, config, database, *, probe_pending_reset=False):
 
 def verify_browser_login(client, database, authorization, *, first_run=False):
     browser = {'Accept': 'text/html'}
-    result = client.request('/admin/devices?page=2', extra_headers=browser)
-    assert result[:2] == (302, '/login?next=%2Fadmin%2Fdevices%3Fpage%3D2'), result
+    inventory_page = '/admin/inventaire?page=2'
+    result = client.request(inventory_page, extra_headers=browser)
+    assert result[:2] == (302, '/login?' + urlencode({'next': inventory_page})), result
     form = client.request(result[1], extra_headers=browser)
     assert form[0] == 200 and b'name="password"' in form[2]
     assert client.request('/login', secure=False)[0] == 404
     assert client.request('/logout')[0] == 405
 
     username, password = authorization.split(':', 1)
-    credentials = {'username': username, 'password': password, 'next': '/admin/devices?page=2'}
+    credentials = {'username': username, 'password': password, 'next': inventory_page}
     assert client.request('/login', form=credentials, origin='https://other.example')[0] == 403
     assert client.request('/login', form={**credentials, 'password': 'wrong'})[0] == 401
     assert client.request('/login', form={**credentials, 'username':'not-a-pxe-account'})[0] == 401
@@ -162,14 +163,14 @@ def verify_browser_login(client, database, authorization, *, first_run=False):
     previous = active
     active = sign_in({**credentials, 'next': '/%2fevil.example'}, target, current=previous)
     assert active['Cookie'] != previous['Cookie']
-    assert client.request('/admin/devices', extra_headers=previous)[0] == 302
+    assert client.request('/admin/inventaire', extra_headers=previous)[0] == 302
 
     assert client.request('/logout', form={}, extra_headers=active, origin='https://other.example')[0] == 403
-    assert client.request('/admin/devices', extra_headers=active)[0] == 200
+    assert client.request('/admin/inventaire', extra_headers=active)[0] == 200
     headers = {}
     assert client.request('/logout', form={}, extra_headers=active, response_headers=headers)[:2] == (303, '/login')
     assert 'Max-Age=0' in headers['set-cookie']
-    assert client.request('/admin/devices', extra_headers=active)[0] == 302
+    assert client.request('/admin/inventaire', extra_headers=active)[0] == 302
     print('Rust browser login, secure session, origin checks, token rotation and logout verified', flush=True)
 
 
@@ -224,7 +225,7 @@ def verify_configuration(client, database, authorization, packaged, boot_fixture
     assert request('/init/network', form={'role':'console'})[:2] == (303, '/init/done')
     fields = ConfirmationInputs(request('/init/done')[2]).values
     assert request('/init/complete', form={**fields, 'plan':'old', 'confirmation':'yes'})[0] == 422
-    assert request('/init/complete', form={**fields, 'confirmation':'yes'})[:2] == (303, '/admin/devices')
+    assert request('/init/complete', form={**fields, 'confirmation':'yes'})[:2] == (303, '/admin/inventaire')
     assert request('/init/complete', form={**fields, 'confirmation':'yes'})[0] == 409
     with closing(sqlite3.connect(database)) as db:
         values = dict(db.execute('SELECT key,value FROM settings'))
@@ -251,7 +252,7 @@ def verify_activation(client, database, request, plan, http_root, tftp_root, inp
     assert fields.get('image') and fields.get('plan'), page[2]
     assert request('/init/complete', form={**fields,'image':'0','confirmation':'yes'})[0] == 422
     result = request('/init/complete', form={**fields,'confirmation':'yes'})
-    assert result[:2] == (303, '/admin/devices'), result
+    assert result[:2] == (303, '/admin/inventaire'), result
 
     deadline = time.monotonic() + 85
     jobs = {}
@@ -308,7 +309,7 @@ def verify_activation(client, database, request, plan, http_root, tftp_root, inp
     assert 'serveur Rust' in retired[1]
     assert 'no-dhcp-interface=*' in dnsmasq_config.read_text().splitlines()
     client.ready()
-    assert request('/admin/devices')[0] == 200
+    assert request('/admin/inventaire')[0] == 200
     try:
         with socket.create_connection((plan['pxe_ip'],80),timeout=2):
             raise AssertionError('The PXE listener stayed bound to the isolated network address')
@@ -386,7 +387,7 @@ def verify_device_removal(client, database, authorization, tftp):
                    (device,secrets.token_hex(32)))
         db.execute("CREATE TRIGGER fixture_refuse_device BEFORE DELETE ON machines "
                    "WHEN OLD.mac='02:00:00:00:47:54' BEGIN SELECT RAISE(ABORT,'fixture refuses delete'); END")
-    path = f'/machines/{device}'
+    path = f'/admin/inventaire/{device}'
     form = {'_method':'DELETE','confirm':'SUPPRIMER'}
     assert client.request(path, form=form)[0] == 401
     assert client.request(path, form=form, authorization=authorization, origin='https://outside.example')[0] == 403
@@ -396,7 +397,7 @@ def verify_device_removal(client, database, authorization, tftp):
     with closing(sqlite3.connect(database)) as db, db:
         assert db.execute("SELECT COUNT(*) FROM machines WHERE id=?", (device,)).fetchone() == (1,)
         db.execute('DROP TRIGGER fixture_refuse_device')
-    assert client.request(path, form=form, authorization=authorization)[:2] == (303, '/admin/devices')
+    assert client.request(path, form=form, authorization=authorization)[:2] == (303, '/admin/inventaire')
     assert not target.exists() and not list(menus.glob('01-02-00-00-00-47-54.pending-delete-*'))
     with closing(sqlite3.connect(database)) as db, db:
         assert db.execute("SELECT COUNT(*) FROM actions WHERE machine_id=?", (device,)).fetchone() == (0,)
@@ -410,7 +411,7 @@ def verify_device_removal(client, database, authorization, tftp):
         ]
         db.execute("INSERT INTO machines(mac,hostname) VALUES('02:00:00:00:47:55','reset-fixture')")
         db.execute("INSERT INTO presets(name,distro,admin_user_login) VALUES('Reset preserved','debian','fixture')")
-    bulk = '/machines/bulk-delete'
+    bulk = '/admin/inventaire/bulk-delete'
     first = menus/'01-02-00-00-00-47-56'
     second = menus/'01-02-00-00-00-47-57'
     first.write_text('bulk menu to restore')
@@ -524,12 +525,12 @@ def verify_factory_reset(client, database, authorization, credentials, http, tft
         assert settings['pxe_enabled'] == 'off' and 'reset_fixture' not in settings
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
     client.ready()
-    assert client.request('/admin/devices', authorization=authorization)[0] == 401
+    assert client.request('/admin/inventaire', authorization=authorization)[0] == 401
     assert client.request('/init')[:2] == (302, '/init/admin')
     code = (credentials/'setup-code').read_text().strip()
     new_auth = {'code':code, 'username':'after-reset', 'password':'fixture-password', 'password_confirm':'fixture-password'}
-    assert client.request('/init/admin', form=new_auth)[:2] == (303, '/admin/devices')
-    assert client.request('/admin/devices', authorization='after-reset:fixture-password')[0] == 200
+    assert client.request('/init/admin', form=new_auth)[:2] == (303, '/admin/inventaire')
+    assert client.request('/admin/inventaire', authorization='after-reset:fixture-password')[0] == 200
     print('Packaged Rust factory reset retired the old instance data and MOK, preserved TLS and the master key, and reopened setup', flush=True)
 
 
@@ -562,8 +563,8 @@ def verify_tls_import(client, original, imported, persistent, authorization):
 def verify_image_console(client, database, authorization, http_root):
     endpoint = '/settings/images'
 
-    def submit(form, **kwargs):
-        return client.request(endpoint, form=form, authorization=authorization, **kwargs)
+    def action(suffix, form=None, **kwargs):
+        return client.request(endpoint+suffix, form=form, authorization=authorization, **kwargs)
 
     with closing(sqlite3.connect(database)) as db, db:
         db.executemany("""INSERT INTO catalog_entries(id,distro,version_full,arch,extract_method)
@@ -573,28 +574,27 @@ def verify_image_console(client, database, authorization, http_root):
         db.execute("INSERT INTO init_jobs(job_type,status) VALUES('bootstrap:refresh_catalog','running')")
     assert client.request(endpoint)[0] == 401
     assert client.request(endpoint, secure=False)[0] == 404
-    assert submit({'action':'refresh'}, origin='https://other.example')[0] == 403
-    assert submit({'action':'refresh'})[:2] == (303, endpoint)
+    assert action('/refresh', form={}, origin='https://other.example')[0] == 403
+    assert action('/refresh', form={})[:2] == (303, endpoint)
     with closing(sqlite3.connect(database)) as db, db:
         assert db.execute("SELECT COUNT(*) FROM init_jobs WHERE status IN ('running','pending')").fetchone() == (1,)
         db.execute("UPDATE init_jobs SET status='success' WHERE job_type='bootstrap:refresh_catalog'")
-    assert submit({'image':'9002'})[0] == 422
-    assert submit({'image':'9001'})[:2] == (303, endpoint)
+    assert action('/add', form={'image':'9002'})[0] == 422
+    assert action('/add', form={'image':'9001'})[:2] == (303, endpoint)
+    assert action('', form={'action':'refresh', 'image':'9001'})[0] == 422
     for _ in range(2):
-        assert submit({'action':'refresh', 'image':'9001'})[:2] == (303, endpoint)
+        assert action('/refresh', form={})[:2] == (303, endpoint)
     with closing(sqlite3.connect(database)) as db, db:
         job, = db.execute("SELECT id FROM init_jobs WHERE job_type='bootstrap:refresh_catalog_v2'").fetchall()
         assert json.loads(db.execute("SELECT value FROM settings WHERE key='catalog_job_ids'").fetchone()[0]) == list(job)
         image, = db.execute("UPDATE os_images SET status='downloading',progress_percent=61 "
                             "WHERE version_full='13.0-console' RETURNING id").fetchone()
-    assert submit({'image':'9001'})[:2] == (303, endpoint)
+    assert action('/add', form={'image':'9001'})[:2] == (303, endpoint)
     status, _, page = client.request(endpoint, authorization=authorization)
     assert status == 200 and b'Debian 13.0-console' in page
     assert b'&lt;trixie&gt;' in page and b'1.0-console' not in page
-    assert b'<td>downloading</td><td>61 %</td>' in page
-    def action(suffix, form=None, **kwargs):
-        return client.request(endpoint+suffix,form=form,authorization=authorization,**kwargs)
-
+    assert f'data-image-id="{image}" data-state="downloading"'.encode() in page
+    assert b'<progress value="61" max="100"' in page
     auto = {'catalog_auto_refresh_enabled':'on','catalog_auto_refresh_interval_hours':'24'}
     assert action('/auto-refresh',form={**auto,'catalog_auto_refresh_interval_hours':'48'})[0] == 422
     assert action('/auto-refresh',form=auto,origin='https://other.example')[0] == 403
@@ -840,15 +840,15 @@ def verify_activity(client, database, authorization):
     assert ' · Reçue</li>'.encode() in checklist and action_token.encode() not in checklist
     assert request(f'/tasks/install-{finished}')[:2] == (301, f'/tasks/{action}')
     assert request(f'/tasks/install-{legacy}')[0] == 404
-    assert request(f'/machines/{device}/tasks/install-{finished}')[0] == 200
-    assert request(f'/machines/{device+1000}/tasks/install-{finished}')[0] == 404
-    device_tasks = request(f'/machines/{device}/tasks')[2]
+    assert request(f'/admin/inventaire/{device}/tasks/install-{finished}')[0] == 200
+    assert request(f'/admin/inventaire/{device+1000}/tasks/install-{finished}')[0] == 404
+    device_tasks = request(f'/admin/inventaire/{device}/tasks')[2]
     assert f'href="/tasks/{action}"'.encode() in device_tasks
     progress = f'/api/machines/{device}/task-progress'
     assert client.request(progress)[0] == 401 and request(progress, secure=False)[0] == 404
     result = request(progress)[2]
     assert b'<progress value="1" max="13">' in result and b'&lt;fixture-phase&gt;' in result
-    assert result in request(f'/machines/{device}')[2]
+    assert result in request(f'/admin/inventaire/{device}')[2]
     with closing(sqlite3.connect(database)) as db, db:
         wipe = db.execute("INSERT INTO wipes(machine_id,disks_json,wipe_mode,wipe_status) "
                           "VALUES(?,'[]','partial','running')", (device,)).lastrowid
@@ -876,7 +876,7 @@ def verify_activity(client, database, authorization):
         before = db.execute('SELECT status FROM machines WHERE id=?', (device,)).fetchone()
         assert db.execute('SELECT status FROM actions WHERE id=?', (action,)).fetchone() == ('running',)
     for _ in range(2):
-        assert request(close_action, form={})[:2] == (303, f'/machines/{device}')
+        assert request(close_action, form={})[:2] == (303, f'/admin/inventaire/{device}')
     assert close_action.encode() not in request(f'/tasks/{action}')[2]
     assert request(install_log)[2] == expected
     assert b'&lt;legacy-log&gt;' in request(f'/installations/{legacy}')[2]
@@ -884,7 +884,7 @@ def verify_activity(client, database, authorization):
     assert request(f'/installations/{finished}/cancel', form={})[:2] == (303, f'/installations/{finished}')
     headers = {}
     assert request(progress, response_headers=headers) == (200, None, b'')
-    assert headers['hx-redirect'] == f'/machines/{device}'
+    assert headers['hx-redirect'] == f'/admin/inventaire/{device}'
     with closing(sqlite3.connect(database)) as db:
         assert db.execute('SELECT status FROM machines WHERE id=?', (device,)).fetchone() == before
         assert db.execute('SELECT status,ended_at IS NOT NULL FROM actions WHERE id=?', (action,)).fetchone() == ('cancelled', 1)
@@ -906,13 +906,18 @@ def verify_appliance_settings(client, database, authorization):
     assert client.request('/settings')[0] == 401
     assert request('/settings', secure=False)[0] == 404
     assert request('/settings/https')[:2] == (302, '/admin/certificates')
-    assert request('/settings/terminology', form={'ui_device_term':'ordinateur'})[:2] == (303, '/settings')
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('ui_device_term','ordinateur')")
+    for retired in ('/settings/terminology', '/admin/settings/device-terminology'):
+        assert request(retired, form={'ui_device_term':'serveur'})[0] == 404
+    with closing(sqlite3.connect(database)) as db:
+        assert db.execute("SELECT value FROM settings WHERE key='ui_device_term'").fetchone() == ('ordinateur',)
     assert request('/settings', form={'discovery_boot_proto':'invalid'})[0] == 422
     assert request('/settings', form={'discovery_boot_proto':'tftp'})[:2] == (303, '/settings')
     page = request('/settings')
     assert b'name="discovery_boot_proto"' in page[2] and b'value="tftp" selected' in page[2]
     assert b'ui-device-term' not in page[2]
-    inventory = request('/admin/devices')[2]
+    inventory = request('/admin/inventaire')[2]
     assert b'<h1>Inventaire</h1>' in inventory and b'ui-device-term' not in inventory
     assert b'inventory-filters' in inventory
     route = '/settings/default-dns'
@@ -951,14 +956,22 @@ def verify_appliance_settings(client, database, authorization):
 
 
 def verify_device_settings(client, database, authorization):
-    assert client.request('/machines',authorization=authorization)[:2]==(302,'/admin/devices')
-    assert client.request('/machines/new')[0]==401
-    assert client.request('/machines/new',authorization=authorization)[0]==200
-    assert client.request('/machines',form={'mac':'invalid'},authorization=authorization)[0]==422
+    for old_path in ('/machines', '/admin/devices'):
+        assert client.request(old_path + '?q=fixture%20host', authorization=authorization)[:2] == (
+            302, '/admin/inventaire?q=fixture%20host',
+        )
+    assert client.request('/machines/1/install', authorization=authorization)[:2] == (
+        302, '/admin/inventaire/1/install',
+    )
+    assert client.request('/machines', secure=False)[0] == 404
+    assert client.request('/machines', form={'mac':'invalid'}, authorization=authorization)[0] == 422
+    assert client.request('/admin/inventaire/new')[0]==401
+    assert client.request('/admin/inventaire/new',authorization=authorization)[0]==200
+    assert client.request('/admin/inventaire',form={'mac':'invalid'},authorization=authorization)[0]==422
     manual = {'mac':'02-00-00-00-09-04','hostname':'fixture-manual'}
-    registered = client.request('/machines',form=manual,authorization=authorization)
-    assert registered[0]==303 and registered[1].startswith('/machines/')
-    assert client.request('/machines',form=manual,authorization=authorization)[0]==409
+    registered = client.request('/admin/inventaire',form=manual,authorization=authorization)
+    assert registered[0]==303 and registered[1].startswith('/admin/inventaire/')
+    assert client.request('/admin/inventaire',form=manual,authorization=authorization)[0]==409
     with closing(sqlite3.connect(database)) as db, db:
         assert db.execute("SELECT hostname,status FROM machines WHERE mac='02:00:00:00:09:04'").fetchone()==(
             'fixture-manual','discovered',
@@ -972,7 +985,7 @@ def verify_device_settings(client, database, authorization):
         db.execute("""INSERT INTO installations(machine_id,action_id,install_status,ansible_status)
                       VALUES(?,?,'installing','pending')""",(device,action))
         db.execute("INSERT INTO init_jobs(job_type,status) VALUES(?,'pending')",(f'action:render_postboot:{action}',))
-    path = f'/machines/{device}'
+    path = f'/admin/inventaire/{device}'
     settings = {'_method':'PUT','notes':'<fixture & notes>','boot_mode':'tftp','hostname':'ignored'}
     assert client.request(path,form=settings)[0]==401
     assert client.request(path,form=settings,authorization=authorization,origin='https://other.example')[0]==403
@@ -1009,7 +1022,7 @@ def verify_device_operations(client, database, authorization):
                VALUES('02:00:00:00:09:20','fixture-rescue','discovered',datetime('now','+1 hour'))"""
         ).lastrowid
         db.execute("INSERT INTO disk_tests(machine_id,jobs_json,job_status) VALUES (?,'[]','running')", [device])
-    path = f'/machines/{device}'
+    path = f'/admin/inventaire/{device}'
     rescue, rediscover = path+'/rescue', path+'/rediscover'
     assert client.request(rescue, form={})[0] == 401
     assert request(rescue, form={}, secure=False)[0] == 404
@@ -1047,7 +1060,7 @@ def verify_device_operations(client, database, authorization):
         power = db.execute("""INSERT INTO machines(mac,hostname,status,awaiting_action_until)
                             VALUES('02:00:00:00:09:21','fixture-power','discovered',datetime('now','+1 hour'))"""
                            ).lastrowid
-    path = f'/machines/{power}'
+    path = f'/admin/inventaire/{power}'
     assert request(path+'/shutdown',form={})[:2] == (303,path)
     with closing(sqlite3.connect(database)) as db, db:
         assert db.execute("SELECT next_action,awaiting_action_until IS NOT NULL FROM machines WHERE id=?",
@@ -1085,7 +1098,7 @@ def verify_device_ansible(client, database, authorization):
     with closing(sqlite3.connect(database)) as db, db:
         device = db.execute("""INSERT INTO machines(mac,hostname,status)
                               VALUES('02:00:00:00:09:22','fixture-ansible','installed')""").lastrowid
-    path = f'/machines/{device}/ansible'
+    path = f'/admin/inventaire/{device}/ansible'
     assert client.request(path+'/pull',form={})[0] == 401
     assert request(path+'/pull',form={},origin='https://outside.example')[0] == 403
     assert request(path+'/pull')[0] == 405
@@ -1136,7 +1149,7 @@ def verify_hardware_context(client, database, authorization):
         device = db.execute("""INSERT INTO machines(mac,status,inventory_json)
                               VALUES('02:00:00:00:09:23','discovered',?)""",
                             [json.dumps(inventory)]).lastrowid
-    route = f'/machines/{device}/hardware-context.json'
+    route = f'/admin/inventaire/{device}/hardware-context.json'
     assert client.request(route)[0] == 401
     assert client.request(route,authorization=authorization,secure=False)[0] == 404
     response = request(route)
@@ -1155,13 +1168,13 @@ def verify_hardware_context(client, database, authorization):
         db.execute("UPDATE machines SET inventory_json='invalid' WHERE id=?", [device])
     empty = json.loads(request(route)[2])
     assert empty['boot_mac'] == '' and empty['disks'] == [] and empty['disk_capacities_mb'] == []
-    missing = request('/machines/123456789/hardware-context.json')
+    missing = request('/admin/inventaire/123456789/hardware-context.json')
     assert missing[0] == 404 and json.loads(missing[2]) == {'error':'machine not found'}
     print('Rust exposes the historical hardware context and flags ambiguous identities', flush=True)
 
 
 def verify_admin_attempt_limit(client, authorization):
-    path = '/admin/devices'
+    path = '/admin/inventaire'
     for _ in range(21):
         assert client.request(path,authorization=authorization)[0]==200
     for _ in range(20):
@@ -1173,27 +1186,27 @@ def verify_admin_attempt_limit(client, authorization):
 def verify_authentik_proxy(server, client, env, registry, authorization):
     mode = {**env,'AUTH_MODE':'authentik'}
     headers = {'X-Forwarded-User':'authentik-fixture','X-Forwarded-Host':'pxe.example.test'}
-    path = '/admin/settings/device-terminology'
+    path = '/settings'
     for name,cidrs in (
         ('untrusted','192.0.2.7/32'),('invalid','127.0.0.1/32,invalid'),('trusted','127.0.0.1/32'),
     ):
         with subprocess.Popen(server, env={**mode,'AUTHENTIK_TRUSTED_PROXY_CIDRS':cidrs}) as proxy:
             try:
                 client.ready(proxy)
-                assert client.request('/admin/devices',authorization=authorization)[0]==401
+                assert client.request('/admin/inventaire',authorization=authorization)[0]==401
                 if name!='trusted':
                     forged = {**headers,'X-Forwarded-For':'192.0.2.7'}
-                    assert client.request('/admin/devices',extra_headers=forged)[0]==401
-                    assert client.request(path,form={'ui_device_term':'serveur'},origin='https://pxe.example.test',
+                    assert client.request('/admin/inventaire',extra_headers=forged)[0]==401
+                    assert client.request(path,form={'discovery_boot_proto':'tftp'},origin='https://pxe.example.test',
                                           extra_headers=forged)[0]==403
                     continue
-                assert client.request('/admin/devices',extra_headers=headers)[0]==200
-                assert client.request('/admin/devices',extra_headers={**headers,'X-Forwarded-User':'a,b'})[0]==401
-                assert client.request(path,form={'ui_device_term':'serveur'},origin='https://outside.example',
+                assert client.request('/admin/inventaire',extra_headers=headers)[0]==200
+                assert client.request('/admin/inventaire',extra_headers={**headers,'X-Forwarded-User':'a,b'})[0]==401
+                assert client.request(path,form={'discovery_boot_proto':'tftp'},origin='https://outside.example',
                                       extra_headers=headers)[0]==403
-                assert client.request(path,form={'ui_device_term':'serveur'},origin='https://pxe.example.test',
-                                      extra_headers=headers)[:2]==(303,'/admin/devices')
-                assert b'<h1>Inventaire</h1>' in client.request('/admin/devices',extra_headers=headers)[2]
+                assert client.request(path,form={'discovery_boot_proto':'tftp'},origin='https://pxe.example.test',
+                                      extra_headers=headers)[:2]==(303,'/settings')
+                assert b'<h1>Inventaire</h1>' in client.request('/admin/inventaire',extra_headers=headers)[2]
                 with closing(sqlite3.connect(registry)) as db:
                     assert not db.execute("SELECT 1 FROM users WHERE username='authentik-fixture'").fetchone()
             finally:
@@ -1239,7 +1252,7 @@ def verify_guided_install(client, database, authorization):
             "INSERT INTO os_images(distro,version,arch,codename,version_full,enabled,status) "
             "VALUES('debian','fixture-trixie','arm64','trixie','13.7.0',1,'downloaded')",
         ).lastrowid
-    end = f'/machines/{device}/install'
+    end = f'/admin/inventaire/{device}/install'
     form = {'hostname':'deb-fixture','disk':'/dev/vda:FIXTURE-SERIAL','preset':preset,'image':image,'confirm':'yes'}
     assert client.request(end, form=form, authorization=authorization, secure=False)[0] == 404
     assert client.request(end, form=form)[0] == 401
@@ -1257,7 +1270,7 @@ def verify_guided_install(client, database, authorization):
         other = db.execute("""INSERT INTO machines(mac,hostname,status,boot_arch,inventory_json)
                             VALUES('02:00:00:00:20:03','fixture-static','discovered','arm64',?)""",
                            [json.dumps(inventory)]).lastrowid
-    static_result = client.request(f'/machines/{other}/install',form=static,authorization=authorization)
+    static_result = client.request(f'/admin/inventaire/{other}/install',form=static,authorization=authorization)
     assert static_result[0] == 303, static_result
     with closing(sqlite3.connect(database)) as db:
         raw, = db.execute('SELECT install_config_json FROM machines WHERE id=?',[other]).fetchone()
@@ -1299,7 +1312,7 @@ def verify_disk_diagnostics(client, database, authorization):
         preset, = db.execute("SELECT id FROM presets WHERE name='Debian <test>'").fetchone()
         image, = db.execute("SELECT id FROM os_images WHERE arch='amd64' AND version_full='13.7.0' "
                             "AND status='downloaded' AND enabled=1 LIMIT 1").fetchone()
-    path = f'/machines/{device}/disktest'
+    path = f'/admin/inventaire/{device}/disktest'
     fields = {'disk':'/dev/vda:FIXTURE-DISK-TEST','mode':'smart_short'}
     assert b'FIXTURE-DISK-TEST' in request(path)[2]
     assert request(path,form={**fields,'mode':'badblocks_fixed_rw'})[0] == 422
@@ -1316,8 +1329,8 @@ def verify_disk_diagnostics(client, database, authorization):
         jobs = json.loads(commands)
         assert jobs[0]['identity']['value'] == 'FIXTURE-DISK-TEST'
         assert db.execute("SELECT id FROM init_jobs WHERE job_type=?",[f'action:reboot:{action}']).fetchone() is None
-    assert request(path+'-post-action',form={'post_action':'poweroff'})[:2] == (303,f'/machines/{device}')
-    install = f'/machines/{device}/install'
+    assert request(path+'-post-action',form={'post_action':'poweroff'})[:2] == (303,f'/admin/inventaire/{device}')
+    install = f'/admin/inventaire/{device}/install'
     form = {'hostname':'fixture-diagnostics','disk':fields['disk'],'image':image,'preset':preset,'confirm':'yes'}
     assert b'name="after_diagnostic"' in request(install)[2]
     assert request(install,form=form)[0] == 409
@@ -1334,7 +1347,7 @@ def verify_disk_diagnostics(client, database, authorization):
         assert json.loads(snapshot)['wake_now'] is True
         assert db.execute('SELECT post_action FROM disk_tests WHERE action_id=?',[action]).fetchone() == ('wait',)
         assert db.execute('SELECT status FROM actions WHERE id=?',[pending]).fetchone() == ('pending',)
-    assert request(path+'-cancel',form={})[:2] == (303,f'/machines/{device}')
+    assert request(path+'-cancel',form={})[:2] == (303,f'/admin/inventaire/{device}')
     with closing(sqlite3.connect(database)) as db, db:
         assert db.execute("SELECT job_status,post_action FROM disk_tests WHERE action_id=?",[action]).fetchone()==(
             'aborted','wait',
@@ -1357,7 +1370,7 @@ def verify_disk_wipe(client, database, authorization):
         device = db.execute("""INSERT INTO machines(mac,hostname,status,inventory_json,awaiting_action_until,local_boot_source)
                             VALUES('02:00:00:00:09:26','fixture-wipe','discovered',?,datetime('now','+1 hour'),'manual')""",
                             [json.dumps(inventory)]).lastrowid
-    path = f'/machines/{device}/wipe-disks'
+    path = f'/admin/inventaire/{device}/wipe-disks'
     form = [('targets[]','/dev/vda:FIXTURE-WIPE-A'),('targets[]','/dev/vdb:FIXTURE-WIPE-B'),
             ('mode[/dev/vda]','partial'),('mode[/dev/vdb]','full'),('post_action','poweroff')]
     assert b'FIXTURE-WIPE-A' in request(path)[2]
@@ -1420,8 +1433,8 @@ def verify_custom_partition_review(client, database, authorization):
                             VALUES('RAID1 <fixture>','debian','debian','trixie','custom',?,
                                    'dhcp','disabled','fixture',?,?)""",
                             [json.dumps(plan),password,json.dumps({'network':network})]).lastrowid
-    preview = f'/machines/{device}/install-preview'
-    target = f'/machines/{device}/install/advanced'
+    preview = f'/admin/inventaire/{device}/install-preview'
+    target = f'/admin/inventaire/{device}/install/advanced'
     form = {'hostname':'fixture-raid','image':image,'preset':preset}
     assert b'RAID1 &lt;fixture&gt;' in request(target)[2]
     assert client.request(preview,form=form)[0] == 401
@@ -1468,8 +1481,8 @@ def verify_custom_partition_review(client, database, authorization):
                                  [json.dumps(wipe_inventory)]).lastrowid
         db.execute('UPDATE presets SET pre_wipe_mode=? WHERE id=?',
                    [json.dumps({'/dev/vdc':'partial'}),preset])
-    wipe_preview = f'/machines/{wipe_device}/install-preview'
-    wipe_target = f'/machines/{wipe_device}/install/advanced'
+    wipe_preview = f'/admin/inventaire/{wipe_device}/install-preview'
+    wipe_target = f'/admin/inventaire/{wipe_device}/install/advanced'
     wipe_form = {**form,'hostname':'fixture-wipe'}
     assert request(wipe_preview,form=wipe_form)[0] == 409
     with closing(sqlite3.connect(database)) as db, db:
@@ -1505,7 +1518,7 @@ def verify_custom_partition_review(client, database, authorization):
 
 def verify_bulk_deployment(client, database, authorization):
     def post(path, form, **options):
-        return client.request('/machines/bulk-'+path, form=form, authorization=authorization, **options)
+        return client.request('/admin/inventaire/bulk-'+path, form=form, authorization=authorization, **options)
 
     with closing(sqlite3.connect(database)) as db, db:
         db.execute("UPDATE settings SET value='on' WHERE key='pxe_enabled'")
@@ -1531,8 +1544,8 @@ def verify_bulk_deployment(client, database, authorization):
                 (mac, f'fixture-bulk-{index}', arch, json.dumps(inventory)),
             ).lastrowid)
             inventories.append(inventory)
-    assert client.request('/machines/bulk')[0] == 401
-    assert b'Data &lt;bulk&gt;' in client.request('/machines/bulk', authorization=authorization)[2]
+    assert client.request('/admin/inventaire/bulk')[0] == 401
+    assert b'Data &lt;bulk&gt;' in client.request('/admin/inventaire/bulk', authorization=authorization)[2]
     selection = [('preset_id',preset), *[('machine_ids[]',device) for device in devices]]
     assert post('preflight', selection, secure=False)[0] == 404
     assert post('preflight', selection, origin='https://outside.example')[0] == 403
@@ -1549,7 +1562,7 @@ def verify_bulk_deployment(client, database, authorization):
     assert report['ready_count'] == report['total'] == 2, report
     assert [target['disks'][0]['serial'] for target in report['targets']] == ['BULK-TEST-1','BULK-TEST-2']
     assert all(target['state'] == 'ready' for target in report['targets'])
-    assert b'Data &lt;bulk&gt;' in client.request('/machines/bulk', authorization=authorization)[2]
+    assert b'Data &lt;bulk&gt;' in client.request('/admin/inventaire/bulk', authorization=authorization)[2]
     page = post('preflight', [*selection,('format','html')])[2]
     assert all(target['fingerprint'].encode() in page for target in report['targets'])
     fingerprints = [(f"fingerprints[{target['id']}]", target['fingerprint']) for target in report['targets']]
@@ -2585,11 +2598,11 @@ def verify_ansible_webhook(client, database, authorization, workdir):
             ).lastrowid)
     ready, busy, optout = machines
     for machine in machines:
-        enable = f'/machines/{machine}/auto-deploy'
+        enable = f'/admin/inventaire/{machine}/auto-deploy'
         assert client.request(enable,form={'auto_deploy':'1'})[0] == 401
         response = client.request(enable,form={'auto_deploy':'1'},authorization=authorization)
         assert response[0] == 303, response
-    assert client.request(f'/machines/{optout}/auto-deploy',form={},authorization=authorization)[0] == 303
+    assert client.request(f'/admin/inventaire/{optout}/auto-deploy',form={},authorization=authorization)[0] == 303
     body = json.dumps({'commits':[{'modified':['playbooks/check.yml','playbooks/check.yml']}],
                        'head_commit':{'id':'ab01234aaaaa'}}).encode()
 

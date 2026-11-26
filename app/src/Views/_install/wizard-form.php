@@ -56,7 +56,7 @@ $restorableConfig += ['hostname' => $machine['hostname'] ?? '', 'domain' => $mac
 $restoreLabel = $hasExistingConfig ? Term::format('Copie enregistrée pour {ce}') : (!empty($errors) ? 'Saisie reçue, non enregistrée' : 'Valeurs initiales');
 ?>
 
-<form id="install-wizard-form" method="post" action="/machines/<?= (int)$machine['id'] ?>/install" novalidate data-preview-url="/machines/<?= (int)$machine['id'] ?>/install-preview" data-restore-label="<?= View::e($restoreLabel) ?>">
+<form id="install-wizard-form" method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/install" novalidate data-preview-url="/admin/inventaire/<?= (int)$machine['id'] ?>/install-preview" data-restore-label="<?= View::e($restoreLabel) ?>">
   <?php View::partial('_install/disk-constraints-fields', ['diskConstraints' => $config['disk_target_constraints'] ?? []]); ?>
   <div id="install-errors" class="bulk-warning install-error-summary" role="alert" tabindex="-1" hidden></div>
   <?php if ($hasExistingConfig || !empty($config['admin_user_pwhash'])): ?>

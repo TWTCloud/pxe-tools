@@ -251,7 +251,7 @@ final class Installation
      * vérité par machine, indépendant du preset).
      *
      * POURQUOI snapshot et pas preset : quand l'install est créée via le wizard
-     * per-machine (/machines/{id}/install), machines.preset_id reste NULL — le
+     * per-machine (/admin/inventaire/{id}/install), machines.preset_id reste NULL — le
      * snapshot install_config_json contient la config complète, y compris
      * ansible_role. Le JOIN sur presets retournait alors p.ansible_role=NULL,
      * worker.py interprétait comme "no_role" et skip le playbook. Le snapshot

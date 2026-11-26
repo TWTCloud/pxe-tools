@@ -89,7 +89,7 @@ impl Wizard {
                 r#"<p class="wizard-intro">Le service libère le réseau et efface les fichiers de démarrage.</p><a class="button button--quiet" href="/init">Vérifier l’avancement</a>"#,
                 StatusCode::OK,
             ),
-            (Some(Stage::Closed), _) => redirect(StatusCode::FOUND, "/admin/devices"),
+            (Some(Stage::Closed), _) => redirect(StatusCode::FOUND, "/admin/inventaire"),
             (None, _) => unavailable(),
         }
     }
@@ -366,7 +366,7 @@ fn create_admin(config: &Path, username: &str, password: &str) -> Result<Reply, 
     )?;
     transaction.execute("DELETE FROM settings WHERE key='rust_setup_pending'", [])?;
     transaction.commit()?;
-    Ok(redirect(StatusCode::SEE_OTHER, "/admin/devices"))
+    Ok(redirect(StatusCode::SEE_OTHER, "/admin/inventaire"))
 }
 
 fn closed() -> Reply {

@@ -25,7 +25,7 @@ $verb = $hasExistingConfig ? 'Réinstaller' : 'Installer';
     <h2><?= $verb ?> · <?= View::e($machineLabel) ?></h2>
     <p class="text-mono"><?= View::e($machine['mac']) ?></p>
   </hgroup>
-  <a href="/machines/<?= (int)$machine['id'] ?>" class="btn btn-secondary">← Retour</a>
+  <a href="/admin/inventaire/<?= (int)$machine['id'] ?>" class="btn btn-secondary">← Retour</a>
 </header>
 
 <?php View::partial('_install/wizard-form', [

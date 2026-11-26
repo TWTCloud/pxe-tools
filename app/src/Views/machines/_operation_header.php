@@ -6,15 +6,11 @@ $powerRule = $summary['state']['rules']['power'];
 $ansibleRule = ['ok'=>$summary['state']['rules']['ansible']['allowed'], 'message'=>$summary['state']['rules']['ansible']['reason']];
 // Translate only this known interface message; the operation signature remains unchanged.
 $displayState = $summary['state'];
-if ($ansibleRule['message'] === 'Aucun rôle Ansible configuré pour cette machine.') {
-    $ansibleRule['message'] = Term::format('Aucun rôle Ansible configuré pour {ce}.');
-    $displayState['rules']['ansible']['reason'] = $ansibleRule['message'];
-}
 $inventory = $summary['state']['has_inventory'];
 ?>
 <div id="machine-operation-header" data-poll-scope data-sig="<?= View::e($summary['signature']) ?>"
      data-operation-state="<?= View::e(json_encode($displayState, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) ?>"
-     hx-get="/machines/<?= (int)$machine['id'] ?>/operation-fragment" hx-trigger="every 5s" hx-swap="outerHTML">
+     hx-get="/admin/inventaire/<?= (int)$machine['id'] ?>/operation-fragment" hx-trigger="every 5s" hx-swap="outerHTML">
 <?php
 $headerState = View::stateLabel($machine);
 // Un boot PXE peut commencer depuis n'importe quel ancien statut : le badge
@@ -28,13 +24,13 @@ $headerState = View::stateLabel($machine);
   </hgroup>
   <div class="actions">
     <?php if ($operationRule['allowed']): ?>
-      <a href="/machines/<?= (int)$machine['id'] ?>/install" class="btn btn-primary" id="machine-primary-action">Configurer l’installation</a>
+      <a href="/admin/inventaire/<?= (int)$machine['id'] ?>/install" class="btn btn-primary" id="machine-primary-action">Configurer l’installation</a>
     <?php elseif ($operationRule['action_id']): ?>
       <a href="/tasks/<?= (int)$operationRule['action_id'] ?>" class="btn btn-primary" id="machine-primary-action">Voir la progression</a>
     <?php else: ?>
       <a href="#events" data-tab="events" class="btn btn-primary" id="machine-primary-action">Voir l’activité</a>
     <?php endif; ?>
-    <a href="/machines" class="btn btn-secondary">
+    <a href="/admin/inventaire" class="btn btn-secondary">
       <svg class="btn-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>Retour</a>
 
     <details class="actions-dropdown" id="machine-actions-menu">
@@ -61,44 +57,44 @@ $headerState = View::stateLabel($machine);
             : Term::format('Envoyer un magic packet WoL à {ce} ?');
         ?>
           <li>
-            <form method="post" action="/machines/<?= (int)$machine['id'] ?>/wake" id="machine-menu-wake" onsubmit="return confirm(<?= View::e(json_encode($wakeConfirm)) ?>);">
+            <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/wake" id="machine-menu-wake" onsubmit="return confirm(<?= View::e(json_encode($wakeConfirm)) ?>);">
               <button type="submit" class="actions-dropdown__item" <?= $powerRule['allowed'] ? '' : 'disabled' ?> title="<?= View::e($powerRule['reason']) ?>" id="machine-command-wake"><?= View::e($wakeLabel) ?></button>
             </form>
           </li>
         <?php endif; ?>
         <?php if (!$isBusy): ?>
           <li>
-            <a href="/machines/<?= (int)$machine['id'] ?>/install" class="actions-dropdown__item" id="machine-menu-install">
+            <a href="/admin/inventaire/<?= (int)$machine['id'] ?>/install" class="actions-dropdown__item" id="machine-menu-install">
               <?= !empty($machine['install_config_json']) ? 'Réinstaller…' : 'Installer…' ?>
             </a>
           </li>
           <?php if ($hasInventory): ?>
             <li>
-              <a href="/machines/<?= (int)$machine['id'] ?>?operation=<?= View::e($summary['signature']) ?>#storage" class="actions-dropdown__item" id="machine-menu-wipe">Effacer les disques…</a>
+              <a href="/admin/inventaire/<?= (int)$machine['id'] ?>?operation=<?= View::e($summary['signature']) ?>#storage" class="actions-dropdown__item" id="machine-menu-wipe">Effacer les disques…</a>
             </li>
             <li>
-              <a href="/machines/<?= (int)$machine['id'] ?>?operation=<?= View::e($summary['signature']) ?>#storage" class="actions-dropdown__item" id="machine-menu-disktest">Lancer des tests disque…</a>
+              <a href="/admin/inventaire/<?= (int)$machine['id'] ?>?operation=<?= View::e($summary['signature']) ?>#storage" class="actions-dropdown__item" id="machine-menu-disktest">Lancer des tests disque…</a>
             </li>
           <?php endif; ?>
         <?php endif; ?>
         <li>
-          <form method="post" action="/machines/<?= (int)$machine['id'] ?>/reboot" id="machine-menu-reboot" onsubmit="return confirm(<?= View::e(json_encode(Term::format('Redémarrer {ce} ?'))) ?>);">
+          <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/reboot" id="machine-menu-reboot" onsubmit="return confirm(<?= View::e(json_encode(Term::format('Redémarrer {ce} ?'))) ?>);">
             <button type="submit" class="actions-dropdown__item" <?= $powerRule['allowed'] ? '' : 'disabled' ?> title="<?= View::e($powerRule['reason']) ?>" id="machine-command-reboot">Redémarrer</button>
           </form>
         </li>
         <li>
-          <form method="post" action="/machines/<?= (int)$machine['id'] ?>/shutdown" id="machine-menu-shutdown" onsubmit="return confirm(<?= View::e(json_encode(Term::format('Arrêter {ce} ?'))) ?>);">
+          <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/shutdown" id="machine-menu-shutdown" onsubmit="return confirm(<?= View::e(json_encode(Term::format('Arrêter {ce} ?'))) ?>);">
             <button type="submit" class="actions-dropdown__item" <?= $powerRule['allowed'] ? '' : 'disabled' ?> title="<?= View::e($powerRule['reason']) ?>" id="machine-command-shutdown">Arrêter</button>
           </form>
         </li>
         <li>
-          <form method="post" action="/machines/<?= (int)$machine['id'] ?>/ansible/redeploy" id="machine-menu-ansible"
+          <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/ansible/redeploy" id="machine-menu-ansible"
                 onsubmit="return confirm(<?= View::e(json_encode(Term::format('Récupérer la dernière version du dépôt Ansible et redéployer la configuration sur {ce} ?'))) ?>);">
             <button type="submit" class="actions-dropdown__item" <?= $ansibleRule['ok'] ? '' : 'disabled' ?> title="<?= View::e($ansibleRule['message']) ?>" id="machine-command-ansible"><?= View::e(Term::format('Appliquer Ansible à {ce}')) ?></button>
           </form>
         </li>
         <?php if (!empty($machine['rescue_mode'])): ?>
-        <li><form method="post" action="/machines/<?= (int)$machine['id'] ?>/rescue/exit"><button type="submit" class="actions-dropdown__item" id="machine-command-rescue-exit">Quitter le mode récupération</button></form></li>
+        <li><form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/rescue/exit"><button type="submit" class="actions-dropdown__item" id="machine-command-rescue-exit">Quitter le mode récupération</button></form></li>
         <?php endif; ?>
         <li><a href="#settings" data-tab="settings" class="actions-dropdown__item">Maintenance et récupération Expert…</a></li>
       </ul>

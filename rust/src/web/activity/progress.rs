@@ -41,7 +41,7 @@ pub(super) fn fragment(db: &Connection, machine: i64) -> Result<Reply, ErrorBox>
     Ok(match render(db, machine)? {
         Some(fragment) => response.body(bytes(fragment))?,
         None => response
-            .header("HX-Redirect", format!("/machines/{machine}"))
+            .header("HX-Redirect", format!("/admin/inventaire/{machine}"))
             .body(bytes(""))?,
     })
 }
@@ -135,7 +135,7 @@ pub(in crate::web) fn render(db: &Connection, machine: i64) -> Result<Option<Str
     }
     write!(
         html,
-        "</ol><p><a href=\"/machines/{machine}#task-progress\">Actualiser</a></p></section>"
+        "</ol><p><a href=\"/admin/inventaire/{machine}#task-progress\">Actualiser</a></p></section>"
     )?;
     Ok(Some(html))
 }

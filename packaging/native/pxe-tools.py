@@ -55,7 +55,7 @@ def setup_route(address, port):
             route = response.getheader('Location')
             if route in SETUP_ROUTES or route == '/init':
                 return route
-            if route in ('/admin/devices', '/login') or (route and route.startswith('/login?')):
+            if route in ('/admin/inventaire', '/admin/devices', '/login') or (route and route.startswith('/login?')):
                 return '/admin/'
         if response.status in (200, 401):
             return '/admin/'

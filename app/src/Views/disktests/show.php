@@ -19,7 +19,7 @@ use Admin\View;
       &nbsp;·&nbsp; après tests : <strong><?= View::e($test['post_action'] ?? 'poweroff') ?></strong>
     </p>
   </hgroup>
-  <a href="/machines" class="btn btn-secondary">← Retour</a>
+  <a href="/admin/inventaire" class="btn btn-secondary">← Retour</a>
 </header>
 
 <?php /* Le fragment se re-poll lui-même (2 s actif / 5 s pending / stop terminal). */ ?>

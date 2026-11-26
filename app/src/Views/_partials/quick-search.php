@@ -1,10 +1,10 @@
 <?php use Admin\View; use Admin\Ui\DeviceTerminology as Term; ?>
 <dialog id="quick-search" class="quick-search" aria-labelledby="quick-search-title">
   <header><h2 id="quick-search-title">Recherche rapide</h2><button type="button" class="btn-icon-only" data-search-close aria-label="Fermer la recherche"><?= View::icon('x') ?></button></header>
-  <form action="/machines" method="get" role="search">
-    <label class="sr-only" for="quick-search-input"><?= View::e(Term::format('Page, nom de {one}, adresse IP ou MAC')) ?></label>
+  <form action="/admin/inventaire" method="get" role="search">
+    <label class="sr-only" for="quick-search-input">Page, nom d’hôte, adresse IP ou MAC</label>
     <input type="search" id="quick-search-input" name="q" autocomplete="off" placeholder="<?= View::e(Term::format('Page, {one}, adresse IP ou MAC…')) ?>">
-    <button class="quick-search-machine" type="submit"><?= View::e(Term::format('Rechercher dans les {many}')) ?> <?= View::icon('search') ?></button>
+    <button class="quick-search-machine" type="submit">Rechercher dans l’inventaire <?= View::icon('search') ?></button>
   </form>
   <nav aria-label="Accès aux pages" data-search-results>
     <?php foreach ($navigation as $item): ?>

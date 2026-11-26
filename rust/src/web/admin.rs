@@ -27,7 +27,6 @@ use std::{
 };
 use tokio::{sync::Semaphore, task};
 
-pub(super) const DEVICE_SETTINGS: &str = "/admin/settings/device-terminology";
 const PAGE_SIZE: usize = 100;
 const DEVICE_STATES: &[(&str, &str)] = &[
     ("unknown", "Inconnu"),
@@ -43,11 +42,6 @@ const DEVICE_STATES: &[(&str, &str)] = &[
     ("testing", "Diagnostic en cours"),
     ("tested", "Diagnostic terminé"),
 ];
-const DEVICE_TERMS: &[&str] = &["machine", "client", "ordinateur", "serveur"];
-
-pub(super) fn device_term(term: &str) -> Option<&'static str> {
-    DEVICE_TERMS.iter().copied().find(|key| *key == term)
-}
 
 pub(super) enum Action {
     Devices,
@@ -68,7 +62,6 @@ pub(super) enum Action {
     Jobs(super::jobs::View),
     Windows(Arc<super::winpe::Editions>, Option<Bytes>),
     Activity(super::activity::View, Arc<crate::monitoring::Catalog>),
-    Terminology(&'static str, &'static str),
     Settings(super::settings::Route, Option<Bytes>),
     Setup(String, Option<Bytes>),
     Certificates(Arc<super::certificates::Certificates>, Option<Bytes>),
@@ -132,7 +125,6 @@ impl Action {
                 | Activity::Checklist(_),
                 _,
             ) => ActivityRead,
-            Self::Terminology(..) => SettingsEdit,
             Self::Settings(Setting::General | Setting::Dns | Setting::Ipxe, _) => {
                 select(SettingsRead, SettingsEdit)
             }
@@ -260,7 +252,7 @@ impl Console {
                 return Some(unauthorized());
             }
             let account = access::account(&db, &username, false).ok()??;
-            let next = if matches!(next.as_str(), "/admin/" | "/admin/devices") && !account.allows(Permission::DevicesRead) {
+            let next = if matches!(next.as_str(), "/admin/" | "/admin/inventaire") && !account.allows(Permission::DevicesRead) {
                 ui::home(&account)
             } else if !account.admin || crate::setting(&db, "wizard_completed").ok()? == "1" {
                 &next
@@ -311,7 +303,7 @@ impl Console {
         if request.uri.path() == "/admin/" {
             return Response::builder()
                 .status(StatusCode::FOUND)
-                .header(LOCATION, "/admin/devices")
+                .header(LOCATION, "/admin/inventaire")
                 .body(bytes(""))
                 .expect("valid admin redirect");
         }
@@ -510,23 +502,6 @@ impl Console {
                 if let Action::Settings(route, form) = action {
                     return route.serve(&db, &db_path, form).ok();
                 }
-                if let Action::Terminology(label, target) = action {
-                    let db = connect(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
-                    db.execute(
-                        "INSERT INTO settings(key, value) VALUES(?, ?)
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        params!["ui_device_term", label],
-                    )
-                    .ok()?;
-                    return Some(
-                        Response::builder()
-                            .status(StatusCode::SEE_OTHER)
-                            .header(LOCATION, target)
-                            .header("Cache-Control", "no-store")
-                            .body(bytes(""))
-                            .expect("valid settings redirect"),
-                    );
-                }
                 render_devices(&db, page, &query).ok()
             })();
             (reply, authenticated)
@@ -666,14 +641,14 @@ fn render_devices(db: &Connection, page: u32, query: &str) -> rusqlite::Result<R
     ])?;
     let mut html = String::from(
         r#"<nav class="device-actions inventory-actions" aria-label="Actions de l’inventaire">
-<a class="button" href="/machines/new">Ajouter un appareil</a>
-<a class="button button--quiet" href="/machines/bulk">Déployer par lots</a>
-<a class="button button--quiet" href="/machines/bulk-delete">Supprimer par lots</a></nav>"#,
+<a class="button" href="/admin/inventaire/new">Ajouter un appareil</a>
+<a class="button button--quiet" href="/admin/inventaire/bulk">Déployer par lots</a>
+<a class="button button--quiet" href="/admin/inventaire/bulk-delete">Supprimer par lots</a></nav>"#,
     );
     if crate::setting(db, "wizard_completed")? != "1" {
         html.push_str(r#"<p><a href="/init/network">Poursuivre la configuration initiale</a></p>"#);
     }
-    html.push_str(r#"<form class="panel filter-form inventory-filters" method="get" action="/admin/devices" aria-label="Filtrer l’inventaire">
+    html.push_str(r#"<form class="panel filter-form inventory-filters" method="get" action="/admin/inventaire" aria-label="Filtrer l’inventaire">
 <div class="field"><label for="inventory-search">Recherche</label><input id="inventory-search" name="q" type="search" maxlength="120" placeholder="Nom d’hôte ou adresse MAC" value=""#);
     escape(&mut html, &search);
     html.push_str(r#""></div><div class="field"><label for="inventory-filter">État</label><select id="inventory-filter" name="status"><option value="">Tous les états</option>"#);
@@ -683,7 +658,7 @@ fn render_devices(db: &Connection, page: u32, query: &str) -> rusqlite::Result<R
             r#"<option value="{key}"{selected}>{label}</option>"#
         ));
     }
-    html.push_str(r#"</select></div><div class="form-actions"><button>Filtrer</button><a class="button button--quiet" href="/admin/devices">Effacer les filtres</a></div></form>"#);
+    html.push_str(r#"</select></div><div class="form-actions"><button>Filtrer</button><a class="button button--quiet" href="/admin/inventaire">Effacer les filtres</a></div></form>"#);
     html.push_str(r#"<div class="table-region device-inventory" role="region" aria-label="Inventaire des appareils" tabindex="0"><table role="table"><thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">Nom d’hôte</th><th scope="col" role="columnheader">Adresse MAC</th><th scope="col" role="columnheader">État</th></tr></thead><tbody role="rowgroup">"#);
     let mut count = 0;
     let mut has_next = false;
@@ -694,7 +669,7 @@ fn render_devices(db: &Connection, page: u32, query: &str) -> rusqlite::Result<R
         }
         let id = row.get::<_, i64>(3)?;
         html.push_str(&format!(
-            r#"<tr class="inventory-row" role="row"><td class="inventory-host" role="cell"><a href="/machines/{id}">"#
+            r#"<tr class="inventory-row" role="row"><td class="inventory-host" role="cell"><a href="/admin/inventaire/{id}">"#
         ));
         let hostname = row.get::<_, String>(0)?;
         escape(
@@ -741,12 +716,12 @@ fn render_devices(db: &Connection, page: u32, query: &str) -> rusqlite::Result<R
                 .finish()
         };
         if page > 1 {
-            html.push_str(r#"<a rel="prev" href="/admin/devices?"#);
+            html.push_str(r#"<a rel="prev" href="/admin/inventaire?"#);
             escape(&mut html, &link(page - 1));
             html.push_str(r#"">Précédente</a> "#);
         }
         if has_next && page < u32::MAX {
-            html.push_str(r#"<a rel="next" href="/admin/devices?"#);
+            html.push_str(r#"<a rel="next" href="/admin/inventaire?"#);
             escape(&mut html, &link(page + 1));
             html.push_str(r#"">Suivante</a>"#);
         }

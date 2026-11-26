@@ -27,10 +27,10 @@ pub(super) fn form(db: &Connection, id: i64, output: &mut String) -> Result<(), 
         [id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
-    write!(output, "<h2>Notes</h2><form method=\"post\" action=\"/machines/{id}\"><input type=\"hidden\" name=\"_method\" value=\"PUT\"><label>Notes <textarea name=\"notes\">")?;
+    write!(output, "<h2>Notes</h2><form method=\"post\" action=\"/admin/inventaire/{id}\"><input type=\"hidden\" name=\"_method\" value=\"PUT\"><label>Notes <textarea name=\"notes\">")?;
     escape(output, notes.as_deref().unwrap_or_default());
     output.push_str("</textarea></label><button>Enregistrer les notes</button></form>");
-    write!(output, "<h2>Démarrage</h2><form method=\"post\" action=\"/machines/{id}\"><input type=\"hidden\" name=\"_method\" value=\"PUT\"><label>Protocole <select name=\"boot_mode\">")?;
+    write!(output, "<h2>Démarrage</h2><form method=\"post\" action=\"/admin/inventaire/{id}\"><input type=\"hidden\" name=\"_method\" value=\"PUT\"><label>Protocole <select name=\"boot_mode\">")?;
     option(output, "http", "HTTP", &boot)?;
     option(output, "tftp", "TFTP", &boot)?;
     output.push_str("</select></label><label>Démarrage local <select name=\"local_boot_source\">");
@@ -40,7 +40,7 @@ pub(super) fn form(db: &Connection, id: i64, output: &mut String) -> Result<(), 
         option(output, "pxe", "Activé après installation PXE", &local)?;
     }
     output.push_str("</select></label><button>Enregistrer le démarrage</button></form>");
-    write!(output, "<details id=\"settings\"><summary>Corriger le suivi</summary><p>Cette action clôture le suivi des opérations actives. Elle ne garantit aucun arrêt à distance.</p><form method=\"post\" action=\"/machines/{id}/status\"><label>État <select name=\"status\">")?;
+    write!(output, "<details id=\"settings\"><summary>Corriger le suivi</summary><p>Cette action clôture le suivi des opérations actives. Elle ne garantit aucun arrêt à distance.</p><form method=\"post\" action=\"/admin/inventaire/{id}/status\"><label>État <select name=\"status\">")?;
     for &(value, label) in STATUSES {
         option(output, value, label, &status)?;
     }
@@ -214,7 +214,7 @@ pub(super) fn update(
     if render {
         tx.execute(
             "INSERT INTO init_jobs(job_type,status,message)
-             SELECT 'bootstrap:render_templates','pending','Régénération des menus PXE par machine'
+             SELECT 'bootstrap:render_templates','pending','Régénération des menus PXE par appareil'
              WHERE NOT EXISTS(SELECT 1 FROM init_jobs WHERE job_type='bootstrap:render_templates' AND status='pending')",
             [],
         )?;
@@ -223,7 +223,7 @@ pub(super) fn update(
     let anchor = if force_status { "#settings" } else { "" };
     Ok(redirect(
         StatusCode::SEE_OTHER,
-        format!("/machines/{id}{anchor}"),
+        format!("/admin/inventaire/{id}{anchor}"),
     ))
 }
 

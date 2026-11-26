@@ -142,7 +142,7 @@ $inject = fn (string $h): string => (string) $ref->invoke(null, $h);
 
 $needle = "name=\"" . Csrf::FIELD . "\"";
 
-$h = $inject("<form method=\"post\" action=\"/machines/1/wipe\"><button>x</button></form>");
+$h = $inject("<form method=\"post\" action=\"/admin/inventaire/1/wipe\"><button>x</button></form>");
 $is(str_contains($h, $needle) && str_contains($h, $t1), "injectCsrf : champ ajouté dans <form method=post>", $h);
 
 $h = $inject("<form method=\"get\" action=\"/search\"><input></form>");
@@ -169,25 +169,25 @@ $reset();
 $_SERVER["HTTP_HOST"]   = "pxe.local";
 $_SERVER["HTTP_ORIGIN"] = "https://pxe.local";
 
-$is(Csrf::requestAllowed("GET",  "/machines") === true,  "requestAllowed : GET autorisé (méthode sûre)");
-$is(Csrf::requestAllowed("HEAD", "/machines") === true,  "requestAllowed : HEAD autorisé");
+$is(Csrf::requestAllowed("GET",  "/admin/inventaire") === true,  "requestAllowed : GET autorisé (méthode sûre)");
+$is(Csrf::requestAllowed("HEAD", "/admin/inventaire") === true,  "requestAllowed : HEAD autorisé");
 $is(Csrf::requestAllowed("POST", "/api/discovery") === true,           "requestAllowed : POST /api/ exempté (client PXE)");
 $is(Csrf::requestAllowed("POST", "/api/internal/checkpoint") === true, "requestAllowed : POST /api/internal exempté");
 
 // Mutations hors /api/ SANS token → rejet (chemin 403).
-$is(Csrf::requestAllowed("POST",   "/machines/1/wipe") === false,      "requestAllowed : POST /machines/1/wipe sans token => 403");
+$is(Csrf::requestAllowed("POST",   "/admin/inventaire/1/wipe") === false,      "requestAllowed : POST /admin/inventaire/1/wipe sans token => 403");
 $is(Csrf::requestAllowed("POST",   "/settings/factory-reset") === false, "requestAllowed : POST factory-reset sans token => 403");
-$is(Csrf::requestAllowed("DELETE", "/machines/1") === false,           "requestAllowed : DELETE réel sans token => 403");
+$is(Csrf::requestAllowed("DELETE", "/admin/inventaire/1") === false,           "requestAllowed : DELETE réel sans token => 403");
 $is(Csrf::requestAllowed("POST",   "/presets/5") === false,            "requestAllowed : POST (form _method=DELETE) sans token => 403");
 
 // Mutation hors /api/ AVEC token valide + origine same-host → autorisé.
 $_POST[Csrf::FIELD] = $t1;
-$is(Csrf::requestAllowed("POST", "/machines/1/wipe") === true,   "requestAllowed : POST + token valide + origine OK");
-$is(Csrf::requestAllowed("PUT",  "/machines/1") === true,        "requestAllowed : PUT + token valide + origine OK");
+$is(Csrf::requestAllowed("POST", "/admin/inventaire/1/wipe") === true,   "requestAllowed : POST + token valide + origine OK");
+$is(Csrf::requestAllowed("PUT",  "/admin/inventaire/1") === true,        "requestAllowed : PUT + token valide + origine OK");
 
 // Token valide mais origine étrangère → rejet (défense complémentaire).
 $_SERVER["HTTP_ORIGIN"] = "https://evil.example";
-$is(Csrf::requestAllowed("POST", "/machines/1/wipe") === false,  "requestAllowed : token valide mais origine étrangère => 403");
+$is(Csrf::requestAllowed("POST", "/admin/inventaire/1/wipe") === false,  "requestAllowed : token valide mais origine étrangère => 403");
 
 // ===================== Auto-injection end-to-end (anti double-injection) =====================
 // Rendu imbriqué : outer (form /outer) qui appelle partial(inner) (form /inner).

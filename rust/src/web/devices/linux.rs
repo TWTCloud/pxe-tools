@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use std::{fmt::Write, net::Ipv4Addr, path::Path};
 
 pub(in crate::web) fn route(path: &str) -> Option<i64> {
-    path.strip_prefix("/machines/")?
+    path.strip_prefix("/admin/inventaire/")?
         .strip_suffix("/install/linux")?
         .parse()
         .ok()
@@ -79,7 +79,7 @@ fn form(
         return Ok(page(ConsoleSection::Devices, title, "<p>Une image de l’architecture de l’appareil et un disque avec un numéro de série unique sont nécessaires.</p>"));
     }
     let mut html = format!(
-        r#"<form method="post" action="/machines/{id}/install/linux">
+        r#"<form method="post" action="/admin/inventaire/{id}/install/linux">
 <label>Image <select name="image" required><option value="" selected disabled>Choisir</option>"#
     );
     for entry in entries {

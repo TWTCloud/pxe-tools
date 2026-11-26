@@ -131,7 +131,7 @@ use Admin\View;
         les redémarrages et l'utilise par défaut pour les playbooks ; un
         <code>ansible_user</code> déclaré dans l'inventaire reste prioritaire.
         Il doit être différent du compte administrateur des modèles. Le
-        changement vaut pour les prochaines installations : les machines déjà
+        changement vaut pour les prochaines installations : les appareils déjà
         installées gardent leur compte.
       </small>
     </label>

@@ -143,10 +143,17 @@ fingerprint=$(docker exec "$name" openssl x509 -in "$cert" -noout -fingerprint -
 
 if [ "$variant" = apt ]; then
     docker exec -i -e DEBIAN_FRONTEND=noninteractive "$name" bash -es -- "${PXE_TEST_APT_VERSION:?}" <<'APT_UPGRADE'
-        apt-get install -y --no-install-recommends /mnt/pxe-fixture/rust.deb /mnt/pxe-fixture/rust-ansible.deb
+        set -o pipefail
+        # Pull requests can build the same version string as the released package.
+        # Reinstall so this fixture always runs the candidate binary.
+        apt-get install -y --reinstall --no-install-recommends /mnt/pxe-fixture/rust.deb /mnt/pxe-fixture/rust-ansible.deb
         for package in pxe-tools pxe-tools-ansible; do
             test "$(dpkg-query -W -f='${Version}' "$package")" = "$1"
         done
+        candidate_sha=$(dpkg-deb --fsys-tarfile /mnt/pxe-fixture/rust.deb \
+            | tar -xOf - ./usr/lib/pxe-tools/pxe-tools-rust | sha256sum)
+        installed_sha=$(sha256sum /usr/lib/pxe-tools/pxe-tools-rust)
+        test "${candidate_sha%% *}" = "${installed_sha%% *}"
         systemctl start pxe-tools-admin.target
         systemctl is-active --quiet pxe-tools-worker.service
         for unit in pxe-tools-php.service pxe-tools-nginx.service pxe-tools-dnsmasq.service; do
@@ -162,7 +169,7 @@ fi
 wait_https 443
 address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name")
 test -n "$address"
-docker exec "$name" curl -kfsS -u fixture-admin:fixture-login-password "https://$address/admin/devices" > "$work/admin.html"
+docker exec "$name" curl -kfsS -u fixture-admin:fixture-login-password "https://$address/admin/inventaire" > "$work/admin.html"
 grep -Fq '<h1>Inventaire</h1>' "$work/admin.html"
 test "$(docker exec "$name" sha256sum /etc/pxe-tools/master.key | cut -d ' ' -f 1)" = "$key"
 served=$(docker exec "$name" bash -o pipefail -c 'openssl s_client -connect 127.0.0.1:443 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256')

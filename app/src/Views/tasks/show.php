@@ -91,10 +91,10 @@ if ($isActionMode) {
         }) ?> <?= View::e($typeLabel($actionType)) ?> #<?= $actionId ?></h2>
         <p class="text-mono"><?= View::e($machine['mac'] ?? '') ?> · <?= View::e($machine['hostname'] ?? 'non assigné') ?></p>
       </hgroup>
-      <a href="/machines/<?= (int)$machine['id'] ?>" class="btn btn-secondary">← <?= View::e(Term::format('Retour à la fiche {du}')) ?></a>
+      <a href="/admin/inventaire/<?= (int)$machine['id'] ?>" class="btn btn-secondary">← <?= View::e(Term::format('Retour à la fiche {du}')) ?></a>
     </header>
 
-    <div hx-get="/machines/<?= (int)$machine['id'] ?>/boot-fragment"
+    <div hx-get="/admin/inventaire/<?= (int)$machine['id'] ?>/boot-fragment"
          hx-trigger="every 5s" hx-swap="innerHTML">
       <?php View::partial('machines/_boot_history', ['machine' => $machine]); ?>
     </div>
@@ -114,7 +114,7 @@ if ($isActionMode) {
     <article>
       <header class="row-flex-spread"><strong>Pendant le test</strong></header>
       <div class="flex items-center justify-between gap-4 flex-wrap">
-        <form method="post" action="/machines/<?= $dtMachineId ?>/disktest-post-action"
+        <form method="post" action="/admin/inventaire/<?= $dtMachineId ?>/disktest-post-action"
               class="flex items-center gap-2 flex-wrap" style="margin:0;">
           <label class="text-small" for="dt-post-action" style="margin:0;">Action à la fin du test :</label>
           <select name="post_action" id="dt-post-action" class="select" style="width:auto; margin:0;">
@@ -126,7 +126,7 @@ if ($isActionMode) {
           </select>
           <button type="submit" class="btn btn-secondary" style="width:auto;">Appliquer</button>
         </form>
-        <form method="post" action="/machines/<?= $dtMachineId ?>/disktest-cancel" style="margin:0;"
+        <form method="post" action="/admin/inventaire/<?= $dtMachineId ?>/disktest-cancel" style="margin:0;"
               onsubmit="return confirm(<?= View::e(json_encode(Term::format('Annuler le test en cours ? Le test s’arrêtera dans les secondes qui viennent ; {le} ') . ((int)($dtSub['in_session'] ?? 0) === 1 ? 'reviendra à l’écran d’attente.' : 's’éteindra.'))) ?>);">
           <button type="submit" class="btn btn-danger" style="width:auto;">Annuler le test</button>
         </form>
@@ -186,7 +186,7 @@ if ($isActionMode) {
         <h2><?= $typeHtml ?> #<?= (int)$task['id'] ?></h2>
         <p class="text-mono"><?= View::e($machine['mac'] ?? '') ?> · <?= View::e($machine['hostname'] ?? 'non assigné') ?></p>
       </hgroup>
-      <a href="/machines/<?= (int)$machine['id'] ?>" class="btn btn-secondary">← <?= View::e(Term::format('Retour à la fiche {du}')) ?></a>
+      <a href="/admin/inventaire/<?= (int)$machine['id'] ?>" class="btn btn-secondary">← <?= View::e(Term::format('Retour à la fiche {du}')) ?></a>
     </header>
 
     <article>

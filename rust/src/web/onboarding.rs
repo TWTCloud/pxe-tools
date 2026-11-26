@@ -263,7 +263,7 @@ fn field<'a>(fields: &'a HashMap<String, String>, name: &str) -> &'a str {
 
 fn view(db: &Connection, endpoint: &str) -> Result<Reply, ErrorBox> {
     if !pending(db)? {
-        return Ok(redirect(StatusCode::FOUND, "/admin/devices"));
+        return Ok(redirect(StatusCode::FOUND, "/admin/inventaire"));
     }
     let plan = draft(db)?;
     if endpoint == "/init/network" {
@@ -379,7 +379,7 @@ fn change(
         ],
     )?;
     tx.commit()?;
-    Ok(redirect(StatusCode::SEE_OTHER, "/admin/devices"))
+    Ok(redirect(StatusCode::SEE_OTHER, "/admin/inventaire"))
 }
 
 pub(super) fn store(db: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {

@@ -4,7 +4,7 @@
  *
  * Rendu :
  * - Initialement par show.php (état initial du badge)
- * - En polling HTMX (hx-get="/machines/{id}/status" every 2s) → swap innerHTML
+ * - En polling HTMX (hx-get="/admin/inventaire/{id}/status" every 2s) → swap innerHTML
  *
  * @var array{class:string,label:string} $state
  */

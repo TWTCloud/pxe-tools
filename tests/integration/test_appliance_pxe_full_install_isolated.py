@@ -203,7 +203,7 @@ def main():
                 raise RuntimeError('preseed did not reject an address outside the configured client subnet')
             allowed=docker('exec',dhcp,'curl','-sS','-w','\\n%{http_code}',
                            'http://192.0.2.1/preseed.php?mac=02:00:00:00:00:ff',check=False)
-            if allowed.returncode!=0 or not allowed.stdout.endswith('\n404') or 'machine introuvable' not in allowed.stdout:
+            if allowed.returncode!=0 or not allowed.stdout.endswith('\n404') or 'appareil introuvable' not in allowed.stdout:
                 raise RuntimeError('preseed did not accept the isolated client subnet before machine lookup')
             docker('run','-d','--name',client,'--network','container:'+app,'--cap-add','NET_ADMIN',
                    '--device','/dev/net/tun','--mount',f'type=bind,src={root},dst=/fixture-data','--entrypoint','qemu-system-x86_64',image,

@@ -44,7 +44,7 @@ final class Router
         echo "404 Not Found: {$method} {$path}\n";
     }
 
-    /** Compile /machines/{id} → ~^/machines/(?<id>[^/]+)$~ */
+    /** Compile /admin/inventaire/{id} → ~^/admin/inventaire/(?<id>[^/]+)$~ */
     private function compile(string $pattern): string
     {
         $regex = preg_replace_callback(

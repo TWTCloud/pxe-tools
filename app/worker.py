@@ -1683,14 +1683,14 @@ def run_ansible_redeploy_job(job: dict) -> None:
         ).fetchone()
     if not row:
         update_init_job(job_id, status="failed",
-                        message=f"machine {machine_id} introuvable",
+                        message=f"Appareil {machine_id} introuvable",
                         ended_at=now(), updated_at=now())
         return
 
     hostname = (row["hostname"] or "").strip()
     if hostname == "":
         update_init_job(job_id, status="failed",
-                        message=f"Hostname manquant pour machine {machine_id}",
+                        message=f"Nom d’hôte manquant pour l’appareil {machine_id}",
                         ended_at=now(), updated_at=now())
         return
 
@@ -1706,7 +1706,7 @@ def run_ansible_redeploy_job(job: dict) -> None:
         return
     if role == "":
         update_init_job(job_id, status="failed",
-                        message=f"ansible_role manquant pour machine {machine_id} ({hostname})",
+                        message=f"Rôle Ansible manquant pour l’appareil {machine_id} ({hostname})",
                         ended_at=now(), updated_at=now())
         _log_machine_event(machine_id, None, "warning",
                            "Redéploiement Ansible refusé : aucun rôle configuré pour cette machine.")
@@ -1887,7 +1887,7 @@ def fetch_pending_ansible(installation_id: int | None = None) -> dict | None:
     # run_playbook skip les checkpoints (cf. log warning).
     # POURQUOI lire ansible_role/extra_vars depuis le snapshot
     # machines.install_config_json (et plus depuis presets) :
-    # - L'install via wizard per-machine (/machines/{id}/install) laisse
+    # - L'install via wizard per-machine (/admin/inventaire/{id}/install) laisse
     #   m.preset_id = NULL → p.ansible_role retournait NULL → 'no_role'
     #   → playbook skip alors que le snapshot contient bien le role.
     # - bulkInstall depuis preset copie aussi le role dans le snapshot via
@@ -2629,7 +2629,7 @@ def run_reboot_job(job: dict) -> None:
         )
         _log_machine_event(
             machine_id, action_id, "action",
-            f"Reboot SSH déclenché vers {ip} via worker — la machine va redémarrer",
+            f"Reboot SSH déclenché vers {ip} via worker — l’appareil va redémarrer",
         )
         return
 
@@ -2722,7 +2722,7 @@ def run_machine_power_job(job: dict, verb: str) -> None:
     with db_connect() as db:
         row = db.execute("SELECT mac FROM machines WHERE id = ?", (machine_id,)).fetchone()
     if not row:
-        update_init_job(job_id, status="failed", message=f"machine {machine_id} introuvable", ended_at=now(), updated_at=now())
+        update_init_job(job_id, status="failed", message=f"Appareil {machine_id} introuvable", ended_at=now(), updated_at=now())
         return
 
     mac = str(row["mac"])
@@ -2939,7 +2939,7 @@ def run_playbook(job: dict) -> None:
         # configurée avec succès. L'OS est installé, mais la machine n'est pas
         # provisionnée. Le log est écrit avant la transition terminale.
         reason = "Ansible désactivé" if not ansible_enabled else "Aucun rôle Ansible défini"
-        append_install_log(install_id, f"[worker] {reason} — configuration ignorée. OS installé, machine non provisionnée.\n")
+        append_install_log(install_id, f"[worker] {reason} — configuration ignorée. Système installé. Configuration Ansible non appliquée.\n")
         update_machine_status(job["machine_id"], "installed")
         update_install(install_id, ansible_status="no_role")
         return

@@ -58,7 +58,7 @@ $active = $refresh_running || count(array_filter($images, static fn(array $image
   <?php if ($restrictions !== []): ?><p id="image-restrictions-<?= $id ?>" class="muted text-small"><strong>Actions protégées :</strong> <?= View::e(implode(' ', $restrictions)) ?></p><?php endif; ?>
   <details id="image-uses-<?= $id ?>" class="mb-4">
     <summary>Usages connus (<?= count($dependencies['usages']) ?>)</summary>
-    <?php if ($dependencies['usages'] === []): ?><p class="muted"><?= View::e(Term::format('Aucun modèle ni configuration de {one} ne référence cette image.')) ?></p>
+    <?php if ($dependencies['usages'] === []): ?><p class="muted"><?= View::e(Term::format('Aucun modèle ni configuration {dun} ne référence cette image.')) ?></p>
     <?php else: ?><ul><?php foreach ($dependencies['usages'] as $use): ?><li>
       <?php if ($use['url']): ?><a href="<?= View::e($use['url']) ?>"><?= View::e($use['label']) ?></a><?php else: ?><?= View::e($use['label']) ?><?php endif; ?>
     </li><?php endforeach; ?></ul><?php endif; ?>

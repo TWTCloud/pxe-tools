@@ -27,8 +27,8 @@ use Admin\Ui\DeviceTerminology as Term;
  *   GET /tasks/discovery-{id}    → 301 vers /tasks/{action_id} (legacy compat)
  *
  * Routes conservées :
- *   GET /machines/{id}/tasks/{type}-{taskId}  → drill-down générique machine-scoped
- *   GET /machines/{id}/tasks                  → fragment HTMX (timeline list)
+ *   GET /admin/inventaire/{id}/tasks/{type}-{taskId}  → drill-down générique machine-scoped
+ *   GET /admin/inventaire/{id}/tasks                  → fragment HTMX (timeline list)
  */
 final class TaskController
 {
@@ -116,7 +116,7 @@ final class TaskController
     }
 
     /**
-     * Route machine-scoped conservée : GET /machines/{id}/tasks/{task}.
+     * Route machine-scoped conservée : GET /admin/inventaire/{id}/tasks/{task}.
      * Toujours fonctionnelle pour le drill-down depuis la fiche machine.
      */
     public function show(array $params): void
@@ -277,7 +277,7 @@ final class TaskController
             // direct vers la fiche machine (idempotence côté admin qui
             // double-clique).
             View::flash('info', "L'action #$actionId est déjà terminée (statut : $currentStatus).");
-            View::redirect('/machines/' . $machineId);
+            View::redirect('/admin/inventaire/' . $machineId);
             return;
         }
 
@@ -291,8 +291,8 @@ final class TaskController
             $actionId
         );
         });
-        View::flash('success', "Suivi de l’action #$actionId clôturé. Aucun arrêt distant garanti ; si nécessaire, corrigez le statut machine dans Paramètres → Expert.");
-        View::redirect('/machines/' . $machineId);
+        View::flash('success', "Suivi de l’action #$actionId clôturé. Aucun arrêt distant garanti ; si nécessaire, corrigez l’état de l’appareil dans Paramètres → Expert.");
+        View::redirect('/admin/inventaire/' . $machineId);
     }
 
     /**

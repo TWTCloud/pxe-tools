@@ -236,7 +236,7 @@ const NAVIGATION: [(&str, &[NavLink]); 3] = [
         "Opérations",
         &[
             (
-                "/admin/devices",
+                "/admin/inventaire",
                 "Inventaire",
                 ConsoleSection::Devices,
                 "M3 4h18v12H3zM8 20h8m-4-4v4",

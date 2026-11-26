@@ -76,7 +76,7 @@ final class ActionCheckpoints
             ['code' => 'install_reboot_done',        'label' => 'Installation terminée, redémarrage de la machine','phase' => 'install'],
             ['code' => 'os_first_boot',              'label' => 'Démarrage du système installé',                   'phase' => 'post'],
             ['code' => 'ansible_started',            'label' => 'Configuration de la machine',                     'phase' => 'post', 'kind' => 'start'],
-            ['code' => 'ansible_finished',           'label' => 'Machine prête',                                   'phase' => 'post'],
+            ['code' => 'ansible_finished',           'label' => 'Appareil prêt',                                   'phase' => 'post'],
         ],
 
         // --- install_only : sous-ensemble de reinstall (sans phase wipe) ---
@@ -91,7 +91,7 @@ final class ActionCheckpoints
             ['code' => 'install_reboot_done',        'label' => 'Installation terminée, redémarrage de la machine','phase' => 'install'],
             ['code' => 'os_first_boot',              'label' => 'Démarrage du système installé',                   'phase' => 'post'],
             ['code' => 'ansible_started',            'label' => 'Configuration de la machine',                     'phase' => 'post', 'kind' => 'start'],
-            ['code' => 'ansible_finished',           'label' => 'Machine prête',                                   'phase' => 'post'],
+            ['code' => 'ansible_finished',           'label' => 'Appareil prêt',                                   'phase' => 'post'],
         ],
 
         // --- wipe_only : les 6 premiers checkpoints de reinstall avec poweroff ---

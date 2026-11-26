@@ -33,7 +33,7 @@ final class AnsibleRedeployEnqueuer
     {
         if (trim((string)($machine['hostname']??''))==='') return ['ok'=>false,'reason'=>'hostname_missing','message'=>'Nom d’hôte absent.'];
         $config=Machine::installConfig($machine)??[];
-        if (trim((string)($config['ansible_role']??''))==='') return ['ok'=>false,'reason'=>'ansible_role_missing','message'=>'Aucun rôle Ansible configuré pour cette machine.'];
+        if (trim((string)($config['ansible_role']??''))==='') return ['ok'=>false,'reason'=>'ansible_role_missing','message'=>'Aucun rôle Ansible configuré pour cet appareil.'];
         $stmt=Db::get()->prepare("SELECT id FROM init_jobs WHERE job_type=? AND status IN ('pending','running') LIMIT 1");
         $stmt->execute(['machine:ansible_redeploy:'.$machine['id']]);
         $existing=$stmt->fetchColumn();

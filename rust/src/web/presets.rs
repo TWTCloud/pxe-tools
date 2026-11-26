@@ -201,7 +201,7 @@ pub(super) fn serve(
             number + 1
         )?;
     }
-    content.push_str(r#"<a href="/admin/devices">Appareils</a> · <a href="/presets/import">Importer un modèle JSON</a></nav>"#);
+    content.push_str(r#"<a href="/admin/inventaire">Appareils</a> · <a href="/presets/import">Importer un modèle JSON</a></nav>"#);
     if !crate::setting(db, "ansible_repo_url")?.trim().is_empty() {
         content.push_str(r#"<form method="post" action="/presets/pull-github"><button>Synchroniser depuis le dépôt Ansible</button></form>"#);
     }

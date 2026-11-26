@@ -647,28 +647,27 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     redirect=request(pxe_url+'/')
     if not redirect.startswith('HTTP/1.1 302 ') or 'location: https://192.0.2.1/admin/' not in redirect.lower():
         raise RuntimeError('Expected the root redirect to the HTTPS console')
-    if not request(pxe_url+'/admin/devices').startswith('HTTP/1.1 404 '):
+    if not request(pxe_url+'/admin/inventaire').startswith('HTTP/1.1 404 '):
         raise RuntimeError('The admin console should require HTTPS')
     redirect=request(tls_url+'/admin/')
-    if not redirect.startswith('HTTP/1.1 302 ') or 'location: /admin/devices' not in redirect.lower():
+    if not redirect.startswith('HTTP/1.1 302 ') or 'location: /admin/inventaire' not in redirect.lower():
         raise RuntimeError('Expected the canonical devices URL')
-    if not request(tls_url+'/admin/devices').startswith('HTTP/1.1 401 '):
+    if not request(tls_url+'/admin/inventaire').startswith('HTTP/1.1 401 '):
         raise RuntimeError('Expected the devices list to require authentication')
     login=('--user','fixture-admin:fixture-login-password')
-    devices=request(tls_url+'/admin/devices',*login)
+    devices=request(tls_url+'/admin/inventaire',*login)
     if not devices.startswith('HTTP/1.1 200 ') or '<h1>Inventaire</h1>' not in devices:
         raise RuntimeError('The Rust console did not display the stable inventory title')
-    settings_url=tls_url+'/admin/settings/device-terminology'
-    change=(*login,'--data','ui_device_term=serveur')
-    # Basic credentials are attached automatically by browsers. Require a
-    # same-origin HTTPS form before authorizing a write.
-    if not request(settings_url,*change,'--header','Origin: https://external.example').startswith('HTTP/1.1 403 '):
-        raise RuntimeError('A cross-origin request changed the device label')
-    saved=request(settings_url,*change,'--header','Origin: '+tls_url)
-    if not saved.startswith('HTTP/1.1 303 ') or 'location: /admin/devices' not in saved.lower():
-        raise RuntimeError('Expected the label form to redirect to the canonical devices list')
-    if '<h1>Inventaire</h1>' not in request(tls_url+'/admin/devices',*login):
-        raise RuntimeError('The legacy terminology setting changed the stable inventory title')
+    for old_path in ('/machines', '/admin/devices'):
+        alias=request(tls_url+old_path+'?page=2',*login)
+        if not alias.startswith('HTTP/1.1 302 ') or 'location: /admin/inventaire?page=2' not in alias.lower():
+            raise RuntimeError('An old inventory link did not preserve its query')
+    settings=request(tls_url+'/settings',*login)
+    if not settings.startswith('HTTP/1.1 200 ') or 'ui_device_term' in settings:
+        raise RuntimeError('The retired terminology selector is still present')
+    discovery=request(pxe_url+'/discover.sh')
+    if not discovery.startswith('HTTP/1.1 200 ') or 'CONSOLE_URL="https://$ORCH_IP/admin/inventaire"' not in discovery:
+        raise RuntimeError('The discovery script did not link to the HTTPS inventory')
     if amd64:
         windows=pxe_url+'/pxe/windows/'
         boot=request(windows+'boot.ipxe')
@@ -1069,7 +1068,7 @@ done
                 raise RuntimeError('preseed did not reject an address outside the configured client subnet')
             allowed=docker('exec',dhcp,'curl','-sS','-w','\\n%{http_code}',
                            'http://192.0.2.1/preseed.php?mac=02:00:00:00:00:ff',check=False)
-            if allowed.returncode!=0 or not allowed.stdout.endswith('\n404') or 'machine introuvable' not in allowed.stdout:
+            if allowed.returncode!=0 or not allowed.stdout.endswith('\n404') or 'appareil introuvable' not in allowed.stdout:
                 raise RuntimeError('preseed did not accept the isolated client subnet before machine lookup')
             # Discovery runs on the same isolated virtual hardware and blank
             # disk later used by the installation; it must supply the serial.
@@ -1114,7 +1113,7 @@ if sys.argv[1]=='checklist':
         raise RuntimeError('The completed action did not show the confirmed first boot')
     print('The task page shows the confirmed first boot')
     sys.exit(0)
-page=opener.open(base+'/machines/1/install',timeout=10).read().decode()
+page=opener.open(base+'/admin/inventaire/1/install',timeout=10).read().decode()
 token=re.search(r'name="csrf_token" value="([^"]+)"',page).group(1)
 values={'csrf_token':token,'hostname':'pxe-fixture','domain':'example.test','distro':'debian',
  'codename':'trixie','version_full':'13.0','network_mode':'dhcp','partition_mode':'default',
@@ -1129,9 +1128,9 @@ if sys.argv[1]=='ansible':
     values['ansible_role']='base'
 else:
     values['admin_user_pubkeys']=sys.argv[2]
-preview=json.load(post('/machines/1/install-preview',values))
+preview=json.load(post('/admin/inventaire/1/install-preview',values))
 if preview.get('errors'): raise RuntimeError('Preflight refused fixture: '+str(preview['errors']))
-response=post('/machines/1/install',values)
+response=post('/admin/inventaire/1/install',values)
 if not re.fullmatch(re.escape(base)+r'/tasks/[0-9]+',response.geturl()):
     raise RuntimeError('Install submission did not redirect to activity')
 response.read()
@@ -1141,9 +1140,9 @@ while time.monotonic()<deadline:
     if menu.is_file() and 'DEFAULT install' in menu.read_text(): break
     time.sleep(1)
 else: raise RuntimeError('Install menu not generated')
-page=opener.open(base+'/machines/1',timeout=10).read().decode()
+page=opener.open(base+'/admin/inventaire/1',timeout=10).read().decode()
 token=re.search(r'name="csrf_token" value="([^"]+)"',page).group(1)
-post('/machines/1/reboot',{'csrf_token':token}).read()
+post('/admin/inventaire/1/reboot',{'csrf_token':token}).read()
 print('Authenticated UI scheduled installation and requested reboot after menu generation')
 '''
             docker('exec',app,'python3','-c',ui,scenario,client_pubkey)

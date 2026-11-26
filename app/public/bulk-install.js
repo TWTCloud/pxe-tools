@@ -179,14 +179,14 @@
     button.disabled = true;
     $('bulk-preflight-status').textContent = 'Contrôle des cibles en cours…';
     try {
-      const data = await jsonRequest('/machines/bulk-preflight', new FormData(form));
+      const data = await jsonRequest('/admin/inventaire/bulk-preflight', new FormData(form));
       if (version !== reviewVersion) return;
       const results = $('bulk-preflight-results');
       results.replaceChildren();
       data.targets.forEach((target) => {
         const card = document.createElement('article'); card.className = 'card mb-3';
         const title = document.createElement('h3');
-        const link = document.createElement('a'); link.href = '/machines/' + target.id + '#install'; link.textContent = target.label;
+        const link = document.createElement('a'); link.href = '/admin/inventaire/' + target.id + '#install'; link.textContent = target.label;
         title.append(link, document.createTextNode(' · ' + ({ ready: 'Prête', blocked: 'Bloquée', adapt: 'À adapter' }[target.state] || target.state)));
         card.append(title);
         target.reasons.forEach((reason) => paragraph(card, reason));
@@ -274,7 +274,7 @@
   // répond 204 → htmx ne swappe pas → le tableau (et les cases cochées) n'est pas
   // recréé du tout → zéro clignotement. Sur changement réel → 200 + nouveau swap.
   document.body.addEventListener('htmx:configRequest', (e) => {
-    if (e.detail && e.detail.path && e.detail.path.indexOf('/machines/list-fragment') !== -1) {
+    if (e.detail && e.detail.path && e.detail.path.indexOf('/admin/inventaire/list-fragment') !== -1) {
       const sec = $('machines-section');
       e.detail.parameters.sig = sec ? (sec.dataset.sig || '') : '';
     }

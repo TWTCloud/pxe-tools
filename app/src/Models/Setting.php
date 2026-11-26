@@ -18,7 +18,6 @@ use Admin\Db;
 final class Setting
 {
     public const KEY_DISCOVERY_BOOT_PROTO = 'discovery_boot_proto';
-    public const KEY_UI_DEVICE_TERM = 'ui_device_term';
 
     // Spec B Lot 1+2 — sentinels et configuration wizard d'init
     public const KEY_WIZARD_COMPLETED     = 'wizard_completed';

@@ -75,9 +75,9 @@ with tempfile.TemporaryDirectory(prefix='pxe-overview-test-') as temp:
             code, _, body = request('/')
             assert code == 200 and '0 disponible' in body and 'Fichiers absents ou illisibles' in body
             assert 'Console uniquement' in body and 'Non demandé' in body
-            code, _, body = request('/machines')
-            assert code == 200 and 'Machines' in body
-            print('Overview HTTP authentication, real data, escaped values and preserved machines route: OK')
+            code, _, body = request('/admin/inventaire')
+            assert code == 200 and '<h1>Inventaire</h1>' in body
+            print('Overview HTTP authentication, real data, escaped values and canonical inventory route: OK')
         finally:
             server.terminate()
             try: server.wait(timeout=3)

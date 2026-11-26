@@ -241,7 +241,7 @@ pub fn poll(db: &mut Connection, mac: &str) -> ApiResult {
             [&mac],
         )?;
         log_event(&tx, tx.last_insert_rowid(), "warning",
-            "Machine re-créée en DB suite à poll après suppression — choisir une action (Éteindre/Redémarrer) ou auto-poweroff dans 1h",
+            "Appareil réinscrit dans l’inventaire après suppression. Choisissez une action ou attendez l’arrêt automatique dans une heure.",
             None, None)?;
         tx.commit()?;
         return Ok((200, json!({"action":"wait","remaining_seconds":3600})));
@@ -262,7 +262,7 @@ pub fn poll(db: &mut Connection, mac: &str) -> ApiResult {
                 &tx,
                 machine,
                 "action",
-                &format!("Action consommée par la machine : {action}"),
+                &format!("Action récupérée par l’appareil : {action}"),
                 None,
                 None,
             )?;
@@ -298,11 +298,11 @@ pub fn poll(db: &mut Connection, mac: &str) -> ApiResult {
                 for (code, message) in [
                     (
                         "dhcp_request_disktest",
-                        "Machine déjà démarrée (test enchaîné in-session)",
+                        "Appareil déjà démarré (diagnostic dans la session en cours)",
                     ),
                     (
                         "grub_config_served_disktest",
-                        "Tests préparés — remis à la machine sans redémarrage",
+                        "Tests préparés — transmis à l’appareil sans redémarrage",
                     ),
                 ] {
                     tx.execute(

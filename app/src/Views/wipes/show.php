@@ -18,7 +18,7 @@ use Admin\View;
       &nbsp;·&nbsp; Mode&nbsp;: <strong><?= View::e($wipe['wipe_mode']) ?></strong>
     </p>
   </hgroup>
-  <a href="/machines" class="btn btn-secondary">← Retour</a>
+  <a href="/admin/inventaire" class="btn btn-secondary">← Retour</a>
 </header>
 
 <div hx-get="/wipes/<?= (int)$wipe['id'] ?>/log"

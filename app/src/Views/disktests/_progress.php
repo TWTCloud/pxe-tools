@@ -85,7 +85,7 @@ $ageSeconds = static function (?string $iso): ?int {
     </div>
 
     <?php if (!$isActive && $r['state'] === 'done' && ($r['verdict'] ?? '') === 'failed' && $machineId > 0): ?>
-      <form method="post" action="/machines/<?= $machineId ?>/disktest" style="margin:.6rem 0 0 0;"
+      <form method="post" action="/admin/inventaire/<?= $machineId ?>/disktest" style="margin:.6rem 0 0 0;"
             onsubmit="return dtConfirmRepair('<?= View::e($r['disk']) ?>');">
         <input type="hidden" name="disks[]" value="<?= View::e($r['disk']) ?>">
         <input type="hidden" name="modes[<?= View::e($r['disk']) ?>]" value="badblocks_quick_rw">

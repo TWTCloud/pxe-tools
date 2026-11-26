@@ -32,10 +32,10 @@ pub(super) fn register(path: &Path, form: Option<&[u8]>) -> Result<Reply, ErrorB
             ConsoleSection::Devices,
             "Ajouter un appareil",
             r#"
-<form class="panel panel--form form-stack" method="post" action="/machines">
+<form class="panel panel--form form-stack" method="post" action="/admin/inventaire">
 <div class="field"><label for="device-mac">Adresse MAC</label><input id="device-mac" name="mac" required autocapitalize="none" spellcheck="false" aria-describedby="device-mac-help"><small id="device-mac-help">Exemple : 02:00:00:00:00:01</small></div>
 <div class="field"><label for="device-hostname">Nom d’hôte (facultatif)</label><input id="device-hostname" name="hostname" autocapitalize="none" spellcheck="false"></div>
-<div class="form-actions"><button>Ajouter l’appareil</button><a class="button button--quiet" href="/admin/devices">Annuler</a></div>
+<div class="form-actions"><button>Ajouter l’appareil</button><a class="button button--quiet" href="/admin/inventaire">Annuler</a></div>
 </form>
 "#,
         ));
@@ -68,7 +68,7 @@ pub(super) fn register(path: &Path, form: Option<&[u8]>) -> Result<Reply, ErrorB
         )
         .optional()?;
     Ok(match created {
-        Some(id) => redirect(StatusCode::SEE_OTHER, format!("/machines/{id}")),
+        Some(id) => redirect(StatusCode::SEE_OTHER, format!("/admin/inventaire/{id}")),
         None => plain(
             StatusCode::CONFLICT,
             "Cette adresse MAC est déjà enregistrée\n",
@@ -94,7 +94,7 @@ enum Section {
 }
 
 pub(super) fn route(path: &str) -> Option<DeviceRoute> {
-    let rest = path.strip_prefix("/machines/")?;
+    let rest = path.strip_prefix("/admin/inventaire/")?;
     let (id, section) = rest.split_once('/').unwrap_or((rest, ""));
     let id = id.parse().ok().filter(|id| *id > 0)?;
     let section = match section {
@@ -310,41 +310,41 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
         escape(&mut output, &serial);
         output.push_str("</li>");
     }
-    write!(output, "</ul><nav class=\"device-actions\" aria-label=\"Actions de l’appareil\"><a class=\"button\" href=\"/machines/{id}/install\">Programmer une installation Debian</a><a class=\"button button--quiet\" href=\"/activity?machine={id}\">Activité</a>")?;
+    write!(output, "</ul><nav class=\"device-actions\" aria-label=\"Actions de l’appareil\"><a class=\"button\" href=\"/admin/inventaire/{id}/install\">Programmer une installation Debian</a><a class=\"button button--quiet\" href=\"/activity?appareil={id}\">Activité</a>")?;
     if linux::supports(device) {
-        write!(output, "<a class=\"button button--quiet\" href=\"/machines/{id}/install/linux\">Programmer une installation Linux</a>")?;
+        write!(output, "<a class=\"button button--quiet\" href=\"/admin/inventaire/{id}/install/linux\">Programmer une installation Linux</a>")?;
     }
-    output.push_str(r#"<a class="button button--quiet" href="/admin/devices">Inventaire</a></nav><h2>Opérations PXE</h2><div class="form-actions">"#);
+    output.push_str(r#"<a class="button button--quiet" href="/admin/inventaire">Inventaire</a></nav><h2>Opérations PXE</h2><div class="form-actions">"#);
     write!(
         output,
-        r#"<a class="button button--danger" href="/machines/{id}/wipe-disks">Effacer des disques</a>"#
+        r#"<a class="button button--danger" href="/admin/inventaire/{id}/wipe-disks">Effacer des disques</a>"#
     )?;
     if device.status == "testing" {
         write!(
             output,
-            r#"<form method="post" action="/machines/{id}/disktest-cancel"><button class="button--quiet">Annuler le diagnostic</button></form>"#
+            r#"<form method="post" action="/admin/inventaire/{id}/disktest-cancel"><button class="button--quiet">Annuler le diagnostic</button></form>"#
         )?;
     } else {
         write!(
             output,
-            r#"<a class="button button--quiet" href="/machines/{id}/disktest">Programmer un diagnostic de disque</a>"#
+            r#"<a class="button button--quiet" href="/admin/inventaire/{id}/disktest">Programmer un diagnostic de disque</a>"#
         )?;
     }
     write!(
         output,
-        r#"<form method="post" action="/machines/{id}/reboot"><button class="button--quiet">Redémarrer</button></form>
-<form method="post" action="/machines/{id}/shutdown"><button class="button--quiet">Arrêter</button></form>"#
+        r#"<form method="post" action="/admin/inventaire/{id}/reboot"><button class="button--quiet">Redémarrer</button></form>
+<form method="post" action="/admin/inventaire/{id}/shutdown"><button class="button--quiet">Arrêter</button></form>"#
     )?;
     if device.rescue {
         write!(
             output,
-            r#"<form method="post" action="/machines/{id}/rescue/exit"><button class="button--quiet">Quitter le mode récupération</button></form>"#
+            r#"<form method="post" action="/admin/inventaire/{id}/rescue/exit"><button class="button--quiet">Quitter le mode récupération</button></form>"#
         )?;
     } else {
         write!(
             output,
-            r#"<form method="post" action="/machines/{id}/rediscover"><button class="button--quiet">Redémarrer pour refaire l’inventaire</button></form>
-<form method="post" action="/machines/{id}/rescue"><button class="button--quiet">Redémarrer en mode récupération</button></form>"#
+            r#"<form method="post" action="/admin/inventaire/{id}/rediscover"><button class="button--quiet">Redémarrer pour refaire l’inventaire</button></form>
+<form method="post" action="/admin/inventaire/{id}/rescue"><button class="button--quiet">Redémarrer en mode récupération</button></form>"#
         )?;
     }
     output.push_str("</div>");
@@ -352,7 +352,7 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
     write!(
         output,
         r#"<details><summary>Supprimer cet appareil</summary>
-<form method="post" action="/machines/{id}">
+<form method="post" action="/admin/inventaire/{id}">
 <input type="hidden" name="_method" value="DELETE">
 <p>La suppression efface la fiche et son historique. Une opération déjà lancée peut continuer sur l’appareil.</p>
 <label>Saisissez SUPPRIMER <input name="confirm" required autocomplete="off"></label>
@@ -361,7 +361,7 @@ fn detail(db: &Connection, id: i64, device: &Device) -> Result<Reply, ErrorBox> 
     device_ansible::form(db, id, &mut output)?;
     write!(
         output,
-        "<p><a href=\"/activity?machine={id}\">Historique de l’appareil</a></p>"
+        "<p><a href=\"/activity?appareil={id}\">Historique de l’appareil</a></p>"
     )?;
     if let Some(progress) = super::activity::progress::render(db, id)? {
         output.push_str(&progress);
@@ -385,7 +385,7 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
         return Ok(plain(StatusCode::CONFLICT, "Inventaire PXE requis\n"));
     };
     let mut output = format!(
-        r#"<form class="panel panel--form form-stack" method="post" action="/machines/{id}/install">
+        r#"<form class="panel panel--form form-stack" method="post" action="/admin/inventaire/{id}/install">
 <div class="field"><label for="install-hostname">Nom d’hôte</label><input id="install-hostname" name="hostname" maxlength="63" required value=""#
     );
     escape(&mut output, &device.hostname);
@@ -437,7 +437,7 @@ fn install_form(db: &Connection, id: i64, device: &Device) -> Result<Reply, Erro
     output.push_str(r#"<label class="check-label"><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement du disque sélectionné au prochain démarrage PXE</label><div class="form-actions"><button>Programmer l’installation</button></div></form>"#);
     write!(
         output,
-        r#"<p><a href="/machines/{id}/install/advanced">Utiliser un modèle de partition personnalisée</a></p>"#
+        r#"<p><a href="/admin/inventaire/{id}/install/advanced">Utiliser un modèle de partition personnalisée</a></p>"#
     )?;
     Ok(page(
         ConsoleSection::Devices,

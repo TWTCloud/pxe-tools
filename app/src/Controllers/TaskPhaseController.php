@@ -82,7 +82,7 @@ final class TaskPhaseController
 
     /**
      * Fragment HTMX : timeline des phases de la tâche active sur la machine.
-     * - Si aucune tâche active : répond avec HX-Redirect vers /machines/{id}
+     * - Si aucune tâche active : répond avec HX-Redirect vers /admin/inventaire/{id}
      *   pour que la page recharge et affiche le wizard.
      * - Sinon : rend le partial _task_progress.
      */
@@ -104,7 +104,7 @@ final class TaskPhaseController
         if ($active === null) {
             // Plus de tâche active → la page parente doit recharger pour
             // réafficher le wizard. HX-Redirect évite le polling infini.
-            header('HX-Redirect: /machines/' . $machineId);
+            header('HX-Redirect: /admin/inventaire/' . $machineId);
             return;
         }
 

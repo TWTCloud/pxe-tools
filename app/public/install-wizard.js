@@ -1,5 +1,5 @@
 /**
- * Assistant 4 étapes /machines/{id}/install :
+ * Assistant 4 étapes /admin/inventaire/{id}/install :
  *   - navigation steps (Suivant / Précédent)
  *   - validation HTML5 par étape avant d'avancer
  *   - chargement d'un preset comme template (fetch /presets/{id}.json)
@@ -344,7 +344,7 @@
     });
     let msg = 'Le modèle ciblait un autre disque ; appliqué au disque détecté : ' + parts.join(', ') + '.';
     if (info.dropped && info.dropped.length) {
-      msg += ' Disque(s) du modèle ignoré(s) (absent(s) ' + (deviceTerms.deviceDu || 'de la machine') + ') : ' + info.dropped.join(', ') + '.';
+      msg += ' Disque(s) du modèle ignoré(s) (absent(s) ' + (deviceTerms.deviceDu || 'de l’appareil') + ') : ' + info.dropped.join(', ') + '.';
     }
     return msg;
   }
@@ -580,7 +580,7 @@
           const res = window.builderShared.remapPlanToInventory(plan);
           if (res.info && res.info.fatal) {
             showDiskRemapNotice('error',
-              "Le modèle nécessite au moins un disque mais aucun n’a été détecté sur " + (deviceTerms.deviceCe || "cette machine") + ".");
+              "Le modèle nécessite au moins un disque mais aucun n’a été détecté sur " + (deviceTerms.deviceCe || "cet appareil") + ".");
             toApply = Object.assign({}, plan, { target_disks: [], disks: [] });
           } else {
             toApply = res.plan;

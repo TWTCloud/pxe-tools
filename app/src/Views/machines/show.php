@@ -30,7 +30,6 @@ $operationSummary = \Admin\Util\MachineOperationSummary::forMachine($machine);
 $operationRule = $operationSummary['state']['rules']['operation'];
 $powerRule = $operationSummary['state']['rules']['power'];
 $ansibleRule = ['ok'=>$operationSummary['state']['rules']['ansible']['allowed'],'message'=>$operationSummary['state']['rules']['ansible']['reason']];
-if ($ansibleRule['message'] === 'Aucun rôle Ansible configuré pour cette machine.') $ansibleRule['message'] = Term::format('Aucun rôle Ansible configuré pour {ce}.');
 $headerState = View::stateLabel($machine);
 $isBusy = !$operationRule['allowed'];
 $deleteConfirmation = 'Supprimer la fiche de ' . Machine::displayLabel($machine) . ' (' . $machine['mac'] . ') ? Statut actuel : ' . $machine['status'] . '. Les inventaires, configurations enregistrées et historiques liés seront supprimés. Cette suppression n’efface pas les disques et ne garantit pas l’arrêt des processus distants.';
@@ -289,7 +288,7 @@ if (!empty($hwInfo['boot_mode'])) {
     <?= View::e($osDisplay) ?>
   </div>
   <div class="machine-identity__state"
-       hx-get="/machines/<?= (int)$machine['id'] ?>/status"
+       hx-get="/admin/inventaire/<?= (int)$machine['id'] ?>/status"
        hx-trigger="every 5s"
        hx-swap="innerHTML">
     <?php View::partial('machines/_status_badge', ['state' => $headerState]); ?>
@@ -320,16 +319,16 @@ if (!empty($hwInfo['boot_mode'])) {
         <?php endif; ?>
         <?php View::partial('machines/_reveal_password', ['machine' => $machine, 'installConfig' => $installConfig]); ?>
       <?php else: ?>
-        <p class="muted">Aucune configuration d'installation. <a href="/machines/<?= (int)$machine['id'] ?>/install">Lancer l'assistant d'installation →</a></p>
+        <p class="muted">Aucune configuration d'installation. <a href="/admin/inventaire/<?= (int)$machine['id'] ?>/install">Lancer l'assistant d'installation →</a></p>
       <?php endif; ?>
     </section>
 
-    <!-- Colonne droite : Notes (textarea éditable, dédiée — POST partial sur /machines/{id}) -->
+    <!-- Colonne droite : Notes (textarea éditable, dédiée — POST partial sur /admin/inventaire/{id}) -->
     <section>
       <h4 style="margin:0 0 .35rem 0; font-size:.95rem; font-weight:600;">Notes</h4>
       <p class="muted" style="margin-top:0;"><?= View::e(Term::format('Annotations libres sur {ce} (localisation, propriétaire, contexte…).')) ?> Modifications sauvegardées indépendamment des autres attributs.</p>
       <?php $notesValue = (string)($machine['notes'] ?? ''); ?>
-      <form method="post" action="/machines/<?= (int)$machine['id'] ?>" style="margin:0;">
+      <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>" style="margin:0;">
         <input type="hidden" name="_method" value="PUT">
         <label for="machine-notes" style="position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;">Notes</label>
         <textarea id="machine-notes" name="notes" rows="<?= $notesValue === '' ? 2 : 6 ?>" style="width:100%; resize:vertical;"><?= View::e($notesValue) ?></textarea>
@@ -733,7 +732,7 @@ $renderDiskTestBadge = static function (?array $r) {
             <td style="white-space:nowrap;">
               <?= $renderDiskTestBadge($r) ?: '<span class="muted">—</span>' ?>
               <?php if ($dtRepairable && $r !== null && ($r['verdict'] ?? '') === 'failed' && $diskName !== '' && $diskIdentityStatus === 'valid'): ?>
-                <form method="post" action="/machines/<?= (int)$machine['id'] ?>/disktest" data-operation-kind="operation"
+                <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/disktest" data-operation-kind="operation"
                       style="margin:.3rem 0 0 0;"
                       onsubmit="return dtConfirmRepair('<?= View::e($diskName) ?>');">
                   <input type="hidden" name="disks[]" value="<?= View::e($diskName) ?>">
@@ -792,7 +791,7 @@ $renderDiskTestBadge = static function (?array $r) {
 <?php else: ?>
 <article>
   <details><summary>Effacer des disques — action destructive</summary>
-  <form method="post" action="/machines/<?= (int)$machine['id'] ?>/wipe-disks" id="wipe-form" data-operation-kind="operation">
+  <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/wipe-disks" id="wipe-form" data-operation-kind="operation">
     <table class="wipe-disks-table" style="margin:0;">
       <thead>
         <tr>
@@ -905,7 +904,7 @@ $renderDiskTestBadge = static function (?array $r) {
     vérification complète de la surface. Sélectionnez un mode par disque — les
     modes d'écriture (qui effacent les données) sont masqués par défaut.
   </p>
-  <form method="post" action="/machines/<?= (int)$machine['id'] ?>/disktest" id="disktest-form" data-operation-kind="operation">
+  <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/disktest" id="disktest-form" data-operation-kind="operation">
 
     <!-- Liste des disques -->
     <div class="field-label" style="display:block; margin-bottom: .5rem;">Disques à tester</div>
@@ -1106,7 +1105,7 @@ $renderDiskTestBadge = static function (?array $r) {
 <!-- ONGLET : ÉVÉNEMENTS — contrôle alimentation + terminal logs   -->
 <!-- ============================================================ -->
 <div id="events" tabindex="-1" data-tab-content="events"<?= $tabHidden('events') ?>>
-<div hx-get="/machines/<?= (int)$machine['id'] ?>/boot-fragment"
+<div hx-get="/admin/inventaire/<?= (int)$machine['id'] ?>/boot-fragment"
      hx-trigger="every 5s" hx-swap="innerHTML">
   <?php View::partial('machines/_boot_history', ['machine' => $machine]); ?>
 </div>
@@ -1125,7 +1124,7 @@ $nextActionLabel = match ($nextAction) {
 <!-- Polling HTMX 5s : synchronise l'UI quand la machine consomme une action
      (next_action passé à NULL côté DB) ou quand la fenêtre d'attente expire. -->
 <div id="power-panel-wrap"
-     hx-get="/machines/<?= (int)$machine['id'] ?>/power-fragment"
+     hx-get="/admin/inventaire/<?= (int)$machine['id'] ?>/power-fragment"
      hx-trigger="every 5s"
      hx-swap="innerHTML">
   <?php View::partial('machines/_power_panel', ['machine' => $machine]); ?>
@@ -1145,7 +1144,7 @@ $tasks = \Admin\Models\MachineTask::recentByMachine((int)$machine['id'], 30);
     Discoveries, installations, effacements et tests disques. Cliquez sur une
     ligne pour le détail (logs, snapshot d'inventaire, jobs unitaires).
   </p>
-  <div id="machine-tasks" data-poll-scope hx-get="/machines/<?= (int)$machine['id'] ?>/tasks" hx-trigger="every 5s" hx-swap="innerHTML">
+  <div id="machine-tasks" data-poll-scope hx-get="/admin/inventaire/<?= (int)$machine['id'] ?>/tasks" hx-trigger="every 5s" hx-swap="innerHTML">
   <?php View::partial('machines/_tasks_list', [
       'machine' => $machine,
       'tasks'   => $tasks,
@@ -1222,7 +1221,7 @@ $tasks = \Admin\Models\MachineTask::recentByMachine((int)$machine['id'], 30);
 <div id="settings" tabindex="-1" data-tab-content="settings"<?= $tabHidden('settings') ?>>
 <div class="card mb-6">
   <h3 style="margin:0 0 1rem 0;"><?= View::e(Term::format('Démarrage {du}')) ?></h3>
-  <form id="machine-attrs-form" method="post" action="/machines/<?= (int)$machine['id'] ?>">
+  <form id="machine-attrs-form" method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>">
     <input type="hidden" name="_method" value="PUT">
   </form>
 
@@ -1291,13 +1290,13 @@ $_redeployDisabled = !$ansibleRule['ok'];
 <div class="card mb-6">
   <div style="display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; margin-bottom:.5rem;">
     <h3 style="margin:0;">Automatisation Ansible</h3>
-    <form method="post" action="/machines/<?= (int)$machine['id'] ?>/ansible/pull" style="margin:0;">
+    <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/ansible/pull" style="margin:0;">
       <button type="submit" class="btn btn-secondary" style="margin:0;">Actualiser le dépôt partagé</button>
     </form>
   </div>
 
   <p class="text-sm">Rôle : <code><?= View::e($_ansibleRole ?: 'aucun') ?></code> · cible : <?= View::e(Machine::displayLabel($machine)) ?>. <?= View::e(Term::format('Actualiser le dépôt concerne l’ensemble des {many} ; appliquer concerne uniquement cette cible.')) ?></p>
-  <form method="post" action="/machines/<?= (int)$machine['id'] ?>/auto-deploy" style="margin:0;">
+  <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/auto-deploy" style="margin:0;">
     <label class="toggle-switch">
       <input type="checkbox" name="auto_deploy" value="1"
              onchange="this.form.submit()"
@@ -1316,7 +1315,7 @@ $_redeployDisabled = !$ansibleRule['ok'];
   </small>
 
   <div class="ansible-actions" style="margin-top:1rem; display:flex; justify-content:flex-end;">
-    <form method="post" action="/machines/<?= (int)$machine['id'] ?>/ansible/redeploy" data-operation-kind="ansible" style="margin:0;"
+    <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/ansible/redeploy" data-operation-kind="ansible" style="margin:0;"
           onsubmit="return confirm(<?= View::e(json_encode(Term::format('Lancer un redéploiement Ansible sur {ce} maintenant ?'))) ?>);">
       <button type="submit" class="btn btn-primary" <?= $_redeployDisabled ? 'disabled data-operation-locked="1"' : '' ?> title="<?= View::e($ansibleRule['message']) ?>">
         <?= View::e(Term::format('Appliquer à {ce}')) ?>
@@ -1334,12 +1333,12 @@ $_redeployDisabled = !$ansibleRule['ok'];
     <p>État actuel : <strong data-operation-rescue><?= $inRescue ? 'Mode récupération' : 'Normal' ?></strong></p>
     <p class="muted">Modifiez le mode pour accéder à un environnement de récupération Debian au prochain démarrage PXE.</p>
     <?php if ($inRescue): ?>
-      <form method="post" action="/machines/<?= (int)$machine['id'] ?>/rescue/exit" class="mt-3">
+      <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/rescue/exit" class="mt-3">
         <button type="submit" class="btn btn-secondary">Sortir du mode rescue</button>
       </form>
       <small class="form-hint">Le prochain démarrage PXE proposera le menu normal.</small>
     <?php else: ?>
-      <form method="post" action="/machines/<?= (int)$machine['id'] ?>/rescue" data-operation-kind="operation" class="mt-3"
+      <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/rescue" data-operation-kind="operation" class="mt-3"
             onsubmit="return confirm(<?= View::e(json_encode(Term::format('Démarrer {le} en mode rescue (Debian d-i en récupération) ?'))) ?>);">
         <button type="submit" class="btn btn-primary" <?= $operationRule['allowed'] ? '' : 'disabled data-operation-locked="1"' ?> title="<?= View::e($operationRule['reason']) ?>">Démarrer en mode récupération</button>
       </form>
@@ -1356,7 +1355,7 @@ $_redeployDisabled = !$ansibleRule['ok'];
     <p class="muted"><?= View::e(Term::format('Re-collecte l’inventaire (disques + SMART, NICs, périphériques USB). {One} : redémarrage en mode discovery, puis retour à l’état précédent.')) ?></p>
     <div class="machine-section-action">
       <small class="form-hint" data-operation-reason="operation" <?= $rediscoverDisabled ? '' : 'hidden' ?>><?= View::e($operationRule['reason']) ?></small>
-      <form method="post" action="/machines/<?= (int)$machine['id'] ?>/rediscover" data-operation-kind="operation"
+      <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/rediscover" data-operation-kind="operation"
             onsubmit="return confirm(<?= View::e(json_encode(Term::format('Relancer la collecte d’inventaire ? {One} : redémarrage en mode discovery.'))) ?>);">
         <button type="submit" class="btn btn-primary"<?= $rediscoverDisabled ? ' disabled data-operation-locked="1"' : '' ?>>Re-collecter l'inventaire</button>
       </form>
@@ -1369,7 +1368,7 @@ $_redeployDisabled = !$ansibleRule['ok'];
 <details class="card mb-6" id="machine-expert">
   <summary>Expert — corriger le suivi et supprimer la fiche</summary>
   <p>Ces actions modifient le suivi de l’appliance. Elles ne garantissent pas l’arrêt d’une installation, d’un effacement ou d’un processus distant. <?= View::e(Term::format('Vérifiez l’état physique {du} avant de relancer une opération.')) ?></p>
-  <form method="post" action="/machines/<?= (int)$machine['id'] ?>/status" onsubmit="return confirm('Corriger le suivi et clôturer ses actions et sous-jobs actifs ? Aucun arrêt physique n’est garanti.');">
+  <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/status" onsubmit="return confirm('Corriger le suivi et clôturer ses actions et sous-jobs actifs ? Aucun arrêt physique n’est garanti.');">
     <label for="machine-status">Corriger l’état de suivi</label>
     <select id="machine-status" name="status" class="select">
       <?php foreach (Machine::STATUSES as $status): ?><option value="<?= View::e($status) ?>" <?= $status===$machine['status']?'selected':'' ?>><?= View::e(View::statusLabel($status)) ?></option><?php endforeach; ?>
@@ -1378,7 +1377,7 @@ $_redeployDisabled = !$ansibleRule['ok'];
     <button class="btn btn-secondary" type="submit">Corriger le suivi</button>
   </form>
   <hr>
-  <form method="post" action="/machines/<?= (int)$machine['id'] ?>" onsubmit="return confirm(<?= View::e(json_encode($deleteConfirmation)) ?>);">
+  <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>" onsubmit="return confirm(<?= View::e(json_encode($deleteConfirmation)) ?>);">
     <input type="hidden" name="_method" value="DELETE">
     <p>Supprimer cette fiche retire ses inventaires, sa configuration et ses historiques liés. Les données sur disque ne sont pas effacées ; l’opération distante peut continuer.</p>
     <button type="submit" class="btn btn-danger">Supprimer la fiche de <?= View::e(Machine::displayLabel($machine)) ?></button>

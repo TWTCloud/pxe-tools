@@ -31,21 +31,6 @@ $groups = [
 <?php endforeach; ?>
 </div>
 <?php View::partial('settings/_application_status', ['jobs' => $jobs ?? []]); ?>
-<section class="card mb-6" aria-labelledby="terminology-title">
-  <h3 id="terminology-title">Appellation des machines clientes</h3>
-  <p class="muted text-small">Choisissez le terme affiché pour tous les utilisateurs de cette instance. Les noms d’hôte et les données des équipements ne changent pas.</p>
-  <form method="post" action="/settings/terminology">
-    <div class="field mb-4"><label for="ui-device-term">Appellation dans la console</label>
-      <select id="ui-device-term" name="ui_device_term">
-      <?php foreach (\Admin\Ui\DeviceTerminology::OPTIONS as $value => $label): ?>
-        <option value="<?= View::e($value) ?>"<?= \Admin\Ui\DeviceTerminology::selected() === $value ? ' selected' : '' ?>><?= View::e($label) ?></option>
-      <?php endforeach ?>
-      </select>
-    </div>
-    <button type="submit" class="btn btn-primary">Enregistrer l’appellation</button>
-  </form>
-</section>
-
 <details class="card mb-6">
   <summary><strong>Valeurs par défaut des déploiements</strong> — DNS et découverte</summary>
 <div class="card mb-6">

@@ -18,10 +18,10 @@ pub(in crate::web) enum Route {
 impl Route {
     pub(in crate::web) fn for_path(path: &str) -> Option<Self> {
         Some(match path {
-            "/machines/bulk" => Self::Form,
-            "/machines/bulk-preflight" => Self::Preview,
-            "/machines/bulk-install" => Self::Install,
-            "/machines/bulk-delete" => Self::Delete,
+            "/admin/inventaire/bulk" => Self::Form,
+            "/admin/inventaire/bulk-preflight" => Self::Preview,
+            "/admin/inventaire/bulk-install" => Self::Install,
+            "/admin/inventaire/bulk-delete" => Self::Delete,
             _ => return None,
         })
     }
@@ -124,8 +124,8 @@ const MODELS: &str = "distro='debian' AND variant='debian' AND root_login_mode='
 
 fn selection_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
-        r#"<nav><a href="/admin/devices">Appareils</a></nav>
-<form method="post" action="/machines/bulk-preflight"><input type="hidden" name="format" value="html">
+        r#"<nav><a href="/admin/inventaire">Appareils</a></nav>
+<form method="post" action="/admin/inventaire/bulk-preflight"><input type="hidden" name="format" value="html">
 <p><label>Modèle Debian <select name="preset_id" required><option value="">Sélectionner</option>"#,
     );
     let mut models = db.prepare(&format!(
@@ -140,7 +140,7 @@ fn selection_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     html.push_str("</select></label></p>");
     let next = device_checkboxes(db, number, &mut html)?;
     html.push_str("<p><label><input type=\"checkbox\" name=\"wake_now\" value=\"1\"> Demander le redémarrage des appareils</label></p><button>Vérifier les cibles</button></form>");
-    pagination(&mut html, "/machines/bulk", number, next)?;
+    pagination(&mut html, "/admin/inventaire/bulk", number, next)?;
     Ok(page(
         ConsoleSection::Devices,
         "Déploiement Debian par lots",
@@ -150,14 +150,14 @@ fn selection_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
 
 fn delete_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
-        r#"<nav><a href="/admin/devices">Appareils</a></nav>
+        r#"<nav><a href="/admin/inventaire">Appareils</a></nav>
 <p>La suppression retire les fiches sélectionnées et leurs historiques, même si une opération est en cours.</p>
-<form method="post" action="/machines/bulk-delete">"#,
+<form method="post" action="/admin/inventaire/bulk-delete">"#,
     );
     let next = device_checkboxes(db, number, &mut html)?;
     html.push_str(r#"<p><label>Saisissez SUPPRIMER <input name="confirm" required autocomplete="off"></label></p>
 <button>Supprimer les appareils sélectionnés</button></form>"#);
-    pagination(&mut html, "/machines/bulk-delete", number, next)?;
+    pagination(&mut html, "/admin/inventaire/bulk-delete", number, next)?;
     Ok(page(ConsoleSection::Devices, "Suppression par lots", &html))
 }
 
@@ -405,7 +405,7 @@ fn preview(db: &Connection, selection: &Selection) -> Result<Reply, ErrorBox> {
 
 fn preview_page(selection: &Selection, targets: &[Value], ready: usize) -> Result<Reply, ErrorBox> {
     let mut html = format!(
-        r#"<form method="post" action="/machines/bulk-install">
+        r#"<form method="post" action="/admin/inventaire/bulk-install">
 <input type="hidden" name="preset_id" value="{}"><input type="hidden" name="format" value="html"><ol>"#,
         selection.preset
     );
@@ -463,7 +463,7 @@ fn preview_page(selection: &Selection, targets: &[Value], ready: usize) -> Resul
     if ready > 0 {
         write!(html, "<button>Programmer le repartitionnement et l’installation sur {ready} appareil(s)</button>")?;
     }
-    html.push_str("</form><a href=\"/machines/bulk\">Modifier la sélection</a>");
+    html.push_str("</form><a href=\"/admin/inventaire/bulk\">Modifier la sélection</a>");
     Ok(page(
         ConsoleSection::Devices,
         "Contrôle du déploiement par lots",
@@ -511,7 +511,7 @@ fn queue(path: &Path, username: &str, selection: &Selection) -> Result<Reply, Er
         }
         html.push_str("</li>");
     }
-    html.push_str("</ul><a href=\"/admin/devices\">Appareils</a>");
+    html.push_str("</ul><a href=\"/admin/inventaire\">Appareils</a>");
     Ok(page(
         ConsoleSection::Devices,
         "Déploiement Debian par lots",

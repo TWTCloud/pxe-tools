@@ -56,7 +56,7 @@ pub(super) fn show(
         let count: u64 = db.query_row("SELECT COUNT(*) FROM machines", [], |row| row.get(0))?;
         write!(
             html,
-            r#"<section class="panel"><h2>Inventaire</h2><p>{count} appareil(s) enregistré(s)</p><a href="/admin/devices">Ouvrir l’inventaire</a></section>"#
+            r#"<section class="panel"><h2>Inventaire</h2><p>{count} appareil(s) enregistré(s)</p><a href="/admin/inventaire">Ouvrir l’inventaire</a></section>"#
         )?;
     }
     if account.allows(Permission::ImagesRead) {

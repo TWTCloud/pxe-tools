@@ -3,7 +3,7 @@
 use Admin\View;
 /**
  * Partial — Panel "Contrôle alimentation à distance" pour machines/show.php.
- * Servi aussi en fragment HTMX (GET /machines/{id}/power-fragment) pour
+ * Servi aussi en fragment HTMX (GET /admin/inventaire/{id}/power-fragment) pour
  * polling 5s qui matérialise l'action consommée par la machine.
  *
  * @var array $machine
@@ -66,7 +66,7 @@ $remainingSec  = $awaitingEpoch > 0 ? max(0, $awaitingEpoch - time()) : 0;
            et permet d'annuler une action programmée non encore consommée. */ ?>
   <?php if ($nextActionLabel !== null): ?>
     <div class="actions mt-3 justify-end">
-      <form method="post" action="/machines/<?= (int)$machine['id'] ?>/power" style="margin:0;">
+      <form method="post" action="/admin/inventaire/<?= (int)$machine['id'] ?>/power" style="margin:0;">
         <input type="hidden" name="action" value="cancel">
         <button type="submit" class="btn btn-secondary">Annuler l'action</button>
       </form>

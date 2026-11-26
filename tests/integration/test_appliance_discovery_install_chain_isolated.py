@@ -214,7 +214,7 @@ done
                 raise RuntimeError('preseed did not reject an address outside the configured client subnet')
             allowed=docker('exec',dhcp,'curl','-sS','-w','\\n%{http_code}',
                            'http://192.0.2.1/preseed.php?mac=02:00:00:00:00:ff',check=False)
-            if allowed.returncode!=0 or not allowed.stdout.endswith('\n404') or 'machine introuvable' not in allowed.stdout:
+            if allowed.returncode!=0 or not allowed.stdout.endswith('\n404') or 'appareil introuvable' not in allowed.stdout:
                 raise RuntimeError('preseed did not accept the isolated client subnet before machine lookup')
             # Discovery runs on the same isolated virtual hardware and blank
             # disk later used by the installation; it must supply the serial.
@@ -253,7 +253,7 @@ token=re.search(r'name="csrf_token" value="([^"]+)"',page).group(1)
 def post(path,values):
     return opener.open(base+path,urllib.parse.urlencode(values).encode(),timeout=20)
 post('/login',{'username':'fixture-admin','password':'fixture-login-password','csrf_token':token}).read()
-page=opener.open(base+'/machines/1/install',timeout=10).read().decode()
+page=opener.open(base+'/admin/inventaire/1/install',timeout=10).read().decode()
 token=re.search(r'name="csrf_token" value="([^"]+)"',page).group(1)
 values={'csrf_token':token,'hostname':'pxe-fixture','domain':'example.test','distro':'debian',
  'codename':'trixie','version_full':'13.0','network_mode':'dhcp','partition_mode':'default',
@@ -264,9 +264,9 @@ values={'csrf_token':token,'hostname':'pxe-fixture','domain':'example.test','dis
  'adv[timezone][utc]':'1','adv[timezone][zone]':'UTC','adv[packages][tasksel]':'ssh-server',
  'adv[packages][pkgsel_include]':'sudo,openssh-server,curl','adv[packages][upgrade]':'none',
  'adv[apt][disable_services]':'1','adv[bootloader][only_debian]':'1','adv[finish][reboot]':'quiet'}
-preview=json.load(post('/machines/1/install-preview',values))
+preview=json.load(post('/admin/inventaire/1/install-preview',values))
 if preview.get('errors'): raise RuntimeError('Preflight refused fixture: '+str(preview['errors']))
-response=post('/machines/1/install',values)
+response=post('/admin/inventaire/1/install',values)
 if not re.fullmatch(re.escape(base)+r'/tasks/[0-9]+',response.geturl()):
     raise RuntimeError('Install submission did not redirect to activity')
 response.read()
@@ -276,9 +276,9 @@ while time.monotonic()<deadline:
     if menu.is_file() and 'DEFAULT install' in menu.read_text(): break
     time.sleep(1)
 else: raise RuntimeError('Install menu not generated')
-page=opener.open(base+'/machines/1',timeout=10).read().decode()
+page=opener.open(base+'/admin/inventaire/1',timeout=10).read().decode()
 token=re.search(r'name="csrf_token" value="([^"]+)"',page).group(1)
-post('/machines/1/reboot',{'csrf_token':token}).read()
+post('/admin/inventaire/1/reboot',{'csrf_token':token}).read()
 print('Authenticated UI scheduled installation and requested reboot after menu generation')
 '''
             docker('exec',app,'python3','-c',ui)

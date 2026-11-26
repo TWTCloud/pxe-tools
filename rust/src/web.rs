@@ -462,6 +462,27 @@ async fn dispatch(
     let (parts, body) = request.into_parts();
     let path = parts.uri.path();
     let readable = matches!(parts.method, Method::GET | Method::HEAD);
+    let canonical_path;
+    let path = if let Some(suffix) = ["/machines", "/admin/devices"]
+        .into_iter()
+        .filter_map(|prefix| path.strip_prefix(prefix))
+        .find(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+    {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        canonical_path = format!("/admin/inventaire{suffix}");
+        if readable {
+            let target = match parts.uri.query() {
+                Some(query) => format!("{canonical_path}?{query}"),
+                None => canonical_path,
+            };
+            return setup::redirect(StatusCode::FOUND, target);
+        }
+        &canonical_path
+    } else {
+        path
+    };
     if secure && readable && path.starts_with("/console-assets/") {
         return ui::asset(path, parts.method == Method::HEAD)
             .unwrap_or_else(|| plain(StatusCode::NOT_FOUND, "Not found\n"));
@@ -609,7 +630,7 @@ async fn dispatch(
         };
         return site.admin.serve(&parts, peer, &site.database, action).await;
     }
-    if matches!(path, "/admin/" | "/admin/devices") && readable {
+    if matches!(path, "/admin/" | "/admin/inventaire") && readable {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
@@ -631,12 +652,6 @@ async fn dispatch(
                 admin::Action::Overview(site.pxe_ip),
             )
             .await;
-    }
-    if path == "/machines" && readable {
-        if !secure {
-            return plain(StatusCode::NOT_FOUND, "Not found\n");
-        }
-        return setup::redirect(StatusCode::FOUND, "/admin/devices");
     }
     if path == "/presets/pull-github" && parts.method == Method::POST {
         if !secure {
@@ -682,8 +697,8 @@ async fn dispatch(
             )
             .await;
     }
-    if (path == "/machines/new" && readable)
-        || (path == "/machines" && parts.method == Method::POST)
+    if (path == "/admin/inventaire/new" && readable)
+        || (path == "/admin/inventaire" && parts.method == Method::POST)
     {
         if !secure {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
@@ -970,42 +985,6 @@ async fn dispatch(
                 peer,
                 &site.database,
                 admin::Action::Settings(route, form),
-            )
-            .await;
-    }
-    if matches!(path, admin::DEVICE_SETTINGS | "/settings/terminology")
-        && parts.method == Method::POST
-        && secure
-    {
-        if !admin_origin(&parts.headers, peer, site) {
-            return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
-        }
-        let data = match read_form(&parts.headers, body, 256).await {
-            Ok(data) => data,
-            Err(reply) => return reply,
-        };
-        let mut fields = form_urlencoded::parse(&data);
-        let update = match (fields.next(), fields.next()) {
-            (Some((key, value)), None) if key == "ui_device_term" => admin::device_term(&value),
-            _ => None,
-        };
-        let Some(update) = update else {
-            return plain(StatusCode::BAD_REQUEST, "Invalid device label\n");
-        };
-        return site
-            .admin
-            .serve(
-                &parts,
-                peer,
-                &site.database,
-                admin::Action::Terminology(
-                    update,
-                    if path == admin::DEVICE_SETTINGS {
-                        "/admin/devices"
-                    } else {
-                        "/settings"
-                    },
-                ),
             )
             .await;
     }
