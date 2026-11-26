@@ -329,8 +329,8 @@ fn windows_form(error: Option<&str>) -> Result<Reply, ErrorBox> {
 <p>Le serveur télécharge une fois le média officiel. PXE Tools vérifie l’ISO, met WinPE en cache et détecte les éditions Famille et Pro.</p>
 <ol>
 <li>Ouvrez la <a href="{download}" target="_blank" rel="noopener noreferrer">page Microsoft de téléchargement de Windows 11</a>.</li>
-<li>Choisissez l’image ISO x64 multi-édition et sa langue, puis copiez le lien de téléchargement Microsoft.</li>
-<li>Sélectionnez la même langue ici et collez le lien. Le lien est valable 24 heures.</li>
+<li>Choisissez l’ISO multi-édition x64 et sa langue, puis confirmez sur le site de Microsoft.</li>
+<li>Faites un clic droit sur le bouton de téléchargement 64 bits, choisissez <strong>Copier l’adresse du lien</strong>, puis collez-la ci-dessous.</li>
 </ol>"#,
     );
     if let Some(error) = error {
@@ -339,8 +339,12 @@ fn windows_form(error: Option<&str>) -> Result<Reply, ErrorBox> {
         html.push_str("</p>");
     }
     html.push_str(
-        r#"<div class="field"><label for="windows-language">Langue de l’ISO</label>
-<select id="windows-language" name="language" required>"#,
+        r#"<div class="field"><label for="windows-url">Adresse du lien de téléchargement Microsoft</label>
+<input id="windows-url" type="url" name="url" maxlength="4096" autocomplete="off" spellcheck="false" aria-describedby="windows-link-help" required>
+<small id="windows-link-help">Microsoft délivre un lien valable 24 heures.</small></div>
+<div class="field"><label for="windows-language">Langue de l’ISO</label>
+<select id="windows-language" name="language">
+<option value="">Détecter depuis le lien</option>"#,
     );
     for (language, label, _) in media::WINDOWS_ISOS {
         write!(html, r#"<option value="{language}">{label}</option>"#)?;
@@ -348,8 +352,6 @@ fn windows_form(error: Option<&str>) -> Result<Reply, ErrorBox> {
     write!(
         html,
         r#"</select></div>
-<div class="field"><label for="windows-url">Lien officiel Microsoft</label>
-<input id="windows-url" type="url" name="url" maxlength="4096" autocomplete="off" spellcheck="false" required></div>
 <div class="form-actions"><button>Télécharger et préparer Windows</button></div>
 </form>
 <details class="panel panel--form"><summary>Réutiliser un ISO déjà téléchargé</summary>
@@ -384,18 +386,40 @@ fn queue_windows(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
             _ => return Ok(invalid()),
         }
     }
-    let Some((language, _, sha256)) = media::WINDOWS_ISOS
-        .into_iter()
-        .find(|(offered, _, _)| language.as_deref() == Some(*offered))
-    else {
-        return windows_form(Some("Sélectionnez la langue de l’ISO Microsoft."));
-    };
     let Some((remote, source)) = source else {
         return Ok(invalid());
     };
+    let source = source.trim();
+    let detected = source
+        .parse::<hyper::Uri>()
+        .ok()
+        .and_then(|uri| {
+            let (_, filename) = uri.path().rsplit_once('/')?;
+            let filename = filename.to_ascii_lowercase();
+            let (language, _) = filename
+                .strip_prefix("windows11_client_x64_")?
+                .split_once('_')?;
+            media::WINDOWS_ISOS
+                .iter()
+                .find(|(code, _, _)| *code == language)
+                .map(|(code, _, _)| *code)
+        })
+        .filter(|_| remote);
+    let language = language
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or(detected);
+    let Some((language, _, sha256)) = media::WINDOWS_ISOS
+        .into_iter()
+        .find(|(offered, _, _)| language == Some(*offered))
+    else {
+        return windows_form(Some(
+            "Choisissez la langue exacte de l’ISO sélectionnée chez Microsoft.",
+        ));
+    };
     let request = media::Import {
         kind: "windows-official".into(),
-        source: source.trim().into(),
+        source: source.into(),
         sha256: sha256.into(),
         profile: language.into(),
         remote,

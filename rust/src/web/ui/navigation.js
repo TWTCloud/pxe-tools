@@ -212,16 +212,16 @@
 })();
 
 (() => {
-  const panel = document.querySelector('[data-rhel-job]');
+  const panel = document.querySelector('[data-media-job]');
   if (!panel) return;
 
   async function refresh() {
     try {
-      const response = await fetch(panel.dataset.rhelJob, { cache: 'no-store' });
+      const response = await fetch(panel.dataset.mediaJob, { cache: 'no-store' });
       if (response.redirected || [401, 403, 404].includes(response.status)) return;
       if (response.ok) {
         const { status, message, progress_percent } = await response.json();
-        if (status !== panel.dataset.rhelState) {
+        if (status !== panel.dataset.mediaState) {
           location.reload();
           return;
         }

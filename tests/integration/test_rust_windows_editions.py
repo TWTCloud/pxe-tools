@@ -54,6 +54,7 @@ def check_shared_windows(public, database, tls, auth, form_headers):
     assert status == 200 and b'name="language"' in page and b'name="url"' in page
     assert b'name="filename"' in page
     assert b'name="sha256"' not in page
+    assert 'Copier l’adresse du lien'.encode() in page
     official = 'https://software.download.prss.microsoft.com/dbazure/Win11_French_x64.iso?token=fixture'
     form = {'language': 'fr-fr', 'url': official}
     assert request(OFFICIAL_WINDOWS, tls=tls, form=form, headers=auth)[0] == 403
@@ -65,6 +66,17 @@ def check_shared_windows(public, database, tls, auth, form_headers):
     with sqlite3.connect(database) as db:
         stored = db.execute("SELECT value FROM settings WHERE key LIKE 'media_import_request_%'").fetchone()[0]
         assert official not in stored and json.loads(stored)['kind'] == 'windows-official'
+    copied = ('https://software.download.prss.microsoft.com/dbazure/'
+              'Windows11_Client_x64_fr-fr_26300_9457.iso?t=fixture&P1=1795761125&P4=abc%2Bdef%3D')
+    status, job, _ = request(OFFICIAL_WINDOWS, tls=tls, form={'url': copied}, headers=form_headers)
+    assert status == 303 and job.startswith('/jobs/')
+    with sqlite3.connect(database) as db:
+        stored = db.execute("SELECT value FROM settings WHERE key=?",
+                            ('media_import_request_'+job.rsplit('/', 1)[1],)).fetchone()[0]
+        assert copied not in stored and json.loads(stored)['profile'] == 'fr-fr'
+    status, _, detail = request(job, tls=tls, headers=auth)
+    assert status == 200 and b'data-media-job' in detail and b'<progress' in detail
+    assert request(job+'/status', tls=tls, headers=auth)[0] == 200
     for filename in ('../windows.iso', '/tmp/windows.iso', 'windows.zip'):
         assert request(OFFICIAL_WINDOWS, tls=tls, form={'language': 'fr-fr', 'filename': filename},
                        headers=form_headers)[0] == 422
