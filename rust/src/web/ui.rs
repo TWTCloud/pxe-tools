@@ -552,10 +552,9 @@ pub(super) fn asset(path: &str, head: bool) -> Option<Reply> {
             "image/svg+xml",
             include_bytes!("../../../app/public/img/distros/fedora.svg"),
         ),
-        "/console-assets/proxmox.svg" => (
-            "image/svg+xml",
-            include_bytes!("../../../app/public/img/distros/proxmox.svg"),
-        ),
+        "/console-assets/proxmox.svg" => {
+            ("image/svg+xml", include_bytes!("ui/proxmox-brandmark.svg"))
+        }
         "/console-assets/rocky.svg" => (
             "image/svg+xml",
             include_bytes!("../../../app/public/img/distros/rocky.svg"),

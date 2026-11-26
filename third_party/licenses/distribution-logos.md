@@ -43,3 +43,9 @@ console. They remain the property of their respective trademark owners.
 - **Windows 11 logo and wordmark:** Microsoft Corporation.
   https://msftstories.thesourcemediaassets.com/sites/612/2021/06/Windows-11-Logo-1000x404.png
   https://news.microsoft.com/june-24-2021/
+
+The Rust catalogue uses the original colour favicon from Proxmox Server
+Solutions GmbH as a link to the vendor's site.
+
+- **Proxmox brandmark:** https://www.proxmox.com/favicon.svg
+  https://proxmox.com/en/about/company-details/media-kit

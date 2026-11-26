@@ -812,12 +812,25 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
             r#"<form class="catalog-selection" method="post" action="{ROUTE}/add" data-catalog-selection>"#,
         )?;
     }
-    html.push_str(
-        r#"<div class="table-region catalog-table"><table class="catalog-versions" aria-labelledby="catalog-title">
-<thead><tr><th scope="col">Distribution</th><th scope="col">Version</th>
-<th scope="col">Intel / AMD<br><small>amd64</small></th>
-<th scope="col">ARM 64 bits<br><small>arm64</small></th></tr></thead><tbody>"#,
-    );
+    write!(
+        html,
+        r#"<div class="catalog-tabs" data-catalog-tabs hidden>
+<button type="button" class="catalog-tab-arrow" data-tab-scroll="-1" aria-label="Afficher les onglets précédents" hidden>{}</button>
+<div class="catalog-tab-list" role="tablist" aria-label="Distributions">"#,
+        icon("M15 18l-6-6 6-6")
+    )?;
+    for (code, title) in DISTRIBUTIONS {
+        write!(
+            html,
+            r#"<button type="button" class="catalog-tab" role="tab" id="catalog-tab-{code}" aria-controls="catalog-panel-{code}" aria-selected="false" tabindex="-1">{}<span>{title}</span></button>"#,
+            distro_icon(code)
+        )?;
+    }
+    write!(
+        html,
+        r#"</div><button type="button" class="catalog-tab-arrow" data-tab-scroll="1" aria-label="Afficher les onglets suivants" hidden>{}</button></div>"#,
+        icon("M9 18l6-6-6-6")
+    )?;
     let mut query = db.prepare(
         "WITH entries AS (
             SELECT c.id,c.version_full,c.arch,c.major, EXISTS(
@@ -841,25 +854,24 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
     let mut available = false;
     for (code, title) in DISTRIBUTIONS {
         let mut rows = query.query(rusqlite::params![code, CATALOG_PER_DISTRIBUTION as i64])?;
-        let icon = distro_icon(code);
         let mut row = rows.next()?;
+        write!(
+            html,
+            r#"<section id="catalog-panel-{code}" class="catalog-panel" aria-labelledby="catalog-heading-{code}">
+<h3 id="catalog-heading-{code}">{title}</h3>
+<div class="table-region catalog-table"><table class="catalog-versions" aria-labelledby="catalog-heading-{code}">
+<thead><tr><th scope="col">Version</th><th scope="col">Intel / AMD<br><small>amd64</small></th>
+<th scope="col">ARM 64 bits<br><small>arm64</small></th></tr></thead><tbody>"#,
+        )?;
         if row.is_none() {
-            write!(
-                html,
-                r#"<tr><th scope="row"><span class="image-name">{icon}<span>{title}</span></span></th>
-<td colspan="3"><span class="record-meta">Aucune version disponible</span></td></tr>"#,
-            )?;
+            html.push_str(r#"<tr><td colspan="3"><span class="record-meta">Aucune version disponible</span></td></tr>"#);
         }
         while let Some(version) = row {
-            write!(
-                html,
-                r#"<tr><th scope="row"><span class="image-name">{icon}<span>{title}</span></span></th>"#,
-            )?;
             catalog_version(&mut html, title, version, can_edit, &mut available)?;
             row = rows.next()?;
         }
+        html.push_str("</tbody></table></div></section>");
     }
-    html.push_str("</tbody></table></div>");
     if can_edit {
         let disabled = if available { "" } else { " disabled" };
         write!(
@@ -872,21 +884,21 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
 <header class="section-heading"><h2 id="catalog-media-title">Médias d’installation</h2></header>
 <div class="table-region catalog-table"><table class="catalog-media-table" aria-labelledby="catalog-media-title">
 <thead><tr><th scope="col">Système</th><th scope="col">Préparation</th></tr></thead><tbody>
-<tr><th scope="row"><span class="image-name">{}<span>Proxmox VE {}</span></span></th>
+<tr><th scope="row"><span class="image-name"><a class="catalog-vendor" href="https://www.proxmox.com/" aria-label="Site officiel de Proxmox">{}</a><span>Proxmox VE {}</span></span></th>
 <td><form method="post" action="{ROUTE}/proxmox" class="catalog-media-form">
 <div class="form-actions"><select name="arch" aria-label="Architecture de Proxmox VE" aria-describedby="proxmox-requirements" required>
-<option value="amd64">Intel / AMD (amd64)</option><option value="arm64">ARM64</option></select>
-<button>Télécharger et préparer</button></div>
-<p class="record-meta" id="proxmox-requirements">8 Gio libres sur le serveur et au moins 6 Gio de RAM sur le client PXE.</p>
+<option value="amd64">Intel / AMD</option><option value="arm64">ARM64</option></select>
+<button aria-describedby="proxmox-requirements">Préparer l’ISO</button></div>
 </form></td></tr>
 <tr><th scope="row"><span class="image-name">{}<span>Red Hat Enterprise Linux 9</span></span></th>
-<td><div class="form-actions"><a class="button" href="{REDHAT_ROUTE}">Télécharger depuis Red Hat</a>
+<td><div class="form-actions"><a class="button" href="{REDHAT_ROUTE}" aria-label="Télécharger depuis Red Hat">Télécharger</a>
 <a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer le DVD</a></div></td></tr>
-<tr><th scope="row"><img class="windows-wordmark" src="/console-assets/windows-11.png" width="192" height="32" alt="Windows 11"></th>
-<td><div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso">Importer les fichiers</a>
-<a class="button button--quiet" href="/settings/windows">Gérer les éditions</a></div>
-<p class="record-meta">Média d’installation et environnement de démarrage WinPE.</p></td></tr>
-</tbody></table></div></section>"#,
+<tr><th scope="row"><span class="windows-wordmark"><img src="/console-assets/windows-11.png" width="1000" height="404" alt="Windows 11"></span></th>
+<td><div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso" aria-label="Importer les fichiers Windows">Importer</a>
+<a class="button button--quiet" href="/settings/windows">Gérer les éditions</a></div></td></tr>
+</tbody></table></div>
+<p class="record-meta catalog-media-note" id="proxmox-requirements">Proxmox VE requiert 8 Gio libres sur le serveur et au moins 6 Gio de RAM sur le client PXE.</p>
+</section>"#,
             distro_icon("proxmox"),
             media::PROXMOX_VERSION,
             distro_icon("rhel9")
@@ -904,9 +916,9 @@ fn catalog_version(
     available: &mut bool,
 ) -> Result<(), ErrorBox> {
     let version: String = row.get(0)?;
-    html.push_str(r#"<td class="catalog-version">"#);
+    html.push_str(r#"<tr><th scope="row" class="catalog-version">"#);
     escape(html, &version);
-    html.push_str("</td>");
+    html.push_str("</th>");
     for (arch, column) in [("amd64", 1), ("arm64", 3)] {
         let id: Option<i64> = row.get(column)?;
         let managed: bool = row.get(column + 1)?;
