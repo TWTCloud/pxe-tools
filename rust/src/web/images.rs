@@ -612,8 +612,7 @@ fn distro_icon(code: &str) -> String {
         "almalinux" | "centos" | "debian" | "fedora" | "proxmox" | "rocky" | "ubuntu" => format!(
             r#"<img class="distro-icon" src="/console-assets/{code}.svg" width="28" height="28" alt="">"#
         ),
-        "windows" => icon("M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6"),
-        "rhel9" => icon("M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18zm0 6a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"),
+        "rhel9" => r#"<img class="distro-icon" src="/console-assets/red-hat-enterprise-linux.png" width="28" height="28" alt="">"#.into(),
         _ => icon("M4 4h16v16H4zM8 8h8m-8 4h8m-8 4h4"),
     }
 }
@@ -848,7 +847,7 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
         if let Some(row) = row {
             write!(
                 html,
-                r#"<table class="catalog-versions" aria-label="Versions de {title}"><thead><tr>
+                r#"<table class="catalog-versions" aria-label="{title} · Versions et architectures"><thead><tr>
 <th scope="col">Version</th><th scope="col">Intel / AMD<br><small>amd64</small></th>
 <th scope="col">ARM 64 bits<br><small>arm64</small></th></tr></thead><tbody>"#,
             )?;
@@ -881,14 +880,14 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
 <article class="panel image-card">{}<p>Préparez un DVD officiel de RHEL 9 pour le démarrage réseau.</p>
 <div class="form-actions"><a class="button" href="{REDHAT_ROUTE}">Télécharger depuis Red Hat</a>
 <a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer le DVD</a></div></article>
-<article class="panel image-card">{}<p>Importez le média d’installation et un environnement de démarrage WinPE.</p>
+<article class="panel image-card"><h3 class="image-name"><img class="windows-wordmark" src="/console-assets/windows-11.png" width="192" height="32" alt="Windows 11"></h3>
+<p>Importez le média d’installation et un environnement de démarrage WinPE.</p>
 <div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso">Importer les fichiers</a>
 <a class="button button--quiet" href="/settings/windows">Gérer les éditions</a></div></article>"#,
             heading("proxmox", "Proxmox VE"),
             media::PROXMOX_VERSION,
             media::PROXMOX_VERSION,
-            heading("rhel9", "Red Hat Enterprise Linux"),
-            heading("windows", "Windows")
+            heading("rhel9", "Red Hat Enterprise Linux")
         )?;
         html.push_str("</div>");
     }
