@@ -19,6 +19,15 @@ use std::{fmt::Write, path::Path};
 
 pub(super) const ROUTE: &str = "/settings/images";
 const PAGE_SIZE: u64 = 100;
+const CATALOG_PER_DISTRIBUTION: usize = 50;
+const DISTRIBUTIONS: [(&str, &str); 6] = [
+    ("debian", "Debian"),
+    ("ubuntu", "Ubuntu Server"),
+    ("centos", "CentOS Stream"),
+    ("fedora", "Fedora Server"),
+    ("almalinux", "AlmaLinux"),
+    ("rocky", "Rocky Linux"),
+];
 
 #[derive(Clone, Copy)]
 pub(super) enum Route {
@@ -538,12 +547,17 @@ fn queue_form(
     db: &Connection,
     fields: form_urlencoded::Parse<'_>,
 ) -> Result<Option<Reply>, ErrorBox> {
-    let mut image = None;
+    let mut images = Vec::new();
     let mut refresh = false;
     let mut rows = Vec::new();
     for (name, value) in fields {
         match name.as_ref() {
-            "image" if image.is_none() => image = Some(value.parse::<i64>()),
+            "image" if images.len() < DISTRIBUTIONS.len() * CATALOG_PER_DISTRIBUTION => {
+                match value.parse::<i64>() {
+                    Ok(id) if id > 0 => images.push(id),
+                    _ => return Ok(Some(invalid())),
+                }
+            }
             "action" if !refresh && value == "refresh" => refresh = true,
             "rows[]" if rows.len() < 100 => rows.push(value),
             _ => {
@@ -554,9 +568,9 @@ fn queue_form(
             }
         }
     }
-    if refresh {
+    if refresh && images.is_empty() && rows.is_empty() {
         refresh_catalog(db)?;
-    } else if !rows.is_empty() && image.is_none() {
+    } else if !refresh && !rows.is_empty() && images.is_empty() {
         let mut matched = false;
         for display in rows {
             let mut fields = display.split(':');
@@ -578,17 +592,17 @@ fn queue_form(
                 "Images indisponibles\n",
             )));
         }
-    } else {
-        let available = match image {
-            Some(Ok(id)) if id > 0 => queue_image(db, id, false)?.is_some(),
-            _ => false,
-        };
-        if !available {
-            return Ok(Some(plain(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Image indisponible\n",
-            )));
+    } else if !refresh && rows.is_empty() && !images.is_empty() {
+        for id in images {
+            if queue_image(db, id, false)?.is_none() {
+                return Ok(Some(plain(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "Une image de la sélection est indisponible. Actualisez le catalogue.\n",
+                )));
+            }
         }
+    } else {
+        return Ok(Some(invalid()));
     }
     Ok(None)
 }
@@ -718,7 +732,8 @@ fn distro_icon(code: &str) -> String {
         "almalinux" | "centos" | "debian" | "fedora" | "proxmox" | "rocky" | "ubuntu" => format!(
             r#"<img class="distro-icon" src="/console-assets/{code}.svg" width="28" height="28" alt="">"#
         ),
-        "windows" => icon("M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"),
+        "windows" => icon("M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6"),
+        "rhel9" => icon("M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18zm0 6a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"),
         _ => icon("M4 4h16v16H4zM8 8h8m-8 4h8m-8 4h4"),
     }
 }
@@ -898,7 +913,7 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
 fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
     let mut html = String::from(
         r#"<section id="catalogue" aria-labelledby="catalog-title"><header class="section-heading">
-<div><h2 id="catalog-title">Catalogue des systèmes</h2><p class="record-meta">Téléchargez les images disponibles depuis leurs éditeurs ou importez vos propres médias.</p></div>"#,
+<div><h2 id="catalog-title">Catalogue des systèmes</h2><p class="record-meta">Ouvrez une distribution pour voir les versions et architectures au catalogue.</p></div>"#,
     );
     if can_edit {
         write!(
@@ -908,80 +923,72 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
     }
     html.push_str("</header>");
     html.push_str(&refresh_button(db)?);
-    html.push_str(r#"<div class="panel-grid image-catalog">"#);
-    let mut query = db.prepare(
-        "SELECT c.id,c.version_full,c.arch, EXISTS(
-            SELECT 1 FROM os_images i WHERE i.distro=c.distro AND i.arch=c.arch
-                AND COALESCE(NULLIF(i.version_full,''),i.version)=c.version_full
-         ) AS managed FROM catalog_entries c
-         WHERE c.distro=?1 AND c.arch IN ('amd64','arm64')
-           AND ((c.distro='debian' AND c.extract_method='direct')
-             OR (c.distro='ubuntu' AND c.extract_method='iso_extract')
-                      OR (c.distro IN ('fedora','centos','almalinux','rocky') AND c.extract_method='direct'))
-         ORDER BY c.major DESC,c.version_full DESC,c.arch,c.id LIMIT 50",
-    )?;
-    for (code, title, description) in [
-        (
-            "debian",
-            "Debian",
-            "Fichiers de démarrage et d’installation réseau.",
-        ),
-        (
-            "ubuntu",
-            "Ubuntu Server",
-            "ISO officielle et fichiers de démarrage extraits sur le serveur.",
-        ),
-        ("centos", "CentOS Stream", "Installateur réseau officiel."),
-        ("fedora", "Fedora Server", "Installateur réseau officiel."),
-        ("almalinux", "AlmaLinux", "Installateur réseau officiel."),
-        ("rocky", "Rocky Linux", "Installateur réseau officiel."),
-    ] {
+    if can_edit {
         write!(
             html,
-            r#"<article class="panel image-card">{}<p>{description}</p>"#,
-            heading(code, title)
+            r#"<form class="catalog-selection" method="post" action="{ROUTE}/add" data-catalog-selection>"#,
         )?;
-        let mut rows = query.query([code])?;
-        let mut options = String::new();
-        let mut count = 0;
-        let mut available = 0;
-        while let Some(row) = rows.next()? {
-            count += 1;
-            let id: i64 = row.get(0)?;
-            let version: String = row.get(1)?;
-            let arch: String = row.get(2)?;
-            let managed: bool = row.get(3)?;
-            available += usize::from(!managed);
-            let disabled = if managed { " disabled" } else { "" };
-            write!(options, r#"<option value="{id}"{disabled}>{title} "#)?;
-            escape(&mut options, &version);
-            options.push_str(" · ");
-            escape(&mut options, architecture(&arch));
-            if managed {
-                options.push_str(" · Sur ce serveur");
-            }
-            options.push_str("</option>");
-        }
-        if count == 0 {
-            html.push_str(r#"<p class="record-meta">Aucune version dans le catalogue. Actualisez-le pour rechercher les images.</p>"#);
-        } else if can_edit {
-            let disabled = if available == 0 { " disabled" } else { "" };
-            write!(
-                html,
-                r#"<form class="form-stack" method="post" action="{ROUTE}">
-<div class="field"><label for="image-{code}">Version et architecture</label><select id="image-{code}" name="image" required{disabled}>
-<option value="" selected disabled>Choisir une version de {title}</option>{options}</select></div>
-<div class="form-actions"><button{disabled}>Télécharger</button></div></form>"#
-            )?;
+    }
+    let mut query = db.prepare(
+        "WITH entries AS (
+            SELECT c.id,c.version_full,c.arch,c.major, EXISTS(
+                SELECT 1 FROM os_images i WHERE i.distro=c.distro AND i.arch=c.arch
+                    AND COALESCE(NULLIF(i.version_full,''),i.version)=c.version_full
+            ) AS managed FROM catalog_entries c
+            WHERE c.distro=?1 AND c.arch IN ('amd64','arm64')
+               AND ((c.distro='debian' AND c.extract_method='direct')
+                 OR (c.distro='ubuntu' AND c.extract_method='iso_extract')
+                 OR (c.distro IN ('fedora','centos','almalinux','rocky') AND c.extract_method='direct'))
+            ORDER BY c.major DESC,c.version_full DESC,c.arch,c.id LIMIT ?2
+         )
+         SELECT version_full,
+                MAX(CASE WHEN arch='amd64' THEN id END),
+                MAX(arch='amd64' AND managed),
+                MAX(CASE WHEN arch='arm64' THEN id END),
+                MAX(arch='arm64' AND managed)
+         FROM entries GROUP BY version_full
+         ORDER BY MAX(major) DESC,version_full DESC",
+    )?;
+    let mut opened = false;
+    let mut available = false;
+    for (code, title) in DISTRIBUTIONS {
+        let mut rows = query.query(rusqlite::params![code, CATALOG_PER_DISTRIBUTION as i64])?;
+        let row = rows.next()?;
+        let open = if !opened && row.is_some() {
+            opened = true;
+            " open"
         } else {
+            ""
+        };
+        write!(
+            html,
+            r#"<details class="catalog-distribution"{open}><summary class="image-name">{}<span>{title}</span></summary>"#,
+            distro_icon(code)
+        )?;
+        if let Some(row) = row {
             write!(
                 html,
-                r#"<p class="record-meta">Versions et architectures au catalogue&nbsp; {count}</p>"#
+                r#"<table class="catalog-versions" aria-label="Versions de {title}"><thead><tr>
+<th scope="col">Version</th><th scope="col">Intel / AMD<br><small>amd64</small></th>
+<th scope="col">ARM 64 bits<br><small>arm64</small></th></tr></thead><tbody>"#,
             )?;
+            catalog_version(&mut html, title, row, can_edit, &mut available)?;
+            while let Some(row) = rows.next()? {
+                catalog_version(&mut html, title, row, can_edit, &mut available)?;
+            }
+            html.push_str("</tbody></table>");
+        } else {
+            html.push_str(r#"<p class="record-meta">Aucune version disponible. Actualisez le catalogue pour rechercher des images.</p>"#);
         }
-        html.push_str("</article>");
+        html.push_str("</details>");
     }
     if can_edit {
+        let disabled = if available { "" } else { " disabled" };
+        write!(
+            html,
+            r#"<div class="form-actions"><button type="submit"{disabled}>Télécharger la sélection</button></div></form>
+<div class="panel-grid image-catalog">"#,
+        )?;
         write!(
             html,
             r#"<article class="panel image-card">{}<p>Installez Proxmox VE directement avec l’ISO officielle.</p>
@@ -1003,7 +1010,43 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
             heading("rhel9", "Red Hat Enterprise Linux"),
             heading("windows", "Windows")
         )?;
+        html.push_str("</div>");
     }
-    html.push_str("</div></section>");
+    html.push_str("</section>");
     Ok(html)
+}
+
+fn catalog_version(
+    html: &mut String,
+    title: &str,
+    row: &rusqlite::Row<'_>,
+    can_edit: bool,
+    available: &mut bool,
+) -> Result<(), ErrorBox> {
+    let version: String = row.get(0)?;
+    html.push_str(r#"<tr><th scope="row">"#);
+    escape(html, &version);
+    html.push_str("</th>");
+    for (arch, column) in [("amd64", 1), ("arm64", 3)] {
+        let id: Option<i64> = row.get(column)?;
+        let managed: bool = row.get(column + 1)?;
+        html.push_str("<td>");
+        match (id, managed) {
+            (Some(id), false) if can_edit => {
+                *available = true;
+                write!(
+                    html,
+                    r#"<label class="catalog-choice"><input type="checkbox" name="image" value="{id}" aria-label=""#
+                )?;
+                escape(html, &format!("{title} {version} · {}", architecture(arch)));
+                html.push_str(r#""></label>"#);
+            }
+            (Some(_), true) => html.push_str(r#"<span class="record-meta">Ajoutée</span>"#),
+            (Some(_), false) => html.push_str("Disponible"),
+            (None, _) => html.push_str(r#"<span class="record-meta">Indisponible</span>"#),
+        }
+        html.push_str("</td>");
+    }
+    html.push_str("</tr>");
+    Ok(())
 }
