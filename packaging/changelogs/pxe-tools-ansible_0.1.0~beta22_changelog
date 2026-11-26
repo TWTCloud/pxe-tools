@@ -1,0 +1,72 @@
+pxe-tools-ansible (0.1.0~beta22) stable; urgency=medium
+
+  * Distribuer le module facultatif avec le socle 0.1.0~beta22.
+
+ -- PXE Tools <security@pxetools.com>  Thu, 26 Nov 2026 00:00:00 +0000
+
+pxe-tools-ansible (0.1.0~beta21) stable; urgency=medium
+
+  * Distribuer le module facultatif avec le socle 0.1.0~beta21.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools-ansible (0.1.0~beta20) stable; urgency=medium
+
+  * Distribuer le module facultatif avec le socle 0.1.0~beta20.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools-ansible (0.1.0~beta19) stable; urgency=medium
+
+  * Distribuer le module facultatif avec le socle 0.1.0~beta19.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools-ansible (0.1.0~beta18) stable; urgency=medium
+
+  * Distribuer le module facultatif avec le socle 0.1.0~beta18.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools-ansible (0.1.0~beta17) stable; urgency=medium
+
+  * Distribuer le module facultatif avec le socle 0.1.0~beta17.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools-ansible (0.1.0~beta16) stable; urgency=medium
+
+  * Distribuer le module facultatif avec le socle 0.1.0~beta16.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools-ansible (0.1.0~beta15) stable; urgency=medium
+
+  * Distribuer le module facultatif avec le socle 0.1.0~beta15.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools-ansible (0.1.0~beta14) stable; urgency=medium
+
+  * Distribuer le module facultatif avec le socle 0.1.0~beta14.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools-ansible (0.1.0~beta13) stable; urgency=medium
+
+  * Distribuer le module facultatif avec le socle Rust amd64 et arm64.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools-ansible (0.1.0~beta12) stable; urgency=medium
+
+  * Distribuer le module Ansible facultatif pour les serveurs amd64 et arm64.
+
+ -- PXE Tools <security@pxetools.com>  Mon, 23 Nov 2026 07:59:30 +0000
+
+pxe-tools-ansible (0.1.0~beta11) stable; urgency=medium
+
+  * Lancer Ansible après confirmation du premier démarrage du système installé.
+  * Utiliser le compte technique configuré pour les nouvelles installations Debian.
+
+ -- PXE Tools <security@pxetools.com>  Mon, 23 Nov 2026 05:54:08 +0000
