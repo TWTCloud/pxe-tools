@@ -452,6 +452,28 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 #catalogue { scroll-margin-top: calc(var(--header-height) + var(--space-4)); }
 .image-list { display: grid; gap: var(--space-3); }
 .image-catalog { align-items: stretch; }
+.catalog-distribution { background: var(--surface); margin: var(--space-2) 0; }
+.console .catalog-distribution > summary { align-items: center; }
+.catalog-distribution > p { margin: var(--space-3) 0 0; }
+.catalog-versions {
+  width: 100%;
+  margin-top: var(--space-3);
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+.catalog-versions :is(th, td) {
+  padding: var(--space-2);
+  border-top: 1px solid var(--line);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.catalog-versions th:first-child { text-align: start; }
+.catalog-versions small { color: var(--muted); font-weight: 500; }
+.catalog-versions .record-meta { margin: 0; }
+.catalog-choice { display: grid; min-height: 2rem; place-items: center; cursor: pointer; }
+.catalog-choice > input[type="checkbox"] { margin: 0; }
+.catalog-choice:hover { background: var(--canvas); }
+.catalog-selection > .form-actions { margin: var(--space-3) 0 var(--space-5); }
 .image-card > header, .image-actions {
   display: flex;
   flex-wrap: wrap;
