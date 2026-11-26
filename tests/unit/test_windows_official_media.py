@@ -55,13 +55,12 @@ class OfficialWindowsMediaTest(unittest.TestCase):
                 "install_sha256": MEDIA.windows.fingerprint(image),
                 "size": image.stat().st_size,
             }
-            request = {"sha256": digest, "profile": "fr-fr", "source": "https://example.invalid/images"}
+            request = {"sha256": digest, "profile": "fr-fr", "source": "windows.iso"}
 
             def download(url, target, *_args, **_kwargs):
-                if url == MEDIA.WIMBOOT_URL:
-                    target.write_bytes(boot_loader.read_bytes())
-                    return target
-                return source
+                self.assertEqual(url, MEDIA.WIMBOOT_URL)
+                target.write_bytes(boot_loader.read_bytes())
+                return target
 
             def extract_boot(_args, *, stdout, check):
                 stdout.write(b"MSWIM\0\0\0boot")
@@ -76,16 +75,21 @@ class OfficialWindowsMediaTest(unittest.TestCase):
                 patch.object(MEDIA.subprocess, "run", side_effect=extract_boot),
                 patch.object(MEDIA, "WIMBOOT_SHA", MEDIA.windows.fingerprint(boot_loader)),
             ):
-                MEDIA.prepare_official_windows(request, root, stage, cache, progress.append)
+                with self.assertRaisesRegex(MEDIA.MediaError, "empreinte Microsoft"):
+                    MEDIA.prepare_official_windows(
+                        {**request, "sha256": "0" * 64}, root, stage, cache, progress.append, source,
+                    )
+                progress.clear()
+                MEDIA.prepare_official_windows(request, root, stage, cache, progress.append, source)
                 result = library / digest
-                self.assertEqual(progress, [15, 85, 95])
+                self.assertEqual(progress, [85, 95])
                 self.assertTrue(image.samefile(result / "install.wim"))
                 self.assertEqual((result / "boot.wim").read_bytes(), b"MSWIM\0\0\0boot")
                 manifest = json.loads((result / "media.json").read_text())
                 self.assertEqual(manifest["editions"], [{"edition": "Core", "index": 2}])
                 self.assertEqual(manifest["iso_sha256"], digest)
                 self.assertIn("déjà préparé", MEDIA.prepare_official_windows(request, root, stage, cache, progress.append))
-                self.assertEqual(fetch.call_count, 2)
+                self.assertEqual(fetch.call_count, 1)
 
 
 if __name__ == "__main__":

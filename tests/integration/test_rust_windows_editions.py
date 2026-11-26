@@ -52,6 +52,7 @@ def media(root, profile, edition, label, index):
 def check_shared_windows(public, database, tls, auth, form_headers):
     status, _, page = request(OFFICIAL_WINDOWS, tls=tls, headers=auth)
     assert status == 200 and b'name="language"' in page and b'name="url"' in page
+    assert b'name="filename"' in page
     assert b'name="sha256"' not in page
     official = 'https://software.download.prss.microsoft.com/dbazure/Win11_French_x64.iso?token=fixture'
     form = {'language': 'fr-fr', 'url': official}
@@ -64,6 +65,17 @@ def check_shared_windows(public, database, tls, auth, form_headers):
     with sqlite3.connect(database) as db:
         stored = db.execute("SELECT value FROM settings WHERE key LIKE 'media_import_request_%'").fetchone()[0]
         assert official not in stored and json.loads(stored)['kind'] == 'windows-official'
+    for filename in ('../windows.iso', '/tmp/windows.iso', 'windows.zip'):
+        assert request(OFFICIAL_WINDOWS, tls=tls, form={'language': 'fr-fr', 'filename': filename},
+                       headers=form_headers)[0] == 422
+    assert request(OFFICIAL_WINDOWS, tls=tls, form={**form, 'filename': 'windows.iso'},
+                   headers=form_headers)[0] == 422
+    assert request(OFFICIAL_WINDOWS, tls=tls, form={'language': 'fr-fr', 'filename': 'Windows11.ISO'},
+                   headers=form_headers)[0] == 303
+    with sqlite3.connect(database) as db:
+        stored = db.execute("SELECT value FROM settings WHERE key LIKE 'media_import_request_%' "
+                            "ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+        assert json.loads(stored)['source'] == 'Windows11.ISO' and not json.loads(stored)['remote']
 
     digest = 'c' * 64
     directory = public / 'media' / 'windows' / digest

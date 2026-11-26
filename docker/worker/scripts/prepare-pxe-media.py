@@ -377,7 +377,7 @@ def windows_editions(image, stage):
             for edition in ("Core", "Professional") if edition in editions]
 
 
-def prepare_official_windows(request, root, stage, cache, progress):
+def prepare_official_windows(request, root, stage, cache, progress, local_iso=None):
     sha = request["sha256"]
     destination = directory(root, "media/windows") / sha
     if destination.exists() or destination.is_symlink():
@@ -393,11 +393,13 @@ def prepare_official_windows(request, root, stage, cache, progress):
                         for name in ("boot.wim", "wimboot", image))):
             return "Média Windows 11 déjà préparé dans le cache PXE."
         raise MediaError("Le média Windows en cache est incomplet.")
-    progress(15)
-    source = download(
-        request["source"], stage / "windows.iso", WINDOWS_CDN, progress,
-        validate_path=lambda path: path.startswith("/dbazure/") and path.endswith(".iso"),
-    )
+    source = local_iso
+    if source is None:
+        progress(15)
+        source = download(
+            request["source"], stage / "windows.iso", WINDOWS_CDN, progress,
+            validate_path=lambda path: path.startswith("/dbazure/") and path.endswith(".iso"),
+        )
     progress(85)
     if windows.fingerprint(source) != sha:
         raise MediaError("L’ISO ne correspond pas à l’empreinte Microsoft de cette langue.")
@@ -470,9 +472,14 @@ def prepare(request, root, progress):
         stage = Path(tmp)
         cache = directory(root, "media/windows-cache")
         if kind == "windows-official":
-            if not request["remote"] or profile not in {"fr-fr", "en-us", "en-gb"}:
+            if profile not in {"fr-fr", "en-us", "en-gb"}:
                 raise MediaError("La sélection du média officiel Windows est invalide.")
-            return prepare_official_windows(request, root, stage, cache, progress)
+            local_iso = None
+            if not request["remote"]:
+                if not request["source"].lower().endswith(".iso"):
+                    raise MediaError("Sélectionnez un fichier ISO dans le dossier privé.")
+                local_iso = local_file(inbox, request["source"])
+            return prepare_official_windows(request, root, stage, cache, progress, local_iso)
         rhel = directory(root, "media/rhel9") / sha if kind == "rhel9" else None
         if rhel is not None and (rhel / ".pxe-media.json").is_file():
             return "DVD RHEL déjà préparé dans le cache PXE."

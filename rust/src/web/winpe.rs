@@ -385,6 +385,16 @@ pub(super) fn logs_request(path: &str) -> bool {
     if matches!(path, "/boot.ipxe" | BOOT) {
         return true;
     }
+    if let Some((id, asset)) = path
+        .strip_prefix(SHARED_PREFIX)
+        .and_then(|path| path.split_once('/'))
+    {
+        return crate::media::digest(id)
+            && matches!(
+                asset,
+                "wimboot" | "boot.wim" | "install.wim" | "install.esd"
+            );
+    }
     match path.strip_prefix(PREFIX).map(|path| path.split_once('/')) {
         Some(Some((id, asset))) => {
             valid_id(id)

@@ -132,6 +132,17 @@ fn allowed_url(value: &str, hosts: impl IntoIterator<Item = impl AsRef<str>>) ->
             .any(|host| authority.host().eq_ignore_ascii_case(host.as_ref()))
 }
 
+fn inbox_filename(value: &str) -> bool {
+    value.len() <= 200
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
 impl Import {
     pub fn valid(&self) -> bool {
         if self.kind == "proxmox" {
@@ -160,14 +171,22 @@ impl Import {
                     .all(|b| b.is_ascii_alphanumeric() || b"._~-".contains(&b));
         }
         if self.kind == "windows-official" {
-            return self.remote
-                && WINDOWS_ISOS
-                    .iter()
-                    .any(|(language, _, hash)| *language == self.profile && *hash == self.sha256)
-                && allowed_url(&self.source, [WINDOWS_CDN])
-                && self.source.parse::<Uri>().is_ok_and(|uri| {
-                    uri.path().starts_with("/dbazure/") && uri.path().ends_with(".iso")
-                });
+            let approved = WINDOWS_ISOS
+                .iter()
+                .any(|(language, _, hash)| *language == self.profile && *hash == self.sha256);
+            return approved
+                && if self.remote {
+                    allowed_url(&self.source, [WINDOWS_CDN])
+                        && self.source.parse::<Uri>().is_ok_and(|uri| {
+                            uri.path().starts_with("/dbazure/") && uri.path().ends_with(".iso")
+                        })
+                } else {
+                    inbox_filename(&self.source)
+                        && self
+                            .source
+                            .rsplit_once('.')
+                            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("iso"))
+                };
         }
         matches!(
             self.kind.as_str(),
@@ -181,16 +200,7 @@ impl Import {
             && (if self.remote {
                 allowed_url(&self.source, download_hosts())
             } else {
-                self.source.len() <= 200
-                    && self
-                        .source
-                        .as_bytes()
-                        .first()
-                        .is_some_and(u8::is_ascii_alphanumeric)
-                    && self
-                        .source
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                inbox_filename(&self.source)
             })
     }
 }

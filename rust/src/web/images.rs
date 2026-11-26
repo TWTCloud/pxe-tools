@@ -350,10 +350,23 @@ fn windows_form(error: Option<&str>) -> Result<Reply, ErrorBox> {
         r#"</select></div>
 <div class="field"><label for="windows-url">Lien officiel Microsoft</label>
 <input id="windows-url" type="url" name="url" maxlength="4096" autocomplete="off" spellcheck="false" required></div>
-<div class="form-actions"><button>Télécharger et préparer Windows</button>
-<a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso">Importer un média existant</a></div>
-</form>"#,
+<div class="form-actions"><button>Télécharger et préparer Windows</button></div>
+</form>
+<details class="panel panel--form"><summary>Réutiliser un ISO déjà téléchargé</summary>
+<form class="form-stack" method="post" action="{WINDOWS_ROUTE}">
+<p>Placez le fichier sur le serveur PXE dans le dossier privé <code>media/inbox</code> du stockage HTTP, avec des droits réservés à root. Le serveur vérifie la même empreinte Microsoft avant l’extraction.</p>
+<div class="field"><label for="windows-local-language">Langue de l’ISO</label>
+<select id="windows-local-language" name="language" required>"#,
     )?;
+    for (language, label, _) in media::WINDOWS_ISOS {
+        write!(html, r#"<option value="{language}">{label}</option>"#)?;
+    }
+    html.push_str(
+        r#"</select></div>
+<div class="field"><label for="windows-filename">Nom du fichier ISO sur le serveur</label>
+<input id="windows-filename" name="filename" maxlength="200" autocomplete="off" spellcheck="false" required></div>
+<div class="form-actions"><button>Préparer l’ISO local</button></div></form></details>"#,
+    );
     let mut reply = page(ConsoleSection::Images, "Préparer Windows 11 x64", &html);
     if error.is_some() {
         *reply.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
@@ -363,11 +376,11 @@ fn windows_form(error: Option<&str>) -> Result<Reply, ErrorBox> {
 
 fn queue_windows(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
     let mut language = None;
-    let mut url = None;
+    let mut source = None;
     for (name, value) in form_urlencoded::parse(form) {
         match name.as_ref() {
             "language" if language.is_none() => language = Some(value),
-            "url" if url.is_none() => url = Some(value),
+            "url" | "filename" if source.is_none() => source = Some((name == "url", value)),
             _ => return Ok(invalid()),
         }
     }
@@ -377,18 +390,23 @@ fn queue_windows(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
     else {
         return windows_form(Some("Sélectionnez la langue de l’ISO Microsoft."));
     };
+    let Some((remote, source)) = source else {
+        return Ok(invalid());
+    };
     let request = media::Import {
         kind: "windows-official".into(),
-        source: url.as_deref().unwrap_or_default().trim().into(),
+        source: source.trim().into(),
         sha256: sha256.into(),
         profile: language.into(),
-        remote: true,
+        remote,
         redhat_token: None,
     };
     if !request.valid() {
-        return windows_form(Some(
-            "Collez le lien HTTPS direct de l’ISO fourni par Microsoft.",
-        ));
+        return windows_form(Some(if remote {
+            "Collez le lien HTTPS direct de l’ISO fourni par Microsoft."
+        } else {
+            "Saisissez le nom du fichier ISO dans le dossier privé, sans chemin."
+        }));
     }
     enqueue_media(path, request)
 }
