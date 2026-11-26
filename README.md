@@ -68,12 +68,12 @@ client x86 concerné avant d'utiliser le chargeur signé par cette instance.
 
 ## Installation avec Docker
 
-L’image bêta 23 est disponible pour Linux amd64 et arm64. Depuis la racine
+L’image bêta 24 est disponible pour Linux amd64 et arm64. Depuis la racine
 du dépôt sur un hôte Docker Linux, téléchargez l'image et démarrez l'appliance.
 
 ```sh
-docker pull ghcr.io/twtcloud/pxe-tools:v0.1.0-beta23
-PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta23 \
+docker pull ghcr.io/twtcloud/pxe-tools:v0.1.0-beta24
+PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta24 \
   docker compose -f compose/docker-compose.yml up -d
 ```
 
@@ -82,12 +82,12 @@ Le fichier Compose utilise le réseau de l’hôte pour le PXE. Ouvrez
 le conteneur.
 
 ```sh
-PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta23 \
+PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta24 \
   docker compose -f compose/docker-compose.yml exec pxe-tools cat /run/pxe-tools-rust-guided/setup-code
 ```
 
 Les notes de mise à niveau et les offres de sources accompagnent la
-[bêta 23](https://github.com/TWTCloud/pxe-tools/releases/tag/v0.1.0-beta23).
+[bêta 24](https://github.com/TWTCloud/pxe-tools/releases/tag/v0.1.0-beta24).
 
 ## Données et limites
 
