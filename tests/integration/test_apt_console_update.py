@@ -17,14 +17,17 @@ from urllib.parse import urlencode
 
 ORIGIN = 'https://127.0.0.1'
 ROUTE = '/settings/updates'
+RELEASES = 'https://github.com/TWTCloud/pxe-tools/releases/tag/v'
 WORK = Path('/var/tmp/apt-update-fixture')
 UPDATER = '/usr/lib/pxe-tools/native/apt-console-update.py'
 AUTH = 'Basic ' + base64.b64encode(b'setup-fixture:fixture-only-password').decode()
 CONTEXT = ssl._create_unverified_context()
 
 
-def request(path, form=None, *, authenticate=True, origin=ORIGIN):
+def request(path, form=None, *, authenticate=True, origin=ORIGIN, as_json=False):
     options = {'Authorization': AUTH} if authenticate else {}
+    if as_json:
+        options['Accept'] = 'application/json'
     if form is not None:
         options.update({'Origin': origin, 'Content-Type': 'application/x-www-form-urlencoded'})
     conn = HTTPSConnection('127.0.0.1', context=CONTEXT, timeout=6)
@@ -142,6 +145,8 @@ def main():
     assert code == 200 and current.encode() in page
     assert 'Vérifier les mises à jour'.encode() in page
     assert b'data-update-progress hidden' in page
+    assert b'data-update-action="install" hidden' in page
+    assert (RELEASES + current.replace('~', '-')).encode() in page
     assert page.count(b'<details class="profile-menu">') == 1
     assert b'<span class="profile-name">setup-fixture</span>' in page
     assert b'href="/admin/profile/tokens"' in page and b'action="/logout"' in page
@@ -152,8 +157,13 @@ def main():
     try:
         code, response = request(ROUTE, {'action': 'auto'})
         assert code == 200 and json.loads(response)['phase'] == 'queued'
+        code, response = request(ROUTE, {'action': 'check'}, as_json=True)
+        assert code == 200 and json.loads(response)['message'] == 'Recherche des mises à jour…'
         code, page = request(ROUTE)
         assert code == 200 and b'data-update-phase="queued"' in page
+        assert b'<h2 id="update-heading">PXE Tools</h2>' in page
+        assert 'Vérifier les mises à jour'.encode() in page
+        assert 'Actualiser l’état'.encode() not in page and 'planifiée'.encode() not in page
         assert b'data-update-progress>' in page
         assert b'role="progressbar"' in page and b'aria-valuenow' not in page
     finally:
@@ -172,21 +182,32 @@ def main():
     code, page = request(ROUTE)
     assert code == 200 and target.encode() in page and b'Installer la mise' in page
     assert b'data-update-action="install"' in page and b'type="checkbox"' not in page
-    install = {'action': 'install', 'plan': json.dumps({'pxe-tools': target}, separators=(',', ':'))}
+    success, body = request(ROUTE + '/status')
+    status = json.loads(body)
+    assert success == 200 and status['installed']['pxe-tools'] == current
+    assert status['candidates'] == {'pxe-tools': target}
+    assert status['release_notes'] == RELEASES + target.replace('~', '-')
+    assert status['release_notes'].encode() in page
+    install = {'action': 'install', 'plan': status['plan']}
     assert request(ROUTE, {**install, 'plan': '{}'})[0] == 409
+    code, body = request(ROUTE, {**install, 'plan': '{}'}, as_json=True)
+    assert code == 409 and json.loads(body)['plan'] == status['plan']
     db_path = json.loads(Path('/etc/pxe-tools/db.conf').read_text())['path']
     with sqlite3.connect(db_path) as db:
         fixture = db.execute("INSERT INTO init_jobs(job_type,status) VALUES('fixture','running')").lastrowid
     assert request(ROUTE, install)[0] == 303
     wait_for('busy')
-    assert 'Installation reportée'.encode() in request(ROUTE)[1]
+    assert 'Des tâches PXE sont en cours'.encode() in request(ROUTE)[1]
     with sqlite3.connect(db_path) as db:
         db.execute('DELETE FROM init_jobs WHERE id=?', (fixture,))
 
     key = Path('/etc/pxe-tools/master.key')
     cert = Path('/var/lib/pxe-tools-native/tls/cert.pem')
     before = [sha256(file.read_bytes()).hexdigest() for file in (key, cert)]
-    assert request(ROUTE, install)[0] == 303
+    code, body = request(ROUTE, install, as_json=True)
+    queued = json.loads(body)
+    assert code == 200 and queued['phase'] == 'install_queued'
+    assert queued['message'] == 'Préparation de l’installation…'
     wait_for('installed', timeout=220)
     assert command('dpkg-query', '-W', '-f=${Version}', 'pxe-tools',
                    capture_output=True, text=True).stdout == target
@@ -194,7 +215,7 @@ def main():
                    capture_output=True, text=True).stdout == 'installed'
     assert [sha256(file.read_bytes()).hexdigest() for file in (key, cert)] == before
     code, page = request(ROUTE)
-    assert code == 200 and target.encode() in page and b'Installer la mise' not in page
+    assert code == 200 and target.encode() in page and b'data-update-action="install" hidden' in page
     assert 'Mise à jour terminée'.encode() in page
     command('systemctl', 'is-active', '--quiet', 'pxe-tools-worker.service')
     print('Native web-triggered signed APT update restored HTTPS, SQLite, the master key and TLS.')

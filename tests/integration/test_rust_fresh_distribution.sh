@@ -101,7 +101,7 @@ docker exec "$container" bash -ec '
         [[ "$output" == *"https://$address/admin/"* && "$output" != *"$code"* ]]
     fi
 ' _ "$variant" "$address"
-if [[ "$variant" == apt ]] && docker exec "$container" test -f /usr/lib/pxe-tools/native/apt-console-update.py; then
+if [[ "$variant" == apt ]]; then
     # Exercise the web updater with a signed package that pulls a new Debian dependency.
     docker exec -e DEBIAN_FRONTEND=noninteractive "$container" \
         apt-get install -y --no-install-recommends apt-utils gnupg

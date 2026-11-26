@@ -49,75 +49,146 @@
   const notice = document.querySelector('[data-update-notice] a');
   const panel = document.querySelector('[data-update-phase]');
   if (!notice && !panel) return;
-  const pending = ['queued', 'checking', 'install_queued', 'installing'];
+  const pending = phase => ['queued', 'checking', 'install_queued', 'installing'].includes(phase);
   const route = '/settings/updates';
-  const actions = panel?.querySelectorAll('[data-update-action]') ?? [];
-  const progress = panel?.querySelector('[data-update-progress]');
-  const message = panel?.querySelector('[data-update-message]');
-  const deadline = Date.now() + (panel ? 26 * 60_000 : 90_000);
-  let phase = panel?.dataset.updatePhase;
-  let submitting = false;
+  const authenticationLost = response => response.redirected || [401, 403].includes(response.status);
+
+  async function request(body) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(body ? route : route + '/status', {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+        signal: controller.signal,
+        ...(body && { method: 'POST', body }),
+      });
+      const hasStatus = !authenticationLost(response) && (response.ok || response.status === 409);
+      const update = hasStatus ? await response.json() : null;
+      return { response, update };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  if (notice) {
+    const deadline = Date.now() + 90_000;
+    async function checkNotice(body) {
+      try {
+        const { response, update } = await request(body);
+        if (authenticationLost(response) || response.status === 404) return;
+        if (update) {
+          notice.hidden = !update.available || pending(update.phase);
+          if (!pending(update.phase)) return;
+        }
+      } catch {
+        // Check the persisted state if the automatic request could not be confirmed.
+      }
+      if (Date.now() < deadline) setTimeout(checkNotice, 5000);
+    }
+    checkNotice(new URLSearchParams({ action: 'auto' }));
+    return;
+  }
+
+  const check = panel.querySelector('[data-update-action="check"]');
+  const install = panel.querySelector('[data-update-action="install"]');
+  const checkButton = check.querySelector('button');
+  const installButton = install.querySelector('button');
+  const progress = panel.querySelector('[data-update-progress]');
+  const message = panel.querySelector('[data-update-message]');
+  const notes = panel.querySelector('[data-update-notes]');
+  const diagnostic = panel.querySelector('[data-update-diagnostic]');
+  const packages = panel.querySelectorAll('[data-update-package]');
+  let phase = panel.dataset.updatePhase;
+  let deadline = 0;
+  let tracking = false;
+  let installing = false;
+  let unconfirmed = false;
 
   function announce(text) {
-    progress.hidden = false;
     if (message.textContent !== text) message.textContent = text;
   }
 
-  for (const action of actions) {
-    action.addEventListener('submit', event => {
-      if (submitting || pending.includes(phase)) {
-        event.preventDefault();
-        return;
-      }
-      submitting = true;
-      for (const form of actions) form.querySelector('button').disabled = true;
-      const installing = action.dataset.updateAction === 'install';
-      panel.querySelector('[data-update-title]').textContent =
-        installing ? 'Installation en cours' : 'Vérification en cours';
-      panel.querySelector('[data-update-description]').textContent =
-        installing ? 'La console se reconnecte après le redémarrage des services.' : '';
-      announce(installing ? 'Installation planifiée…' : 'Vérification planifiée…');
-    });
+  function setTracking(active) {
+    tracking = active;
+    progress.hidden = !active;
+    checkButton.setAttribute('aria-disabled', String(active));
+    installButton.setAttribute('aria-disabled', String(active || pending(phase)));
+    checkButton.disabled = installButton.disabled = false;
   }
 
-  function stop(messageText) {
-    if (!panel || !pending.includes(phase)) return;
-    progress.querySelector('[role=progressbar]').hidden = true;
-    announce(messageText);
+  function renderResult(update) {
+    for (const row of packages) {
+      const name = row.dataset.updatePackage;
+      const installed = update.installed[name];
+      const candidate = update.candidates[name];
+      row.querySelector('[data-update-installed]').textContent = installed ?? 'À vérifier';
+      row.querySelector('[data-update-candidate]').textContent = candidate ?? '—';
+      row.hidden = name !== 'pxe-tools' && !installed && !candidate;
+    }
+    install.elements.plan.value = update.plan;
+    if (!update.available && install.contains(document.activeElement)) {
+      checkButton.focus({ preventScroll: true });
+    }
+    install.hidden = !update.available;
+    notes.href = update.release_notes;
+    diagnostic.hidden = update.phase !== 'failed';
   }
 
-  async function poll(automatic) {
-    if (submitting) return;
+  async function poll(body) {
     try {
-      const response = automatic
-        ? await fetch(route, { method: 'POST', body: new URLSearchParams({ action: 'auto' }) })
-        : await fetch(route + '/status', { cache: 'no-store' });
-      if (response.redirected || [401, 403].includes(response.status)) {
-        stop('Reconnectez-vous pour consulter le résultat de la mise à jour.');
+      const { response, update } = await request(body);
+      if (authenticationLost(response)) {
+        setTracking(false);
+        announce('Rechargez la page pour vous reconnecter.');
         return;
       }
-      if (response.ok) {
-        const update = await response.json();
-        if (notice) notice.hidden = !update.available || pending.includes(update.phase);
-        if (panel && pending.includes(phase)) {
-          if (!pending.includes(update.phase)) {
-            location.reload();
-            return;
-          }
-          phase = update.phase;
-          announce(update.message);
+      if (update) {
+        const requestUnconfirmed = unconfirmed && !body && update.phase === phase;
+        phase = panel.dataset.updatePhase = update.phase;
+        unconfirmed = false;
+        if (!pending(phase)) {
+          setTracking(false);
+          renderResult(update);
+          if (response.status === 409) announce('La version proposée a changé. Vérifiez-la avant de l’installer.');
+          else if (requestUnconfirmed) announce('La demande a échoué. Réessayez.');
+          else announce(update.message);
+          return;
         }
-        if (!pending.includes(update.phase)) return;
+        installing = ['install_queued', 'installing'].includes(phase);
+        announce(update.message);
+      } else if (body) {
+        unconfirmed = true;
       }
     } catch {
-      // The HTTP service can be temporarily unavailable while APT replaces it.
-      if (panel && phase === 'installing') announce('Reconnexion à la console…');
+      if (body) unconfirmed = true;
+      if (installing) announce('Reconnexion à la console…');
     }
-    if (Date.now() < deadline) setTimeout(() => poll(false), 5000);
-    else stop('La console attend encore une réponse. Actualisez l’état pour reprendre le suivi.');
+    if (Date.now() < deadline) {
+      setTimeout(poll, 3000);
+    } else {
+      setTracking(false);
+      announce('La console ne répond pas. Vérifiez les mises à jour pour reprendre le suivi.');
+    }
   }
 
-  if (notice || pending.includes(phase)) poll(Boolean(notice));
+  function follow(form) {
+    const body = form && !pending(phase) ? new URLSearchParams(new FormData(form)) : undefined;
+    installing = body?.get('action') === 'install' || ['install_queued', 'installing'].includes(phase);
+    unconfirmed = false;
+    deadline = Date.now() + 26 * 60_000;
+    setTracking(true);
+    if (body) announce(installing ? 'Préparation de l’installation…' : 'Recherche des mises à jour…');
+    poll(body);
+  }
+
+  for (const form of [check, install]) {
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      if (!tracking && !(form === install && pending(phase))) follow(form);
+    });
+  }
+  if (pending(phase)) follow();
 })();
 
 (() => {

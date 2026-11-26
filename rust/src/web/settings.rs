@@ -74,9 +74,16 @@ impl Route {
         db: &Connection,
         db_path: &Path,
         form: Option<Bytes>,
+        wants_json: bool,
     ) -> Result<Reply, ErrorBox> {
         if matches!(self, Self::Updates | Self::UpdateStatus) {
-            return updates::serve(matches!(self, Self::UpdateStatus), db, db_path, form);
+            return updates::serve(
+                matches!(self, Self::UpdateStatus),
+                db,
+                db_path,
+                form,
+                wants_json,
+            );
         }
         if matches!(self, Self::Ansible | Self::VaultUnlock) {
             return ansible_settings::serve(db, db_path, matches!(self, Self::VaultUnlock), form);

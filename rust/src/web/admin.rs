@@ -13,7 +13,7 @@ use crate::{configured_database, connect};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hyper::{
     body::Bytes,
-    header::{AUTHORIZATION, LOCATION, WWW_AUTHENTICATE},
+    header::{ACCEPT, AUTHORIZATION, LOCATION, WWW_AUTHENTICATE},
     http::request::Parts,
     Response, StatusCode,
 };
@@ -363,6 +363,10 @@ impl Console {
         let path = request.uri.path().to_owned();
         let method = request.method.clone();
         let query = request.uri.query().unwrap_or_default().to_owned();
+        let wants_json = request
+            .headers
+            .get(ACCEPT)
+            .is_some_and(|value| value == "application/json");
         let reply = task::spawn_blocking(move || {
             let mut authenticated = false;
             let reply = (|| {
@@ -500,7 +504,7 @@ impl Console {
                     });
                 }
                 if let Action::Settings(route, form) = action {
-                    return route.serve(&db, &db_path, form).ok();
+                    return route.serve(&db, &db_path, form, wants_json).ok();
                 }
                 render_devices(&db, page, &query).ok()
             })();
