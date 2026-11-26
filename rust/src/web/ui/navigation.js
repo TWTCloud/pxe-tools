@@ -176,6 +176,20 @@
 })();
 
 (() => {
+  const form = document.querySelector('[data-catalog-selection]');
+  if (!form) return;
+  const submit = form.querySelector('button[type="submit"]');
+  function update() {
+    const count = form.querySelectorAll('input[name="image"]:checked').length;
+    submit.disabled = count === 0;
+    submit.textContent = count ? `Télécharger la sélection (${count})` : 'Télécharger la sélection';
+  }
+  form.addEventListener('change', update);
+  window.addEventListener('pageshow', update);
+  update();
+})();
+
+(() => {
   let list = document.getElementById('activity-list');
   const freshness = document.querySelector('[data-activity-refresh]');
   if (!list || !freshness) return;

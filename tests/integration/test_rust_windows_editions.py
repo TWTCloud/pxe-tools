@@ -144,6 +144,36 @@ def check_linux(tls, auth, form_headers):
     print('Ubuntu media selection, architecture-specific menus, ISO streaming and RHEL repository verified.')
 
 
+def check_catalog_selection(database, tls, auth, form_headers):
+    catalogue = '/settings/images/add'
+    choices = [('debian', '13.99', 'amd64'), ('debian', '13.99', 'arm64'),
+               ('fedora', '45', 'amd64')]
+    with sqlite3.connect(database) as db:
+        ids = [db.execute(
+            "INSERT INTO catalog_entries(distro,version_full,arch) VALUES (?,?,?)", choice,
+        ).lastrowid for choice in choices]
+    status, _, page = request(catalogue, tls=tls, headers=auth)
+    assert status == 200 and 'Télécharger la sélection'.encode() in page
+    assert b'Versions de Debian' in page and b'Versions de Fedora Server' in page
+    assert b'amd64' in page and b'arm64' in page
+    for identifier in ids:
+        assert f'type="checkbox" name="image" value="{identifier}"'.encode() in page
+    selection = [('image', str(identifier)) for identifier in ids]
+    assert request(catalogue, tls=tls, form=selection, headers=auth)[0] == 403
+    assert request(catalogue, tls=tls, form=[*selection, ('image', '9999')],
+                   headers=form_headers)[0] == 422
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT COUNT(*) FROM os_images WHERE version_full='13.99'").fetchone() == (0,)
+    assert request(catalogue, tls=tls, form=selection, headers=form_headers)[:2] == (303, '/settings/images')
+    with sqlite3.connect(database) as db:
+        assert db.execute("""SELECT distro,version_full,arch FROM os_images WHERE status='pending'
+                             AND version_full IN ('13.99','45') ORDER BY distro,arch""").fetchall() == choices
+    page = request(catalogue, tls=tls, headers=auth)[2]
+    assert 'Ajoutée'.encode() in page
+    for identifier in ids:
+        assert f'type="checkbox" name="image" value="{identifier}"'.encode() not in page
+
+
 def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
     crypt = CDLL('libcrypt.so.1').crypt
     crypt.argtypes = (c_char_p, c_char_p)
@@ -1095,6 +1125,7 @@ def main(binary):
                     assert request(f'/pxe/windows/{profile}/case.json', source=WINDOWS_CLIENT)[0] == 404
                 assert request('/pxe/windows/boot.wim', source=WINDOWS_CLIENT)[0] == 404
                 check_linux(tls, auth, form_headers)
+                check_catalog_selection(database, tls, auth, form_headers)
                 rhel_sha = check_media(binary, root, public, database, tls, auth, form_headers, env)
                 check_automatic_linux(database, tls, auth, form_headers, rhel_sha)
                 check_proxmox(root, public, database, tls, auth, form_headers)
