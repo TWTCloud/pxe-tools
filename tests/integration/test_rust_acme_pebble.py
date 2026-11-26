@@ -16,6 +16,7 @@ import tempfile
 import time
 from urllib.request import urlopen
 
+from acme_fixture import generate_authority_endpoint
 from test_rust_initial_setup import Client, generate_tls_pair, setup
 
 
@@ -64,28 +65,6 @@ def tls_leaf(port, context):
             return tls.getpeercert(binary_form=True)
 
 
-def generate_authority_endpoint(directory):
-    options = {'cwd':directory, 'check':True, 'stdout':subprocess.DEVNULL, 'stderr':subprocess.DEVNULL}
-    subprocess.run([
-        'openssl','req','-x509','-nodes','-newkey','rsa:2048','-days','1',
-        '-subj','/CN=fixture-ca','-keyout','ca.key','-out','ca.pem',
-        '-addext','basicConstraints=critical,CA:TRUE',
-        '-addext','keyUsage=critical,keyCertSign,cRLSign',
-        '-addext','subjectKeyIdentifier=hash',
-    ], **options)
-    subprocess.run([
-        'openssl','req','-new','-nodes','-newkey','rsa:2048',
-        '-subj','/CN=fixture-pebble-endpoint','-keyout','key.pem','-out','endpoint.csr',
-    ], **options)
-    (directory/'endpoint.ext').write_text('basicConstraints=critical,CA:FALSE\n'
-                                          'extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\n'
-                                          'authorityKeyIdentifier=keyid:always\n')
-    subprocess.run([
-        'openssl','x509','-req','-in','endpoint.csr','-CA','ca.pem','-CAkey','ca.key','-CAcreateserial',
-        '-days','1','-extfile','endpoint.ext','-out','cert.pem',
-    ], **options)
-
-
 def check(binary, pebble, resolver):
     ca_port, admin_port, dns_port, dns_admin, http_port, https_port = fixture_ports()
     with tempfile.TemporaryDirectory(prefix='pxe-rust-acme-') as temporary, ExitStack() as stack:
@@ -129,16 +108,20 @@ def check(binary, pebble, resolver):
         console = '/admin/certificates'
         env = {**os.environ, 'CREDENTIALS_DIRECTORY':str(default), 'HTTP_ROOT':str(public),
                'PXE_TLS_IMPORT_DIR':str(store), 'PXE_HTTP_PORT':str(http_port), 'PXE_HTTPS_PORT':str(https_port),
-               'PXE_PUBLIC_HOST':HOST, 'AUTH_MODE':'local', 'PXE_DB_PATH':str(database),
-               'PXE_DB_DRIVER':'sqlite', 'PXE_SETUP_DATA_ROOT':str(data),
-               'PXE_ACME_DIRECTORY_URL':f'https://127.0.0.1:{ca_port}/dir', 'PXE_ACME_CA_FILE':str(ca/'ca.pem')}
+               'AUTH_MODE':'local', 'PXE_DB_PATH':str(database),
+               'PXE_DB_DRIVER':'sqlite', 'PXE_SETUP_DATA_ROOT':str(data)}
+        for name in ('PXE_PUBLIC_HOST', 'PXE_ACME_DIRECTORY_URL', 'PXE_ACME_CA_FILE'):
+            env.pop(name, None)
         env['PXE_ACME'] = ''
         service = start(stack, command, env)
         client = Client(default, http_port, https_port)
         client.ready(service)
         authorization = setup(client, default, config, database)
         assert b'Autorit' in client.request(console, authorization=authorization)[2]
-        choice = {'mode':'private','terms':'on','email':'lab@example.test'}
+        choice = {
+            'mode':'private', 'terms':'on', 'email':'lab@example.test', 'host':HOST,
+            'directory':f'https://127.0.0.1:{ca_port}/dir', 'root_ca':(ca/'ca.pem').read_text(),
+        }
         assert client.request(control, form=choice)[0] == 401
         assert client.request(control, form=choice, authorization=authorization,
                               origin='https://external.example')[0] == 403

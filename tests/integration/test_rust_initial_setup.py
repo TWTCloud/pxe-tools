@@ -534,6 +534,66 @@ def verify_factory_reset(client, database, authorization, credentials, http, tft
     print('Packaged Rust factory reset retired the old instance data and MOK, preserved TLS and the master key, and reopened setup', flush=True)
 
 
+def verify_private_acme(client, credentials, authorization, root):
+    from acme_fixture import authority
+
+    console = '/admin/certificates'
+    route = console + '/acme'
+    host = 'pxe.internal.test'
+    private = root / 'tls-import'
+    assert b'<option value="private"' in client.request(console, authorization=authorization)[2]
+    with authority(root / 'authority', client.http_port, host) as (directory, ca, accounts):
+        form = {'mode': 'private', 'host': host, 'directory': directory,
+                'root_ca': ca.read_text(), 'terms': 'on', 'email': 'pxe@example.test'}
+        assert client.request(route, form=form)[0] == 401
+        assert client.request(route, form=form, authorization=authorization,
+                              origin='https://outside.example.test')[0] == 403
+        for override in (
+            {'host': '127.0.0.1'}, {'directory': directory.replace('https:', 'http:')},
+            {'root_ca': (ca.with_name('ca.key')).read_text()},
+        ):
+            result = client.request(route, form={**form, **override}, authorization=authorization)
+            assert result[0] == 422 and b'PRIVATE KEY' not in result[2]
+            assert not (private / 'acme-settings.json').exists()
+        assert client.request(route, form=form, authorization=authorization)[:2] == (303, console)
+        assert stat.S_IMODE((private / 'acme-settings.json').stat().st_mode) == 0o600
+
+        https = Client(credentials, client.http_port, client.https_port)
+        https.context = ssl.create_default_context(cafile=str(ca))
+        https.context.check_hostname = False
+
+        def current_leaf():
+            with socket.create_connection(('127.0.0.1', client.https_port), timeout=3) as stream:
+                with https.context.wrap_socket(stream, server_hostname=host) as tls:
+                    return tls.getpeercert(binary_form=True)
+
+        deadline = time.monotonic() + 40
+        first = None
+        while time.monotonic() < deadline:
+            try:
+                leaf = current_leaf()
+            except ssl.SSLError:
+                time.sleep(.2)
+                continue
+            if first is not None and leaf != first:
+                break
+            first = leaf
+            time.sleep(.2)
+        else:
+            status = https.request(console, authorization=authorization)[2] if first else b''
+            raise AssertionError(f'ACME certificate was not issued twice: {len(accounts)} accounts {len(status)} bytes')
+
+        assert len(accounts) == 1
+        page = https.request(console, authorization=authorization)
+        assert page[0] == 200 and host.encode() in page[2] and b'Certificat ACME' in page[2]
+        address = f'{host}:{client.https_port}'
+        result = https.request(route, form={'mode': 'off'}, authorization=authorization,
+                               extra_headers={'Host': address}, origin='https://' + address)
+        assert result[:2] == (303, console), result
+        assert b'auto-sign' in client.request(console, authorization=authorization)[2]
+    print('The Rust console configured a private ACME CA, renewed TLS and disabled ACME over HTTPS', flush=True)
+
+
 def verify_tls_import(client, original, imported, persistent, authorization):
     generate_tls_pair(imported, 'fixture-import')
     endpoint = '/admin/certificates'
@@ -556,6 +616,9 @@ def verify_tls_import(client, original, imported, persistent, authorization):
     assert stat.S_IMODE(persistent.stat().st_mode) == 0o700
     assert stat.S_IMODE(bundle.stat().st_mode) == 0o600
     assert json.loads(bundle.read_text()) == valid
+    assert updated.request(endpoint, form={'restore_default':'1'}, authorization=authorization)[:2] == (303, endpoint)
+    assert not bundle.exists() and client.request('/healthz')[0] == 200
+    assert client.request(endpoint, form=valid, authorization=authorization)[:2] == (303, endpoint)
     print('Rust imported a matching TLS pair without restart and refused the mismatched key', flush=True)
     return updated
 
@@ -2680,6 +2743,7 @@ def local(binary):
         verify_browser_login(client, database, authorization, first_run=True)
         verify_configuration(client, database, authorization, packaged=False)
         verify_browser_login(client, database, authorization)
+        verify_private_acme(client, credentials, authorization, root)
         imported = root/'imported'
         imported.mkdir()
         updated = verify_tls_import(client, credentials, imported, root/'tls-import', authorization)

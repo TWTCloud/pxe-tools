@@ -930,7 +930,7 @@ async fn dispatch(
             if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
-            let limit = if path == certificates::ROUTE {
+            let limit = if matches!(path, certificates::ROUTE | certificates::ACME_ROUTE) {
                 certificates::MAX_FORM
             } else if path == presets::ROUTE {
                 2048
@@ -1264,6 +1264,7 @@ fn admin_origin(headers: &HeaderMap, peer: IpAddr, site: &Site) -> bool {
             .parse::<Ipv4Addr>()
             .is_ok_and(|ip| site.addresses.contains(&ip))
             || name.eq_ignore_ascii_case("localhost")
+            || site.tls.allowed_acme_host(name)
             || site
                 .public_host
                 .as_ref()
