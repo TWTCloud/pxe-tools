@@ -435,7 +435,7 @@ if ($machine === null) {
         }
     }
     $bootSession = begin_boot_session($bootMachineId, $mac, 'discovery');
-    echo "# Machine inconnue (MAC: '$mac') — discovery en $discoveryBootProto (setting global), stub créé en 'inventorying'\n";
+    echo "# Appareil inconnu (MAC: '$mac') — discovery en $discoveryBootProto (setting global), stub créé en 'inventorying'\n";
     echo menuentry_discovery($orch_ip, $kernel_opts, $default_distro, $default_arch, $discoveryBootProto), "\n";
 } else {
     $status = $machine['status'];
@@ -477,25 +477,25 @@ if ($machine === null) {
         // rescue_mode=1 : priorité absolue sur le status. La machine est volontairement
         // mise en mode récupération via l'UI ; on sert uniquement le menuentry rescue
         // jusqu'à ce que l'utilisateur sorte du mode rescue (POST /admin/inventaire/{id}/rescue/exit).
-        echo "# Machine $hostname en mode rescue → boot Debian d-i en récupération\n";
+        echo "# Appareil $hostname en mode rescue → boot Debian d-i en récupération\n";
         echo menuentry_rescue($orch_ip, $kernel_opts, $default_distro, $default_arch, $bootProto), "\n";
     } elseif ($status === 'testing') {
         // Job de tests de disque en cours → sert le menuentry disktest qui charge
         // disktest-preseed.cfg → disktest.sh télécharge smartctl/badblocks et exécute.
-        echo "# Machine $hostname en cours de tests disque → boot disktest-preseed (proto=$bootProto)\n";
+        echo "# Appareil $hostname en cours de tests disque → boot disktest-preseed (proto=$bootProto)\n";
         echo menuentry_disktest($orch_ip, $kernel_opts, $default_distro, $default_arch, $bootProto), "\n";
         if (isset($pdo)) emit_grub_checkpoint($pdo, (int)$machine['id'], 'grub_config_served_disktest', $mac);
     } elseif ($status === 'wiping') {
-        echo "# Machine $hostname en cours de wipe → boot wipe-preseed (proto=$bootProto)\n";
+        echo "# Appareil $hostname en cours de wipe → boot wipe-preseed (proto=$bootProto)\n";
         echo menuentry_wipe($orch_ip, $kernel_opts, $default_distro, $default_arch, $bootProto), "\n";
         if (isset($pdo)) emit_grub_checkpoint($pdo, (int)$machine['id'], 'grub_config_served_wipe', $mac);
     } elseif ($status === 'configured') {
-        echo "# Machine $hostname configurée → install auto (proto=$bootProto)\n";
+        echo "# Appareil $hostname configuré → install auto (proto=$bootProto)\n";
         echo menuentry_install($orch_ip, $kernel_opts, $distro, $default_arch, $hostname, $mac, $bootProto), "\n";
         if (isset($pdo)) emit_grub_checkpoint($pdo, (int)$machine['id'], 'grub_config_served_install', $mac);
     } elseif ($defaultMenu === 'local') {
         // Installation PXE réussie ou choix explicite de l'administrateur.
-        echo "# Machine $hostname → boot local autorisé ({$machine['local_boot_source']})\n";
+        echo "# Appareil $hostname → boot local autorisé ({$machine['local_boot_source']})\n";
         echo menuentry_local($orch_ip), "\n";
         echo "\n# Forcer la réinstall (override) :\n";
         if ($distro) {
@@ -508,7 +508,7 @@ if ($machine === null) {
         //   re-discovery au prochain boot PXE. Sans ce cas, 'unknown' tombait dans
         //   le `else` générique dont le default=0 chaînait sur grub.cfg → install
         //   AUTO non sollicitée (qui échouait sur preseed.php sans mac). JAMAIS ça.
-        echo "# Machine ($status, mac=$mac) → (re-)boot ramdisk discovery (proto=$discoveryBootProto)\n";
+        echo "# Appareil ($status, mac=$mac) → (re-)boot ramdisk discovery (proto=$discoveryBootProto)\n";
         echo menuentry_discovery($orch_ip, $kernel_opts, $default_distro, $default_arch, $discoveryBootProto), "\n";
     } elseif (in_array($status, ['discovered', 'tested', 'failed', 'wiped'], true)) {
         // Machine inventoriée SANS flow actif (découverte sans preset, ou
@@ -526,12 +526,12 @@ if ($machine === null) {
         // tentait de démarrer son OS (souvent inexistant) au lieu de revenir
         // à l'écran d'attente. Le pendant BIOS (render-per-mac-pxelinux.sh)
         // les route déjà vers discovery via son case default.
-        echo "# Machine $hostname ($status, sans flow actif) → re-boot ramdisk discovery (poll d'attente, re-timeout 1h)\n";
+        echo "# Appareil $hostname ($status, sans flow actif) → re-boot ramdisk discovery (poll d'attente, re-timeout 1h)\n";
         echo menuentry_discovery($orch_ip, $kernel_opts, $default_distro, $default_arch, $discoveryBootProto), "\n";
     } else {
         // Statut transitoire ou futur : discovery reste le repli sûr tant
         // qu'une installation terminée n'est pas attestée dans la DB.
-        echo "# Machine en status='$status' — discovery par défaut\n";
+        echo "# Appareil en status='$status' — discovery par défaut\n";
         echo menuentry_discovery($orch_ip, $kernel_opts, $default_distro, $default_arch, $discoveryBootProto), "\n";
     }
 }

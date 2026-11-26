@@ -90,13 +90,13 @@ pub(super) fn dispatch_installation(
             (
                 "installed",
                 "no_role",
-                "[worker] Ansible désactivé. OS installé, machine non provisionnée.\n",
+                "[worker] Ansible désactivé. Système installé. Configuration Ansible non appliquée.\n",
             )
         } else if role.is_empty() {
             (
                 "installed",
                 "no_role",
-                "[worker] Aucun rôle Ansible défini. OS installé, machine non provisionnée.\n",
+                "[worker] Aucun rôle Ansible défini. Système installé. Configuration Ansible non appliquée.\n",
             )
         } else if hostname.trim().is_empty() {
             ("failed", "failed", "[worker] Nom d’hôte manquant.\n")

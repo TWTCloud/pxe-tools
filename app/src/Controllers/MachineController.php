@@ -882,7 +882,7 @@ final class MachineController
     public function ansibleRedeploy(array $params): void
     {
         $id = (int) $params['id'];
-        $message = "Redéploiement manuel demandé par admin (machine $id)";
+        $message = "Redéploiement manuel demandé par admin (appareil $id)";
         $r = AnsibleRedeployEnqueuer::enqueue($id, $message);
 
         if ($r['ok']) {

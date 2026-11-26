@@ -428,7 +428,7 @@ final class WizardController
         // d'étape vient de InitGuard::JOB_TITLES ; ce message le complète.
         $jobs = [
             'bootstrap:build_grub'       => 'Sécurisation du démarrage avec l’adresse de votre serveur',
-            'bootstrap:render_templates' => 'Préparation des options proposées à vos machines',
+            'bootstrap:render_templates' => 'Préparation des options de démarrage des appareils',
             'bootstrap:restart_dnsmasq'  => 'Mise en service du réseau',
         ];
         if (Setting::get(Setting::KEY_PXE_ENABLED, 'on') === 'off') {

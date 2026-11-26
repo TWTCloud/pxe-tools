@@ -344,7 +344,7 @@
     });
     let msg = 'Le modèle ciblait un autre disque ; appliqué au disque détecté : ' + parts.join(', ') + '.';
     if (info.dropped && info.dropped.length) {
-      msg += ' Disque(s) du modèle ignoré(s) (absent(s) ' + (deviceTerms.deviceDu || 'de la machine') + ') : ' + info.dropped.join(', ') + '.';
+      msg += ' Disque(s) du modèle ignoré(s) (absent(s) ' + (deviceTerms.deviceDu || 'de l’appareil') + ') : ' + info.dropped.join(', ') + '.';
     }
     return msg;
   }
