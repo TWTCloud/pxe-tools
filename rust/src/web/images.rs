@@ -10,7 +10,7 @@ use super::{
 use crate::{
     connect,
     images::{Change, Changed},
-    media::{self, REDHAT_ROUTE},
+    media::{self, REDHAT_ROUTE, WINDOWS_ROUTE},
     setting,
 };
 use hyper::{Method, StatusCode};
@@ -26,6 +26,7 @@ pub(super) enum Route {
     Add,
     Media(Option<&'static str>),
     RedHat,
+    Windows,
     Proxmox,
     Refresh,
     RefreshStatus,
@@ -51,6 +52,7 @@ impl Route {
                     }),
             ),
             REDHAT_ROUTE => Self::RedHat,
+            WINDOWS_ROUTE => Self::Windows,
             "/settings/images/proxmox" => Self::Proxmox,
             "/settings/images/refresh" => Self::Refresh,
             "/settings/images/refresh-button" => Self::RefreshStatus,
@@ -78,6 +80,7 @@ impl Route {
                     | Self::Add
                     | Self::Media(_)
                     | Self::RedHat
+                    | Self::Windows
                     | Self::RefreshStatus
                     | Self::Status
             ),
@@ -106,6 +109,9 @@ pub(super) fn serve(
         (Route::RedHat, None) if can_edit => redhat_form(None),
         (Route::RedHat, Some(form)) if can_edit => queue_redhat(path, form),
         (Route::RedHat, _) => Ok(plain(StatusCode::FORBIDDEN, "Accès refusé\n")),
+        (Route::Windows, None) if can_edit => windows_form(None),
+        (Route::Windows, Some(form)) if can_edit => queue_windows(path, form),
+        (Route::Windows, _) => Ok(plain(StatusCode::FORBIDDEN, "Accès refusé\n")),
         (Route::Add, None) => catalog(db, can_edit).map(|html| {
             page(
                 ConsoleSection::Images,
@@ -310,6 +316,78 @@ fn queue_redhat(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
     if !request.valid() {
         return redhat_form(Some(
             "Collez le jeton complet généré dans le portail Red Hat.",
+        ));
+    }
+    enqueue_media(path, request)
+}
+
+fn windows_form(error: Option<&str>) -> Result<Reply, ErrorBox> {
+    let download = media::WINDOWS_DOWNLOAD_PAGE;
+    let mut html = format!(
+        r#"<nav class="page-links" aria-label="Images PXE"><a href="{ROUTE}/add">Ajouter une image</a></nav>
+<form class="panel panel--form form-stack" method="post" action="{WINDOWS_ROUTE}">
+<p>Le serveur télécharge une fois le média officiel. PXE Tools vérifie l’ISO, met WinPE en cache et détecte les éditions Famille et Pro.</p>
+<ol>
+<li>Ouvrez la <a href="{download}" target="_blank" rel="noopener noreferrer">page Microsoft de téléchargement de Windows 11</a>.</li>
+<li>Choisissez l’image ISO x64 multi-édition et sa langue, puis copiez le lien de téléchargement Microsoft.</li>
+<li>Sélectionnez la même langue ici et collez le lien. Le lien est valable 24 heures.</li>
+</ol>"#,
+    );
+    if let Some(error) = error {
+        html.push_str(r#"<p class="wizard-error" role="alert">"#);
+        escape(&mut html, error);
+        html.push_str("</p>");
+    }
+    html.push_str(
+        r#"<div class="field"><label for="windows-language">Langue de l’ISO</label>
+<select id="windows-language" name="language" required>"#,
+    );
+    for (language, label, _) in media::WINDOWS_ISOS {
+        write!(html, r#"<option value="{language}">{label}</option>"#)?;
+    }
+    write!(
+        html,
+        r#"</select></div>
+<div class="field"><label for="windows-url">Lien officiel Microsoft</label>
+<input id="windows-url" type="url" name="url" maxlength="4096" autocomplete="off" spellcheck="false" required></div>
+<div class="form-actions"><button>Télécharger et préparer Windows</button>
+<a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso">Importer un média existant</a></div>
+</form>"#,
+    )?;
+    let mut reply = page(ConsoleSection::Images, "Préparer Windows 11 x64", &html);
+    if error.is_some() {
+        *reply.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+    }
+    Ok(reply)
+}
+
+fn queue_windows(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
+    let mut language = None;
+    let mut url = None;
+    for (name, value) in form_urlencoded::parse(form) {
+        match name.as_ref() {
+            "language" if language.is_none() => language = Some(value),
+            "url" if url.is_none() => url = Some(value),
+            _ => return Ok(invalid()),
+        }
+    }
+    let Some((language, _, sha256)) = media::WINDOWS_ISOS
+        .into_iter()
+        .find(|(offered, _, _)| language.as_deref() == Some(*offered))
+    else {
+        return windows_form(Some("Sélectionnez la langue de l’ISO Microsoft."));
+    };
+    let request = media::Import {
+        kind: "windows-official".into(),
+        source: url.as_deref().unwrap_or_default().trim().into(),
+        sha256: sha256.into(),
+        profile: language.into(),
+        remote: true,
+        redhat_token: None,
+    };
+    if !request.valid() {
+        return windows_form(Some(
+            "Collez le lien HTTPS direct de l’ISO fourni par Microsoft.",
         ));
     }
     enqueue_media(path, request)
@@ -874,8 +952,8 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
 <article class="panel image-card">{}<p>Préparez un DVD officiel de RHEL 9 pour le démarrage réseau.</p>
 <div class="form-actions"><a class="button" href="{REDHAT_ROUTE}">Télécharger depuis Red Hat</a>
 <a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer le DVD</a></div></article>
-<article class="panel image-card">{}<p>Importez le média d’installation et un environnement de démarrage WinPE.</p>
-<div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso">Importer les fichiers</a>
+<article class="panel image-card">{}<p>Préparez le média officiel et détectez les éditions Windows disponibles.</p>
+<div class="form-actions"><a class="button" href="{WINDOWS_ROUTE}">Préparer Windows</a>
 <a class="button button--quiet" href="/settings/windows">Gérer les éditions</a></div></article>"#,
             heading("proxmox", "Proxmox VE"),
             media::PROXMOX_VERSION,

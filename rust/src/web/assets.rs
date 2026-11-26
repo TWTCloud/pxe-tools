@@ -43,6 +43,27 @@ impl Assets {
         &self.root
     }
 
+    pub(super) async fn serve_shared_windows(
+        &self,
+        media: &super::winpe::SharedMedia,
+        name: &str,
+        headers: &HeaderMap,
+        head: bool,
+    ) -> Option<Reply> {
+        if !media.allows_asset(name) {
+            return None;
+        }
+        let directory = self.root.join("media/windows").join(&media.iso_sha256);
+        self.serve_file(
+            &directory,
+            Path::new(name),
+            "application/octet-stream",
+            headers,
+            head,
+        )
+        .await
+    }
+
     pub(super) async fn serve_rhel(
         &self,
         route: &str,

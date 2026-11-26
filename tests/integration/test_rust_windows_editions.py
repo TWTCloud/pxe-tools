@@ -32,6 +32,7 @@ HTTPS = 8448
 SETTINGS = '/settings/windows'
 BOOT = '/pxe/windows/boot.ipxe'
 MEDIA = '/settings/images/media'
+OFFICIAL_WINDOWS = '/settings/images/windows'
 CDN = '93.184.216.34'
 LAN = '10.77.0.1'
 LAN_CLIENT = '10.77.0.2'
@@ -46,6 +47,48 @@ def media(root, profile, edition, label, index):
         'edition': edition, 'edition_label': label, 'image_index': index,
         'install_image': 'install.wim', 'install_sha256': 'a'*64,
     }))
+
+
+def check_shared_windows(public, database, tls, auth, form_headers):
+    status, _, page = request(OFFICIAL_WINDOWS, tls=tls, headers=auth)
+    assert status == 200 and b'name="language"' in page and b'name="url"' in page
+    assert b'name="sha256"' not in page
+    official = 'https://software.download.prss.microsoft.com/dbazure/Win11_French_x64.iso?token=fixture'
+    form = {'language': 'fr-fr', 'url': official}
+    assert request(OFFICIAL_WINDOWS, tls=tls, form=form, headers=auth)[0] == 403
+    for url in (official.replace('https:', 'http:', 1),
+                official.replace('software.download.prss.microsoft.com', 'example.test'),
+                official.replace('.iso', '.zip')):
+        assert request(OFFICIAL_WINDOWS, tls=tls, form={**form, 'url': url}, headers=form_headers)[0] == 422
+    assert request(OFFICIAL_WINDOWS, tls=tls, form=form, headers=form_headers)[0] == 303
+    with sqlite3.connect(database) as db:
+        stored = db.execute("SELECT value FROM settings WHERE key LIKE 'media_import_request_%'").fetchone()[0]
+        assert official not in stored and json.loads(stored)['kind'] == 'windows-official'
+
+    digest = 'c' * 64
+    directory = public / 'media' / 'windows' / digest
+    directory.mkdir(parents=True)
+    data = b'shared windows fixture'
+    for name in ('wimboot', 'boot.wim', 'install.wim'):
+        (directory / name).write_bytes(data)
+    (directory / 'media.json').write_text(json.dumps({
+        'iso_sha256': digest, 'arch': 'amd64', 'language': 'fr-fr',
+        'editions': [{'edition': 'Core', 'index': 2}, {'edition': 'Professional', 'index': 5}],
+        'install_image': 'install.wim', 'install_sha256': 'd' * 64,
+        'install_size': len(data), 'boot_sha256': 'e' * 64,
+    }))
+    assert b'Famille, Pro' in request(SETTINGS, tls=tls, headers=auth)[2]
+    asset = f'/pxe/windows/media/{digest}/'
+    assert request(asset + 'boot.wim', source=WINDOWS_CLIENT)[0] == 404
+    assert request(SETTINGS, tls=tls, form={'media': digest}, headers=form_headers)[:2] == (303, SETTINGS)
+    boot = request(BOOT, source=WINDOWS_CLIENT)
+    assert boot[0] == 200 and asset.encode() in boot[2]
+    assert request(asset + 'install.wim', source=WINDOWS_CLIENT, headers={'Range': 'bytes=0-5'})[2] == b'shared'
+    assert request(asset + 'wimboot', source=OTHER_CLIENT)[0] == 404
+    assert request(asset + 'media.json', source=WINDOWS_CLIENT)[0] == 404
+    assert request(SETTINGS, tls=tls, form={'edition': 'windows11-professional'},
+                   headers=form_headers)[:2] == (303, SETTINGS)
+    assert request(asset + 'boot.wim', source=WINDOWS_CLIENT)[0] == 404
 
 
 def request(path, *, tls=None, source=None, form=None, json_body=None, headers=None, method=None, host=None,
@@ -951,7 +994,7 @@ def verify_restored_console(secure, private, admin, database, plan):
         db.execute("UPDATE os_images SET status='pending',progress_percent=0 WHERE distro='ubuntu'")
     images = request('/settings/images', **secure, headers=admin)[2]
     assert b'/console-assets/debian.svg' in images and b'/console-assets/ubuntu.svg' in images
-    assert b'/settings/images/media?kind=windows-iso' in images and b'Confirmer la suppression' in images
+    assert b'/settings/images/windows' in images and b'Confirmer la suppression' in images
     windows_media = request('/settings/images/media?kind=windows-iso', **secure, headers=admin)[2]
     assert b'<option value="windows-iso" selected>' in windows_media
     assert request(network, **private)[0] == 404
@@ -1094,6 +1137,7 @@ def main(binary):
                         assert request(path, source=OTHER_CLIENT)[0] == 404
                     assert request(f'/pxe/windows/{profile}/case.json', source=WINDOWS_CLIENT)[0] == 404
                 assert request('/pxe/windows/boot.wim', source=WINDOWS_CLIENT)[0] == 404
+                check_shared_windows(public, database, tls, auth, form_headers)
                 check_linux(tls, auth, form_headers)
                 rhel_sha = check_media(binary, root, public, database, tls, auth, form_headers, env)
                 check_automatic_linux(database, tls, auth, form_headers, rhel_sha)

@@ -66,7 +66,12 @@ pub(super) enum Action {
     Preset(super::presets::Route, Option<Bytes>),
     PullPresets,
     Jobs(super::jobs::View),
-    Windows(Arc<super::winpe::Editions>, Option<Bytes>),
+    Windows(
+        Arc<super::winpe::Editions>,
+        std::path::PathBuf,
+        bool,
+        Option<Bytes>,
+    ),
     Activity(super::activity::View, Arc<crate::monitoring::Catalog>),
     Terminology(&'static str, &'static str),
     Settings(super::settings::Route, Option<Bytes>),
@@ -465,8 +470,10 @@ impl Console {
                 if let Action::Jobs(view) = &action {
                     return view.serve(&db, &db_path, page).ok();
                 }
-                if let Action::Windows(editions, form) = &action {
-                    return editions.settings(&db, &db_path, form.as_deref()).ok();
+                if let Action::Windows(editions, root, preview_enabled, form) = &action {
+                    return editions
+                        .settings(&db, &db_path, root, form.as_deref(), *preview_enabled)
+                        .ok();
                 }
                 if let Action::Presets(form) = &action {
                     return super::presets::serve(&db, &db_path, form.as_deref(), page).ok();
