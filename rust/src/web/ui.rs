@@ -568,6 +568,11 @@ pub(super) fn asset(path: &str, head: bool) -> Option<Reply> {
             "image/svg+xml",
             include_bytes!("../../../app/public/img/distros/ubuntu.svg"),
         ),
+        "/console-assets/red-hat-enterprise-linux.png" => (
+            "image/png",
+            include_bytes!("ui/red-hat-enterprise-linux.png"),
+        ),
+        "/console-assets/windows-11.png" => ("image/png", include_bytes!("ui/windows-11.png")),
         "/console-assets/server-room.webp" => ("image/webp", include_bytes!("ui/server-room.webp")),
         _ => return None,
     };
