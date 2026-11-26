@@ -283,7 +283,7 @@ final class InternalApiController
                 // Early registration : matérialise la machine en DB dès le
                 // premier signal DHCP (avant que discover.sh n'ait fini son
                 // inventaire ~5-10s plus tard). Status 'inventorying' (badge
-                // running visible dans /machines) → discover.sh basculera
+                // running visible dans /admin/inventaire) → discover.sh basculera
                 // vers 'discovered' une fois l'inventaire posté via
                 // /api/discovery (qui fait UPSERT, cf. PxeController:141).
                 try {
@@ -295,7 +295,7 @@ final class InternalApiController
                     MachineEvent::log(
                         $newId,
                         MachineEvent::LEVEL_INFO,
-                        "Machine vue en DHCP (IP $ip) — en attente de discover.sh"
+                        "Appareil détecté en DHCP (IP $ip) — en attente de discover.sh"
                     );
                     $this->recordPxeBoot($newId, $mac, $ip);
                 } catch (\Throwable $e) {
@@ -607,7 +607,7 @@ final class InternalApiController
                 MachineEvent::log(
                     $newId,
                     MachineEvent::LEVEL_INFO,
-                    "Machine vue en DHCP proxy" . ($ip !== '' ? " (IP $ip)" : '') . " — en attente de discover.sh"
+                    "Appareil détecté en DHCP proxy" . ($ip !== '' ? " (IP $ip)" : '') . " — en attente de discover.sh"
                 );
                 $this->recordPxeBoot($newId, $mac, $ip);
             } catch (\Throwable $e) {

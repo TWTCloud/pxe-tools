@@ -147,7 +147,11 @@ impl View {
             "/activity/list" => return Some(Self::Fragment),
             _ => {}
         }
-        let (section, rest) = path.strip_prefix('/')?.split_once('/')?;
+        let (section, rest) = if let Some(rest) = path.strip_prefix("/admin/inventaire/") {
+            ("inventaire", rest)
+        } else {
+            path.strip_prefix('/')?.split_once('/')?
+        };
         let (id, endpoint) = rest.split_once('/').unwrap_or((rest, ""));
         if section == "tasks" && endpoint.is_empty() {
             if let Some((legacy, kind)) = Operation::from_segment(id) {
@@ -158,8 +162,8 @@ impl View {
         match (section, endpoint) {
             ("tasks", "") => Some(Self::Task(id)),
             ("tasks", "checklist") => Some(Self::Checklist(id)),
-            ("machines", "tasks") => Some(Self::DeviceTasks(id)),
-            ("machines", endpoint) => {
+            ("inventaire", "tasks") => Some(Self::DeviceTasks(id)),
+            ("inventaire", endpoint) => {
                 let (legacy, kind) = Operation::from_segment(endpoint.strip_prefix("tasks/")?)?;
                 Some(Self::Legacy(legacy, kind, Some(id)))
             }
@@ -297,7 +301,7 @@ fn close(path: &Path, id: i64, installation: bool) -> Result<Reply, ErrorBox> {
                 Some(id),
             )?;
         }
-        format!("/machines/{machine}")
+        format!("/admin/inventaire/{machine}")
     };
     tx.commit()?;
     Ok(redirect(StatusCode::SEE_OTHER, target))
@@ -346,7 +350,7 @@ fn download(db: &Connection, id: i64, journal: &Journal) -> Result<Reply, ErrorB
         .filter(|character| character.is_ascii_alphanumeric() || "._-".contains(*character))
         .collect();
     let host = if hostname.is_empty() {
-        "machine"
+        "appareil"
     } else {
         &hostname
     };
@@ -383,7 +387,7 @@ impl Filter {
                 "type" if TYPES.iter().any(|(key, _)| *key == value) => {
                     filter.kind = value.into_owned()
                 }
-                "machine" => filter.machine = value.parse::<i64>().unwrap_or_default().max(0),
+                "appareil" | "machine" => filter.machine = value.parse::<i64>().unwrap_or_default().max(0),
                 "sig" if value.len() == 16 => filter.signature = value.into_owned(),
                 _ => {}
             }
@@ -399,7 +403,7 @@ impl Filter {
                 ("q", self.search.as_str()),
                 ("status", &self.status),
                 ("type", &self.kind),
-                ("machine", &machine),
+                ("appareil", &machine),
                 ("page", &number),
             ])
             .finish()
@@ -567,7 +571,7 @@ fn list(db: &Connection, filter: &Filter, number: u32, fragment: bool) -> Result
     let utc: String = db.query_row("SELECT strftime('%H:%M:%S', 'now')", [], |row| row.get(0))?;
     write!(
         form,
-        r#"<input type="hidden" name="machine" value="{}"><div class="form-actions"><button>Filtrer</button><a class="button button--quiet" href="/activity">Effacer les filtres</a></div></form><p class="record-meta activity-refresh" role="status" data-activity-refresh>Dernière actualisation à {utc} UTC</p>{section}"#,
+        r#"<input type="hidden" name="appareil" value="{}"><div class="form-actions"><button>Filtrer</button><a class="button button--quiet" href="/activity">Effacer les filtres</a></div></form><p class="record-meta activity-refresh" role="status" data-activity-refresh>Dernière actualisation à {utc} UTC</p>{section}"#,
         filter.machine
     )?;
     Ok(page(ConsoleSection::Activity, "Activité", &form))

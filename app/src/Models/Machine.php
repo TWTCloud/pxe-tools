@@ -559,7 +559,7 @@ final class Machine
                 $delete = $pdo->prepare('DELETE FROM machines WHERE id = ? AND mac = ?');
                 $delete->execute([$id, (string)$value]);
                 if ($delete->rowCount() !== 1) {
-                    throw new \RuntimeException('Machine modifiée ; suppression refusée.');
+                    throw new \RuntimeException('L’appareil a changé. Relancez la suppression.');
                 }
                 $pdo->commit();
             } catch (\Throwable $error) {

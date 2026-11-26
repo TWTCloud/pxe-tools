@@ -1887,7 +1887,7 @@ def fetch_pending_ansible(installation_id: int | None = None) -> dict | None:
     # run_playbook skip les checkpoints (cf. log warning).
     # POURQUOI lire ansible_role/extra_vars depuis le snapshot
     # machines.install_config_json (et plus depuis presets) :
-    # - L'install via wizard per-machine (/machines/{id}/install) laisse
+    # - L'install via wizard per-machine (/admin/inventaire/{id}/install) laisse
     #   m.preset_id = NULL → p.ansible_role retournait NULL → 'no_role'
     #   → playbook skip alors que le snapshot contient bien le role.
     # - bulkInstall depuis preset copie aussi le role dans le snapshot via

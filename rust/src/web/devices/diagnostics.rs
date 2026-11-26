@@ -29,7 +29,7 @@ pub(super) fn form(device: &Device, id: i64) -> Result<Reply, ErrorBox> {
     let mut html=String::from("<p>Le test est exécuté au démarrage PXE. Les modes d’écriture effacent les données du disque choisi.</p>");
     write!(
         html,
-        r#"<form method="post" action="/machines/{id}/disktest">
+        r#"<form method="post" action="/admin/inventaire/{id}/disktest">
 <label>Disque vérifié <select name="disk" required><option value="">Sélectionner</option>"#
     )?;
     for (path, id, _) in device
@@ -190,7 +190,7 @@ pub(super) fn submit(
                     cancel(&tx, id, test, in_session, action, &device)?;
                 }
             }
-            format!("/machines/{id}")
+            format!("/admin/inventaire/{id}")
         }
     };
     tx.commit()?;

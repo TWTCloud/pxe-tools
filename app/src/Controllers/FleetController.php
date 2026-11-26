@@ -14,7 +14,7 @@ final class FleetController
     }
     public function index(array $params): void
     {
-        View::render('machines/index',self::data()+['statuses'=>Machine::STATUSES,'presets'=>Preset::all()],\Admin\Ui\DeviceTerminology::format('{Many} · PXE Tools'));
+        View::render('machines/index',self::data()+['statuses'=>Machine::STATUSES,'presets'=>Preset::all()],'Inventaire · PXE Tools');
     }
     public function fragment(array $params): void
     {

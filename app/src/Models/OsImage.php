@@ -485,7 +485,7 @@ final class OsImage
                 && ((int)$machine['rescue_mode'] === 1 || in_array($machine['status'], ['inventorying', 'wiping', 'testing'], true));
             if (!$matches($config, $machine['boot_arch']) && !$usesBase) continue;
             $label = $machine['hostname'] ?: $machine['mac'];
-            $uses[] = ['label' => 'Machine : ' . $label, 'url' => '/machines/' . $machine['id']];
+            $uses[] = ['label' => 'Machine : ' . $label, 'url' => '/admin/inventaire/' . $machine['id']];
             if ($usesBase || in_array($machine['status'], ['installing','inventorying','wiping','testing'], true) || isset($activeIds[$machine['id']])) {
                 $activeUse = true;
                 $blocks[] = 'Opération active ou prévue sur ' . $label . '.';
@@ -496,7 +496,7 @@ final class OsImage
             $config = is_array($config['install_config'] ?? null) ? $config['install_config'] : $config;
             if (!$matches($config, $chain['boot_arch'])) continue;
             $label = $chain['hostname'] ?: $chain['mac'];
-            $uses[] = ['label' => 'Installation après effacement : ' . $label, 'url' => '/machines/' . $chain['id']];
+            $uses[] = ['label' => 'Installation après effacement : ' . $label, 'url' => '/admin/inventaire/' . $chain['id']];
             $activeUse = true;
             $blocks[] = 'Installation prévue après effacement sur ' . $label . '.';
         }

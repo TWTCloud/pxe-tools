@@ -37,11 +37,11 @@ Interface web + API pour piloter le serveur PXE.
 └── discover.sh                # Script discovery boot (déployé aussi dans /srv/http/)
 ```
 
-## Appellation des équipements
+## Inventaire
 
-Dans **Appliance → Vue d’ensemble → Appellation des machines clientes**, un administrateur peut choisir « Machine » (défaut), « Client PXE », « Ordinateur » ou « Serveur ». Le réglage est partagé par l’instance et modifie les libellés de la console. Les onglets déjà ouverts peuvent nécessiter un rechargement.
-
-Les noms d’hôte, les notes et les données existantes restent identiques, ainsi que les URL, les formats des API et les messages déjà enregistrés dans l’historique. Ce choix ne modifie pas la configuration PXE et ne demande aucun redémarrage de service.
+La liste est accessible depuis **Inventaire** à l’adresse `/admin/inventaire`.
+Les anciens liens `/machines` et `/admin/devices` redirigent vers le nouveau
+chemin avec leurs filtres. Les URL d’API restent compatibles.
 
 ## Endpoints
 
@@ -49,12 +49,13 @@ Les noms d’hôte, les notes et les données existantes restent identiques, ain
 
 | Méthode | Path                      | Action |
 |--|--|--|
-| GET     | `/`                       | Liste des machines |
-| GET     | `/machines/{id}`          | Détail machine + assign preset |
-| POST    | `/machines`               | Créer machine manuellement |
-| PUT     | `/machines/{id}`          | Update (preset, hostname...) |
-| POST    | `/machines/{id}/wipe`     | Reset status → `discovered` |
-| DELETE  | `/machines/{id}`          | Supprimer |
+| GET     | `/`                       | Vue d’ensemble |
+| GET     | `/admin/inventaire`       | Inventaire des appareils |
+| GET     | `/admin/inventaire/{id}`          | Fiche et modèle de déploiement |
+| POST    | `/admin/inventaire`               | Ajouter un appareil |
+| PUT     | `/admin/inventaire/{id}`          | Update (preset, hostname...) |
+| POST    | `/admin/inventaire/{id}/wipe`     | Reset status → `discovered` |
+| DELETE  | `/admin/inventaire/{id}`          | Supprimer |
 | GET     | `/presets`                | Liste presets |
 | GET     | `/presets/new` / `/{id}`  | Form create/edit |
 | POST/PUT| `/presets[/{id}]`         | Save |

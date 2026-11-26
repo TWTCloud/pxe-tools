@@ -208,6 +208,13 @@ def main() -> int:
     # exposent un menuentry "Chainload iPXE" qui charge ipxe.lkrn / ipxe.efi.
     ipxe_enabled = db_setting("ipxe_enabled", "off") == "on"
 
+    rust_guided = os.environ.get("PXE_RUST_GUIDED") == "1"
+    admin_port = os.environ.get("ADMIN_PORT", "8443")
+    console_port = os.environ.get("PXE_HTTPS_PORT", "443") if rust_guided else admin_port
+    console_port_suffix = ""
+    if console_port.isascii() and console_port.isdecimal() and console_port != "443":
+        console_port_suffix = f":{console_port}"
+
     ctx = {
         "ansible_managed": "Géré par pxe-tools-worker bootstrap (NE PAS éditer)",
         "pxe_ip": orch_ip,
@@ -247,11 +254,12 @@ def main() -> int:
         "ansible_ssh_pubkey": ansible_pubkey,
         # Port admin (Spec A.10) — utilisé dans grub.php.j2 pour afficher l'URL
         # admin aux machines en status=discovered sans preset.
-        "pxe_admin_port": os.environ.get("ADMIN_PORT", "8443"),
+        "pxe_admin_port": admin_port,
+        "pxe_console_port_suffix": console_port_suffix,
         # Spec H : toggle iPXE chainload — pxelinux/grub conditionnent leurs
         # menuentries "Chainload iPXE" sur ce flag.
         "pxe_ipxe_enabled": ipxe_enabled,
-        "pxe_rust_guided": os.environ.get("PXE_RUST_GUIDED") == "1",
+        "pxe_rust_guided": rust_guided,
         # Spec D : architecture par défaut pour les paths netboot (/<version>/<arch>/).
         # Utilisé par grub.cfg.j2, pxelinux-default.j2, grub.php.j2, boot.ipxe.j2.
         # En multi-arch full (Spec D.4), preseed.php fera un lookup machine.boot_arch

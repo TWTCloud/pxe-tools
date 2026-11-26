@@ -40,7 +40,7 @@ pub(super) fn form(db: &Connection, id: i64, device: &Device) -> Result<Reply, E
         return Ok(rejected(StatusCode::CONFLICT, "Inventaire PXE requis"));
     };
     let mut html = format!(
-        r#"<form method="post" action="/machines/{id}/install-preview">
+        r#"<form method="post" action="/admin/inventaire/{id}/install-preview">
 <p><label>Nom d’hôte <input name="hostname" required maxlength="63" value=""#
     );
     escape(&mut html, &device.hostname);
@@ -222,7 +222,7 @@ pub(super) fn submit(
             let image = selection.image;
             write!(
                 html,
-                r#"<form method="post" action="/machines/{id}/install/advanced">
+                r#"<form method="post" action="/admin/inventaire/{id}/install/advanced">
 <input type="hidden" name="preset" value="{preset}"><input type="hidden" name="image" value="{image}">
 <input type="hidden" name="review" value="{fingerprint}"><input type="hidden" name="hostname" value="{hostname}">
 <p><label><input type="checkbox" name="confirm" value="yes" required> Confirmer le repartitionnement des disques indiqués</label></p>"#

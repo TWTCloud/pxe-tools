@@ -92,7 +92,7 @@ $flashesHtml = static function() use ($flashes) {
     </div>
   </aside>
   <div class="app-backdrop" id="app-backdrop" data-sidebar-close></div>
-  <div class="app-content"<?= preg_match('~^/machines/\d+$~', $path) ? ' data-context-tabs="true"' : '' ?>>
+  <div class="app-content"<?= preg_match('~^/admin/inventaire/\d+$~', $path) ? ' data-context-tabs="true"' : '' ?>>
     <header class="app-topbar">
       <button type="button" class="sidebar-burger" data-sidebar-open aria-controls="app-sidebar" aria-expanded="false" aria-label="Ouvrir le menu"><?= View::icon('menu') ?></button>
       <nav class="context-breadcrumbs" aria-label="Contexte">

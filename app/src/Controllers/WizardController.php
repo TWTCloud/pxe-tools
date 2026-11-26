@@ -414,7 +414,7 @@ final class WizardController
         View::partial('init/wizard/done', ['step' => 5]);
     }
 
-    /** POST /init/complete — pose wizard_completed=1 + applique la conf + redirect /machines */
+    /** POST /init/complete — pose wizard_completed=1 + applique la conf + redirect /admin/inventaire */
     public function complete(array $params): void
     {
         $this->requireConfirmedNetwork();
@@ -460,9 +460,9 @@ final class WizardController
         }
 
         // On envoie sur /init (page de progression) plutôt que directement sur
-        // /machines : l'admin voit l'avancement des jobs bootstrap + du
+        // /admin/inventaire : l'admin voit l'avancement des jobs bootstrap + du
         // téléchargement de l'image Debian de base. InitController redirigera
-        // automatiquement vers /machines quand tout sera prêt. L'admin reste
+        // automatiquement vers /admin/inventaire quand tout sera prêt. L'admin reste
         // libre de naviguer ailleurs entre-temps (state() vaut COMPLETE ici).
         header('Location: /init');
         exit;

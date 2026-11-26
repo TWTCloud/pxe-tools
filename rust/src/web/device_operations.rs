@@ -143,7 +143,7 @@ impl Operation {
             pxe::log_event(&tx, id, "action", event, None, None)?;
         }
         tx.commit()?;
-        Ok(redirect(StatusCode::SEE_OTHER, format!("/machines/{id}")))
+        Ok(redirect(StatusCode::SEE_OTHER, format!("/admin/inventaire/{id}")))
     }
 }
 

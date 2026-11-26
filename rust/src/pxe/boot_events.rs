@@ -33,7 +33,7 @@ pub(crate) fn dhcp(
             &tx,
             id,
             "info",
-            &format!("Machine vue en {source}{address} — en attente de discover.sh"),
+            &format!("Appareil détecté en {source}{address} — en attente de discover.sh"),
             None,
             None,
         )?;

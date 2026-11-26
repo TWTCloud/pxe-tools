@@ -98,7 +98,7 @@ if (!$machine) {
 }
 if (empty($machine['install_config_json'])) {
     http_response_code(404);
-    echo "# ERREUR : machine $mac sans config d'install (passer par /machines/{id}/install d'abord)\n";
+    echo "# ERREUR : appareil $mac sans config d'installation (passer par /admin/inventaire/{id}/install d'abord)\n";
     exit;
 }
 $config = json_decode($machine['install_config_json'], true);
@@ -296,7 +296,7 @@ if ($effective_root_mode === 'disabled') {
     }
     if (!$safe) {
         http_response_code(422);
-        echo "# ERREUR : directives root du template preseed incompatibles avec la configuration de la machine.\n";
+        echo "# ERREUR : directives root du template preseed incompatibles avec la configuration de l'appareil.\n";
         exit;
     }
 }
@@ -1248,7 +1248,7 @@ if ($hasAccountsBlock && $effective_root_mode === 'disabled') {
 }
 if (!$accountsSafe) {
     http_response_code(422);
-    echo "# ERREUR : directives comptes du template preseed incompatibles avec la configuration de la machine.\n";
+    echo "# ERREUR : directives comptes du template preseed incompatibles avec la configuration de l'appareil.\n";
     exit;
 }
 

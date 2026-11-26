@@ -30,20 +30,6 @@ final class SettingsController
         ], 'Paramètres');
     }
 
-    /** Save the instance-wide display vocabulary without applying network configuration. */
-    public function updateTerminology(array $params): void
-    {
-        $value = $_POST['ui_device_term'] ?? null;
-        if (!is_string($value) || !isset(\Admin\Ui\DeviceTerminology::OPTIONS[$value])) {
-            View::flash('error', 'Choisissez une appellation proposée.');
-            View::redirect('/settings');
-            return;
-        }
-        Setting::set(Setting::KEY_UI_DEVICE_TERM, $value);
-        View::flash('success', 'Appellation enregistrée pour cette instance.');
-        View::redirect('/settings');
-    }
-
     public function update(array $params): void
     {
         $values = [];

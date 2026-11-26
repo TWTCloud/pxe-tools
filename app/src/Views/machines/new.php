@@ -1,7 +1,7 @@
 <?php use Admin\View; use Admin\Ui\DeviceTerminology as Term; ?>
 <header class="row-flex-spread mb-1">
   <h2><?= View::e(ucfirst(Term::format('{nouveau}')) . ' (saisie manuelle)') ?></h2>
-  <a href="/machines" class="btn btn-secondary">← Retour</a>
+  <a href="/admin/inventaire" class="btn btn-secondary">← Retour</a>
 </header>
 
 <div class="card">
@@ -9,7 +9,7 @@
     <?= View::e(Term::format('Normalement, les {many} apparaissent automatiquement après leur premier démarrage PXE.')) ?>
     <?= View::e(Term::format('Cette page permet d’ajouter manuellement {un} si son adresse MAC est déjà connue.')) ?>
   </p>
-  <form method="post" action="/machines">
+  <form method="post" action="/admin/inventaire">
     <label>
       Adresse MAC <span class="required-marker">*</span>
       <input type="text" name="mac" required placeholder="02:00:00:00:00:01" pattern="[0-9a-fA-F:.\-]+" aria-required="true">

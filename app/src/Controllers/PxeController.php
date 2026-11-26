@@ -249,7 +249,7 @@ final class PxeController
         // encore. Au lieu de la laisser en limbo (wait perpétuel jusqu'au
         // prochain reboot manuel), on la recrée en DB avec status='discovered'
         // + fenêtre d'attente 1h (équivalent au flow discovery normal). Cela
-        // la rend re-visible dans /machines et l'admin peut décider d'une
+        // la rend re-visible dans /admin/inventaire et l'admin peut décider d'une
         // action via les boutons Éteindre/Redémarrer.
         if (!Machine::findByAnyMac($mac)) {
             try {
@@ -262,7 +262,7 @@ final class PxeController
                 MachineEvent::log(
                     $newId,
                     MachineEvent::LEVEL_WARNING,
-                    "Machine re-créée en DB suite à poll après suppression — choisir une action (Éteindre/Redémarrer) ou auto-poweroff dans 1h"
+                    "Appareil réinscrit dans l’inventaire après suppression. Choisissez une action ou attendez l’arrêt automatique dans une heure."
                 );
             } catch (\Throwable $e) {
                 // Race ou contrainte DB : on retombe sur le comportement par
@@ -277,7 +277,7 @@ final class PxeController
         $remaining = 0;
 
         if ($action !== 'wait') {
-            MachineEvent::logByMac($mac, MachineEvent::LEVEL_ACTION, "Action consommée par la machine : $action");
+            MachineEvent::logByMac($mac, MachineEvent::LEVEL_ACTION, "Action récupérée par l’appareil : $action");
         } else {
             // Test de disque in-session en attente → la machine l'enchaîne sans
             // reboot. UNIQUEMENT in_session=1 : un test « chemin reboot » a déjà
@@ -302,8 +302,8 @@ final class PxeController
                             'SELECT 1 FROM machine_events WHERE action_id = ? AND checkpoint = ? LIMIT 1'
                         );
                         $inSessionCheckpoints = [
-                            'dhcp_request_disktest'       => 'Machine déjà démarrée (test enchaîné in-session)',
-                            'grub_config_served_disktest' => 'Tests préparés — remis à la machine sans redémarrage',
+                            'dhcp_request_disktest'       => 'Appareil déjà démarré (diagnostic dans la session en cours)',
+                            'grub_config_served_disktest' => 'Tests préparés — transmis à l’appareil sans redémarrage',
                         ];
                         foreach ($inSessionCheckpoints as $code => $msg) {
                             $seen->execute([$aid, $code]);
@@ -504,7 +504,7 @@ final class PxeController
         MachineEvent::log(
             (int)$m['id'],
             MachineEvent::LEVEL_INFO,
-            'Machine signalée online (post-reboot, sshd up)'
+            'Appareil signalé en ligne (post-reboot, sshd up)'
         );
 
         View::json(['status' => 'ok']);

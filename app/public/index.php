@@ -115,7 +115,7 @@ set_exception_handler(function (\Throwable $e): void {
     $target = match (InitGuard::state()) {
         InitGuard::STATE_DB_PENDING     => '/init/db',
         InitGuard::STATE_ADMIN_PENDING  => '/init/admin',
-        InitGuard::STATE_LOGIN_PENDING  => '/login?next=' . rawurlencode($_SERVER['REQUEST_URI'] ?? '/machines'),
+        InitGuard::STATE_LOGIN_PENDING  => '/login?next=' . rawurlencode($_SERVER['REQUEST_URI'] ?? '/admin/inventaire'),
         InitGuard::STATE_WIZARD_PENDING => '/init/network',
         default                          => null,  // complete → laisser passer
     };
@@ -201,43 +201,43 @@ $router->get('/activity/list', [$activity, 'fragment']);
 // Vue d'ensemble et liste des machines
 $overview = new Admin\Controllers\OverviewController();
 $router->get('/',                    [$overview, 'index']);
-$router->get('/machines',            [$fc, 'index']);
-$router->get('/machines/new',        [$mc, 'newForm']);
-$router->post('/machines',           [$mc, 'create']);
-$router->post('/machines/bulk-preflight', [$mc, 'bulkPreflight']);
-$router->post('/machines/bulk-install', [$mc, 'bulkInstall']);
-$router->post('/machines/bulk-delete',  [$mc, 'bulkDelete']);
-$router->get('/machines/list-fragment', [$fc, 'fragment']);
-$router->get('/machines/{id}/hardware-context.json', [$mc, 'hardwareContextJson']);
-$router->get('/machines/{id}/operation-fragment', [$mc, 'operationFragment']);
-$router->get('/machines/{id}/status',   [$mc, 'statusFragment']);
-$router->post('/machines/{id}/reveal-password', [$mc, 'revealPassword']);
-$router->get('/machines/{id}/install', [$mc, 'installWizard']);
-$router->post('/machines/{id}/install-preview', [$mc, 'installPreview']);
-$router->post('/machines/{id}/install',[$mc, 'installSubmit']);
-$router->get('/machines/{id}',       [$mc, 'show']);
-$router->put('/machines/{id}',       [$mc, 'update']);
-$router->post('/machines/{id}/wipe', [$mc, 'wipe']);
-$router->post('/machines/{id}/status', [$mc, 'setStatusManual']);
-$router->post('/machines/{id}/power',  [$mc, 'power']);
-$router->get('/machines/{id}/events',  [$mc, 'eventsFragment']);
-$router->get('/machines/{id}/power-fragment', [$mc, 'powerFragment']);
-$router->get('/machines/{id}/boot-fragment', [$mc, 'bootFragment']);
-$router->post('/machines/{id}/wake', [$mc, 'wake']);
-$router->post('/machines/{id}/reboot',   [$mc, 'reboot']);
-$router->post('/machines/{id}/shutdown', [$mc, 'shutdown']);
-$router->post('/machines/{id}/wipe-disks', [$mc, 'wipeDisks']);
-$router->post('/machines/{id}/disktest',             [$mc, 'diskTestStart']);
-$router->post('/machines/{id}/disktest-cancel',      [$mc, 'diskTestCancel']);
-$router->post('/machines/{id}/disktest-post-action', [$mc, 'diskTestPostAction']);
-$router->post('/machines/{id}/rescue',      [$mc, 'rescueStart']);
-$router->post('/machines/{id}/rescue/exit', [$mc, 'rescueStop']);
-$router->post('/machines/{id}/rediscover',  [$mc, 'rediscover']);
-$router->post('/machines/{id}/ansible/retry',    [$mc, 'ansibleRetry']);
-$router->post('/machines/{id}/ansible/redeploy', [$mc, 'ansibleRedeploy']);
-$router->post('/machines/{id}/ansible/pull',     [$mc, 'ansiblePull']);
-$router->post('/machines/{id}/auto-deploy',      [$mc, 'autoDeployToggle']);
-$router->delete('/machines/{id}',    [$mc, 'delete']);
+$router->get('/admin/inventaire',            [$fc, 'index']);
+$router->get('/admin/inventaire/new',        [$mc, 'newForm']);
+$router->post('/admin/inventaire',           [$mc, 'create']);
+$router->post('/admin/inventaire/bulk-preflight', [$mc, 'bulkPreflight']);
+$router->post('/admin/inventaire/bulk-install', [$mc, 'bulkInstall']);
+$router->post('/admin/inventaire/bulk-delete',  [$mc, 'bulkDelete']);
+$router->get('/admin/inventaire/list-fragment', [$fc, 'fragment']);
+$router->get('/admin/inventaire/{id}/hardware-context.json', [$mc, 'hardwareContextJson']);
+$router->get('/admin/inventaire/{id}/operation-fragment', [$mc, 'operationFragment']);
+$router->get('/admin/inventaire/{id}/status',   [$mc, 'statusFragment']);
+$router->post('/admin/inventaire/{id}/reveal-password', [$mc, 'revealPassword']);
+$router->get('/admin/inventaire/{id}/install', [$mc, 'installWizard']);
+$router->post('/admin/inventaire/{id}/install-preview', [$mc, 'installPreview']);
+$router->post('/admin/inventaire/{id}/install',[$mc, 'installSubmit']);
+$router->get('/admin/inventaire/{id}',       [$mc, 'show']);
+$router->put('/admin/inventaire/{id}',       [$mc, 'update']);
+$router->post('/admin/inventaire/{id}/wipe', [$mc, 'wipe']);
+$router->post('/admin/inventaire/{id}/status', [$mc, 'setStatusManual']);
+$router->post('/admin/inventaire/{id}/power',  [$mc, 'power']);
+$router->get('/admin/inventaire/{id}/events',  [$mc, 'eventsFragment']);
+$router->get('/admin/inventaire/{id}/power-fragment', [$mc, 'powerFragment']);
+$router->get('/admin/inventaire/{id}/boot-fragment', [$mc, 'bootFragment']);
+$router->post('/admin/inventaire/{id}/wake', [$mc, 'wake']);
+$router->post('/admin/inventaire/{id}/reboot',   [$mc, 'reboot']);
+$router->post('/admin/inventaire/{id}/shutdown', [$mc, 'shutdown']);
+$router->post('/admin/inventaire/{id}/wipe-disks', [$mc, 'wipeDisks']);
+$router->post('/admin/inventaire/{id}/disktest',             [$mc, 'diskTestStart']);
+$router->post('/admin/inventaire/{id}/disktest-cancel',      [$mc, 'diskTestCancel']);
+$router->post('/admin/inventaire/{id}/disktest-post-action', [$mc, 'diskTestPostAction']);
+$router->post('/admin/inventaire/{id}/rescue',      [$mc, 'rescueStart']);
+$router->post('/admin/inventaire/{id}/rescue/exit', [$mc, 'rescueStop']);
+$router->post('/admin/inventaire/{id}/rediscover',  [$mc, 'rediscover']);
+$router->post('/admin/inventaire/{id}/ansible/retry',    [$mc, 'ansibleRetry']);
+$router->post('/admin/inventaire/{id}/ansible/redeploy', [$mc, 'ansibleRedeploy']);
+$router->post('/admin/inventaire/{id}/ansible/pull',     [$mc, 'ansiblePull']);
+$router->post('/admin/inventaire/{id}/auto-deploy',      [$mc, 'autoDeployToggle']);
+$router->delete('/admin/inventaire/{id}',    [$mc, 'delete']);
 
 $router->get('/presets',         [$pc, 'index']);
 $router->get('/presets/new',     [$pc, 'newForm']);
@@ -276,8 +276,8 @@ $router->get('/api/init-job-status', [$jc, 'statusByJobType']);
 
 // Spec C — Vue unifiée des tâches d'une machine (timeline + drill-down)
 $tc = new TaskController();
-$router->get('/machines/{id}/tasks',         [$tc, 'listFragment']);
-$router->get('/machines/{id}/tasks/{task}',  [$tc, 'show']);
+$router->get('/admin/inventaire/{id}/tasks',         [$tc, 'listFragment']);
+$router->get('/admin/inventaire/{id}/tasks/{task}',  [$tc, 'show']);
 
 // Actions — routes canoniques (numérique pur) + redirections legacy 301.
 // /tasks/{action_id}/checklist → partial HTMX (hx-swap="outerHTML" sur #checklist)
@@ -304,7 +304,6 @@ $router->get('/api/monitoring/installs',              [$monitoring, 'installs'])
 $sc = new SettingsController();
 $router->get('/settings',  [$sc, 'index']);
 $router->post('/settings', [$sc, 'update']);
-$router->post('/settings/terminology', [$sc, 'updateTerminology']);
 $router->post('/settings/default-dns', [$sc, 'updateDefaultDns']);
 $router->post('/settings/regenerate-mok', [$sc, 'regenerateMok']);
 $router->post('/settings/rebuild-grub',   [$sc, 'rebuildGrub']);
@@ -359,7 +358,7 @@ $router->post('/api/init-retry-job/{id}', [$initc, 'retryJob']);
 // tant que les sentinels (db_init_done, admin_created, wizard_completed) ne
 // sont pas à 1. Whitelist /init/* dans Auth::PUBLIC_PREFIXES.
 // Flow : /init/welcome → /init/db → /init/admin → /login →
-//        relogin → /init/network → /init/images → /init/done → /machines.
+//        relogin → /init/network → /init/images → /init/done → /admin/inventaire.
 // D'autres images OS s'ajoutent post-wizard via /settings/images.
 $wc = new WizardController();
 $router->get('/init/welcome',   [$wc, 'welcome']);
@@ -462,4 +461,11 @@ $router->get('/pxe/postboot/{action_id}/{file}', [$pxe, 'serveActionFile']);
 // ---------- Dispatch ----------
 $method = $_SERVER['REQUEST_METHOD'];
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/';
-$router->dispatch($method, $path);
+// Keep old bookmarks and open forms working after the inventory URL changed.
+$canonicalPath = preg_replace('~^/(?:machines|admin/devices)(?=/|$)~', '/admin/inventaire', $path);
+if ($canonicalPath !== $path && ($method === 'GET' || $method === 'HEAD')) {
+    $query = $_SERVER['QUERY_STRING'] ?? '';
+    header('Location: ' . $canonicalPath . ($query === '' ? '' : '?' . $query), true, 302);
+    exit;
+}
+$router->dispatch($method, $canonicalPath);

@@ -269,7 +269,7 @@ def first_boot(action):
     with closing(sqlite3.connect(DATABASE)) as db:
         receipts = db.execute("SELECT message FROM machine_events WHERE action_id=? AND checkpoint='os_first_boot'",
                               (action,)).fetchall()
-        ready = db.execute("SELECT 1 FROM machine_events WHERE message LIKE 'Machine signalée online%'").fetchone()
+        ready = db.execute("SELECT 1 FROM machine_events WHERE message LIKE 'Appareil signalé en ligne%'").fetchone()
         guard = db.execute("SELECT 1 FROM task_phases WHERE phase_key='disk-guard' AND status='success'").fetchone()
     if ready or len(receipts) > 1:
         raise RuntimeError("The installed guest reported an unexpected legacy or duplicate boot callback")

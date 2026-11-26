@@ -227,7 +227,7 @@ pub(super) async fn serve(parts: Parts, body: Incoming, config: &Path) -> Result
                         .headers()
                         .get(header::LOCATION)
                         .and_then(|value| value.to_str().ok())
-                        .and_then(|location| location.strip_prefix("/machines/"))
+                        .and_then(|location| location.strip_prefix("/admin/inventaire/"))
                         .and_then(|id| id.parse::<i64>().ok())
                         .ok_or("Invalid registration redirect")?;
                     let mut response = json_reply(StatusCode::CREATED, json!({"id":id}))?;

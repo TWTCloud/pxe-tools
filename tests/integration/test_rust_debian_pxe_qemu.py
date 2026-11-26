@@ -117,7 +117,9 @@ def setup(root, inputs, keyring):
     for item in ("linux", "initrd.gz"):
         (http / item).symlink_to(inputs / item)
     (http / "static-bin").symlink_to(ROOT / "docker/pxe-tools/static-bin", target_is_directory=True)
-    (http / "discover.sh").write_text(render_fixture("discover.sh.j2", pxe_ip=PXE_IP))
+    (http / "discover.sh").write_text(render_fixture(
+        "discover.sh.j2", pxe_ip=PXE_IP, pxe_console_port_suffix="",
+    ))
     discovery = render_fixture("discovery-preseed.cfg.j2", pxe_ip=PXE_IP, ansible_managed="Disposable fixture")
     # Debian Installer's serial frontend only offers English and C.
     discovery = discovery.replace("deb.debian.org", PXE_IP).replace("fr_FR.UTF-8", "en_US.UTF-8")
@@ -247,7 +249,7 @@ def first_boot_recorded(root):
     with closing(sqlite3.connect(root / "fixture.sqlite")) as db:
         event = db.execute("""SELECT e.message FROM machine_events e JOIN installations i ON i.action_id=e.action_id
             WHERE e.checkpoint='os_first_boot' AND i.install_status='success'""").fetchone()
-        ready = db.execute("SELECT 1 FROM machine_events WHERE message LIKE 'Machine signalée online%'").fetchone()
+        ready = db.execute("SELECT 1 FROM machine_events WHERE message LIKE 'Appareil signalé en ligne%'").fetchone()
         guard = db.execute("SELECT 1 FROM task_phases WHERE phase_key='disk-guard' AND status='success'").fetchone()
     if not (event and guard) or ready:
         return False

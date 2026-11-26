@@ -355,7 +355,7 @@ final class InitGuard
      * Lot 2 : l'image Debian de base est-elle prête (= téléchargée) ?
      *
      * C'est le pré-requis du mode découverte et du rescue (kernel/initrd Debian
-     * netboot). InitController s'en sert pour ne PAS rediriger vers /machines
+     * netboot). InitController s'en sert pour ne PAS rediriger vers /admin/inventaire
      * tant que cette image n'est pas downloaded — sinon discovery/rescue
      * n'auraient pas leur kernel.
      *
@@ -399,7 +399,7 @@ final class InitGuard
      *
      * Les downloads d'images ne passent PAS par init_jobs (chemin worker séparé),
      * donc hasActiveJobs() y est aveugle. InitController s'en sert pour ne pas
-     * rediriger vers /machines tant qu'une image cochée au wizard (Debian de base
+     * rediriger vers /admin/inventaire tant qu'une image cochée au wizard (Debian de base
      * OU autres distros) finit de télécharger — sinon la section de progression
      * qu'on vient d'ajouter devient inutile (l'admin est éjecté pendant le DL).
      *

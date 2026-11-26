@@ -216,7 +216,7 @@ def check_automatic_linux(database, tls, auth, form_headers, rhel_sha):
             device = db.execute("""INSERT INTO machines(mac,status,boot_arch,inventory_json)
                                    VALUES (?,'discovered','amd64',?) RETURNING id""",
                                 (mac, json.dumps(inventory))).fetchone()[0]
-        route = f'/machines/{device}/install/linux'
+        route = f'/admin/inventaire/{device}/install/linux'
         grub = '/grub.php?' + urlencode({'mac': mac, 'arch': 'amd64'})
         selection = {'image': image, 'disk': f'/dev/vda:{serial}', 'hostname': f'pxe-linux-{offset}',
                      'login': 'pxecheck', 'password': 'fixture-long-password',
@@ -306,7 +306,7 @@ def check_proxmox(root, public, database, tls, auth, headers):
                      'inventory': {'boot_mode': 'UEFI'}, 'disks': [{'name': 'vda', 'serial': 'PVE-PXE'}]}
         device = db.execute("""INSERT INTO machines(mac,status,boot_arch,inventory_json)
                                VALUES (?,'discovered','amd64',?) RETURNING id""", (mac,json.dumps(inventory))).fetchone()[0]
-    route = f'/machines/{device}/install/linux'
+    route = f'/admin/inventaire/{device}/install/linux'
     assert b'Proxmox VE 9.2-1' in request(route, tls=tls, headers=auth)[2]
     form = {'image': 'proxmox-9.2-1', 'disk': '/dev/vda:PVE-PXE', 'hostname': 'pve01.example.test',
             'login': '', 'proxmox_email': 'admin@example.test', 'password': 'fixture-proxmox-password',
@@ -631,7 +631,7 @@ def verify_access(secure, private, admin, database):
                 'Origin': admin['Origin'], 'Content-Type': admin['Content-Type']}
     assert request(users, **secure, headers=admin)[0] == 200
     assert form(users, {'action':'create', **credentials, 'scope':'devices.read'})[:2] == (303, users)
-    visible = request('/admin/devices', **secure, headers=observer)
+    visible = request('/admin/inventaire', **secure, headers=observer)
     assert visible[0] == 200 and personal.encode() in visible[2] and users.encode() not in visible[2]
     assert b'class="profile-name">observer<' in visible[2] and b'action="/logout"' in visible[2]
     assert request(profile, **secure)[0] == 401
@@ -640,7 +640,7 @@ def verify_access(secure, private, admin, database):
     assert request(users, **secure, headers=observer)[0] == 403
     assert form(users, {'action':'create', 'username':'intrus', 'password':'fixture-attacker-password',
                         'admin':'1'}, observer)[0] == 403
-    assert form('/machines', {'mac':'02:00:00:00:20:01'}, observer)[0] == 403
+    assert form('/admin/inventaire', {'mac':'02:00:00:00:20:01'}, observer)[0] == 403
     images_user = {'username': 'media-editor', 'password': 'fixture-media-editor-password'}
     assert form(users, {'action': 'create', **images_user, 'scope': 'images.write'})[:2] == (303, users)
     media_editor = {**admin, 'Authorization': 'Basic '+base64.b64encode(
@@ -682,12 +682,12 @@ def verify_access(secure, private, admin, database):
     login = form('/login', credentials, response_header='Set-Cookie')
     assert login[0] == 303 and login[1]
     cookie = {'Cookie':login[1].split(';', 1)[0]}
-    assert request('/admin/devices', **secure, headers=cookie)[0] == 200
+    assert request('/admin/inventaire', **secure, headers=cookie)[0] == 200
     assert request(api+'/devices', **secure, headers=cookie)[0] == 401
     assert api_call('/devices', issued)[0] == 200
     assert api_call('/jobs', issued)[0] == 403
     assert api_call('/devices', issued, json_body={'mac':'02:00:00:00:20:01'})[0] == 403
-    assert request('/admin/devices', **secure, headers=bearer(issued))[0] == 401
+    assert request('/admin/inventaire', **secure, headers=bearer(issued))[0] == 401
     assert request(api+'/devices', **private, headers=bearer(issued))[0] == 404
     other = form('/login', credentials, response_header='Set-Cookie')
     other_cookie = {'Cookie':other[1].split(';', 1)[0]}
@@ -733,9 +733,9 @@ def verify_access(secure, private, admin, database):
     assert form(users, {'action':'update','id':owner,'enabled':'1','scope':'devices.read'})[:2] == (303, users)
     assert api_call('/devices', pending)[0] == 401
     assert form(users, {'action':'update','id':owner,'scope':'devices.read'})[:2] == (303, users)
-    assert request('/admin/devices', **secure, headers=observer)[0] == 401
+    assert request('/admin/inventaire', **secure, headers=observer)[0] == 401
     assert form(users, {'action':'update','id':owner,'enabled':'1','scope':'devices.read'})[:2] == (303, users)
-    assert request('/admin/devices', **secure, headers=cookie)[0] in (302, 401)
+    assert request('/admin/inventaire', **secure, headers=cookie)[0] in (302, 401)
     with sqlite3.connect(database) as db:
         db.execute('UPDATE api_tokens SET expires_at=unixepoch() WHERE user_id=?', [first_admin])
     assert api_call('/devices', operator)[0] == 401
@@ -779,18 +779,18 @@ def verify_authentik_access(binary, config, secure, origin, env):
             admin = {'X-Forwarded-User':'sso-admin', 'Origin':origin,
                      'Content-Type':'application/x-www-form-urlencoded'}
             viewer = {**admin, 'X-Forwarded-User':'sso-viewer'}
-            assert request('/admin/devices', **secure, headers=viewer)[0] == 200
+            assert request('/admin/inventaire', **secure, headers=viewer)[0] == 200
             assert request(users, **secure, headers=admin, form={'action':'activate'})[:2] == (303, users)
-            assert request('/admin/devices', **secure, headers=viewer)[0] == 403
+            assert request('/admin/inventaire', **secure, headers=viewer)[0] == 403
             assert request(users, **secure, headers=admin,
                            form={'action':'create','username':'sso-viewer','scope':'devices.read'})[:2] == (303, users)
-            assert request('/admin/devices', **secure, headers=viewer)[0] == 200
-            assert request('/admin/devices', **secure, headers={**viewer,'X-Forwarded-User':'SSO-VIEWER'})[0] == 403
+            assert request('/admin/inventaire', **secure, headers=viewer)[0] == 200
+            assert request('/admin/inventaire', **secure, headers={**viewer,'X-Forwarded-User':'SSO-VIEWER'})[0] == 403
             assert request(users, **secure, headers=viewer)[0] == 403
             profile = request('/admin/profile', **secure, headers=viewer)
             assert profile[0] == 200 and b'Authentik' in profile[2] and b'name="current"' not in profile[2]
             assert request('/admin/profile', **secure, headers=viewer, form={'current':'test'})[0] == 403
-            assert request('/machines', **secure, headers=viewer, form={'mac':'02:00:00:00:20:03'})[0] == 403
+            assert request('/admin/inventaire', **secure, headers=viewer, form={'mac':'02:00:00:00:20:03'})[0] == 403
         finally:
             service.terminate()
     print('Verified trusted SSO transition from legacy access to explicit administrator and viewer accounts.')
@@ -870,7 +870,7 @@ def check_lan(binary, root, tls, env):
                            headers={**headers, 'Origin':'https://other.invalid'})[0] == 403
             credentials = {'username':'lan-admin', 'password':'fixture-lan-password'}
             assert request('/init/admin', **secure, headers=headers,
-                           form={**credentials,'password_confirm': credentials['password'],'code':'a'*48})[:2] == (303,'/admin/devices')
+                           form={**credentials,'password_confirm': credentials['password'],'code':'a'*48})[:2] == (303,'/admin/inventaire')
             assert request('/login', **secure, headers=headers, form=credentials)[0] == 303
             authorization = base64.b64encode(b'lan-admin:fixture-lan-password').decode()
             admin = {'Authorization': 'Basic ' + authorization, **headers}
@@ -968,7 +968,7 @@ def check_lan(binary, root, tls, env):
             assert request('/init/network', **secure, form={'role':'console'}, headers=admin)[:2] == (303,'/init/done')
             _, summary = wizard_page('/init/done', 'Validation', headers=admin)
             assert b'name="confirmation" value="yes"' in summary and b'Console seule' in summary
-            status, csp, console = request('/admin/devices', **secure, headers=admin,
+            status, csp, console = request('/admin/inventaire', **secure, headers=admin,
                                            response_header='Content-Security-Policy')
             assert status == 200 and b'class="rail"' in console and b'aria-current="page"' in console
             assert b'aria-controls="mobile-navigation"' in console
@@ -981,7 +981,7 @@ def check_lan(binary, root, tls, env):
                 draft, = db.execute("SELECT value FROM settings WHERE key='rust_wizard_network'").fetchone()
             result = request('/init/complete', **secure, headers=admin,
                              form={'confirmation': 'yes', 'plan': draft, 'image': ''})
-            assert result[:2] == (303, '/admin/devices')
+            assert result[:2] == (303, '/admin/inventaire')
             verify_access(secure, private, admin, runtime/'install.sqlite')
             verify_restored_console(secure, private, admin, runtime/'install.sqlite', plan)
         finally:
@@ -1066,9 +1066,9 @@ def verify_restored_console(secure, private, admin, database, plan):
     assert request(guided, **secure, form={'keymap': 'us'}, headers=admin)[:2] == (303, guided)
     preset_list = request('/presets', **secure, headers=admin)[2]
     assert re.search(rb'modele-guide</a></td><td>[^<]+</td><td>Compatible', preset_list)
-    inventory = request('/admin/devices?' + urlencode({'q': 'SERVER_'}), **secure, headers=admin)[2]
+    inventory = request('/admin/inventaire?' + urlencode({'q': 'SERVER_'}), **secure, headers=admin)[2]
     assert b'server_xyz' in inventory and b'server-xyz' not in inventory
-    inventory = request('/admin/devices?status=discovered', **secure, headers=admin)[2]
+    inventory = request('/admin/inventaire?status=discovered', **secure, headers=admin)[2]
     assert b'server-xyz' in inventory and b'server_xyz' not in inventory
     print('Restored network settings, overview, inventory filters, preset options and duplication verified.')
 

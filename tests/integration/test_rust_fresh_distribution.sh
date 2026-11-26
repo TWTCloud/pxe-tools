@@ -93,9 +93,9 @@ docker exec "$container" bash -ec '
     test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=$wrong_code")" = "403 "
     test ! -e /etc/pxe-tools/db.conf
     submitted="${code^^}"
-    test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=${submitted//-/ }")" = "303 $origin/admin/devices"
+    test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=${submitted//-/ }")" = "303 $origin/admin/inventaire"
     test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=$code")" = "409 "
-    curl -kfsS --max-time 5 --user setup-fixture:fixture-only-password "$origin/admin/devices" >/dev/null
+    curl -kfsS --max-time 5 --user setup-fixture:fixture-only-password "$origin/admin/inventaire" >/dev/null
     if [[ "$variant" == apt ]]; then
         output=$(pxe-tools setup)
         [[ "$output" == *"https://$address/admin/"* && "$output" != *"$code"* ]]

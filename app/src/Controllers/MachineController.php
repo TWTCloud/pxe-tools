@@ -37,14 +37,14 @@ final class MachineController
             'presets'      => Preset::all(),
             'activeTests'  => $activeTests,
             'sig'          => Machine::listSignature($machines, $statusFilter, $activeTests),
-        ], 'Machines');
+        ], 'Inventaire');
     }
 
     public function show(array $params): void
     {
         $id = (int) $params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine not found'; return; }
+        if (!$machine) { http_response_code(404); echo 'Appareil introuvable'; return; }
         $presets = Preset::all();
         $presetsGrouped = Preset::allGroupedForMachine($id);
         $latestInstall = Installation::latestForMachine($id);
@@ -101,7 +101,7 @@ final class MachineController
         $mac = Machine::normalizeMac($_POST['mac'] ?? '');
         if ($mac === '') {
             View::flash('error', 'MAC invalide');
-            View::redirect('/machines/new');
+            View::redirect('/admin/inventaire/new');
         }
         try {
             $id = Machine::create([
@@ -111,11 +111,11 @@ final class MachineController
             ]);
         } catch (\Exception $e) {
             View::flash('error', 'Erreur : ' . $e->getMessage());
-            View::redirect('/machines/new');
+            View::redirect('/admin/inventaire/new');
             return;
         }
         View::flash('success', Term::format('{One} {cree}'));
-        View::redirect('/machines/' . $id);
+        View::redirect('/admin/inventaire/' . $id);
     }
 
     public function update(array $params): void
@@ -125,7 +125,7 @@ final class MachineController
         if (!$machine) { http_response_code(404); return; }
 
         if (isset($_POST['status']) && !in_array($_POST['status'],Machine::STATUSES,true)) {
-            View::flash('error','Statut invalide.'); View::redirect('/machines/'.$id.'#settings'); return;
+            View::flash('error','Statut invalide.'); View::redirect('/admin/inventaire/'.$id.'#settings'); return;
         }
 
         // Update partial : seuls les champs présents dans le POST sont écrits.
@@ -157,7 +157,7 @@ final class MachineController
                 }
             } else {
                 View::flash('error', 'Choix de démarrage local invalide');
-                View::redirect('/machines/' . $id . '#settings');
+                View::redirect('/admin/inventaire/' . $id . '#settings');
             }
         }
         if (array_key_exists('status', $_POST) && $_POST['status'] !== $machine['status']) {
@@ -179,7 +179,7 @@ final class MachineController
             default                                                 => Term::format('{One} {mis_a_jour}'),
         };
         View::flash('success', $flashMsg);
-        View::redirect('/machines/' . $id);
+        View::redirect('/admin/inventaire/' . $id);
     }
 
     public function wipe(array $params): void
@@ -190,7 +190,7 @@ final class MachineController
 
 
     /**
-     * POST /machines/{id}/power — programme une action poweroff/reboot/cancel
+     * POST /admin/inventaire/{id}/power — programme une action poweroff/reboot/cancel
      * que la machine consommera au prochain poll de discover.sh (≤5s).
      * Sert à éteindre/redémarrer une machine en attente après discovery sans
      * dépendre du WoL (souvent peu fiable).
@@ -199,19 +199,19 @@ final class MachineController
     {
         $id = (int) $params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine not found'; return; }
+        if (!$machine) { http_response_code(404); echo 'Appareil introuvable'; return; }
 
         $action = trim((string)($_POST['action'] ?? ''));
         if (!in_array($action, ['poweroff', 'reboot', 'cancel'], true)) {
             View::flash('error', 'Action invalide');
-            View::redirect('/machines/' . $id);
+            View::redirect('/admin/inventaire/' . $id);
             return;
         }
         try {
             MachineOperation::run($id,$action==='cancel'?null:'power',static function () use ($id,$action): void {
                 Machine::setNextAction($id,$action==='cancel'?null:$action);
             });
-        } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); View::redirect('/machines/'.$id); return; }
+        } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); View::redirect('/admin/inventaire/'.$id); return; }
         $eventMsg = match ($action) {
             'cancel'   => 'Admin a annulé l\'action programmée',
             'poweroff' => 'Admin a programmé : extinction',
@@ -224,11 +224,11 @@ final class MachineController
             'reboot'   => Term::format('Redémarrage programmé — sera appliqué au prochain échange {du} (≤5s)'),
         };
         View::flash('success', $label);
-        View::redirect('/machines/' . $id);
+        View::redirect('/admin/inventaire/' . $id);
     }
 
     /**
-     * POST /machines/{id}/status — change manuellement le statut (fonction avancée debug).
+     * POST /admin/inventaire/{id}/status — change manuellement le statut (fonction avancée debug).
      * Utile pour déverrouiller une machine bloquée (ex: stuck en `installing` après crash).
      * Statut validé contre Machine::STATUSES.
      *
@@ -246,7 +246,7 @@ final class MachineController
             $count=MachineOperation::correctStatus($id,trim((string)($_POST['status']??'')));
             View::flash('success', "Suivi corrigé ; $count action(s) clôturée(s). Aucun arrêt de processus distant n’est garanti.");
         } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); }
-        View::redirect('/machines/'.$id.'#settings');
+        View::redirect('/admin/inventaire/'.$id.'#settings');
     }
 
 
@@ -272,12 +272,12 @@ final class MachineController
         try {
             MachineOperation::run($id,'rescue',function () use ($id): void {
                 Machine::setRescueMode($id,true); Machine::setNextAction($id,'reboot');
-                $this->enqueueMachinePower($id,'reboot','Redémarrage en récupération machine '.$id);
+                $this->enqueueMachinePower($id,'reboot','Redémarrage en récupération de l’appareil '.$id);
                 MachineEvent::log($id,MachineEvent::LEVEL_ACTION,'Mode récupération demandé par admin.');
             });
             View::flash('success','Récupération programmée au redémarrage.');
         } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); }
-        View::redirect('/machines/'.$id);
+        View::redirect('/admin/inventaire/'.$id);
     }
 
 
@@ -298,11 +298,11 @@ final class MachineController
             MachineOperation::run($id,'discovery',function () use ($id): void {
                 Machine::setStatus($id,'inventorying'); Machine::setNextAction($id,'reboot');
                 MachineEvent::log($id,MachineEvent::LEVEL_ACTION,'Nouvel inventaire demandé par admin.');
-                $this->enqueueMachinePower($id,'reboot','Redémarrage pour inventaire machine '.$id);
+                $this->enqueueMachinePower($id,'reboot','Redémarrage pour inventaire de l’appareil '.$id);
             });
             View::flash('success',Term::format('Nouvel inventaire programmé. Redémarrage {du} à venir.'));
         } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); }
-        View::redirect('/machines/'.$id);
+        View::redirect('/admin/inventaire/'.$id);
     }
 
 
@@ -314,16 +314,16 @@ final class MachineController
     {
         $id = (int) $params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine not found'; return; }
+        if (!$machine) { http_response_code(404); echo 'Appareil introuvable'; return; }
 
         Machine::setRescueMode($id, false);
         MachineEvent::log($id, MachineEvent::LEVEL_ACTION, 'Admin a désactivé le mode rescue');
         View::flash('info', 'Mode rescue désactivé. Le prochain boot servira le menu normal.');
-        View::redirect('/machines/' . $id);
+        View::redirect('/admin/inventaire/' . $id);
     }
 
     /**
-     * GET /machines/{id}/events — fragment HTMX (auto-refresh 2s) pour le
+     * GET /admin/inventaire/{id}/events — fragment HTMX (auto-refresh 2s) pour le
      * terminal de l'onglet Événements. Affiche les N derniers événements de
      * la machine (info, action, warning, error) en ordre chronologique.
      */
@@ -331,7 +331,7 @@ final class MachineController
     {
         $id = (int) $params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine not found'; return; }
+        if (!$machine) { http_response_code(404); echo 'Appareil introuvable'; return; }
         $events = \Admin\Models\MachineEvent::recent($id, 100);
         View::partial('machines/_events_log', [
             'machine' => $machine,
@@ -348,14 +348,14 @@ final class MachineController
     }
 
     /**
-     * GET /machines/{id}/install — affiche le wizard 3 étapes.
+     * GET /admin/inventaire/{id}/install — affiche le wizard 3 étapes.
      * Si la machine a déjà un install_config_json, le wizard est pré-rempli avec.
      */
     public function installWizard(array $params): void
     {
         $id = (int) $params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine not found'; return; }
+        if (!$machine) { http_response_code(404); echo 'Appareil introuvable'; return; }
 
         $existing = Machine::installConfig($machine);
         $hasExistingConfig = $existing !== null;
@@ -373,7 +373,7 @@ final class MachineController
     }
 
     /**
-     * GET /machines/{id}/hardware-context.json
+     * GET /admin/inventaire/{id}/hardware-context.json
      *
      * Expose le HardwareContext d'une machine (disques+NICs+RAM+UEFI+CPU) en
      * JSON. Consommé par le form preset (Phase 2 chantier hardware-aware) :
@@ -426,7 +426,7 @@ final class MachineController
     }
 
     /**
-     * POST /machines/{id}/install — valide et persiste la config + status='configured'.
+     * POST /admin/inventaire/{id}/install — valide et persiste la config + status='configured'.
      * Sauvegarde aussi hostname/domain (attributs machine, pas install).
      * WoL optionnel via checkbox.
      */
@@ -584,7 +584,7 @@ final class MachineController
     public function bulkInstall(array $params): void
     {
         [$preset,$config,$ids]=$this->bulkInput();
-        if (!$preset || !$ids) { View::flash('error',Term::format('Sélectionnez un modèle et au moins {un}.')); View::redirect('/machines'); return; }
+        if (!$preset || !$ids) { View::flash('error',Term::format('Sélectionnez un modèle et au moins {un}.')); View::redirect('/admin/inventaire'); return; }
         $results=[]; $done=0;
         foreach ($ids as $id) {
             $fingerprint=(string)($_POST['fingerprints'][$id]??'');
@@ -598,7 +598,7 @@ final class MachineController
         if (str_contains($_SERVER['HTTP_ACCEPT']??'','application/json')) View::json(['results'=>$results,'started_count'=>$done]);
         $errors=array_map(static fn($r)=>'#'.$r['id'].' : '.($r['reason']??''),array_filter($results,static fn($r)=>!$r['ok']));
         View::flash($errors?'warning':'success',"$done installation(s) programmée(s). ".implode(' ',$errors));
-        View::redirect('/machines');
+        View::redirect('/admin/inventaire');
     }
 
     public function bulkPreflight(array $params): void
@@ -628,12 +628,12 @@ final class MachineController
     {
         $static=($config['network_mode']??'dhcp')==='static';
         if (!empty($config['network']['interfaces'])) $static=(bool)array_filter($config['network']['interfaces'],static fn($nic)=>($nic['mode']??'dhcp')==='static');
-        if ($count>1 && $static) throw new \RuntimeException('Ce modèle attribuerait la même IP statique à plusieurs machines. Adaptez le réseau individuellement.');
+        if ($count>1 && $static) throw new \RuntimeException('Ce modèle attribuerait la même IP statique à plusieurs appareils. Adaptez le réseau individuellement.');
     }
 
 
     /**
-     * POST /machines/{id}/reveal-password — déchiffre un mot de passe stocké
+     * POST /admin/inventaire/{id}/reveal-password — déchiffre un mot de passe stocké
      * en clair (chiffré via master.key Crypto). Auth admin suffit, plus de
      * passphrase opérateur. POST body : type=root (défaut) ou type=admin_user.
      *
@@ -707,7 +707,7 @@ final class MachineController
     }
 
     /**
-     * GET /machines/list-fragment — rend toute la section dynamique du dashboard
+     * GET /admin/inventaire/list-fragment — rend toute la section dynamique du dashboard
      * (compteur "Machines (N)", bulk-bar, empty-state OR table). Polling HTMX 5s
      * depuis #machines-section. Le polling sur le wrapper (vs uniquement <tbody>)
      * couvre aussi l'état vide : sans ça, la 1ère machine n'apparaît jamais en
@@ -732,7 +732,7 @@ final class MachineController
     }
 
     /**
-     * GET /machines/{id}/power-fragment — rend uniquement le panel "Contrôle
+     * GET /admin/inventaire/{id}/power-fragment — rend uniquement le panel "Contrôle
      * alimentation à distance" (état awaiting + countdown + boutons). Polling
      * HTMX every 5s pour matérialiser l'action consommée par la machine sans
      * recharger toute la page.
@@ -741,11 +741,11 @@ final class MachineController
     {
         $id = (int) $params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine not found'; return; }
+        if (!$machine) { http_response_code(404); echo 'Appareil introuvable'; return; }
         View::partial('machines/_power_panel', ['machine' => $machine]);
     }
 
-    /** GET /machines/{id}/boot-fragment — état du menu GRUB et historique. */
+    /** GET /admin/inventaire/{id}/boot-fragment — état du menu GRUB et historique. */
     public function bootFragment(array $params): void
     {
         $machine = Machine::find((int)$params['id']);
@@ -754,7 +754,7 @@ final class MachineController
     }
 
     /**
-     * GET /machines/{id}/status — rend uniquement le contenu du badge statut,
+     * GET /admin/inventaire/{id}/status — rend uniquement le contenu du badge statut,
      * pour polling HTMX 2s sur la fiche machine quand l'état est "live"
      * (inventorying / installing / wiping / testing / etc.).
      */
@@ -769,7 +769,7 @@ final class MachineController
     }
 
     /**
-     * POST /machines/{id}/ansible/retry — re-enqueue un init_job ansible bootstrap
+     * POST /admin/inventaire/{id}/ansible/retry — re-enqueue un init_job ansible bootstrap
      * isolé (sans wipe/install) pour relancer uniquement la phase post-installation.
      *
      * Garde-fous :
@@ -788,12 +788,12 @@ final class MachineController
                 $stmt->execute([$id]); $target=$stmt->fetch();
                 if (!$target) throw new \RuntimeException('Aucune phase Ansible en échec à réessayer.');
                 $actionId=(int)$target['action_id'];
-                $pdo->prepare("INSERT INTO init_jobs (job_type,status,message) VALUES (?,'pending',?)")->execute(['action:ansible_retry:'.$actionId,'Réessai Ansible machine '.$id]);
+                $pdo->prepare("INSERT INTO init_jobs (job_type,status,message) VALUES (?,'pending',?)")->execute(['action:ansible_retry:'.$actionId,'Réessai Ansible pour l’appareil '.$id]);
                 MachineEvent::log($id,MachineEvent::LEVEL_ACTION,'Réessai Ansible demandé.',null,$actionId);
                 return $actionId;
             });
             View::flash('success','Réessai Ansible programmé.'); View::redirect('/tasks/'.$actionId);
-        } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); View::redirect('/machines/'.$id.'#events'); }
+        } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); View::redirect('/admin/inventaire/'.$id.'#events'); }
     }
 
     /**
@@ -810,7 +810,7 @@ final class MachineController
     }
 
     /**
-     * POST /machines/{id}/reboot — point UNIQUE de redémarrage (menu Actions) :
+     * POST /admin/inventaire/{id}/reboot — point UNIQUE de redémarrage (menu Actions) :
      * machine en attente → next_action consommé au poll (≤ 5 s) ; sinon SSH via
      * worker root avec fallback WoL (init_job `machine:reboot:{id}`).
      */
@@ -820,17 +820,17 @@ final class MachineController
         try {
             MachineOperation::run($id,'power',function (array $machine) use ($id): void {
                 if (self::machineIsAwaiting($machine)) Machine::setNextAction($id,'reboot');
-                else $this->enqueueMachinePower($id,'reboot', 'Demande administrateur pour machine '.$id);
+                else $this->enqueueMachinePower($id,'reboot', 'Demande administrateur pour l’appareil '.$id);
                 MachineEvent::log($id,MachineEvent::LEVEL_ACTION,'Redémarrage demandé par admin.');
             });
             View::flash('success','Demande transmise. Consultez l’activité pour le résultat.');
         } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); }
-        View::redirect('/machines/'.$id);
+        View::redirect('/admin/inventaire/'.$id);
     }
 
 
     /**
-     * POST /machines/{id}/shutdown — point UNIQUE d'arrêt (menu Actions) :
+     * POST /admin/inventaire/{id}/shutdown — point UNIQUE d'arrêt (menu Actions) :
      * machine en attente → next_action consommé au poll (≤ 5 s) ; sinon SSH via
      * worker root (init_job `machine:shutdown:{id}`, pas de fallback WoL —
      * le WoL allume, n'éteint pas).
@@ -841,17 +841,17 @@ final class MachineController
         try {
             MachineOperation::run($id,'power',function (array $machine) use ($id): void {
                 if (self::machineIsAwaiting($machine)) Machine::setNextAction($id,'poweroff');
-                else $this->enqueueMachinePower($id,'shutdown', 'Demande administrateur pour machine '.$id);
+                else $this->enqueueMachinePower($id,'shutdown', 'Demande administrateur pour l’appareil '.$id);
                 MachineEvent::log($id,MachineEvent::LEVEL_ACTION,'Arrêt demandé par admin.');
             });
             View::flash('success','Demande transmise. Consultez l’activité pour le résultat.');
         } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); }
-        View::redirect('/machines/'.$id);
+        View::redirect('/admin/inventaire/'.$id);
     }
 
 
     /**
-     * POST /machines/{id}/auto-deploy — active ou désactive le redéploiement
+     * POST /admin/inventaire/{id}/auto-deploy — active ou désactive le redéploiement
      * Ansible automatique pour cette machine (déclenché par webhook GitHub
      * sur push qui touche la config de la machine).
      */
@@ -859,7 +859,7 @@ final class MachineController
     {
         $id = (int) $params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine not found'; return; }
+        if (!$machine) { http_response_code(404); echo 'Appareil introuvable'; return; }
 
         $enabled = !empty($_POST['auto_deploy']) ? 1 : 0;
         Machine::update($id, ['auto_deploy' => $enabled]);
@@ -869,11 +869,11 @@ final class MachineController
             $enabled
                 ? Term::format('Auto-déploiement Ansible activé pour {ce}.')
                 : Term::format('Auto-déploiement Ansible désactivé pour {ce}.'));
-        View::redirect('/machines/' . $id);
+        View::redirect('/admin/inventaire/' . $id);
     }
 
     /**
-     * POST /machines/{id}/ansible/redeploy — redéploie la config Ansible sur
+     * POST /admin/inventaire/{id}/ansible/redeploy — redéploie la config Ansible sur
      * cette machine SANS attendre un échec (à la différence d'ansibleRetry).
      * Use case : l'admin a mis à jour le repo Ansible sur GitHub et veut
      * appliquer la nouvelle config à chaud. Le worker fait `git pull` puis
@@ -905,11 +905,11 @@ final class MachineController
             'machine_busy'          => Term::format('Une opération est en cours sur {ce} (installation, wipe ou test) — attendez la fin avant de redéployer.'),
         ];
         View::flash('error', $msgByReason[$r['reason']] ?? 'Redéploiement Ansible refusé.');
-        View::redirect('/machines/' . $id);
+        View::redirect('/admin/inventaire/' . $id);
     }
 
     /**
-     * POST /machines/{id}/ansible/pull — enqueue un init_job 'ansible_repo:pull'
+     * POST /admin/inventaire/{id}/ansible/pull — enqueue un init_job 'ansible_repo:pull'
      * qui exécute `git pull --ff-only` dans WORKDIR via le worker.py.
      * Use case : l'admin veut récupérer la dernière version du dépôt configuré
      * avant un redéploiement manuel, sans avoir à activer l'auto-deploy webhook.
@@ -919,7 +919,7 @@ final class MachineController
     {
         $id = (int) $params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine not found'; return; }
+        if (!$machine) { http_response_code(404); echo 'Appareil introuvable'; return; }
 
         $jobType = 'ansible_repo:pull';
         $pdo = Db::get();
@@ -976,7 +976,7 @@ final class MachineController
     }
 
     /**
-     * POST /machines/bulk-delete — supprime les machines sélectionnées en une fois.
+     * POST /admin/inventaire/bulk-delete — supprime les machines sélectionnées en une fois.
      *
      * Suppression toujours forcée : même les machines en cours d'opération
      * (wiping/installing/inventorying/testing) sont supprimées. Le JS UI
@@ -994,7 +994,7 @@ final class MachineController
         $ids = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['machine_ids'] ?? [])))));
         if (empty($ids)) {
             View::flash('error', ucfirst(Term::format('{aucun} {selectionne}')));
-            View::redirect('/machines');
+            View::redirect('/admin/inventaire');
             return;
         }
 
@@ -1020,7 +1020,7 @@ final class MachineController
             $msg .= " · $notFound introuvable(s) (déjà supprimée(s) ?)";
         }
         View::flash('success', $msg);
-        View::redirect('/machines');
+        View::redirect('/admin/inventaire');
     }
 
     /**
@@ -1032,7 +1032,7 @@ final class MachineController
     {
         $id = (int) $params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine not found'; return; }
+        if (!$machine) { http_response_code(404); echo 'Appareil introuvable'; return; }
 
         // Format POST attendu (nouveau, mode-per-disk) :
         //   disks_modes['/dev/sda'] = 'partial' | 'full' | ''
@@ -1046,7 +1046,7 @@ final class MachineController
 
         if (!is_array($disksModesIn) || empty($disksModesIn)) {
             View::flash('error', 'Aucun disque sélectionné');
-            View::redirect('/machines/' . $id);
+            View::redirect('/admin/inventaire/' . $id);
         }
 
         // Whitelist : disques connus de l'inventory
@@ -1065,7 +1065,7 @@ final class MachineController
 
         if (empty($disksWithModes)) {
             View::flash('error', 'Aucun disque valide à effacer (sélectionnez au moins un mode par disque).');
-            View::redirect('/machines/' . $id);
+            View::redirect('/admin/inventaire/' . $id);
         }
 
         try {
@@ -1091,7 +1091,7 @@ final class MachineController
             });
             $action=$result;
             $rebootMessage='Redémarrage programmé ; consultez la progression';
-        } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); View::redirect('/machines/'.$id.'#storage'); return; }
+        } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); View::redirect('/admin/inventaire/'.$id.'#storage'); return; }
         $summary = count($disksWithModes) . ' disque(s) : '
             . implode(', ', array_map(static fn($d) => $d['name'] . ' (' . $d['mode'] . ')', $disksWithModes));
         View::flash('success', "Effacement lancé sur $summary · $rebootMessage");
@@ -1116,22 +1116,22 @@ final class MachineController
     {
         $id = (int) $params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine not found'; return; }
+        if (!$machine) { http_response_code(404); echo 'Appareil introuvable'; return; }
 
         // Conflits d'état
         if ($machine['status'] === 'wiping') {
             View::flash('error', Term::format('Impossible : {one} en cours d’effacement'));
-            View::redirect('/machines/' . $id);
+            View::redirect('/admin/inventaire/' . $id);
             return;
         }
         if ($machine['status'] === 'testing') {
             View::flash('error', 'Impossible : un test de disque est déjà en cours');
-            View::redirect('/machines/' . $id);
+            View::redirect('/admin/inventaire/' . $id);
             return;
         }
         if ((int)($machine['rescue_mode'] ?? 0) === 1) {
             View::flash('error', 'Opération impossible : mode rescue actif. Veuillez désactiver le mode rescue avant de lancer un test.');
-            View::redirect('/machines/' . $id);
+            View::redirect('/admin/inventaire/' . $id);
             return;
         }
 
@@ -1143,12 +1143,12 @@ final class MachineController
 
         if (!is_array($disksRequested) || empty($disksRequested)) {
             View::flash('error', 'Aucun disque sélectionné');
-            View::redirect('/machines/' . $id);
+            View::redirect('/admin/inventaire/' . $id);
             return;
         }
         if (!is_array($modesByDisk)) {
             View::flash('error', 'Modes de test invalides');
-            View::redirect('/machines/' . $id);
+            View::redirect('/admin/inventaire/' . $id);
             return;
         }
 
@@ -1164,7 +1164,7 @@ final class MachineController
             $mode = $modesByDisk[$d] ?? null;
             if (!is_string($mode) || !in_array($mode, DiskTest::MODES, true)) {
                 View::flash('error', "Mode invalide pour le disque $d");
-                View::redirect('/machines/' . $id);
+                View::redirect('/admin/inventaire/' . $id);
                 return;
             }
             $jobs[] = ['disk' => $d, 'mode' => $mode];
@@ -1175,7 +1175,7 @@ final class MachineController
         }
         if (empty($jobs)) {
             View::flash('error', Term::format('Aucun disque valide (il doit faire partie de l’inventaire {du})'));
-            View::redirect('/machines/' . $id);
+            View::redirect('/admin/inventaire/' . $id);
             return;
         }
 
@@ -1212,7 +1212,7 @@ final class MachineController
                 if (!$inSession) Action::enqueueReboot((int)$action['id'],$id);
                 return $action;
             });
-        } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); View::redirect('/machines/'.$id.'#storage'); return; }
+        } catch (\RuntimeException $e) { View::flash('error',$e->getMessage()); View::redirect('/admin/inventaire/'.$id.'#storage'); return; }
 
         $count = count($jobs);
         $msg = "Tests de disque lancés sur $count disque(s)" . ($parallel ? ' (parallèle)' : ' (séquentiel)');
@@ -1225,7 +1225,7 @@ final class MachineController
     }
 
     /**
-     * POST /machines/{id}/disktest-cancel — annule le test de disque actif.
+     * POST /admin/inventaire/{id}/disktest-cancel — annule le test de disque actif.
      * Serveur : test → aborted, action → cancelled, machine → discovered.
      * Agent : il découvre l'annulation à son prochain POST de progression
      * (réponse «ignored») → stoppe badblocks/smartctl et, en in-session,
@@ -1256,11 +1256,11 @@ final class MachineController
         View::flash($test ? 'success' : 'info', $test
             ? 'Suivi du test annulé et installation dépendante déprogrammée. L’agent recevra la demande d’arrêt à son prochain contact.'
             : Term::format('Aucun test de disque en cours sur {ce}.'));
-        View::redirect('/machines/' . $id);
+        View::redirect('/admin/inventaire/' . $id);
     }
 
     /**
-     * POST /machines/{id}/disktest-post-action — modifie l'action de fin du test
+     * POST /admin/inventaire/{id}/disktest-post-action — modifie l'action de fin du test
      * EN COURS. L'agent applique la valeur fraîche renvoyée par disktest-end au
      * moment où il termine, pas celle du fetch initial.
      */
@@ -1268,18 +1268,18 @@ final class MachineController
     {
         $id = (int) $params['id'];
         $machine = Machine::find($id);
-        if (!$machine) { http_response_code(404); echo 'Machine not found'; return; }
+        if (!$machine) { http_response_code(404); echo 'Appareil introuvable'; return; }
 
         $pa = (string)($_POST['post_action'] ?? '');
         if (!in_array($pa, DiskTest::POST_ACTIONS, true)) {
             View::flash('error', 'Action de fin invalide.');
-            View::redirect('/machines/' . $id);
+            View::redirect('/admin/inventaire/' . $id);
             return;
         }
         $t = DiskTest::activeByMac((string)$machine['mac']);
         if ($t === null) {
             View::flash('info', Term::format('Aucun test de disque en cours sur {ce}.'));
-            View::redirect('/machines/' . $id);
+            View::redirect('/admin/inventaire/' . $id);
             return;
         }
         if ($pa === 'wait' && (int)($t['in_session'] ?? 0) !== 1) {

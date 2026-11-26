@@ -161,7 +161,7 @@ configfile "(http,{SERVER}){seed}"
                           "login": "", "proxmox_email": "admin@example.test", "password": "fixture-pve-password",
                           "password_confirm": "fixture-pve-password", "confirm": "yes"})
         schedule = curl("--cacert", cert, "-u", ADMIN, "-H", f"Origin: https://{SERVER}", "-D", "-",
-                        "-d", form, f"https://{SERVER}/machines/{device}/install/linux")
+                        "-d", form, f"https://{SERVER}/admin/inventaire/{device}/install/linux")
         if schedule.returncode != 0 or b"303" not in schedule.stdout.splitlines()[0]:
             raise RuntimeError(f"La planification Proxmox a échoué (curl={schedule.returncode})")
         drive = root/"disk.qcow2"

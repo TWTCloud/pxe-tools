@@ -28,7 +28,7 @@ final class ActivityQuery
         $q = $queryMatch[0] ?? '';
         $status=in_array($input['status']??'', ['pending','running','success','failed','cancelled','skipped','aborted'],true)?$input['status']:'';
         $type=in_array($input['type']??'', ['install','wipe','disktest','discovery','job'],true)?$input['type']:'';
-        $machine=max(0,(int)($input['machine']??0)); $where=[]; $args=[];
+        $machine=max(0,(int)($input['appareil']??$input['machine']??0)); $where=[]; $args=[];
         if($status!==''){$where[]='activity.status=?';$args[]=$status;}
         if($type==='job')$where[]="activity.source='job'";
         elseif($type==='install')$where[]="activity.type IN ('install','install_only','reinstall')";

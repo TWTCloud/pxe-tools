@@ -346,7 +346,7 @@ pub fn machine_ready(db: &mut Connection, raw_mac: &str) -> ApiResult {
         &tx,
         machine,
         "info",
-        "Machine signalée online (post-reboot, sshd up)",
+        "Appareil signalé en ligne (post-reboot, sshd up)",
         None,
         None,
     )?;

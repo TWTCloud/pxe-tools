@@ -11,7 +11,7 @@
 use Admin\View;
 
 // Fallback href si history.back() ne fonctionne pas (tab fraîche, URL directe).
-$backHref = $machine ? '/machines/' . (int)$machine['id'] : '/activity';
+$backHref = $machine ? '/admin/inventaire/' . (int)$machine['id'] : '/activity';
 ?>
 
 <header class="row-flex-spread mb-1">

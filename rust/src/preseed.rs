@@ -57,7 +57,7 @@ pub fn serve(
     let Some(machine) = install::machine(&tx, raw_mac, false)? else {
         return Ok(reply(
             404,
-            format!("# ERREUR : machine introuvable pour MAC {mac}\n"),
+            format!("# ERREUR : appareil introuvable pour MAC {mac}\n"),
         ));
     };
     let Some(raw) = machine
@@ -65,7 +65,7 @@ pub fn serve(
         .as_deref()
         .filter(|raw| !matches!(*raw, "" | "0"))
     else {
-        return Ok(reply(404, format!("# ERREUR : machine {mac} sans config d'install (passer par /machines/{{id}}/install d'abord)\n")));
+        return Ok(reply(404, format!("# ERREUR : appareil {mac} sans config d'installation (passer par /admin/inventaire/{{id}}/install d'abord)\n")));
     };
     let config: Value = match serde_json::from_str(raw) {
         Ok(config) if is_php_array(&config) => config,

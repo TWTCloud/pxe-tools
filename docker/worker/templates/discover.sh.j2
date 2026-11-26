@@ -11,6 +11,7 @@
 # access.log + le terminal d'événements de la machine.
 
 ORCH_IP="{{ pxe_ip }}"
+CONSOLE_URL="https://$ORCH_IP{{ pxe_console_port_suffix }}/admin/inventaire"
 API="http://$ORCH_IP/api/discovery"
 STATIC_BIN_BASE="http://$ORCH_IP/static-bin"
 
@@ -1257,7 +1258,7 @@ render_status() {
         echo
         echo "                  ================================================================"
         if [ "$posted" -eq 1 ]; then
-            echo "                                     HARDWARE DISCOVERY TERMINE"
+            echo "                                     INVENTAIRE TERMINE"
         else
             echo "                              ENVOI DE L'INVENTAIRE NON CONFIRME"
         fi
@@ -1266,7 +1267,7 @@ render_status() {
         echo
         echo
         if [ "$posted" -eq 1 ]; then
-            echo "                    Machine identifiee et enregistree sur le serveur PXE :"
+            echo "                    Appareil ajoute a l'inventaire PXE :"
         else
             echo "                    L'inventaire n'a pas pu etre confirme par le serveur."
         fi
@@ -1275,14 +1276,14 @@ render_status() {
         echo "                      IP  : $IP_ADDR"
         echo
         if [ "$posted" -eq 1 ]; then
-            echo "                    En attente d'une action depuis l'interface admin :"
+            echo "                    En attente d'une action depuis la console :"
         else
             echo "                    Verifiez le reseau et relancez la decouverte."
         fi
         echo
-        echo "                      http://$ORCH_IP/machines"
+        echo "                      $CONSOLE_URL"
         echo
-        printf "                    Arret automatique de la machine dans : %02d:%02d\n" "$MM" "$SS"
+        printf "                    Arret automatique de l'appareil dans : %02d:%02d\n" "$MM" "$SS"
         echo
         echo
         echo

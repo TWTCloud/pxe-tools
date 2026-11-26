@@ -76,7 +76,7 @@
         },
         {
             "code": "ansible_finished",
-            "label": "Machine prête",
+            "label": "Appareil prêt",
             "phase": "post"
         }
     ],
@@ -126,7 +126,7 @@
         },
         {
             "code": "ansible_finished",
-            "label": "Machine prête",
+            "label": "Appareil prêt",
             "phase": "post"
         }
     ],

@@ -510,7 +510,7 @@ final class InstallConfigBuilder
                 if ($mac === '') {
                     $errors[] = "$label : match_by=mac mais aucun MAC fourni";
                 } elseif (!isset($knownMacs[$mac])) {
-                    $errors[] = "$label : MAC $mac introuvable dans l'inventaire matériel de la machine de référence";
+                    $errors[] = "$label : MAC $mac introuvable dans l'inventaire matériel de l’appareil de référence";
                 }
             }
 
@@ -1005,7 +1005,7 @@ final class InstallConfigBuilder
         $adminHasPwd    = !empty($config['admin_user_pwhash']);
         $adminHasKeys   = !empty(trim((string)($config['admin_user_pubkeys'] ?? '')));
         if (!$ansibleEnabled && !$adminHasPwd && !$adminHasKeys) {
-            $errors[] = 'Aucun chemin SSH disponible : activez le module Ansible avec une clé pubkey configurée, OU fournissez un mot de passe admin, OU des clés SSH publiques admin. Sinon la machine sera inaccessible à distance après installation.';
+            $errors[] = 'Aucun chemin SSH disponible : activez le module Ansible avec une clé pubkey configurée, OU fournissez un mot de passe admin, OU des clés SSH publiques admin. Sinon l’appareil sera inaccessible à distance après installation.';
         }
 
         return $errors;

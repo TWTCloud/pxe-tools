@@ -476,7 +476,7 @@ if ($machine === null) {
     if ($rescueMode) {
         // rescue_mode=1 : priorité absolue sur le status. La machine est volontairement
         // mise en mode récupération via l'UI ; on sert uniquement le menuentry rescue
-        // jusqu'à ce que l'utilisateur sorte du mode rescue (POST /machines/{id}/rescue/exit).
+        // jusqu'à ce que l'utilisateur sorte du mode rescue (POST /admin/inventaire/{id}/rescue/exit).
         echo "# Machine $hostname en mode rescue → boot Debian d-i en récupération\n";
         echo menuentry_rescue($orch_ip, $kernel_opts, $default_distro, $default_arch, $bootProto), "\n";
     } elseif ($status === 'testing') {

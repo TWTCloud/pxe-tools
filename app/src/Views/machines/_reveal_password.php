@@ -62,7 +62,7 @@ if (!($hasAdminCipher || $hasRootCipher || $hasRootLegacy)) return;
     if (passphrase) fd.append('passphrase', passphrase);
     const headers = { Accept: 'application/json' };
     if (block.dataset.csrfToken) headers[block.dataset.csrfHeader] = block.dataset.csrfToken;
-    const r = await fetch('/machines/' + machineId + '/reveal-password', { method: 'POST', body: fd, headers });
+    const r = await fetch('/admin/inventaire/' + machineId + '/reveal-password', { method: 'POST', body: fd, headers });
     // Un rejet (403 CSRF, session expirée) renvoie du HTML : sans ce contrôle, r.json() lève une
     // exception que personne ne voit et le bouton semble simplement ne rien faire.
     if (!(r.headers.get('content-type') || '').includes('application/json')) {

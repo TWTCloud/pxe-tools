@@ -1,6 +1,6 @@
 <?php use Admin\View; use Admin\Ui\DeviceTerminology as Term; ?>
 <dialog id="bulk-install-modal" class="bulk-modal" aria-labelledby="bulk-modal-title" aria-describedby="bulk-modal-description" style="width:min(58rem,calc(100vw - 2rem));max-height:90vh;overflow:auto;">
-  <form method="post" action="/machines/bulk-install" id="bulk-install-form">
+  <form method="post" action="/admin/inventaire/bulk-install" id="bulk-install-form">
     <h2 id="bulk-modal-title" class="text-lg font-semibold">Installer <span id="bulk-modal-count">0</span> <span id="bulk-modal-term"><?= View::e(Term::format('{many}')) ?></span></h2>
     <p id="bulk-modal-description">Vérifiez chaque cible avant de programmer l’installation. La copie du modèle remplace le système et les données des disques ciblés.</p>
     <p class="text-sm">Sélection : <span id="bulk-modal-list"></span></p>

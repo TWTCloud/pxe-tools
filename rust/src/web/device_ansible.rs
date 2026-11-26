@@ -182,7 +182,7 @@ fn auto_deploy(path: &Path, id: i64, form: &[u8]) -> Result<Reply, ErrorBox> {
     };
     pxe::log_event(&tx, id, "action", message, None, None)?;
     tx.commit()?;
-    Ok(redirect(StatusCode::SEE_OTHER, format!("/machines/{id}")))
+    Ok(redirect(StatusCode::SEE_OTHER, format!("/admin/inventaire/{id}")))
 }
 
 fn pending(db: &Connection, kind: &str) -> rusqlite::Result<Option<i64>> {
@@ -211,10 +211,10 @@ pub(super) fn form(db: &Connection, id: i64, output: &mut String) -> Result<(), 
     let checked = if auto { " checked" } else { "" };
     write!(
         output,
-        r#"<form method="post" action="/machines/{id}/ansible/pull"><button>Synchroniser le dépôt</button></form>
-<form method="post" action="/machines/{id}/ansible/redeploy"><button>Redéployer le rôle</button></form>
-<form method="post" action="/machines/{id}/ansible/retry"><button>Réessayer une exécution en échec</button></form>
-<form method="post" action="/machines/{id}/auto-deploy"><label><input type="checkbox" name="auto_deploy" value="1"{checked}> Redéployer après les changements GitHub qui concernent cet appareil</label>
+        r#"<form method="post" action="/admin/inventaire/{id}/ansible/pull"><button>Synchroniser le dépôt</button></form>
+<form method="post" action="/admin/inventaire/{id}/ansible/redeploy"><button>Redéployer le rôle</button></form>
+<form method="post" action="/admin/inventaire/{id}/ansible/retry"><button>Réessayer une exécution en échec</button></form>
+<form method="post" action="/admin/inventaire/{id}/auto-deploy"><label><input type="checkbox" name="auto_deploy" value="1"{checked}> Redéployer après les changements GitHub qui concernent cet appareil</label>
 <button>Enregistrer le redéploiement automatique</button></form>"#
     )?;
     Ok(())

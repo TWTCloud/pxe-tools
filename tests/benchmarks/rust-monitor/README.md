@@ -134,17 +134,8 @@ pour garder le certificat en recréant le conteneur. Pour reprendre une
 paire existante, placer `cert.pem` et `key.pem` dans ce volume avant le
 démarrage, avec le répertoire et la clé privés et propriété de root.
 
-La vue HTTPS `/admin/devices` permet de consulter la liste avec le compte
-local SQLite existant. Le formulaire d’appellation enregistre le réglage
-`ui_device_term` dans la même base et revient à `/admin/devices`. Pour un
-accès par nom DNS, définir `PXE_PUBLIC_HOST` avec ce nom pour la redirection
-et la validation du formulaire. La page HTTPS `/admin/certificates` permet
-d’importer une chaîne de certificats et sa clé privée au format PEM. Après
-vérification de la paire, les nouvelles connexions utilisent le certificat
-importé et le service le recharge au redémarrage.
-`/var/lib/pxe-tools/tls-import/external.json` contient la clé privée et doit
-être conservé avec les données sensibles de l’instance, avec les permissions
-du service.
+La vue HTTPS `/admin/inventaire` permet de consulter la liste avec le compte
+administrateur. Les anciennes adresses d’inventaire redirigent vers cette URL.
 
 Depuis la fiche d’un appareil inventorié, l’installation guidée choisit
 une image Debian 13 publiée pour son architecture et un modèle compatible.
@@ -449,9 +440,8 @@ d'accès des artefacts postboot et des payloads netboot.
 
 ### Console, écouteurs et certificats
 
-- La liste des appareils a pour URL canonique `/admin/devices`. Le
-  réglage `ui_device_term` de la bêta 12 change le libellé dans la console.
-  Un changement de libellé conserve la même URL et les liens existants.
+- La rubrique **Inventaire** a pour URL canonique `/admin/inventaire`.
+  Le libellé est commun à toutes les instances.
 - Sur HTTP 80, la racine `/` redirige directement vers `/admin/` en HTTPS
   sur le port 443. La règle vise la seule racine. Les images, le preseed et
   les retours d'installation gardent leurs réponses HTTP directes.

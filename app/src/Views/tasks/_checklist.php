@@ -672,7 +672,7 @@ if (isset($pollInterval) && $pollInterval !== null) {
         post-installation sans refaire le wipe ni l'installation OS.
       </small>
       <form method="post"
-            action="/machines/<?= $machineIdForRetry ?>/ansible/retry"
+            action="/admin/inventaire/<?= $machineIdForRetry ?>/ansible/retry"
             onsubmit="return confirm('Voulez-vous relancer le playbook Ansible ?\n\nSeule la phase post-installation sera réexécutée (pas de wipe, pas de réinstallation OS).');"
             style="margin:0;flex-shrink:0;">
         <button type="submit" class="btn btn-danger" style="margin:0;font-size:0.85rem;">

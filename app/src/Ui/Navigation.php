@@ -10,7 +10,7 @@ final class Navigation
     {
         return [
             'overview' => ['label' => 'Vue d’ensemble', 'icon' => 'home', 'href' => '/', 'children' => []],
-            'machines' => ['label' => DeviceTerminology::format('{Many}'), 'icon' => 'hard-drive', 'href' => '/machines', 'children' => []],
+            'machines' => ['label' => 'Inventaire', 'icon' => 'hard-drive', 'href' => '/admin/inventaire', 'children' => []],
             'presets' => ['label' => 'Modèles', 'icon' => 'package', 'href' => '/presets', 'children' => []],
             'activity' => ['label' => 'Activité', 'icon' => 'zap', 'href' => '/activity', 'children' => [
                 ['/activity', 'Toute l’activité'], ['/installations', 'Installations'],
@@ -35,7 +35,7 @@ final class Navigation
     public static function current(string $path, string $href): bool
     {
         if ($href === '/') return $path === '/';
-        if ($href === '/machines') return $path === $href;
+        if ($href === '/admin/inventaire') return $path === $href;
         if (in_array($href, ['/settings', '/activity'], true)) return $path === $href;
         return $path === $href || str_starts_with($path, $href . '/');
     }
@@ -47,16 +47,16 @@ final class Navigation
         $crumbs = [['label' => $section['label'], 'href' => $section['href']]];
         if ($path === '/' || $path === $section['href']) return ['section' => $key, 'crumbs' => $crumbs];
 
-        if (preg_match('~^/machines/(\d+)(/install)?$~', $path, $matches)) {
+        if (preg_match('~^/admin/inventaire/(\d+)(/install)?$~', $path, $matches)) {
             $machine = $data['machine'] ?? [];
             $label = trim((string)($machine['hostname'] ?? '')) ?: (string)($machine['mac'] ?? DeviceTerminology::format('{One}') . ' #' . $matches[1]);
-            $crumbs[] = ['label' => $label, 'href' => '/machines/' . $matches[1]];
+            $crumbs[] = ['label' => $label, 'href' => '/admin/inventaire/' . $matches[1]];
             if (isset($matches[2])) $crumbs[] = ['label' => 'Préparer l’installation', 'href' => $path];
         } elseif (preg_match('~^/presets/(\d+)$~', $path)) {
             $crumbs[] = ['label' => (string)($data['preset']['name'] ?? 'Éditer le modèle'), 'href' => $path];
         } else {
             $labels = [
-                '/machines/new' => DeviceTerminology::format('Ajouter {un}'), '/presets/new' => 'Nouveau modèle',
+                '/admin/inventaire/new' => DeviceTerminology::format('Ajouter {un}'), '/presets/new' => 'Nouveau modèle',
                 '/presets/import' => 'Importer', '/presets/duplicate' => 'Dupliquer',
                 '/installations' => 'Installations', '/settings/images' => 'Images système',
                 '/settings/images/add' => 'Ajouter une image', '/settings/ansible' => 'Ansible',

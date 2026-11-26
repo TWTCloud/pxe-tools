@@ -19,7 +19,7 @@ pub(super) fn form(device: &Device, id: i64) -> Result<Reply, ErrorBox> {
     write!(
         html,
         r#"<p>L’effacement détruit les données des disques sélectionnés.</p>
-<form method="post" action="/machines/{id}/wipe-disks">"#
+<form method="post" action="/admin/inventaire/{id}/wipe-disks">"#
     )?;
     for (path, serial, _) in device
         .disks()
