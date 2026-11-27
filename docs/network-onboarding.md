@@ -16,6 +16,13 @@ Le mode de démarrage distingue :
 
 Les deux réglages avancés de réseau ont des usages distincts : `pxe_subnet` délimite les clients autorisés à certains endpoints PXE ; `dhcp_proxy_network` et `dhcp_proxy_netmask` définissent la portée du proxy dnsmasq. Le cas courant utilise le même réseau détecté, mais une configuration existante peut avoir des valeurs différentes.
 
+Au démarrage, PXE Tools retrouve l’IPv4 de l’interface choisie. Si l’ancienne
+adresse a disparu, le service reprend une adresse de remplacement unique sur
+le même réseau et dans la portée du proxy DHCP lorsqu’il est activé. Il
+reconstruit les chargeurs et les menus avant d’annoncer la nouvelle adresse.
+Si l’interface est absente ou si plusieurs adresses sont possibles, la console
+reste disponible et indique que le démarrage PXE est suspendu.
+
 ## Console et services de démarrage
 
 La console native utilise normalement le port TCP 8080. Le service HTTP de démarrage utilise le port TCP 80 ; TFTP utilise UDP 69 et le proxy DHCP peut utiliser UDP 67/4011. Une console accessible ne prouve pas que le réseau PXE est prêt.

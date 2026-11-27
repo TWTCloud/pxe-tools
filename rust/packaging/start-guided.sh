@@ -1,5 +1,8 @@
 #!/bin/sh
 set -eu
+if [ "${PXE_SERVICE_MANAGER:-}" = systemd ]; then
+    /bin/sh /opt/pxe-tools/init/bootstrap-render-startup.sh --refresh-only
+fi
 python3 /opt/pxe-tools/scripts/validate-native-runtime.py tls "$TLS_DIR"
 export CREDENTIALS_DIRECTORY=/run/pxe-tools-rust-guided
 install -d -o root -g www-data -m 0750 "$CREDENTIALS_DIRECTORY"
