@@ -95,6 +95,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             }
             return Ok(());
         }
+        if flag == "--admin-hostnames" {
+            for name in web::admin_hostnames() {
+                println!("{name}");
+            }
+            return Ok(());
+        }
     }
     if let [flag, config] = args.as_slice() {
         if flag == "--migrate-schema" && Path::new(config).is_absolute() {

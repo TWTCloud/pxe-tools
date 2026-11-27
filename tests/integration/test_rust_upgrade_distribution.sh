@@ -11,6 +11,9 @@ previous=$(jq -er .version "$manifest")
 [[ "$tag" == "v${previous//\~/-}" ]]
 release="https://github.com/TWTCloud/pxe-tools/releases/download/$tag"
 name="pxe-rust-upgrade-$variant-$$"
+server_name=pxe-upgrade-fixture
+search_domain=lan.example.test
+hostname_args=(--hostname "$server_name" --dns-search "$search_domain")
 work=$(mktemp -d)
 volumes=()
 cleanup() {
@@ -63,7 +66,7 @@ case "$variant" in
         cp -- "$PXE_GUIDED_DEB" "$work/rust.deb"
         cp -- "${PXE_GUIDED_ANSIBLE_DEB:?}" "$work/rust-ansible.deb"
         chmod 0755 "$work"
-        docker run -d --name "$name" --privileged --cgroupns private \
+        docker run -d --name "$name" --privileged --cgroupns private "${hostname_args[@]}" \
             --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
             --mount "type=bind,src=$work,dst=/mnt/pxe-fixture,readonly" \
             "${PXE_FRESH_APT_IMAGE:?}" /lib/systemd/systemd --unit=basic.target >/dev/null
@@ -95,7 +98,7 @@ APT_LEGACY
             mounts+=(--mount "type=volume,src=$volume,dst=$location")
         done
         docker network create --internal "$name" >/dev/null
-        docker run -d --name "$name" --network "$name" "${mounts[@]}" "$prior" >/dev/null
+        docker run -d --name "$name" --network "$name" "${hostname_args[@]}" "${mounts[@]}" "$prior" >/dev/null
         if [ "$(docker image inspect --format '{{json .Config.Env}}' "$prior" | jq -r 'index("PXE_RUST_DIRECT_HTTP=1") != null')" = true ]; then
             wait_https 443
         else
@@ -163,7 +166,8 @@ if [ "$variant" = apt ]; then
 APT_UPGRADE
 else
     docker rm -fv "$name" >/dev/null
-    docker run -d --name "$name" --network "$name" "${mounts[@]}" "${PXE_RUST_GUIDED_DOCKER_IMAGE:?}" >/dev/null
+    docker run -d --name "$name" --network "$name" "${hostname_args[@]}" \
+        "${mounts[@]}" "${PXE_RUST_GUIDED_DOCKER_IMAGE:?}" >/dev/null
 fi
 
 wait_https 443
@@ -174,8 +178,12 @@ grep -Fq '<h1>Inventaire</h1>' "$work/admin.html"
 test "$(docker exec "$name" sha256sum /etc/pxe-tools/master.key | cut -d ' ' -f 1)" = "$key"
 served=$(docker exec "$name" bash -o pipefail -c 'openssl s_client -connect 127.0.0.1:443 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256')
 test "$served" = "$fingerprint"
+dns_name="$server_name.$search_domain"
+test "$(docker exec "$name" curl -ksS --noproxy '*' --max-time 5 -o /dev/null -w '%{http_code}' \
+    --resolve "$dns_name:443:$address" -H "Origin: https://$dns_name" \
+    --data 'username=fixture-admin&password=fixture-login-password' "https://$dns_name/login")" = 303
 test -z "$(docker exec "$name" ss -Hlun '( sport = :67 or sport = :4011 )')"
-printf 'Rust %s upgrade from %s preserved SQLite, the account, the master key and TLS.\n' "$variant" "$previous"
+printf 'Rust %s upgrade from %s preserved SQLite, the account, the master key and TLS. DNS login works.\n' "$variant" "$previous"
 
 if [[ "$variant" == apt ]]; then
     # Use the candidate public script against the upgraded official APT instance.

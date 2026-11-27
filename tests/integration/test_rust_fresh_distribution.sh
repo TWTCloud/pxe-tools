@@ -5,6 +5,8 @@ set -euo pipefail
 
 variant="${1:?apt or docker}"
 container="pxe-rust-fresh-$variant-$$"
+server_name=pxe-console-fixture
+search_domain=lan.example.test
 cleanup() {
     if docker inspect "$container" >/dev/null 2>&1; then
         if [ "$variant" = apt ]; then
@@ -24,6 +26,7 @@ trap cleanup EXIT
 case "$variant" in
     apt)
         docker run -d --name "$container" --privileged --cgroupns private \
+            --hostname "$server_name" --dns-search "$search_domain" \
             --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
             --mount "type=bind,src=${PXE_GUIDED_DEB:?},dst=/var/tmp/pxe-tools.deb,readonly" \
             "${PXE_FRESH_APT_IMAGE:?}" /lib/systemd/systemd --unit=basic.target >/dev/null
@@ -42,7 +45,9 @@ APT_GUEST
         ;;
     docker)
         docker network create --internal "$container" >/dev/null
-        docker run -d --name "$container" --network "$container" "${PXE_RUST_GUIDED_DOCKER_IMAGE:?}" >/dev/null
+        docker run -d --name "$container" --network "$container" \
+            --hostname "$server_name" --dns-search "$search_domain" \
+            "${PXE_RUST_GUIDED_DOCKER_IMAGE:?}" >/dev/null
         ;;
     *) exit 2 ;;
 esac
@@ -68,6 +73,8 @@ docker exec "$container" curl -fsS --max-time 5 --cacert /run/pxe-tools-rust-gui
 docker exec "$container" bash -ec '
     variant="$1"
     address="$2"
+    dns_name="$3"
+    search_domain="$4"
     origin=https://127.0.0.1
     code=$(</run/pxe-tools-rust-guided/setup-code)
     [[ "$code" =~ ^[0-9a-f]{4}(-[0-9a-f]{4}){2}$ ]]
@@ -96,11 +103,44 @@ docker exec "$container" bash -ec '
     test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=${submitted//-/ }")" = "303 $origin/admin/inventaire"
     test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=$code")" = "409 "
     curl -kfsS --max-time 5 --user setup-fixture:fixture-only-password "$origin/admin/inventaire" >/dev/null
+
+    tls_cert=/run/pxe-tools-rust-guided/cert.pem
+    dns_origin="https://$dns_name"
+    dns_client=(curl -sS --noproxy "*" --max-time 5 --cacert "$tls_cert" --resolve "$dns_name:443:$address")
+    status=(-o /dev/null -w "%{http_code}")
+    test "$(curl -fsS --noproxy "*" --max-time 5 --resolve "$dns_name:80:$address" -o /dev/null \
+        -w "%{redirect_url}" "http://$dns_name/")" = "$dns_origin/admin/"
+    test "$("${dns_client[@]}" "${status[@]}" --data "" -H "Origin: https://unrelated.example.test" "$dns_origin/login")" = 403
+    test "$("${dns_client[@]}" "${status[@]}" --data "" -H "Origin: https://unrelated.example.test" \
+        -H "Host: unrelated.example.test" "$dns_origin/login")" = 403
+    fixture=$(mktemp -d)
+    test "$("${dns_client[@]}" "${status[@]}" --cookie-jar "$fixture/session" -H "Origin: $dns_origin" \
+        --data "username=setup-fixture&password=fixture-only-password" "$dns_origin/login")" = 303
+    "${dns_client[@]}" -f --cookie "$fixture/session" "$dns_origin/admin/inventaire" >/dev/null
+
+    alias=inventory.example.test
+    openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj "/CN=$alias" \
+        -addext "subjectAltName=DNS:$alias,DNS:*.$search_domain" \
+        -keyout "$fixture/key.pem" -out "$fixture/cert.pem" >/dev/null 2>&1
+    test "$("${dns_client[@]}" "${status[@]}" --cookie "$fixture/session" -H "Origin: $dns_origin" \
+        --data-urlencode "certificate@$fixture/cert.pem" --data-urlencode "private_key@$fixture/key.pem" \
+        "$dns_origin/admin/certificates")" = 303
+    alias_origin="https://$alias"
+    alias_client=(curl -sS --noproxy "*" --max-time 5 --cacert "$fixture/cert.pem" --resolve "$alias:443:$address")
+    test "$("${alias_client[@]}" "${status[@]}" -H "Origin: $alias_origin" --data "" "$alias_origin/login")" = 422
+    test "$("${alias_client[@]}" "${status[@]}" -H "Host: unrelated.$search_domain" \
+        -H "Origin: https://unrelated.$search_domain" --data "" "$alias_origin/login")" = 403
+    test "$("${alias_client[@]}" "${status[@]}" --user setup-fixture:fixture-only-password \
+        -H "Origin: $alias_origin" --data "restore_default=1" "$alias_origin/admin/certificates")" = 303
+    "${dns_client[@]}" -f --cookie "$fixture/session" "$dns_origin/admin/inventaire" >/dev/null
+    test "$("${dns_client[@]}" "${status[@]}" -H "Host: $alias" \
+        -H "Origin: $alias_origin" --data "" "$dns_origin/login")" = 403
+    printf "Browser login works on %s and a certificate alias is accepted only while active.\n" "$dns_name"
     if [[ "$variant" == apt ]]; then
         output=$(pxe-tools setup)
         [[ "$output" == *"https://$address/admin/"* && "$output" != *"$code"* ]]
     fi
-' _ "$variant" "$address"
+' _ "$variant" "$address" "$server_name.$search_domain" "$search_domain"
 if [[ "$variant" == apt ]]; then
     # Exercise the web updater with a signed package that pulls a new Debian dependency.
     docker exec -e DEBIAN_FRONTEND=noninteractive "$container" \
