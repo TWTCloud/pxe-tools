@@ -78,6 +78,13 @@ esac
 
 PXE_INTERFACE=$(get_setting 'pxe_interface' "${PXE_INTERFACE:-}") || read_error
 PXE_IP=$(get_setting 'pxe_ip' "${PXE_IP:-${ORCHESTRATOR_IP:-}}") || read_error
+if [ "${PXE_RUST_DIRECT_HTTP:-}" = 1 ] && [ -e /etc/pxe-tools/db.conf ]; then
+    active_ip=$(/usr/lib/pxe-tools/pxe-tools-rust --active-pxe-address /etc/pxe-tools/db.conf) ||
+        fail_config "impossible de vérifier l’adresse PXE"
+    if [ -z "$active_ip" ] || [ "$active_ip" != "$PXE_IP" ]; then
+        fail_config "adresse PXE indisponible ou fichiers de démarrage en attente"
+    fi
+fi
 case "${DHCP_MODE:-tftp_only}" in
     tftp_only) LEGACY_PROXY=off ;;
     proxy) LEGACY_PROXY=on ;;

@@ -314,6 +314,7 @@ RUN rm /etc/s6-overlay/s6-rc.d/user/contents.d/php-fpm \
     && printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rust-guided/type \
     && touch /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/php-init \
              /etc/s6-overlay/s6-rc.d/bootstrap-tls/dependencies.d/php-init \
+             /etc/s6-overlay/s6-rc.d/render-dnsmasq-conf/dependencies.d/bootstrap-render-templates \
              /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/bootstrap-tls \
              /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/bootstrap-render-templates \
              /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/wait-for-net \

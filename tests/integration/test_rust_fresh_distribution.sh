@@ -147,5 +147,40 @@ if [[ "$variant" == apt ]]; then
         apt-get install -y --no-install-recommends apt-utils gnupg
     docker cp tests/integration/test_apt_console_update.py "$container:/var/tmp/test_apt_console_update.py"
     docker exec "$container" python3 /var/tmp/test_apt_console_update.py "${PXE_TEST_APT_VERSION:-0.1.0~guided1}"
+    docker exec -i "$container" bash -es <<'NETWORK_GUEST'
+        set -euo pipefail
+        systemctl stop pxe-tools-worker.service
+        config=/etc/pxe-tools/db.conf
+        db=/var/lib/pxe-tools/pxe-tools.sqlite
+        binary=/usr/lib/pxe-tools/pxe-tools-rust
+        ip addr add 192.0.2.43/24 dev eth0
+        runuser -u www-data -- sqlite3 "$db" <<'SQL'
+INSERT OR REPLACE INTO settings(key,value) VALUES
+    ('pxe_enabled','on'),('pxe_interface','eth0'),('pxe_ip','192.0.2.42'),
+    ('pxe_subnet','192.0.2.0/24'),('dhcp_proxy_enabled','on'),
+    ('dhcp_proxy_network','192.0.2.0'),('dhcp_proxy_netmask','255.255.255.0');
+SQL
+        test "$(runuser -u www-data -- "$binary" --refresh-pxe-address "$config")" = 192.0.2.43
+        test "$(runuser -u www-data -- "$binary" --refresh-pxe-address "$config")" = 192.0.2.43
+        test -z "$("$binary" --active-pxe-address "$config")"
+        if runuser -u www-data -- "$binary" --finish-pxe-address "$config" 192.0.2.42; then
+            exit 1
+        fi
+        # At startup this acknowledgement follows GRUB and template rendering.
+        runuser -u www-data -- "$binary" --finish-pxe-address "$config" 192.0.2.43
+        test "$("$binary" --active-pxe-address "$config")" = 192.0.2.43
+        test "$(runuser -u www-data -- "$binary" --refresh-pxe-address "$config")" = unchanged
+        ip addr del 192.0.2.43/24 dev eth0
+        ip addr add 192.0.2.44/24 dev eth0
+        ip addr add 192.0.2.45/24 dev eth0
+        test "$(runuser -u www-data -- "$binary" --refresh-pxe-address "$config")" = suspended
+        systemctl restart pxe-tools-pxe-http.service
+        curl -fsS --max-time 5 --cacert /run/pxe-tools-rust-guided/cert.pem https://127.0.0.1/healthz >/dev/null
+        overview=$(curl -kfsS --max-time 5 --user setup-fixture:fixture-only-password https://127.0.0.1/overview)
+        [[ "$overview" == *"Démarrage PXE suspendu"* ]]
+        test -z "$("$binary" --active-pxe-address "$config")"
+        test -z "$(ss -Hlun '( sport = :67 or sport = :4011 )')"
+        printf 'PXE renewed its address and left the console accessible with an ambiguous IPv4.\n'
+NETWORK_GUEST
 fi
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"

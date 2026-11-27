@@ -1,6 +1,7 @@
 [Unit]
 Description=Prepare PXE Tools data and templates
-After=network.target
+Wants=network-online.target
+After=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/usr/lib/pxe-tools/native/default.env

@@ -31,6 +31,7 @@ mod ui;
 mod updates;
 mod winpe;
 
+pub(crate) use onboarding::{finish_pxe_address, refresh_pxe_address};
 pub(crate) use setup::adopt_existing_database;
 
 use crate::{configured_database, handle_request, monitoring, setting, PxeRequest, Routes};
@@ -228,7 +229,7 @@ pub(crate) fn admin_addresses() -> Result<Vec<Ipv4Addr>, ErrorBox> {
     Ok(addresses)
 }
 
-fn active_pxe_address(config: &Path) -> Result<Option<Ipv4Addr>, ErrorBox> {
+pub(crate) fn active_pxe_address(config: &Path) -> Result<Option<Ipv4Addr>, ErrorBox> {
     match std::fs::symlink_metadata(config) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -247,12 +248,23 @@ fn active_pxe_address(config: &Path) -> Result<Option<Ipv4Addr>, ErrorBox> {
     if !matches!(enabled.as_str(), "" | "on") {
         return Err("Invalid PXE activation setting".into());
     }
-    let ip: Ipv4Addr = address.parse()?;
+    if !setting(&db, onboarding::PENDING_PXE_ADDRESS)?.is_empty() {
+        eprintln!("PXE démarrage suspendu : les fichiers de démarrage doivent être régénérés.");
+        return Ok(None);
+    }
+    let Ok(ip) = address.parse::<Ipv4Addr>() else {
+        eprintln!("PXE démarrage suspendu : adresse invalide.");
+        return Ok(None);
+    };
     if ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() {
-        return Err("Invalid PXE address".into());
+        eprintln!("PXE démarrage suspendu : adresse invalide.");
+        return Ok(None);
     }
     #[cfg(target_os = "linux")]
-    validate_interface(ip, &setting(&db, "pxe_interface")?)?;
+    if let Err(error) = validate_interface(ip, &setting(&db, "pxe_interface")?) {
+        eprintln!("PXE démarrage suspendu : {error}");
+        return Ok(None);
+    }
     Ok(Some(ip))
 }
 
@@ -272,7 +284,7 @@ fn validate_interface(ip: Ipv4Addr, interface: &str) -> Result<(), ErrorBox> {
         return Err("Invalid PXE interface or address".into());
     }
     let output = Command::new("/usr/bin/ip")
-        .args(["-j", "-4", "addr", "show", "dev", interface])
+        .args(["-j", "-4", "addr", "show", "up", "dev", interface])
         .output()
         .map_err(|error| format!("PXE interface inspection: {error}"))?;
     if output.status.success() {

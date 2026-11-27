@@ -30,6 +30,9 @@ pub(super) fn show(
     };
     let listener = match (active, bound) {
         (true, Some(ip)) if ip.to_string() == address => "Adresse PXE en écoute",
+        (true, None) => {
+            "Démarrage PXE suspendu. Vérifiez l’interface et l’adresse dans les paramètres réseau."
+        }
         (false, None) => "Démarrage réseau désactivé",
         _ => "L’écoute actuelle diffère de la configuration enregistrée",
     };

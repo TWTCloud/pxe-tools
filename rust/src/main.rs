@@ -103,6 +103,16 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     if let [flag, config] = args.as_slice() {
+        if flag == "--refresh-pxe-address" && Path::new(config).is_absolute() {
+            println!("{}", web::refresh_pxe_address(Path::new(config))?);
+            return Ok(());
+        }
+        if flag == "--active-pxe-address" && Path::new(config).is_absolute() {
+            if let Some(address) = web::active_pxe_address(Path::new(config))? {
+                println!("{address}");
+            }
+            return Ok(());
+        }
         if flag == "--migrate-schema" && Path::new(config).is_absolute() {
             return migrations::schema(Path::new(config));
         }
@@ -138,6 +148,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     if let [flag, config, path] = args.as_slice() {
+        if flag == "--finish-pxe-address" && Path::new(config).is_absolute() {
+            return web::finish_pxe_address(
+                Path::new(config),
+                path.to_str().ok_or("Invalid IPv4 address")?.parse()?,
+            );
+        }
         if flag == "--work-guided" {
             return worker::service::run(Path::new(config), Path::new(path));
         }

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::Ipv4Addr, path::Path};
 
 const NETWORK_DRAFT: &str = "rust_wizard_network";
+pub(super) const PENDING_PXE_ADDRESS: &str = "pending_pxe_address";
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,6 +129,7 @@ impl Network {
     }
 
     pub(super) fn save(&self, db: &Connection) -> Result<(), ErrorBox> {
+        store(db, PENDING_PXE_ADDRESS, "")?;
         if self.enabled() {
             store(db, "pxe_interface", &self.interface)?;
             store(db, "pxe_ip", &self.address.to_string())?;
@@ -167,6 +169,75 @@ impl Network {
         #[cfg(not(target_os = "linux"))]
         false
     }
+}
+
+/// Keep the last usable address as the preference when the interface has aliases.
+/// A replacement must belong to the configured boot subnet and proxy scope.
+pub(crate) fn refresh_pxe_address(config: &Path) -> Result<String, ErrorBox> {
+    if !config.try_exists()? {
+        return Ok("unchanged".into());
+    }
+    let path = crate::configured_database(config).ok_or("SQLite configuration unavailable")?;
+    let mut db = connect(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let plan = Network::current(&tx)?;
+    if !plan.enabled() {
+        return Ok("unchanged".into());
+    }
+    let networks = detected_networks();
+    if networks
+        .iter()
+        .any(|(interface, address, _)| *interface == plan.interface && *address == plan.address)
+    {
+        let pending = setting(&tx, PENDING_PXE_ADDRESS)?;
+        return Ok(if pending.is_empty() {
+            "unchanged".into()
+        } else {
+            pending
+        });
+    }
+
+    let mut candidates: Vec<_> = networks
+        .into_iter()
+        .filter(|(interface, address, connected_subnet)| {
+            *interface == plan.interface
+                && (crate::pxe::client_in_subnet(plan.address, connected_subnet)
+                    || crate::pxe::client_in_subnet(*address, &plan.subnet))
+                && (plan.role != Role::Proxy
+                    || plan
+                        .proxy_subnet
+                        .as_ref()
+                        .is_some_and(|subnet| crate::pxe::client_in_subnet(*address, subnet)))
+        })
+        .map(|(_, address, _)| address)
+        .collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    let [address] = candidates.as_slice() else {
+        return Ok("suspended".into());
+    };
+    let address = address.to_string();
+    store(&tx, "pxe_ip", &address)?;
+    store(&tx, PENDING_PXE_ADDRESS, &address)?;
+    tx.commit()?;
+    Ok(address)
+}
+
+pub(crate) fn finish_pxe_address(config: &Path, address: Ipv4Addr) -> Result<(), ErrorBox> {
+    let path = crate::configured_database(config).ok_or("SQLite configuration unavailable")?;
+    let mut db = connect(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let plan = Network::current(&tx)?;
+    if !plan.enabled()
+        || plan.address != address
+        || setting(&tx, PENDING_PXE_ADDRESS)? != address.to_string()
+        || !plan.assigned()
+    {
+        return Err("PXE address changed while preparing the boot files".into());
+    }
+    store(&tx, PENDING_PXE_ADDRESS, "")?;
+    tx.commit()?;
+    Ok(())
 }
 
 fn detected_networks() -> Vec<(String, Ipv4Addr, String)> {
