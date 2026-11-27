@@ -4,6 +4,7 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 FALLBACK = '/usr/lib/pxe-tools/native/keyrings/debian-archive-2025.1.gpg'
 WORKER = '/usr/lib/pxe-tools/app/worker.py'
@@ -28,7 +29,7 @@ def worker_environment(environment, os_release, keyring_version, *, detected=Non
     return result
 
 
-def main():
+def configured_environment():
     # os-release and the package database are controlled by the host admin.
     detected = subprocess.run(['/bin/sh', str(BASE_HELPER), '--detect'],
                               stdout=subprocess.PIPE, text=True, check=True).stdout.strip()
@@ -36,7 +37,14 @@ def main():
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                            text=True, check=False)
     version = query.stdout.strip() if query.returncode == 0 else ''
-    environment = worker_environment(os.environ, {}, version, detected=detected)
+    return worker_environment(os.environ, {}, version, detected=detected)
+
+
+def main():
+    environment = configured_environment()
+    if sys.argv[1:] == ['--archive-keyring']:
+        print(environment.get('DEBIAN_ARCHIVE_KEYRING', '/usr/share/keyrings/debian-archive-keyring.gpg'))
+        return
     if environment.get('PXE_RUST_GUIDED') == '1':
         os.execve(RUST_WORKER, [RUST_WORKER, '--work-guided', '/etc/pxe-tools/db.conf', WORKER], environment)
     os.execve('/usr/bin/python3', ['/usr/bin/python3', WORKER], environment)

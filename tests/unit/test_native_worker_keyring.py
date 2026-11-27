@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 import importlib.util
+from contextlib import redirect_stdout
+from io import StringIO
 import os
 from pathlib import Path
 import subprocess
 import unittest
+from unittest.mock import patch
 
 path = Path(__file__).resolve().parents[2] / 'packaging/native/start-worker.py'
 spec = importlib.util.spec_from_file_location('start_worker', path)
@@ -47,6 +50,18 @@ class NativeWorkerKeyring(unittest.TestCase):
         for value in ('/admin/keyring.gpg', ''):
             env = {'DEBIAN_ARCHIVE_KEYRING': value}
             self.assertEqual(worker.worker_environment(env, release, '2023.4ubuntu1'), env)
+
+    def test_startup_reads_the_same_keyring_as_the_worker(self):
+        release = {'ID': 'ubuntu', 'VERSION_ID': '24.04', 'VERSION_CODENAME': 'noble'}
+        for environment, expected in (
+            (worker.worker_environment({}, release, '2023.4ubuntu1'), worker.FALLBACK),
+            ({}, '/usr/share/keyrings/debian-archive-keyring.gpg'),
+            ({'DEBIAN_ARCHIVE_KEYRING': ''}, ''),
+        ):
+            with patch.object(worker, 'configured_environment', return_value=environment):
+                with patch('sys.argv', [str(path), '--archive-keyring']), redirect_stdout(StringIO()) as result:
+                    worker.main()
+                self.assertEqual(result.getvalue(), expected + '\n')
 
     def test_empty_explicit_keyring_fails_closed_in_real_verifier(self):
         library = path.parents[2] / 'docker/worker/scripts/lib-image-verify.sh'
