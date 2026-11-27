@@ -180,18 +180,7 @@ fn parse_root(pem: &str) -> Result<CertificateDer<'static>, ErrorBox> {
 }
 
 pub(super) fn dns_name(name: &str) -> bool {
-    name.len() <= 253
-        && name.contains('.')
-        && name.parse::<std::net::Ipv4Addr>().is_err()
-        && name.split('.').all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
+    name.contains('.') && super::hostnames::dns_name(name)
 }
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]

@@ -3,7 +3,7 @@
 use super::{
     acme,
     admin::escape,
-    plain,
+    hostnames, plain,
     setup::redirect,
     ui::{page, ConsoleSection},
     ErrorBox, Reply,
@@ -20,7 +20,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::watch;
-use tokio_rustls::{rustls::ServerConfig, TlsAcceptor};
+use tokio_rustls::{
+    rustls::{
+        pki_types::{CertificateDer, PrivateKeyDer},
+        ServerConfig,
+    },
+    TlsAcceptor,
+};
 
 pub(super) const ROUTE: &str = "/admin/certificates";
 pub(super) const ACME_ROUTE: &str = "/admin/certificates/acme";
@@ -46,10 +52,53 @@ struct Managed {
     pair: Pair,
 }
 
-struct Active {
+#[derive(Clone)]
+pub(super) struct Endpoint {
     acceptor: TlsAcceptor,
-    external: bool,
     pin: String,
+    dns_names: Vec<String>,
+}
+
+impl Endpoint {
+    pub(super) fn new(
+        certs: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+    ) -> Result<Self, ErrorBox> {
+        let leaf = certs.first().ok_or("TLS certificate leaf missing")?;
+        let pin = super::certificate_pin(leaf);
+        let dns_names = certificate_dns_names(leaf);
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+        Ok(Self {
+            acceptor: TlsAcceptor::from(Arc::new(config)),
+            pin,
+            dns_names,
+        })
+    }
+}
+
+fn certificate_dns_names(der: &[u8]) -> Vec<String> {
+    use x509_parser::extensions::GeneralName::DNSName;
+    let Ok((_, certificate)) = x509_parser::parse_x509_certificate(der) else {
+        return Vec::new();
+    };
+    let Ok(Some(san)) = certificate.subject_alternative_name() else {
+        return Vec::new();
+    };
+    san.value
+        .general_names
+        .iter()
+        .filter_map(|entry| match entry {
+            DNSName(name) if hostnames::dns_name(name) => Some(name.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
+struct Active {
+    endpoint: Endpoint,
+    external: bool,
     renewal: Option<Renewal>,
 }
 
@@ -80,8 +129,7 @@ pub(super) enum AcmeProgress {
 pub(super) struct Certificates {
     directory: PathBuf,
     active: RwLock<Active>,
-    default: TlsAcceptor,
-    default_pin: String,
+    default: Endpoint,
     public_host: Option<String>,
     acme_from_env: bool,
     acme_progress: RwLock<AcmeProgress>,
@@ -89,11 +137,7 @@ pub(super) struct Certificates {
 }
 
 impl Certificates {
-    pub(super) fn new(
-        default: TlsAcceptor,
-        default_pin: String,
-        public_host: Option<String>,
-    ) -> Result<Self, ErrorBox> {
+    pub(super) fn new(default: Endpoint, public_host: Option<String>) -> Result<Self, ErrorBox> {
         let directory = env::var_os("PXE_TLS_IMPORT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/var/lib/pxe-tools/tls-import".into());
@@ -114,8 +158,7 @@ impl Certificates {
         let external: Option<Pair> = load(&directory, BUNDLE)?;
         let active = if let Some(pair) = external {
             Active {
-                acceptor: pair.acceptor()?,
-                pin: pair.pin()?,
+                endpoint: pair.endpoint()?,
                 external: true,
                 renewal: None,
             }
@@ -138,8 +181,7 @@ impl Certificates {
                 }
             });
             cached.unwrap_or(Active {
-                acceptor: default.clone(),
-                pin: default_pin.clone(),
+                endpoint: default.clone(),
                 external: false,
                 renewal: None,
             })
@@ -148,7 +190,6 @@ impl Certificates {
             directory,
             active: RwLock::new(active),
             default,
-            default_pin,
             public_host,
             acme_from_env,
             acme_progress: RwLock::new(AcmeProgress::default()),
@@ -157,13 +198,19 @@ impl Certificates {
     }
 
     pub(super) fn pin(&self) -> String {
-        self.active.read().expect("TLS config lock").pin.clone()
+        self.active
+            .read()
+            .expect("TLS config lock")
+            .endpoint
+            .pin
+            .clone()
     }
 
     pub(super) fn acceptor(&self) -> TlsAcceptor {
         self.active
             .read()
             .expect("TLS config lock")
+            .endpoint
             .acceptor
             .clone()
     }
@@ -229,6 +276,11 @@ impl Certificates {
                 .renewal
                 .as_ref()
                 .is_some_and(|renewal| renewal.host.eq_ignore_ascii_case(host))
+    }
+
+    pub(super) fn covers_dns_name(&self, host: &str) -> bool {
+        let active = self.active.read().expect("TLS config lock");
+        hostnames::contains(&active.endpoint.dns_names, host)
     }
 
     pub(super) fn report_acme(&self, config: &acme::Config, progress: AcmeProgress) {
@@ -431,8 +483,7 @@ impl Certificates {
         }
         if config.is_none() && active.renewal.is_some() {
             *active = Active {
-                acceptor: self.default.clone(),
-                pin: self.default_pin.clone(),
+                endpoint: self.default.clone(),
                 external: false,
                 renewal: None,
             };
@@ -449,10 +500,7 @@ impl Certificates {
         let Some(pair) = Pair::parse(form) else {
             return invalid();
         };
-        let Ok((acceptor, pin)) = pair
-            .acceptor()
-            .and_then(|acceptor| Ok((acceptor, pair.pin()?)))
-        else {
+        let Ok(endpoint) = pair.endpoint() else {
             return invalid();
         };
         // Serialize persist-and-activate so concurrent imports cannot leave
@@ -467,8 +515,7 @@ impl Certificates {
             );
         }
         *current = Active {
-            acceptor,
-            pin,
+            endpoint,
             external: true,
             renewal: None,
         };
@@ -499,8 +546,7 @@ impl Certificates {
                 eprintln!("Could not flush TLS import directory: {error}");
             }
             *active = Active {
-                acceptor: self.default.clone(),
-                pin: self.default_pin.clone(),
+                endpoint: self.default.clone(),
                 external: false,
                 renewal: None,
             };
@@ -513,14 +559,6 @@ impl Certificates {
 }
 
 impl Pair {
-    fn pin(&self) -> Result<String, ErrorBox> {
-        let leaf = rustls_pemfile::certs(&mut BufReader::new(self.certificate.as_bytes()))
-            .next()
-            .transpose()?
-            .ok_or("TLS certificate leaf missing")?;
-        Ok(super::certificate_pin(&leaf))
-    }
-
     fn parse(form: &[u8]) -> Option<Self> {
         let mut certificate = None;
         let mut private_key = None;
@@ -537,7 +575,7 @@ impl Pair {
         })
     }
 
-    fn acceptor(&self) -> Result<TlsAcceptor, ErrorBox> {
+    fn endpoint(&self) -> Result<Endpoint, ErrorBox> {
         let mut cert_pem = BufReader::new(self.certificate.as_bytes());
         let certs = rustls_pemfile::certs(&mut cert_pem).collect::<Result<Vec<_>, _>>()?;
         let mut key_pem = BufReader::new(self.private_key.as_bytes());
@@ -545,10 +583,7 @@ impl Pair {
         if rustls_pemfile::private_key(&mut key_pem)?.is_some() {
             return Err("Expected exactly one TLS private key".into());
         }
-        let config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)?;
-        Ok(TlsAcceptor::from(Arc::new(config)))
+        Endpoint::new(certs, key)
     }
 }
 
@@ -580,8 +615,7 @@ impl Managed {
         // and shorter-lived certificates.
         let renew_at = last - (last - first) / 3;
         Ok(Active {
-            acceptor: self.pair.acceptor()?,
-            pin: self.pair.pin()?,
+            endpoint: self.pair.endpoint()?,
             external: false,
             renewal: Some(Renewal {
                 directory: self.directory.clone(),

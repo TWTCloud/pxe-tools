@@ -55,6 +55,9 @@ binary = Path('/usr/lib/pxe-tools/pxe-tools-rust')
 if binary.is_file():
     addresses = subprocess.check_output([binary, '--admin-listen-addresses'], text=True)
     names.extend('IP:' + line for line in addresses.splitlines() if line != '127.0.0.1')
+    hostnames = subprocess.check_output([binary, '--admin-hostnames'], text=True)
+    defaults = {'localhost', os.environ.get('TLS_CN', 'pxe-tools.local').lower()}
+    names.extend('DNS:' + name for name in hostnames.splitlines() if name.lower() not in defaults)
 host = os.environ.get('PXE_PUBLIC_HOST', '')
 if host:
     try:

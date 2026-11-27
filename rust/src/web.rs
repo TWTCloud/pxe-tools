@@ -15,6 +15,7 @@ mod device_operations;
 mod device_settings;
 mod devices;
 mod hardware_context;
+mod hostnames;
 mod images;
 mod jobs;
 mod linux_boot;
@@ -66,7 +67,6 @@ use tokio::{
     task,
     time::timeout,
 };
-use tokio_rustls::{rustls::ServerConfig, TlsAcceptor};
 
 type ErrorBox = Box<dyn Error + Send + Sync>;
 type Body = UnsyncBoxBody<Bytes, io::Error>;
@@ -78,6 +78,7 @@ struct Site {
     catalog: Arc<monitoring::Catalog>,
     pxe_ip: Option<Ipv4Addr>,
     addresses: Vec<Ipv4Addr>,
+    local_names: Vec<String>,
     https_port: u16,
     http_port: u16,
     winpe_client: Option<Ipv4Addr>,
@@ -120,11 +121,9 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         .transpose()?;
     let http_port = port("PXE_HTTP_PORT", 80)?;
     let https_port = port("PXE_HTTPS_PORT", 443)?;
-    let (default_tls, certificate_pin) =
-        tls_config().map_err(|error| format!("TLS configuration: {error}"))?;
+    let default_tls = tls_config().map_err(|error| format!("TLS configuration: {error}"))?;
     let tls = Arc::new(certificates::Certificates::new(
         default_tls,
-        certificate_pin,
         public_host.clone(),
     )?);
     let acme_challenge = Arc::new(acme::ChallengeResponse::default());
@@ -139,6 +138,7 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         catalog: Arc::new(serde_json::from_str(include_str!("checkpoints.json"))?),
         pxe_ip,
         addresses,
+        local_names: admin_hostnames(),
         https_port,
         http_port,
         winpe_client: winpe::configured_client()?,
@@ -183,6 +183,10 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         result = servers.join_next() => result.ok_or("HTTP listeners unavailable")??,
         signal = tokio::signal::ctrl_c() => signal.map_err(Into::into),
     }
+}
+
+pub(crate) fn admin_hostnames() -> Vec<String> {
+    hostnames::local()
 }
 
 pub(crate) fn admin_addresses() -> Result<Vec<Ipv4Addr>, ErrorBox> {
@@ -305,7 +309,7 @@ fn certificate_pin(der: &[u8]) -> String {
         .collect()
 }
 
-fn tls_config() -> Result<(TlsAcceptor, String), ErrorBox> {
+fn tls_config() -> Result<certificates::Endpoint, ErrorBox> {
     let directory = credential_directory()?;
     let open = |name| {
         let path = directory.join(name);
@@ -316,11 +320,7 @@ fn tls_config() -> Result<(TlsAcceptor, String), ErrorBox> {
     let certs = rustls_pemfile::certs(&mut open("cert.pem")?).collect::<Result<Vec<_>, _>>()?;
     let private_key =
         rustls_pemfile::private_key(&mut open("key.pem")?)?.ok_or("TLS private key missing")?;
-    let pin = certificate_pin(certs.first().ok_or("TLS certificate leaf missing")?);
-    let config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, private_key)?;
-    Ok((TlsAcceptor::from(Arc::new(config)), pin))
+    certificates::Endpoint::new(certs, private_key)
 }
 
 fn credential_directory() -> Result<PathBuf, ErrorBox> {
@@ -531,6 +531,8 @@ async fn dispatch(
                     requested_host.as_ref().map(Authority::host).filter(|name| {
                         (local.is_loopback() && name.eq_ignore_ascii_case("localhost"))
                             || public_host.is_some_and(|host| host.eq_ignore_ascii_case(name))
+                            || (!name.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+                                && known_dns_name(site, name))
                     })
                 })
                 .map_or_else(|| local.to_string(), str::to_owned);
@@ -1243,6 +1245,10 @@ async fn read_form(headers: &HeaderMap, body: Incoming, max: usize) -> Result<By
     }
 }
 
+fn known_dns_name(site: &Site, name: &str) -> bool {
+    hostnames::contains(&site.local_names, name) || site.tls.covers_dns_name(name)
+}
+
 fn admin_origin(headers: &HeaderMap, peer: IpAddr, site: &Site) -> bool {
     let forwarded = site.admin.trusted_proxy(peer) && headers.contains_key("x-forwarded-host");
     let header = if forwarded {
@@ -1263,6 +1269,7 @@ fn admin_origin(headers: &HeaderMap, peer: IpAddr, site: &Site) -> bool {
             .parse::<Ipv4Addr>()
             .is_ok_and(|ip| site.addresses.contains(&ip))
             || name.eq_ignore_ascii_case("localhost")
+            || known_dns_name(site, name)
             || site.tls.allowed_acme_host(name)
             || site
                 .public_host

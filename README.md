@@ -66,6 +66,12 @@ leur fin. Elle peut être brièvement indisponible pendant le redémarrage.
 Pour Secure Boot, la clé MOK de votre instance doit être enrôlée sur chaque
 client x86 concerné avant d'utiliser le chargeur signé par cette instance.
 
+La console HTTPS reconnaît aussi le nom du serveur, son nom complet d’après
+la configuration DNS locale et les noms exacts du certificat actif. Le
+certificat créé lors d’une installation neuve inclut les noms locaux détectés.
+Pour utiliser un nouveau nom avec une instance déjà configurée, vous pouvez
+importer ou émettre un certificat qui le couvre depuis **Certificats TLS**.
+
 ## Installation avec Docker
 
 L’image bêta 25 est disponible pour Linux amd64 et arm64. Depuis la racine
