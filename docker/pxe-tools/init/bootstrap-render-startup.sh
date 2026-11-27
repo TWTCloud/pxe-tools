@@ -4,7 +4,10 @@ set -eu
 if [ "${PXE_RUST_DIRECT_HTTP:-}" = 1 ] && [ -e /etc/pxe-tools/db.conf ]; then
     binary=/usr/lib/pxe-tools/pxe-tools-rust
     config=/etc/pxe-tools/db.conf
-    address=$(runuser -u www-data -- "$binary" --refresh-pxe-address "$config")
+    if ! address=$(runuser -u www-data -- "$binary" --refresh-pxe-address "$config"); then
+        echo '[bootstrap] Impossible de vérifier l’adresse PXE.' >&2
+        exit 0
+    fi
     case "$address" in
         unchanged) ;;
         suspended)

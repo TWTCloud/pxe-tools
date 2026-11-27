@@ -153,13 +153,15 @@ if [[ "$variant" == apt ]]; then
         config=/etc/pxe-tools/db.conf
         db=/var/lib/pxe-tools/pxe-tools.sqlite
         binary=/usr/lib/pxe-tools/pxe-tools-rust
-        ip addr add 192.0.2.43/24 dev eth0
+        ip addr add 198.51.100.43/24 dev eth0
         runuser -u www-data -- sqlite3 "$db" <<'SQL'
 INSERT OR REPLACE INTO settings(key,value) VALUES
     ('pxe_enabled','on'),('pxe_interface','eth0'),('pxe_ip','192.0.2.42'),
     ('pxe_subnet','192.0.2.0/24'),('dhcp_proxy_enabled','on'),
     ('dhcp_proxy_network','192.0.2.0'),('dhcp_proxy_netmask','255.255.255.0');
 SQL
+        test "$(runuser -u www-data -- "$binary" --refresh-pxe-address "$config")" = suspended
+        ip addr add 192.0.2.43/24 dev eth0
         test "$(runuser -u www-data -- "$binary" --refresh-pxe-address "$config")" = 192.0.2.43
         test "$(runuser -u www-data -- "$binary" --refresh-pxe-address "$config")" = 192.0.2.43
         test -z "$("$binary" --active-pxe-address "$config")"

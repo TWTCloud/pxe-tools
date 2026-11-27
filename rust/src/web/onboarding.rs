@@ -200,9 +200,13 @@ pub(crate) fn refresh_pxe_address(config: &Path) -> Result<String, ErrorBox> {
     let mut candidates: Vec<_> = networks
         .into_iter()
         .filter(|(interface, address, connected_subnet)| {
+            let same_network = if plan.address.is_unspecified() {
+                crate::pxe::client_in_subnet(*address, &plan.subnet)
+            } else {
+                crate::pxe::client_in_subnet(plan.address, connected_subnet)
+            };
             *interface == plan.interface
-                && (crate::pxe::client_in_subnet(plan.address, connected_subnet)
-                    || crate::pxe::client_in_subnet(*address, &plan.subnet))
+                && same_network
                 && (plan.role != Role::Proxy
                     || plan
                         .proxy_subnet
