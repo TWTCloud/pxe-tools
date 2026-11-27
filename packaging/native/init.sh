@@ -39,5 +39,5 @@ python3 /opt/pxe-tools/scripts/validate-native-runtime.py tls "$TLS_DIR"
 if [ ! -e /etc/pxe-tools/db.conf ] && [ ! -L /etc/pxe-tools/db.conf ] && [ -z "${PXE_DB_DRIVER:-}" ]; then
     echo '[pxe-tools-init] Base non configurée ; rendu PXE différé.'
 else
-    /bin/sh /opt/pxe-tools/init/bootstrap-render-startup.sh
+    /bin/bash /opt/pxe-tools/scripts/bootstrap-render-templates.sh
 fi
