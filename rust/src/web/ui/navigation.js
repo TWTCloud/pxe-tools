@@ -344,10 +344,11 @@
     const tables = page.querySelectorAll('[data-catalog-versions]');
     if (!tables.length) return false;
     for (const table of tables) {
-      const current = document.getElementById(`catalog-panel-${table.dataset.catalogVersions}`);
-      const replacement = table.tBodies[0];
-      current.querySelector('tbody').replaceWith(replacement);
-      for (const input of replacement.querySelectorAll(image)) {
+      const current = catalog.querySelector(`[data-catalog-versions="${table.dataset.catalogVersions}"]`);
+      if (!current) return false;
+      for (const group of [...current.tBodies]) group.remove();
+      current.append(...table.tBodies);
+      for (const input of current.querySelectorAll(image)) {
         const label = input.getAttribute('aria-label');
         input.checked = selection.has(label);
         if (label === focused) input.focus({ preventScroll: true });

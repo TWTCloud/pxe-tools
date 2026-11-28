@@ -2495,21 +2495,7 @@ def verify_catalog_refresh(binary):
         config = root/'db.conf'
         config.write_text(json.dumps({'driver':'sqlite','path':str(database)}))
         fetch = root/'curl'
-        fetch.write_text('''#!/usr/bin/env python3
-import sys
-from hashlib import sha256
-url = sys.argv[-1]
-if url.endswith('/trixie/Release'):
-    print('Version: 13.8')
-elif url.endswith('/cdimage/archive/'):
-    print('<a href="13.8.0/"> <a href="13.5.0/"> <a href="13.5.0/"> <a href="13.7.0-live/">')
-elif url == 'https://releases.ubuntu.com/24.04/':
-    print('ubuntu-24.04.6-live-server-amd64.iso')
-elif url.endswith('/current/images/SHA256SUMS'):
-    print(sha256(b'verified replacement').hexdigest(), './netboot/debian-installer/amd64/initrd.gz')
-else:
-    sys.exit(22)
-''')
+        fetch.write_bytes((Path(__file__).parent/'fixtures/catalog_curl.py').read_bytes())
         fetch.chmod(0o700)
         http = root/'http'
         image = http/'netboot/debian/13.8.0/amd64'
@@ -2530,10 +2516,12 @@ else:
             with closing(sqlite3.connect(database)) as db:
                 assert db.execute("""SELECT version_full,extract_method FROM catalog_entries
                                      WHERE distro='debian' AND codename='trixie' AND arch='amd64'
-                                     ORDER BY version_full""").fetchall()==[('13.5.0','iso_extract'),('13.8.0','direct')]
+                                     ORDER BY version_full""").fetchall()==[
+                    ('13.5.0','iso_extract'), ('13.7.0','iso_extract'), ('13.8.0','direct'),
+                ]
                 assert db.execute("""SELECT iso_url FROM catalog_entries
-                                     WHERE distro='ubuntu' AND version_full='24.04.6' AND arch='arm64'""").fetchone()==(
-                    'https://cdimage.ubuntu.com/releases/24.04/release/ubuntu-24.04.6-live-server-arm64.iso',
+                                     WHERE distro='ubuntu' AND version_full='24.04.7' AND arch='arm64'""").fetchone()==(
+                    'https://cdimage.ubuntu.com/releases/24.04/release/ubuntu-24.04.7-live-server-arm64.iso',
                 )
                 assert db.execute("SELECT COUNT(DISTINCT distro) FROM catalog_entries").fetchone()==(6,)
                 assert db.execute("SELECT status FROM os_images").fetchone()==('pending',)

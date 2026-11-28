@@ -349,6 +349,7 @@ if [[ "$variant" == docker ]]; then
     docker exec "$container" curl -kfsS --max-time 5 https://127.0.0.1:9443/healthz >/dev/null
 fi
 printf 'HTTPS port trial, confirmation and restart passed (%s)\n' "$variant"
+docker exec -i "$container" bash -c 'cat > /tmp/pxe-catalog-curl' < tests/integration/fixtures/catalog_curl.py
 docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
     set -euo pipefail
     if [[ "$1" == apt ]]; then
@@ -363,13 +364,34 @@ docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
     client=(curl -kfsS --max-time 8 --user setup-fixture:fixture-only-password)
     route="$origin/settings/images"
     archive='https://cdimage.debian.org/cdimage/archive/13.7.0/amd64/iso-cd/debian-13.7.0-amd64-netinst.iso'
-    entry=$(sqlite3 "$database" "INSERT INTO catalog_entries
-      (distro,version_full,major,codename,arch,extract_method,iso_url)
-      VALUES('debian','13.7.0',13,'trixie','amd64','iso_extract','$archive')
-      ON CONFLICT(distro,version_full,arch) DO UPDATE SET iso_url=excluded.iso_url,extract_method='iso_extract'
-      RETURNING id")
+    # The APT guest mounts /tmp with noexec. Keep the executable on its root filesystem.
+    fixture=$(mktemp -d /var/tmp/pxe-catalog.XXXXXXXX)
+    trap 'rm -rf -- "$fixture"' EXIT
+    install -m 0755 /tmp/pxe-catalog-curl "$fixture/curl"
+    test "$("$fixture/curl" https://deb.debian.org/debian/dists/trixie/Release)" = 'Version: 13.8'
+    PATH="$fixture:$PATH" /usr/lib/pxe-tools/pxe-tools-rust --refresh-catalog "$config"
+    test "$(sqlite3 "$database" "SELECT count(DISTINCT distro) FROM catalog_entries")" = 6
+    test "$(sqlite3 "$database" "SELECT group_concat(arch) FROM catalog_entries
+      WHERE distro='debian' AND version_full='14-testing' AND codename='forky' AND channel='testing'")" = amd64
+    test "$(sqlite3 "$database" "SELECT group_concat(arch) FROM catalog_entries
+      WHERE distro='fedora' AND version_full='46' AND channel='stable'")" = amd64
+    test "$(sqlite3 "$database" "SELECT count(*) FROM catalog_entries
+      WHERE distro='fedora' AND version_full='43' AND channel='oldstable'")" = 2
+    test "$(sqlite3 "$database" "SELECT group_concat(version_full || ':' || arch, ',') FROM (
+      SELECT version_full, arch FROM catalog_entries WHERE distro='ubuntu'
+      AND version_full IN ('24.04.6','24.04.7','24.04.10') ORDER BY CAST(substr(version_full,7) AS INTEGER)
+    )")" = '24.04.6:amd64,24.04.7:arm64,24.04.10:amd64'
+    entry=$(sqlite3 "$database" "SELECT id FROM catalog_entries
+      WHERE distro='debian' AND version_full='13.7.0' AND arch='amd64' AND iso_url='$archive'")
+    [[ "$entry" =~ ^[0-9]+$ ]]
     catalog=$("${client[@]}" "$route/add")
     [[ "$catalog" == *'13.7.0 <small>Archive</small>'* ]]
+    [[ "$catalog" == *'Debian 14 · forky<span class="status-badge status-badge--active">Testing</span>'* ]]
+    [[ "$catalog" == *'Debian 13 · trixie<span class="status-badge status-badge--success">Stable</span>'* ]]
+    [[ "$catalog" == *'Debian 12 · bookworm<span class="status-badge status-badge--neutral">Oldstable</span>'* ]]
+    [[ "$catalog" == *'13.8.0<span class="status-badge status-badge--active">Latest</span>'* ]]
+    [[ "$catalog" == *'24.04.10 <small>Archive</small>'*'24.04.7</th>'* ]]
+    [[ "$catalog" == *'14-testing</th>'* && "$catalog" != *'14-testing <small>Archive</small>'* ]]
     [[ "$catalog" == *"name=\"image\" value=\"$entry\""* ]]
     post=(-o /dev/null -w '%{http_code}' -H "Origin: $origin")
     test "$("${client[@]}" "${post[@]}" --data "image=$entry" "$route/add")" = 303
@@ -389,7 +411,7 @@ docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
     [[ "$finished" == *'data-catalog-refresh="success"'* && "$finished" == *'Catalogue à jour'* ]]
     sqlite3 "$database" "DELETE FROM os_images WHERE distro='debian' AND version_full='13.7.0' AND arch='amd64';
       DELETE FROM catalog_entries WHERE id=$entry"
-    printf 'Debian archive selection and catalog refresh states passed (%s)\n' "$1"
+    printf 'Six distribution catalogs, channels, archives and refresh states passed (%s)\n' "$1"
 CATALOG_GUEST
 bash tests/integration/test_rust_multinetwork.sh "$container" "$variant"
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"

@@ -507,7 +507,7 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 }
 .catalog-table :is(th, td) { vertical-align: middle; }
 .catalog-table tbody th { background: transparent; }
-.catalog-table tbody tr:last-child th { border-bottom: 0; }
+.catalog-table tbody:last-child tr:last-child th { border-bottom: 0; }
 .catalog-table .image-name { gap: var(--space-2); }
 .catalog-versions thead th:first-child { width: 30%; }
 .catalog-versions thead th:nth-child(n+2), .catalog-versions td:not([colspan]) {
@@ -516,6 +516,9 @@ body:has(.mobile-drawer[open]) { overflow: hidden; }
 .catalog-versions tbody td:not([colspan]) { padding-block: var(--space-1); }
 .catalog-versions small { color: var(--muted); font-weight: 500; }
 .catalog-version { font-size: .875rem; }
+.catalog-table .catalog-series th { background: var(--canvas); }
+.catalog-series .status-badge, .catalog-version .status-badge,
+.wizard-image-channel { margin-inline-start: var(--space-2); }
 .catalog-choice {
   display: grid;
   min-height: var(--control-height);

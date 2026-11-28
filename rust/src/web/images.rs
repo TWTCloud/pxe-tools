@@ -781,7 +781,8 @@ fn architecture(arch: &str) -> &str {
 
 pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::Result<Option<i64>> {
     db.execute(
-        &format!("INSERT INTO os_images(distro,version,version_full,arch,codename,major,channel,
+        &format!(
+            "INSERT INTO os_images(distro,version,version_full,arch,codename,major,channel,
                     kernel_url,initrd_url,firmware_url,iso_url,extract_method,enabled,status)
                 SELECT distro,version_full,version_full,arch,codename,major,channel,
                     kernel_url,initrd_url,firmware_url,iso_url,extract_method,1,'pending'
@@ -792,7 +793,8 @@ pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::R
                                 THEN os_images.status ELSE 'pending' END,
                     error_msg=CASE WHEN os_images.status IN ('downloaded','downloading')
                                    THEN os_images.error_msg ELSE NULL END
-                WHERE os_images.extract_method=excluded.extract_method AND ?2"),
+                WHERE os_images.extract_method=excluded.extract_method AND ?2"
+        ),
         rusqlite::params![id, resume],
     )?;
     db.query_row(
@@ -849,20 +851,26 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
     )?;
     let mut query = db.prepare(&format!(
         "WITH entries AS (
-            SELECT c.id,c.version_full,c.arch,c.major,c.extract_method, EXISTS(
+            SELECT c.id,c.version_full,c.arch,c.major,c.extract_method,c.codename,c.channel,c.iso_url, EXISTS(
                 SELECT 1 FROM os_images i WHERE i.distro=c.distro AND i.arch=c.arch
                     AND COALESCE(NULLIF(i.version_full,''),i.version)=c.version_full
             ) AS managed FROM catalog_entries c
             WHERE c.distro=?1 AND {SELECTABLE_CATALOG_IMAGE}
-         )
+         ), versions AS (
          SELECT version_full,
                 MAX(CASE WHEN arch='amd64' THEN id END),
                 MAX(arch='amd64' AND managed),
                 MAX(CASE WHEN arch='arm64' THEN id END),
                 MAX(arch='arm64' AND managed),
-                ?1='debian' AND MIN(extract_method='iso_extract')
+                (?1='debian' AND MIN(extract_method='iso_extract' AND COALESCE(channel,'') NOT IN ('testing','unstable')))
+                    OR (?1='ubuntu' AND MIN(COALESCE(iso_url,'') LIKE 'https://old-releases.ubuntu.com/%')) AS archived,
+                COALESCE(MAX(major),0) AS major, COALESCE(MAX(codename),''),
+                COALESCE(MAX(channel),''), substr(version_full,instr(version_full,'.')+1) AS tail
          FROM entries GROUP BY version_full
-         ORDER BY MAX(major) DESC,CAST(substr(version_full,instr(version_full,'.')+1) AS INTEGER) DESC,
+         )
+         SELECT * FROM versions
+         ORDER BY major DESC, CAST(tail AS INTEGER) DESC,
+                  CASE WHEN instr(tail,'.')>0 THEN CAST(substr(tail,instr(tail,'.')+1) AS INTEGER) ELSE 0 END DESC,
                   version_full DESC LIMIT ?2",
     ))?;
     let mut available = false;
@@ -875,13 +883,41 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
 <h3 id="catalog-heading-{code}">{title}</h3>
 <div class="table-region catalog-table"><table class="catalog-versions" data-catalog-versions="{code}" aria-labelledby="catalog-heading-{code}">
 <thead><tr><th scope="col">Version</th><th scope="col">Intel / AMD<br><small>amd64</small></th>
-<th scope="col">ARM 64 bits<br><small>arm64</small></th></tr></thead><tbody>"#,
+<th scope="col">ARM 64 bits<br><small>arm64</small></th></tr></thead>"#,
         )?;
         if row.is_none() {
-            html.push_str(r#"<tr><td colspan="3"><span class="record-meta">Aucune version disponible</span></td></tr>"#);
+            html.push_str(r#"<tbody><tr><td colspan="3"><span class="record-meta">Aucune version disponible</span></td></tr>"#);
         }
+        let mut series = None;
+        let mut latest_shown = false;
         while let Some(version) = row {
-            catalog_version(&mut html, title, version, can_edit, &mut available)?;
+            let major: i64 = version.get(6)?;
+            let channel: String = version.get(8)?;
+            if series != Some(major) {
+                if series.is_some() {
+                    html.push_str("</tbody>");
+                }
+                html.push_str("<tbody>");
+                if major > 0 {
+                    let codename: String = version.get(7)?;
+                    let number: String = version.get(0)?;
+                    let series_name = if code == "ubuntu" {
+                        number
+                            .rsplit_once('.')
+                            .filter(|(base, _)| base.contains('.'))
+                            .map_or(number.as_str(), |(base, _)| base)
+                            .to_owned()
+                    } else {
+                        major.to_string()
+                    };
+                    catalog_series(&mut html, title, &series_name, &codename, &channel)?;
+                }
+                series = Some(major);
+            }
+            let archived: bool = version.get(5)?;
+            let latest = channel == "stable" && !archived && !latest_shown;
+            latest_shown |= latest;
+            catalog_version(&mut html, title, version, latest, can_edit, &mut available)?;
             row = rows.next()?;
         }
         html.push_str("</tbody></table></div></section>");
@@ -922,10 +958,44 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
     Ok(html)
 }
 
+fn catalog_series(
+    html: &mut String,
+    title: &str,
+    series: &str,
+    codename: &str,
+    channel: &str,
+) -> Result<(), ErrorBox> {
+    write!(
+        html,
+        r#"<tr class="catalog-series"><th scope="rowgroup" colspan="3">{title} "#
+    )?;
+    escape(html, series);
+    if !codename.is_empty() {
+        html.push_str(" · ");
+        escape(html, codename);
+    }
+    if let Some((tone, label)) = catalog_channel(channel) {
+        status_badge(html, tone, label);
+    }
+    html.push_str("</th></tr>");
+    Ok(())
+}
+
+pub(super) fn catalog_channel(channel: &str) -> Option<(&'static str, &'static str)> {
+    match channel {
+        "stable" => Some(("success", "Stable")),
+        "oldstable" => Some(("neutral", "Oldstable")),
+        "testing" => Some(("running", "Testing")),
+        "unstable" => Some(("neutral", "Unstable")),
+        _ => None,
+    }
+}
+
 fn catalog_version(
     html: &mut String,
     title: &str,
     row: &rusqlite::Row<'_>,
+    latest: bool,
     can_edit: bool,
     available: &mut bool,
 ) -> Result<(), ErrorBox> {
@@ -934,6 +1004,9 @@ fn catalog_version(
     escape(html, &version);
     if row.get(5)? {
         html.push_str(" <small>Archive</small>");
+    }
+    if latest {
+        status_badge(html, "running", "Latest");
     }
     html.push_str("</th>");
     for (arch, column) in [("amd64", 1), ("arm64", 3)] {
