@@ -454,6 +454,22 @@ pub(super) fn automatic(
         return Ok(missing());
     }
     let authority = linux_install::authority(server, site.http_port);
+    if let Source::Proxmox(version) = &plan.source {
+        if site.boot_networks.is_some()
+            && !super::proxmox::media_matches(
+                site.assets.http_root(),
+                version,
+                &plan.arch,
+                &format!("{server}:{}", site.console_port.active()),
+                &site.tls.pin(),
+            )
+        {
+            return Ok(plain(
+                StatusCode::CONFLICT,
+                "Le média Proxmox automatique n’est pas préparé pour ce réseau PXE.\n",
+            ));
+        }
+    }
     let Some(mut entry) = available(
         &tx,
         site.assets.http_root(),

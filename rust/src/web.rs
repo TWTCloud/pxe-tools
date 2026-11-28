@@ -779,7 +779,7 @@ async fn dispatch(
                 &parts,
                 peer,
                 &site.database,
-                admin::Action::Overview(site.pxe_ip),
+                admin::Action::Overview(site.pxe_ip, site.boot_networks.clone()),
             )
             .await;
     }

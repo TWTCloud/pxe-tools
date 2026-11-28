@@ -8,13 +8,16 @@ if [ "${PXE_RUST_DIRECT_HTTP:-}" = 1 ] && [ -e /etc/pxe-tools/db.conf ]; then
         echo '[bootstrap] Impossible de vérifier l’adresse PXE.' >&2
         exit 0
     fi
+    if [ "$address" != unchanged ] && [ "$address" != suspended ] && [ "${PXE_SERVICE_MANAGER:-}" = systemd ]; then
+        if ! DEBIAN_ARCHIVE_KEYRING=$(python3 /usr/lib/pxe-tools/native/start-worker.py --archive-keyring); then
+            echo '[bootstrap] Impossible de sélectionner le trousseau Debian.' >&2
+            exit 0
+        fi
+        export DEBIAN_ARCHIVE_KEYRING
+    fi
     case "$address" in
         unchanged) ;;
         multiple)
-            if [ "${PXE_SERVICE_MANAGER:-}" = systemd ]; then
-                DEBIAN_ARCHIVE_KEYRING=$(python3 /usr/lib/pxe-tools/native/start-worker.py --archive-keyring)
-                export DEBIAN_ARCHIVE_KEYRING
-            fi
             python3 /opt/pxe-tools/scripts/boot-network-files.py startup ||
                 echo '[bootstrap] Certaines interfaces PXE sont indisponibles.' >&2
             exit 0
@@ -26,13 +29,6 @@ if [ "${PXE_RUST_DIRECT_HTTP:-}" = 1 ] && [ -e /etc/pxe-tools/db.conf ]; then
         *)
             # A rebinding changes the IP embedded in signed GRUB. Gate the
             # network until both GRUB and the boot scripts use the new address.
-            if [ "${PXE_SERVICE_MANAGER:-}" = systemd ]; then
-                if ! DEBIAN_ARCHIVE_KEYRING=$(python3 /usr/lib/pxe-tools/native/start-worker.py --archive-keyring); then
-                    echo '[bootstrap] Impossible de sélectionner le trousseau Debian.' >&2
-                    exit 0
-                fi
-                export DEBIAN_ARCHIVE_KEYRING
-            fi
             if timeout 30s /bin/bash /opt/pxe-tools/scripts/bootstrap-build-grub.sh &&
                 /bin/bash /opt/pxe-tools/scripts/bootstrap-render-templates.sh &&
                 runuser -u www-data -- "$binary" --finish-pxe-address "$config" "$address"; then

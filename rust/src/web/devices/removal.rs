@@ -125,7 +125,9 @@ fn remove_selected(path: &Path, ids: &[i64]) -> Result<Removal, ErrorBox> {
         let Some((mac, status)) = device else {
             continue;
         };
-        targets.push(menus.path_for(&mac)?);
+        for menu in &menus {
+            targets.push(menu.path_for(&mac)?);
+        }
         if tx.execute(
             "DELETE FROM machines WHERE id=?1 AND mac=?2",
             params![id, mac],

@@ -11,6 +11,9 @@ réseau l’adresse indiquée pour ce réseau, dans les options de démarrage du
 Les installations déjà configurées conservent leur sélection à la mise à niveau.
 L’adresse peut être redétectée au démarrage dans le sous-réseau associé.
 
+L’ISO automatique Proxmox VE embarque une adresse HTTPS et l’empreinte du
+certificat. Ce média est utilisable sur le réseau pour lequel il a été préparé.
+
 Ce parcours est un candidat de développement ; il ne modifie pas une installation existante tant que les réglages ne sont pas enregistrés et appliqués. Sa validation et sa publication dans une nouvelle version APT sont deux étapes distinctes.
 
 ## Parcours courant

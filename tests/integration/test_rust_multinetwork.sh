@@ -45,7 +45,11 @@ if [[ "$1" == apt ]]; then
     source /usr/lib/pxe-tools/native/default.env
     source /var/lib/pxe-tools-native/runtime.env
     set +a
+    export PXE_RUST_GUIDED=1 PXE_RUST_DIRECT_HTTP=1
+    DEBIAN_ARCHIVE_KEYRING=$(python3 /usr/lib/pxe-tools/native/start-worker.py --archive-keyring)
+    export DEBIAN_ARCHIVE_KEYRING
 else
+    export PATH="/command:$PATH"
     s6-svc -d /run/service/worker
 fi
 interface() {
@@ -101,10 +105,11 @@ packet += bytes((53, 1, 1, 93, 2, 0, 7, 60, len(vendor))) + vendor + b'\xff'
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
     client.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'eth0\0')
     client.bind(('', 68))
     deadline = time.monotonic() + 12
     while time.monotonic() < deadline:
-        client.sendto(packet, ('255.255.255.255', 67))
+        client.sendto(packet, (sys.argv[1].rsplit('.', 1)[0] + '.255', 67))
         client.settimeout(1)
         try:
             reply, peer = client.recvfrom(2048)
@@ -119,14 +124,28 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
     else:
         raise SystemExit(f'No UEFI ProxyDHCP offer received from {sys.argv[1]}')
 PYTHON
-    local tftp menu seed
+    local tftp menu seed install mac="02:00:00:00:ae:0$id"
     tftp=$(sudo nsenter -t "$pid" -n curl --noproxy '*' -fsS --max-time 8 "tftp://$server_ip/pxelinux.cfg/default")
-    menu=$(sudo nsenter -t "$pid" -n curl --noproxy '*' -fsS --max-time 8 "http://$server_ip/pxe/grub.cfg?mac=02:00:00:00:ae:0$id")
+    menu=$(sudo nsenter -t "$pid" -n curl --noproxy '*' -fsS --max-time 8 "http://$server_ip/pxe/grub.cfg?mac=$mac")
     seed=$(sudo nsenter -t "$pid" -n curl --noproxy '*' -fsS --max-time 8 "http://$server_ip/discovery-preseed.cfg")
     [[ "$tftp" == *"http://$server_ip/"* && "$tftp" != *"$other"* ]]
     [[ "$menu" == *"http://$server_ip/"* && "$menu" != *"$other"* ]]
     [[ "$seed" == *"http://$server_ip/"* && "$seed" != *"$other"* ]]
-    printf 'ProxyDHCP, TFTP BIOS, GRUB et preseed de découverte passent par %s.\n' "$server_ip"
+    docker exec -i "$server" python3 - "$mac" <<'PYTHON'
+import sqlite3
+import sys
+
+with sqlite3.connect('/var/lib/pxe-tools/pxe-tools.sqlite') as db:
+    machine, = db.execute('SELECT id FROM machines WHERE mac=?', [sys.argv[1]]).fetchone()
+    db.execute("UPDATE machines SET status='configured',hostname='pxe-fixture',install_config_json=? WHERE id=?",
+               ('{"codename":"trixie"}', machine))
+    db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES(?,'install_only','pending',?)",
+               (machine, '0' * 31 + sys.argv[1][-1]))
+PYTHON
+    install=$(sudo nsenter -t "$pid" -n curl --noproxy '*' -fsS --max-time 8 \
+        "http://$server_ip/pxe/preseed.cfg?mac=$mac")
+    [[ "$install" == *"http://$server_ip/"* && "$install" != *"$other"* ]]
+    printf 'ProxyDHCP, TFTP BIOS, GRUB et preseeds de découverte et d’installation passent par %s.\n' "$server_ip"
 }
 probe_lan a 203.0.113.2 198.19.77.2
 probe_lan b 198.19.77.2 203.0.113.2

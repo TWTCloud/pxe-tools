@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use crate::{connect, migrations, preseed, pxe, setting};
+use crate::{boot_networks, connect, migrations, preseed, pxe, setting};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::{
     env,
     error::Error,
     io::Read,
-    net::{Ipv4Addr, UdpSocket},
+    net::{IpAddr, Ipv4Addr, UdpSocket},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -45,6 +45,7 @@ struct Target {
     action: Option<i64>,
     peer: Option<Ipv4Addr>,
     subnet: String,
+    source: Ipv4Addr,
     user: String,
 }
 
@@ -78,10 +79,10 @@ pub(crate) fn run(database: &Path, id: i64) -> Result<(), ErrorBox> {
     };
     let subject = raw.parse::<i64>().ok().filter(|id| *id > 0);
     let key = if action {
-        "SELECT m.id,m.mac,m.install_config_json FROM machines m JOIN actions a ON a.machine_id=m.id
+        "SELECT m.id,m.mac,m.install_config_json,m.inventory_json FROM machines m JOIN actions a ON a.machine_id=m.id
          WHERE a.id=?1 AND a.status IN ('pending','running')"
     } else {
-        "SELECT id,mac,install_config_json FROM machines WHERE id=?1"
+        "SELECT id,mac,install_config_json,inventory_json FROM machines WHERE id=?1"
     };
     let machine = tx
         .query_row(key, [subject], |row| {
@@ -89,10 +90,11 @@ pub(crate) fn run(database: &Path, id: i64) -> Result<(), ErrorBox> {
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })
         .optional()?;
-    let Some((machine, mac, config)) = machine else {
+    let Some((machine, mac, config, inventory)) = machine else {
         tx.execute(
             "UPDATE init_jobs SET status='failed', ended_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,
              message='Appareil introuvable ou action clôturée' WHERE id=?1", [id],
@@ -100,11 +102,38 @@ pub(crate) fn run(database: &Path, id: i64) -> Result<(), ErrorBox> {
         tx.commit()?;
         return Ok(());
     };
+    let mut peer = last_address(&tx, machine, config.as_deref())?;
+    let mut source = Ipv4Addr::UNSPECIFIED;
+    let subnet = if let Some(networks) = boot_networks::configured(&tx)? {
+        let networks = boot_networks::resolve(networks, &boot_networks::detected());
+        let discovered = inventory.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let network = peer
+            .into_iter()
+            .chain(
+                discovered
+                    .as_ref()
+                    .and_then(|data| ipv4(&data["discovery_ip"])),
+            )
+            .find_map(|address| {
+                networks
+                    .iter()
+                    .find(|item| item.contains(IpAddr::V4(address)))
+                    .map(|item| (address, item))
+            });
+        network.map_or_else(String::new, |(address, item)| {
+            peer = Some(address);
+            source = item.address;
+            item.subnet.clone()
+        })
+    } else {
+        setting(&tx, "pxe_subnet")?
+    };
     let target = Target {
         mac,
         action: subject.filter(|_| action),
-        peer: last_address(&tx, machine, config.as_deref())?,
-        subnet: setting(&tx, "pxe_subnet")?,
+        peer,
+        subnet,
+        source,
         user: setting(&tx, "ansible_target_user")?,
     };
     tx.execute(
@@ -144,7 +173,7 @@ fn execute(power: Power, target: &Target) -> (bool, String, String) {
             format!("Échec arrêt SSH via worker ({problem})"),
         );
     }
-    if wake(&target.mac, &target.subnet) {
+    if wake(&target.mac, &target.subnet, target.source) {
         return (
             true,
             format!("WoL envoyé à {} ({problem})", target.mac),
@@ -304,7 +333,7 @@ fn ssh(power: Power, peer: Ipv4Addr, raw_user: &str) -> Result<(), String> {
     })
 }
 
-fn wake(mac: &str, subnet: &str) -> bool {
+fn wake(mac: &str, subnet: &str, source: Ipv4Addr) -> bool {
     let Some(packet) = packet(mac) else {
         return false;
     };
@@ -314,7 +343,7 @@ fn wake(mac: &str, subnet: &str) -> bool {
         return false;
     };
     let destination = Ipv4Addr::from(network | !mask);
-    UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+    UdpSocket::bind((source, 0))
         .and_then(|socket| {
             socket.set_broadcast(true)?;
             socket.send_to(&packet, (destination, 9))

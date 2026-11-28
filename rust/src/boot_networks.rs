@@ -94,7 +94,7 @@ pub(crate) fn contains_client(db: &Connection, peer: Ipv4Addr) -> rusqlite::Resu
 
 /// Resolve each network independently. An ambiguous or unavailable interface
 /// is omitted until it has a usable address again.
-fn resolve(configured: Vec<Network>, detected: &[Network]) -> Vec<Network> {
+pub(crate) fn resolve(configured: Vec<Network>, detected: &[Network]) -> Vec<Network> {
     configured
         .into_iter()
         .filter_map(|network| {

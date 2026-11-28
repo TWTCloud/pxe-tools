@@ -231,10 +231,10 @@ pub(crate) fn refresh_pxe_address(config: &Path) -> Result<String, ErrorBox> {
     if !plan.additional.is_empty() {
         return Ok("multiple".into());
     }
-    let networks = detected_networks();
+    let networks = boot_networks::detected();
     if networks
         .iter()
-        .any(|(interface, address, _)| *interface == plan.interface && *address == plan.address)
+        .any(|item| item.interface == plan.interface && item.address == plan.address)
     {
         let pending = setting(&tx, PENDING_PXE_ADDRESS)?;
         return Ok(if pending.is_empty() {
@@ -246,6 +246,7 @@ pub(crate) fn refresh_pxe_address(config: &Path) -> Result<String, ErrorBox> {
 
     let mut candidates: Vec<_> = networks
         .into_iter()
+        .map(|item| (item.interface, item.address, item.subnet))
         .filter(|(interface, address, connected_subnet)| {
             let same_network = if plan.address.is_unspecified() {
                 crate::pxe::client_in_subnet(*address, &plan.subnet)
@@ -289,13 +290,6 @@ pub(crate) fn finish_pxe_address(config: &Path, address: Ipv4Addr) -> Result<(),
     store(&tx, PENDING_PXE_ADDRESS, "")?;
     tx.commit()?;
     Ok(())
-}
-
-fn detected_networks() -> Vec<(String, Ipv4Addr, String)> {
-    boot_networks::detected()
-        .into_iter()
-        .map(|item| (item.interface, item.address, item.subnet))
-        .collect()
 }
 
 pub(super) fn network_address_field(name: &str) -> bool {
@@ -554,36 +548,33 @@ pub(super) fn network_form(
     html.push_str(
         r#"</fieldset><fieldset class="form-stack wizard-network"><legend>Paramètres PXE</legend>"#,
     );
-    let choices = detected_networks();
+    let choices = boot_networks::detected();
     let saved_network = plan.filter(|saved| !saved.address.is_unspecified());
-    let saved_choice = |interface: &str, ip: Ipv4Addr, cidr: &str| {
-        saved_network.is_some_and(|saved| {
-            (saved.interface == interface
-                && saved.address == ip
-                && parse_subnet(&saved.subnet) == parse_subnet(cidr))
-                || saved
-                    .additional
-                    .iter()
-                    .any(|item| item.interface == interface && item.address == ip)
-        })
-    };
-    let manual = choices.is_empty()
-        || (saved_network.is_some()
-            && !choices
-                .iter()
-                .any(|(interface, ip, cidr)| saved_choice(interface, *ip, cidr)));
+    let saved_links = saved_network.map_or_else(Vec::new, |saved| {
+        Link::new(saved.interface.clone(), saved.address, &saved.subnet)
+            .into_iter()
+            .chain(saved.additional.iter().cloned())
+            .collect()
+    });
+    let saved_count = saved_links.len();
+    let selected = boot_networks::resolve(saved_links, &choices);
+    let manual = choices.is_empty() || (saved_network.is_some() && selected.is_empty());
     if choices.is_empty() {
         html.push_str(r#"<p class="muted">Aucune interface avec une IPv4 active. Connectez le réseau ou renseignez son adresse ci-dessous.</p>"#);
     } else {
         html.push_str(r#"<fieldset class="form-stack"><legend>Réseaux desservis</legend>
 <p class="muted">Cochez une IPv4 par interface. Chaque client reçoit l’adresse indiquée sur sa ligne.</p>"#);
-        for (index, (interface, ip, subnet)) in choices.iter().take(128).enumerate() {
-            let checked =
-                if saved_choice(interface, *ip, subnet) || (plan.is_none() && choices.len() == 1) {
-                    " checked"
-                } else {
-                    ""
-                };
+        for (index, link) in choices.iter().take(128).enumerate() {
+            let Link {
+                interface,
+                address: ip,
+                subnet,
+            } = link;
+            let checked = if selected.contains(link) || (plan.is_none() && choices.len() == 1) {
+                " checked"
+            } else {
+                ""
+            };
             html.push_str(&format!(r#"<label class="check-label"><input type="checkbox" name="network_address_{index}" value=""#));
             escape(&mut html, &format!("{interface}|{ip}"));
             html.push_str(&format!(r#""{checked}><span>"#));
@@ -593,14 +584,8 @@ pub(super) fn network_form(
             html.push_str("</small></span></label>");
         }
         html.push_str("</fieldset>");
-        if saved_network.is_some_and(|saved| {
-            saved.additional.iter().any(|item| {
-                !choices
-                    .iter()
-                    .any(|(interface, _, _)| *interface == item.interface)
-            })
-        }) {
-            html.push_str(r#"<p class="muted">Certaines interfaces configurées sont hors ligne. Réactivez-les avant d’enregistrer pour les conserver.</p>"#);
+        if saved_count > selected.len() {
+            html.push_str(r#"<p class="muted">Certaines interfaces configurées sont indisponibles. Réactivez-les avant d’enregistrer pour les conserver.</p>"#);
         }
     }
     let open = if manual { " open" } else { "" };
