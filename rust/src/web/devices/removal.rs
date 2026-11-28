@@ -77,7 +77,7 @@ pub(super) fn bulk(path: &Path, form: &[u8]) -> Result<Reply, ErrorBox> {
             ConsoleSection::Devices,
             "Suppression par lots",
             &format!(
-                r#"<p>{} appareil(s) supprimé(s), dont {} en cours d’opération. {} appareil(s) déjà absent(s).</p><a href="/admin/inventaire">Revenir aux appareils</a>"#,
+                r#"<p>{} appareil(s) supprimé(s), dont {} en cours d’opération. {} appareil(s) déjà absent(s).</p><a href="/admin/inventaire">Revenir à l’inventaire</a>"#,
                 result.deleted,
                 result.active,
                 ids.len() - result.deleted,

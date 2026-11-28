@@ -124,7 +124,7 @@ const MODELS: &str = "distro='debian' AND variant='debian' AND root_login_mode='
 
 fn selection_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
-        r#"<nav><a href="/admin/inventaire">Appareils</a></nav>
+        r#"<nav><a href="/admin/inventaire">Inventaire</a></nav>
 <form method="post" action="/admin/inventaire/bulk-preflight"><input type="hidden" name="format" value="html">
 <p><label>Modèle Debian <select name="preset_id" required><option value="">Sélectionner</option>"#,
     );
@@ -150,7 +150,7 @@ fn selection_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
 
 fn delete_form(db: &Connection, number: u32) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
-        r#"<nav><a href="/admin/inventaire">Appareils</a></nav>
+        r#"<nav><a href="/admin/inventaire">Inventaire</a></nav>
 <p>La suppression retire les fiches sélectionnées et leurs historiques, même si une opération est en cours.</p>
 <form method="post" action="/admin/inventaire/bulk-delete">"#,
     );
@@ -511,7 +511,7 @@ fn queue(path: &Path, username: &str, selection: &Selection) -> Result<Reply, Er
         }
         html.push_str("</li>");
     }
-    html.push_str("</ul><a href=\"/admin/inventaire\">Appareils</a>");
+    html.push_str("</ul><a href=\"/admin/inventaire\">Inventaire</a>");
     Ok(page(
         ConsoleSection::Devices,
         "Déploiement Debian par lots",
