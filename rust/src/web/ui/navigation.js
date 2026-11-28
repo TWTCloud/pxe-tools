@@ -316,11 +316,11 @@
   if (!form) return;
   const submit = form.querySelector('button[type="submit"]');
   function update() {
-    const count = form.querySelectorAll('input[name="image"]:checked').length;
+    const count = [...form.elements].filter(input => input.name === 'image' && input.checked).length;
     submit.disabled = count === 0;
     submit.textContent = count ? `Télécharger la sélection (${count})` : 'Télécharger la sélection';
   }
-  form.addEventListener('change', update);
+  form.closest('#catalogue').addEventListener('change', update);
   window.addEventListener('pageshow', update);
   update();
 })();
@@ -354,7 +354,7 @@
         if (label === focused) input.focus({ preventScroll: true });
       }
     }
-    catalog.querySelector('[data-catalog-selection]')?.dispatchEvent(new Event('change'));
+    catalog.dispatchEvent(new Event('change'));
     return true;
   }
 

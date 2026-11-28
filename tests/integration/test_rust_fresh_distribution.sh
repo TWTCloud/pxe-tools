@@ -354,8 +354,10 @@ docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
     set -euo pipefail
     if [[ "$1" == apt ]]; then
         systemctl stop pxe-tools-worker.service
+        http=/var/lib/pxe-tools-http
     else
         /command/s6-svc -d /run/service/worker
+        http=/srv/http
     fi
     config=/etc/pxe-tools/db.conf
     database=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["path"])' "$config")
@@ -392,7 +394,13 @@ docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
     [[ "$catalog" == *'13.8.0<span class="status-badge status-badge--active">Latest</span>'* ]]
     [[ "$catalog" == *'24.04.10 <small>Archive</small>'*'24.04.7</th>'* ]]
     [[ "$catalog" == *'14-testing</th>'* && "$catalog" != *'14-testing <small>Archive</small>'* ]]
-    [[ "$catalog" == *"name=\"image\" value=\"$entry\""* ]]
+    [[ "$catalog" == *"form=\"catalog-selection\" name=\"image\" value=\"$entry\""* ]]
+    for tab in windows proxmox rhel9; do
+        [[ "$catalog" == *"role=\"tab\" id=\"catalog-tab-$tab\" aria-controls=\"catalog-panel-$tab\""* ]]
+    done
+    [[ "$catalog" == *'id="catalog-panel-windows"'*'href="/settings/images/media?kind=windows-iso"'*'href="/settings/windows"'*'id="catalog-panel-proxmox"'* ]]
+    [[ "$catalog" == *'id="catalog-panel-proxmox"'*'action="/settings/images/proxmox"'*'id="catalog-panel-rhel9"'* ]]
+    [[ "$catalog" == *'id="catalog-panel-rhel9"'*'href="/settings/images/rhel"'*'href="/settings/images/media?kind=rhel9"'*'id="catalog-panel-centos"'* ]]
     post=(-o /dev/null -w '%{http_code}' -H "Origin: $origin")
     test "$("${client[@]}" "${post[@]}" --data "image=$entry" "$route/add")" = 303
     queued=$(sqlite3 "$database" "SELECT extract_method||'|'||iso_url||'|'||status
@@ -411,7 +419,34 @@ docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
     [[ "$finished" == *'data-catalog-refresh="success"'* && "$finished" == *'Catalogue à jour'* ]]
     sqlite3 "$database" "DELETE FROM os_images WHERE distro='debian' AND version_full='13.7.0' AND arch='amd64';
       DELETE FROM catalog_entries WHERE id=$entry"
-    printf 'Six distribution catalogs, channels, archives and refresh states passed (%s)\n' "$1"
+    base="$http/netboot/debian/13.8.0/amd64"
+    replacement="$http/netboot/debian/12.15.0/amd64"
+    for path in "$base" "$replacement"; do
+        install -d -m 0755 "$path"
+        printf 'fixture' >"$path/linux"
+        printf 'fixture' >"$path/initrd.gz"
+    done
+    rescue=$(sqlite3 "$database" "INSERT INTO os_images
+      (distro,version,version_full,codename,major,arch,extract_method,enabled,status)
+      VALUES ('debian','13.8.0','13.8.0','trixie',13,'amd64','direct',1,'downloaded') RETURNING id")
+    protected=$("${client[@]}" "$route")
+    [[ "$protected" == *'Dernière image de découverte et de secours pour cette architecture'* ]]
+    [[ "$protected" != *"action=\"/settings/images/$rescue\""* ]]
+    reply=$("${client[@]}" --no-fail -w '\n%{http_code}' -H "Origin: $origin" \
+      --data '_method=DELETE' "$route/$rescue")
+    [[ "$reply" == *'Dernière image de découverte et de secours pour cette architecture'*$'\n409' ]]
+    fallback=$(sqlite3 "$database" "INSERT INTO os_images
+      (distro,version,version_full,codename,major,arch,extract_method,enabled,status)
+      VALUES ('debian','12.15.0','12.15.0','bookworm',12,'amd64','direct',1,'downloaded') RETURNING id")
+    [[ "$("${client[@]}" "$route")" == *"action=\"/settings/images/$rescue\""* ]]
+    test "$("${client[@]}" "${post[@]}" --data '_method=DELETE' "$route/$rescue")" = 303
+    sqlite3 "$database" "DELETE FROM init_jobs WHERE job_type='image:delete:$rescue';
+      DELETE FROM os_images WHERE id IN ($rescue,$fallback)"
+    for path in "$base" "$replacement"; do
+        rm -- "$path/linux" "$path/initrd.gz"
+        rmdir -- "$path"
+    done
+    printf 'Catalog tabs, refresh states and rescue protection passed (%s)\n' "$1"
 CATALOG_GUEST
 bash tests/integration/test_rust_multinetwork.sh "$container" "$variant"
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"

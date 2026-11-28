@@ -68,8 +68,15 @@ pub(crate) enum Change {
 pub(crate) enum Changed {
     Updated,
     Unavailable,
-    Blocked,
+    Blocked(BlockReason),
     Queued(i64),
+}
+
+pub(crate) enum BlockReason {
+    Transfer,
+    InUse,
+    Rescue,
+    Deleting,
 }
 
 pub(crate) fn change(db: &Connection, id: i64, requested: Change) -> Result<Changed, ErrorBox> {
@@ -85,22 +92,33 @@ pub(crate) fn change(db: &Connection, id: i64, requested: Change) -> Result<Chan
         return Ok(if matches!(requested, Change::Delete) {
             Changed::Queued(job)
         } else {
-            Changed::Blocked
+            Changed::Blocked(BlockReason::Deleting)
         });
     }
     let http = http_root()?;
     image.key.path(&http)?;
     let transfer_active = transferring(&image);
     let active = active_operations(db, &image)?;
-    let available = image.key.available(&http)?;
     let last_rescue = last_rescue_image(db, &image, &http)?;
-    let blocked = transfer_active || last_rescue || active;
+    let reason = if transfer_active {
+        Some(BlockReason::Transfer)
+    } else if active {
+        Some(BlockReason::InUse)
+    } else if last_rescue {
+        Some(BlockReason::Rescue)
+    } else {
+        None
+    };
     match requested {
         Change::Enable(enabled) => {
             let enabled = enabled.unwrap_or(!image.enabled);
             let requeue = enabled && matches!(image.status.as_str(), "pending" | "failed");
-            if !enabled && blocked || requeue && active {
-                return Ok(Changed::Blocked);
+            if !enabled {
+                if let Some(reason) = reason {
+                    return Ok(Changed::Blocked(reason));
+                }
+            } else if requeue && active {
+                return Ok(Changed::Blocked(BlockReason::InUse));
             }
             db.execute(
                 "UPDATE os_images SET enabled=?2,
@@ -110,8 +128,8 @@ pub(crate) fn change(db: &Connection, id: i64, requested: Change) -> Result<Chan
             )?;
         }
         Change::Download => {
-            if active || transfer_active || (image.status == "downloaded" && available && blocked) {
-                return Ok(Changed::Blocked);
+            if let Some(reason) = reason {
+                return Ok(Changed::Blocked(reason));
             }
             db.execute(
                 "UPDATE os_images SET enabled=1,status='pending',error_msg=NULL WHERE id=?1",
@@ -119,8 +137,8 @@ pub(crate) fn change(db: &Connection, id: i64, requested: Change) -> Result<Chan
             )?;
         }
         Change::Delete => {
-            if blocked {
-                return Ok(Changed::Blocked);
+            if let Some(reason) = reason {
+                return Ok(Changed::Blocked(reason));
             }
             db.execute(
                 "INSERT INTO init_jobs(job_type,status,message,log)
@@ -131,6 +149,13 @@ pub(crate) fn change(db: &Connection, id: i64, requested: Change) -> Result<Chan
         }
     }
     Ok(Changed::Updated)
+}
+
+pub(crate) fn is_last_rescue(db: &Connection, id: i64) -> Result<bool, ErrorBox> {
+    match Image::get(db, id)? {
+        Some(image) => last_rescue_image(db, &image, &http_root()?),
+        None => Ok(false),
+    }
 }
 
 fn http_root() -> Result<PathBuf, ErrorBox> {

@@ -279,7 +279,7 @@ const NAVIGATION: [(&str, &[NavLink]); 3] = [
                 "/settings/images",
                 "Images PXE",
                 ConsoleSection::Images,
-                "m12 3 9 5-9 5-9-5zm-9 9 9 5 9-5m-18 4 9 5 9-5",
+                "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zm-7 0a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM6.6 9a6 6 0 0 1 2.4-2.4m8.4 8.4a6 6 0 0 1-2.4 2.4",
             ),
             (
                 "/settings",

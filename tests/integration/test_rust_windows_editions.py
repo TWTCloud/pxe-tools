@@ -158,18 +158,21 @@ def check_catalog_selection(database, tls, auth, form_headers):
     for distro in ('debian', 'ubuntu', 'centos', 'fedora', 'almalinux', 'rocky'):
         assert f'role="tab" id="catalog-tab-{distro}" aria-controls="catalog-panel-{distro}"'.encode() in page
         assert f'<section id="catalog-panel-{distro}"'.encode() in page
-        assert f'<table class="catalog-versions" aria-labelledby="catalog-heading-{distro}">'.encode() in page
+        assert f'<table class="catalog-versions" data-catalog-versions="{distro}" aria-labelledby="catalog-heading-{distro}">'.encode() in page
     assert b'data-tab-scroll="-1"' in page and b'data-tab-scroll="1"' in page
     assert b'<th scope="col">Version</th>' in page
     assert b'Intel / AMD<br><small>amd64</small>' in page
     assert b'ARM 64 bits<br><small>arm64</small>' in page
     assert 'Debian 13.99 · ARM 64 bits'.encode() in page
     assert 'Fedora Server 45 · Intel / AMD 64 bits'.encode() in page
-    assert b'<table class="catalog-media-table" aria-labelledby="catalog-media-title">' in page
-    assert b'<form method="post" action="/settings/images/proxmox"' in page
-    assert b'href="https://www.proxmox.com/"' in page
-    assert b'href="/settings/images/rhel"' in page
-    assert b'href="/settings/images/media?kind=windows-iso"' in page
+    for distro, actions in {
+        'windows': (b'href="/settings/images/media?kind=windows-iso"', b'href="/settings/windows"'),
+        'proxmox': (b'<form method="post" action="/settings/images/proxmox"', b'href="https://www.proxmox.com/"'),
+        'rhel9': (b'href="/settings/images/rhel"', b'href="/settings/images/media?kind=rhel9"'),
+    }.items():
+        assert f'role="tab" id="catalog-tab-{distro}" aria-controls="catalog-panel-{distro}"'.encode() in page
+        panel = page.split(f'<section id="catalog-panel-{distro}"'.encode(), 1)[1].split(b'</section>', 1)[0]
+        assert all(action in panel for action in actions)
     for asset in ('windows-11.png', 'red-hat-enterprise-linux.png'):
         path = '/console-assets/' + asset
         assert path.encode() in page
@@ -181,7 +184,7 @@ def check_catalog_selection(database, tls, auth, form_headers):
         200, 'image/svg+xml', (ROOT/'rust/src/web/ui/proxmox-brandmark.svg').read_bytes()
     )
     for identifier in ids:
-        assert f'type="checkbox" name="image" value="{identifier}"'.encode() in page
+        assert f'type="checkbox" form="catalog-selection" name="image" value="{identifier}"'.encode() in page
     selection = [('image', str(identifier)) for identifier in ids]
     assert request(catalogue, tls=tls, form=selection, headers=auth)[0] == 403
     assert request(catalogue, tls=tls, form=[*selection, ('image', '9999')],
