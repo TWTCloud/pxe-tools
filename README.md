@@ -79,8 +79,8 @@ sélectionne l’image adaptée au serveur. Depuis la racine du dépôt sur un h
 Docker Linux, téléchargez l’image et démarrez l’appliance.
 
 ```sh
-docker pull ghcr.io/twtcloud/pxe-tools:v0.1.0-beta30
-export PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta30
+docker pull ghcr.io/twtcloud/pxe-tools:v0.1.0-beta31
+export PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta31
 docker compose -f compose/docker-compose.yml up -d
 ```
 
@@ -93,7 +93,7 @@ docker compose -f compose/docker-compose.yml exec pxe-tools cat /run/pxe-tools-r
 ```
 
 Les archives à importer avec `docker load`, leurs empreintes et les offres de
-sources accompagnent la [release bêta 30](https://github.com/TWTCloud/pxe-tools/releases/tag/v0.1.0-beta30).
+sources accompagnent la [release bêta 31](https://github.com/TWTCloud/pxe-tools/releases/tag/v0.1.0-beta31).
 
 Le paquet APT et l’image Docker utilisent le serveur HTTP et HTTPS intégré au
 binaire Rust. Les nouvelles configurations PXE utilisent
