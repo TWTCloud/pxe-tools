@@ -238,7 +238,7 @@ impl Route {
 
     fn general(self, db: &Connection) -> Result<Reply, ErrorBox> {
         let mut html = String::from(
-            r#"<nav class="page-links" aria-label="Autres paramètres"><a href="/settings/network">Réseau PXE</a><a href="/settings/images">Images PXE</a><a href="/settings/ipxe">iPXE</a><a href="/settings/ansible">Ansible</a><a href="/admin/certificates">Certificats TLS</a></nav>
+            r#"<nav class="page-links" aria-label="Autres paramètres"><a href="/settings/network">Réseau PXE</a><a href="/settings/images">Images PXE</a><a href="/settings/ipxe">iPXE</a><a href="/settings/ansible">Ansible</a><a href="/admin/certificates">Certificats TLS</a><a href="/settings/console">Accès à la console</a></nav>
 <div class="panel-grid">
 <div class="panel-stack">
 <section class="panel"><h2>Découverte réseau</h2>

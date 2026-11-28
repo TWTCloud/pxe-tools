@@ -10,6 +10,7 @@ mod api;
 mod assets;
 mod auth_proxy;
 mod certificates;
+mod console_port;
 mod device_ansible;
 mod device_operations;
 mod device_settings;
@@ -31,6 +32,9 @@ mod ui;
 mod updates;
 mod winpe;
 
+pub(crate) use console_port::{
+    configured as configured_console_port, set_configured as set_console_port,
+};
 pub(crate) use onboarding::{finish_pxe_address, refresh_pxe_address};
 pub(crate) use setup::adopt_existing_database;
 
@@ -55,10 +59,10 @@ use std::{
     error::Error,
     fs::File,
     io::{self, BufReader, Cursor},
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, Weak},
     time::Duration,
 };
 use tokio::{
@@ -80,12 +84,13 @@ struct Site {
     pxe_ip: Option<Ipv4Addr>,
     addresses: Vec<Ipv4Addr>,
     local_names: Vec<String>,
-    https_port: u16,
+    console_port: console_port::ConsolePort,
     http_port: u16,
     winpe_client: Option<Ipv4Addr>,
     rhel_repositories: linux_boot::RhelRepositories,
     public_host: Option<String>,
     requests: Semaphore,
+    connections: Arc<Semaphore>,
     admin: admin::Console,
     setup: setup::Wizard,
     tls: Arc<certificates::Certificates>,
@@ -121,7 +126,7 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         })
         .transpose()?;
     let http_port = port("PXE_HTTP_PORT", 80)?;
-    let https_port = port("PXE_HTTPS_PORT", 443)?;
+    let https_port = console_port::configured(config)?;
     let default_tls = tls_config().map_err(|error| format!("TLS configuration: {error}"))?;
     let tls = Arc::new(certificates::Certificates::new(
         default_tls,
@@ -140,12 +145,13 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         pxe_ip,
         addresses,
         local_names: admin_hostnames(),
-        https_port,
+        console_port: console_port::ConsolePort::new(https_port),
         http_port,
         winpe_client: winpe::configured_client()?,
         rhel_repositories: linux_boot::RhelRepositories::from_environment(),
         public_host,
         requests: Semaphore::new(8),
+        connections: Arc::new(Semaphore::new(64)),
         admin: admin::Console::new(),
         setup: setup::Wizard::new(),
         tls,
@@ -153,22 +159,19 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
     });
     let mut listeners = Vec::new();
     for &address in &site.addresses {
-        for (port, tls) in [(http_port, false), (https_port, true)] {
-            let listener = TcpListener::bind((address, port))
-                .await
-                .map_err(|error| format!("Unable to listen on {address}:{port}: {error}"))?;
-            listeners.push((listener, address, tls));
-        }
+        let listener = TcpListener::bind((address, http_port))
+            .await
+            .map_err(|error| format!("Unable to listen on {address}:{http_port}: {error}"))?;
+        listeners.push(listener);
     }
-    let connections = Arc::new(Semaphore::new(64));
+    site.console_port.start(&site)?;
     let mut servers = task::JoinSet::new();
-    for (listener, address, tls) in listeners {
+    for listener in listeners {
         servers.spawn(accept(
             listener,
-            address,
-            tls,
-            site.clone(),
-            connections.clone(),
+            false,
+            Arc::downgrade(&site),
+            site.connections.clone(),
         ));
     }
     let tls = site.tls.clone();
@@ -369,17 +372,21 @@ fn notify_ready() -> io::Result<()> {
 
 async fn accept(
     listener: TcpListener,
-    local: Ipv4Addr,
     tls: bool,
-    site: Arc<Site>,
+    site: Weak<Site>,
     connections: Arc<Semaphore>,
 ) -> Result<(), ErrorBox> {
+    let SocketAddr::V4(local) = listener.local_addr()? else {
+        return Err("Expected an IPv4 listening socket".into());
+    };
     loop {
         let (stream, peer) = listener.accept().await?;
         let Ok(permit) = connections.clone().try_acquire_owned() else {
             continue;
         };
-        let site = site.clone();
+        let Some(site) = site.upgrade() else {
+            return Ok(());
+        };
         task::spawn(async move {
             let _permit = permit;
             if tls {
@@ -394,8 +401,13 @@ async fn accept(
     }
 }
 
-async fn connection<S>(stream: S, peer: SocketAddr, local: Ipv4Addr, secure: bool, site: Arc<Site>)
-where
+async fn connection<S>(
+    stream: S,
+    peer: SocketAddr,
+    local: SocketAddrV4,
+    secure: bool,
+    site: Arc<Site>,
+) where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     let service = service_fn(|request: Request<Incoming>| {
@@ -467,13 +479,61 @@ async fn windows_editions(site: &Site) -> Arc<winpe::Editions> {
 async fn dispatch(
     request: Request<Incoming>,
     peer: IpAddr,
-    local: Ipv4Addr,
+    listener: SocketAddrV4,
     secure: bool,
     site: &Arc<Site>,
 ) -> Reply {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path();
     let readable = matches!(parts.method, Method::GET | Method::HEAD);
+    let local = *listener.ip();
+    let (https_port, testing_port) = site.console_port.access(listener.port());
+    if secure && listener.port() != https_port {
+        if !testing_port {
+            return plain(StatusCode::GONE, "Ce port de console a été fermé.\n");
+        }
+        if !matches!(path, console_port::ROUTE | "/login") && !path.starts_with("/console-assets/")
+        {
+            return setup::redirect(StatusCode::SEE_OTHER, console_port::ROUTE);
+        }
+    }
+    if path == console_port::ROUTE {
+        if !secure {
+            return plain(StatusCode::NOT_FOUND, "Not found\n");
+        }
+        let host = admin_authority(&parts.headers, HOST.as_str(), site)
+            .filter(|authority| authority.port_u16().unwrap_or(443) == listener.port())
+            .map(|authority| authority.host().to_owned());
+        let form = if readable {
+            None
+        } else if parts.method == Method::POST {
+            if host.is_none()
+                || !admin_origin_on(&parts.headers, HOST.as_str(), site, Some(listener.port()))
+            {
+                return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
+            }
+            match read_form(&parts.headers, body, 256).await {
+                Ok(form) => Some(form),
+                Err(reply) => return reply,
+            }
+        } else {
+            return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
+        };
+        return site
+            .admin
+            .serve(
+                &parts,
+                peer,
+                &site.database,
+                admin::Action::ConsolePort(console_port::Visit {
+                    site: site.clone(),
+                    port: listener.port(),
+                    host,
+                    form,
+                }),
+            )
+            .await;
+    }
     let canonical_path;
     let path = if let Some(suffix) = ["/machines", "/admin/devices"]
         .into_iter()
@@ -548,10 +608,10 @@ async fn dispatch(
                     })
                 })
                 .map_or_else(|| local.to_string(), str::to_owned);
-            let port = if site.https_port == 443 {
+            let port = if https_port == 443 {
                 String::new()
             } else {
-                format!(":{}", site.https_port)
+                format!(":{https_port}")
             };
             format!("https://{host}{port}/admin/")
         };
@@ -601,7 +661,12 @@ async fn dispatch(
         if parts.method != Method::POST {
             return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
         }
-        if !admin_origin(&parts.headers, peer, site) {
+        let valid_origin = if listener.port() == https_port {
+            admin_origin(&parts.headers, peer, site)
+        } else {
+            admin_origin_on(&parts.headers, HOST.as_str(), site, Some(listener.port()))
+        };
+        if !valid_origin {
             return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
         }
         if path == "/logout" {
@@ -927,7 +992,7 @@ async fn dispatch(
                     route,
                     form,
                     site.pxe_ip
-                        .map(|address| format!("{address}:{}:{}", site.https_port, site.tls.pin())),
+                        .map(|address| format!("{address}:{https_port}:{}", site.tls.pin())),
                 ),
             )
             .await;
@@ -1263,31 +1328,43 @@ fn known_dns_name(site: &Site, name: &str) -> bool {
 
 fn admin_origin(headers: &HeaderMap, peer: IpAddr, site: &Site) -> bool {
     let forwarded = site.admin.trusted_proxy(peer) && headers.contains_key("x-forwarded-host");
-    let header = if forwarded {
-        "x-forwarded-host"
+    if forwarded {
+        admin_origin_on(headers, "x-forwarded-host", site, None)
     } else {
-        HOST.as_str()
-    };
-    let Some(host) = single(headers, header)
+        admin_origin_on(
+            headers,
+            HOST.as_str(),
+            site,
+            Some(site.console_port.active()),
+        )
+    }
+}
+
+fn admin_authority(headers: &HeaderMap, header: &str, site: &Site) -> Option<Authority> {
+    let host = single(headers, header)
         .filter(|raw| !raw.contains('@'))
-        .and_then(|raw| raw.parse::<Authority>().ok())
-    else {
+        .and_then(|raw| raw.parse::<Authority>().ok())?;
+    let name = host.host();
+    (name
+        .parse::<Ipv4Addr>()
+        .is_ok_and(|ip| site.addresses.contains(&ip))
+        || name.eq_ignore_ascii_case("localhost")
+        || known_dns_name(site, name)
+        || site.tls.allowed_acme_host(name)
+        || site
+            .public_host
+            .as_ref()
+            .is_some_and(|value| value.eq_ignore_ascii_case(name)))
+    .then_some(host)
+}
+
+fn admin_origin_on(headers: &HeaderMap, header: &str, site: &Site, port: Option<u16>) -> bool {
+    let Some(host) = admin_authority(headers, header, site) else {
         return false;
     };
     let name = host.host();
     let external_port = host.port_u16().unwrap_or(443);
-    if (!forwarded && external_port != site.https_port)
-        || !(name
-            .parse::<Ipv4Addr>()
-            .is_ok_and(|ip| site.addresses.contains(&ip))
-            || name.eq_ignore_ascii_case("localhost")
-            || known_dns_name(site, name)
-            || site.tls.allowed_acme_host(name)
-            || site
-                .public_host
-                .as_ref()
-                .is_some_and(|v| v.eq_ignore_ascii_case(name)))
-    {
+    if port.is_some_and(|port| external_port != port) {
         return false;
     }
     let expected = if external_port == 443 {

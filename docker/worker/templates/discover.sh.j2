@@ -11,7 +11,7 @@
 # access.log + le terminal d'événements de la machine.
 
 ORCH_IP="{{ pxe_ip }}"
-CONSOLE_URL="{{ pxe_console_scheme }}://$ORCH_IP{{ pxe_console_port_suffix }}/admin/inventaire"
+CONSOLE_URL="{{ pxe_console_scheme }}://$ORCH_IP{{ pxe_console_port_suffix }}{{ pxe_console_path | default('/admin/inventaire') }}"
 API="http://$ORCH_IP/api/discovery"
 STATIC_BIN_BASE="http://$ORCH_IP/static-bin"
 

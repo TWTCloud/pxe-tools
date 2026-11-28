@@ -25,7 +25,21 @@ reste disponible et indique que le démarrage PXE est suspendu.
 
 ## Console et services de démarrage
 
-La console native utilise normalement le port TCP 8080. Le service HTTP de démarrage utilise le port TCP 80 ; TFTP utilise UDP 69 et le proxy DHCP peut utiliser UDP 67/4011. Une console accessible ne prouve pas que le réseau PXE est prêt.
+La console Rust en APT et Docker utilise le port HTTPS TCP 443 par défaut.
+Le démarrage utilise TCP 80 en HTTP, UDP 69 pour TFTP et UDP 67/4011 pour le proxy DHCP.
+
+Dans **Paramètres → Accès à la console**, autorisez le nouveau port dans votre
+pare-feu, puis cliquez sur **Tester le port**. Ouvrez le lien proposé et
+confirmez sur le nouveau port dans les deux minutes. Si le lien est
+inaccessible, l’ancien port reste utilisable et l’essai expire.
+Préparez de nouveau les médias Proxmox VE qui incorporent l’ancienne URL HTTPS.
+
+Si le port 443 est occupé lors d’une installation APT, le paquet déballé permet
+d’enregistrer un autre port avec `sudo pxe-tools web-port 8443` lorsque le
+service web est arrêté ou en échec. Reprenez ensuite la configuration du paquet
+avec `sudo dpkg --configure pxe-tools`. Sur Docker, définissez
+`PXE_HTTPS_PORT=8443` avant le premier démarrage. Le port confirmé dans la
+console est conservé dans le volume de configuration et devient prioritaire.
 
 Le réglage `pxe_enabled` sépare l'activation des services de démarrage de la configuration conservée. Il utilise la table `settings` existante, sans migration de schéma :
 
