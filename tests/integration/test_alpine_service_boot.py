@@ -86,12 +86,15 @@ def verify_operation(db, mode):
             conn.execute("UPDATE machines SET next_action='poweroff' WHERE mac=?", [MAC])
             return True
         if mode == 'disktest':
-            status, = conn.execute('SELECT job_status FROM disk_tests').fetchone()
+            status, log = conn.execute('SELECT job_status,log FROM disk_tests').fetchone()
         else:
-            status, = conn.execute('SELECT wipe_status FROM wipes').fetchone()
+            status, log = conn.execute('SELECT wipe_status,log FROM wipes').fetchone()
         if status == 'failed':
-            raise RuntimeError(f'Alpine {mode} reported failure.')
-        return status == 'success'
+            raise RuntimeError(f'Alpine {mode} reported failure.\n{log or ""}')
+        if status == 'success':
+            assert log and 'démarré' in log, f'Missing UTF-8 progress journal for {mode}'
+            return True
+        return False
 
 
 def main():

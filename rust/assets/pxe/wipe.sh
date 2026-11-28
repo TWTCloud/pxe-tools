@@ -89,9 +89,9 @@ log_line() {
     msg="[$(date +%H:%M:%S)] $1"
     echo "$msg"
     if [ "$WIPE_ID" -gt 0 ] 2>/dev/null; then
-        enc=$(echo "$msg" | sed 's/%/%25/g; s/ /%20/g; s|/|%2F|g; s/:/%3A/g; s/=/%3D/g; s/&/%26/g; s/+/%2B/g')
-        wget -q -O /dev/null --header="Authorization: Bearer $BOOT_TOKEN" \
-            "$API_BASE/wipe-progress?wipe_id=$WIPE_ID&mac=$MAC&line=$enc" 2>/dev/null || true
+        wget -q -O /dev/null --post-data="$msg" --header="Content-Type: text/plain; charset=utf-8" \
+            --header="Authorization: Bearer $BOOT_TOKEN" \
+            "$API_BASE/wipe-progress?wipe_id=$WIPE_ID&mac=$MAC" 2>/dev/null || true
     fi
 }
 
