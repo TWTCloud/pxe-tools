@@ -30,7 +30,7 @@ chmod 0755 "$work"
 
 build=(docker build --platform "linux/$architecture" -f docker/pxe-tools/Dockerfile)
 "${build[@]}" --target rust-experimental -t "$name-experimental" .
-"${build[@]}" -t "$name-standard" .
+"${build[@]}" --target php-appliance -t "$name-standard" .
 docker create --name "$name-binary" "$name-experimental" >/dev/null
 docker cp "$name-binary:/usr/lib/pxe-tools/pxe-tools-rust" "$work/pxe-tools-rust"
 docker rm "$name-binary" >/dev/null

@@ -124,6 +124,8 @@ class ExternalDatabaseFailClosed(unittest.TestCase):
 
     def test_init_refuses_external_without_spawning_client_or_changing_files(self):
         source = (ROOT / 'docker/pxe-tools/init/php-init.sh').read_text()
+        source = source.replace('. "${0%/*}/database-init.sh"',
+                         ((ROOT / 'docker/pxe-tools/init') / 'database-init.sh').read_text())
         for prefix in ('/etc/pxe-tools', '/var/lib/pxe-tools', '/run/php'):
             source = source.replace(prefix, str(self.root / prefix.lstrip('/')))
         init = self.root / 'init.sh'

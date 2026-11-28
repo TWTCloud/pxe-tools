@@ -95,6 +95,8 @@ PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta25 \
 Les notes de mise à niveau et les offres de sources accompagnent la
 [bêta 25](https://github.com/TWTCloud/pxe-tools/releases/tag/v0.1.0-beta25).
 
+Le paquet APT et l’image Docker de PXE Tools utilisent le serveur HTTP et HTTPS intégré au binaire Rust. Les URL historiques `/grub.php` et `/preseed.php` restent utilisables par les chargeurs déjà installés. La cible Docker `php-appliance` sert aux essais historiques et doit être sélectionnée explicitement.
+
 ## Données et limites
 
 La base SQLite, la clé de chiffrement et les fichiers persistants doivent être

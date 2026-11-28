@@ -52,9 +52,13 @@ case "$variant" in
                 if systemctl is-failed --quiet "$unit"; then exit 1; fi
             done
             test -z "$(find /usr/lib/pxe-tools /opt/pxe-tools -type f \( -name '*.php' -o -name '*.php.j2' \) -print -quit)"
-            test ! -e /opt/pxe-tools/init/php-init.sh
+            test ! -e /usr/lib/pxe-tools/app/worker_legacy.py
             test ! -d /opt/pxe-tools/nginx
             test ! -d /run/php
+            test -x /opt/pxe-tools/init/sqlite-init.sh
+            test ! -e /opt/pxe-tools/init/php-init.sh
+            test ! -e /opt/pxe-tools/init/render-legacy-boot-templates.sh
+            test ! -e /opt/pxe-tools/init/render-nginx-conf.sh
             systemctl stop pxe-tools-dnsmasq-tail.service pxe-tools-dnsmasq.service
 APT_GUEST
         ;;
@@ -63,6 +67,15 @@ APT_GUEST
         docker run -d --name "$container" --network "$container" \
             --hostname "$server_name" --dns-search "$search_domain" \
             "${PXE_RUST_GUIDED_DOCKER_IMAGE:?}" >/dev/null
+        docker exec "$container" bash -ec '
+            test -z "$(find /app /opt/pxe-tools /etc/s6-overlay/s6-rc.d -iname "*php*" -print -quit)"
+            test -z "$(find /etc/s6-overlay/s6-rc.d -iname "*nginx*" -print -quit)"
+            test -x /opt/pxe-tools/init/sqlite-init.sh
+            test -f /etc/s6-overlay/s6-rc.d/bootstrap-tls/dependencies.d/sqlite-init
+            test ! -e /app/worker_legacy.py
+            test ! -d /etc/nginx
+            test ! -d /run/php
+        '
         ;;
     *) exit 2 ;;
 esac

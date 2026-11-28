@@ -34,6 +34,8 @@ class NativeInitSqlitePathGuard(unittest.TestCase):
         (self.app / 'db/migrate.php').write_text(
             '<?php file_put_contents(' + json.dumps(str(marker)) + ', "ok");\n')
         source = (ROOT / 'docker/pxe-tools/init/php-init.sh').read_text()
+        source = source.replace('. "${0%/*}/database-init.sh"',
+                         ((ROOT / 'docker/pxe-tools/init') / 'database-init.sh').read_text())
         for original, replacement in (('/etc/pxe-tools', self.conf),
                                       ('/var/lib/pxe-tools', self.data),
                                       ('/run/php', self.root / 'run-php')):

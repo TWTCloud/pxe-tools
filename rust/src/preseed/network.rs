@@ -7,7 +7,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::Value;
 use std::{collections::HashSet, net::Ipv4Addr};
 
-const BOND_SCRIPT: &str = include_str!(concat!(env!("OUT_DIR"), "/target-bond.sh"));
+const BOND_SCRIPT: &str = include_str!("../../assets/pxe/target-bond.sh").trim_ascii_end();
 
 pub(super) struct Network {
     pub(super) installer: String,

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class EmptySetupDatabase(unittest.TestCase):
     def test_read_only_classification(self):
-        source = (ROOT / 'docker/pxe-tools/init/php-init.sh').read_text()
+        source = (ROOT / 'docker/pxe-tools/init/database-init.sh').read_text()
         function = source.split('classify_setup_db() {\n', 1)[1].split('\n}\nDETECTED_DB=', 1)[0]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

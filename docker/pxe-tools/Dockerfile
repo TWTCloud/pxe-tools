@@ -112,25 +112,7 @@ ENV S6_KEEP_ENV=1 \
 # Les clés MOK sont générées par instance, jamais lors du build de l'image.
 
 # ----------------------------------------------------------------------------
-# Code app — PHP + worker.py + scripts shell servis par nginx (.sh aux clients PXE)
-# Note : path /app/ identique côté nginx ET php-fpm (même container = même FS, plus
-# besoin de COPY dupliqué comme dans l'ancienne stack à 4 images).
-#
-# NOTE Tailwind v4 : le CSS est compilé en local par scripts/dev-css.sh (ou
-# scripts/build-css.sh) puis commité (app/public/style.tailwind.css). On ne
-# build pas dans l'image car le binaire Go standalone Tailwind crashe en SIGILL
-# sur les CPU sans AVX (vu sur AMD E1-1200 de pxe). Le compilé est versionné.
-# ----------------------------------------------------------------------------
-COPY app/ /app/
-# Version only affects application metadata, not the package/runtime layers.
-ARG APP_VERSION=0.1.0-dev
-RUN printf '%s\n' "$APP_VERSION" > /app/src/build-version.txt
-RUN chmod +x /app/worker.py \
-    && chown -R root:root /app \
-    && chmod -R go-w /app
-
-# ----------------------------------------------------------------------------
-# Binaires statiques (smartctl, badblocks, dmidecode) — servis par nginx sous
+# Binaires statiques (smartctl, badblocks, dmidecode) — servis sous
 # /static-bin/ et téléchargés par discover.sh / disktest.sh / wipe.sh dans le
 # busybox d-i (qui n'a aucun de ces outils en natif).
 # ----------------------------------------------------------------------------
@@ -140,12 +122,6 @@ RUN find /srv/http/static-bin/ -type f ! -name '*.md' -exec chmod +x {} \; \
     && chmod -R go-w /srv/http/static-bin/
 
 # ----------------------------------------------------------------------------
-# Bootstrap scripts (rendu templates, build GRUB, etc.) — repris du worker actuel
-# ----------------------------------------------------------------------------
-COPY docker/worker/scripts/ /opt/pxe-tools/scripts/
-COPY docker/worker/templates/ /opt/pxe-tools/templates/
-RUN chmod +x /opt/pxe-tools/scripts/*.sh
-
 # Keyrings de confiance pour la vérif d'intégrité des images OS (F-05) : clés CD
 # Debian/Ubuntu officielles, épinglées et dé-armurées (committées), qui signent
 # les SHA256SUMS des ISO/firmware. Le netboot Debian utilise debian-archive-keyring
@@ -167,17 +143,6 @@ conf-dir=/etc/dnsmasq.d/
 EOF
 
 # ----------------------------------------------------------------------------
-# s6-overlay services (oneshots bootstrap + 4 longruns + bundle user)
-# ----------------------------------------------------------------------------
-COPY docker/pxe-tools/s6-rc/ /etc/s6-overlay/s6-rc.d/
-RUN find /etc/s6-overlay/s6-rc.d -name 'run' -o -name 'up' -o -name 'down' -o -name 'finish' \
-    | xargs -r chmod +x
-
-# Scripts d'init custom (php-init, bootstrap-tls, render-dnsmasq-conf)
-COPY docker/pxe-tools/init/ /opt/pxe-tools/init/
-RUN chmod +x /opt/pxe-tools/init/*.sh
-
-# ----------------------------------------------------------------------------
 # Volumes persistants (mountés via docker-compose)
 # ----------------------------------------------------------------------------
 RUN mkdir -p \
@@ -188,7 +153,6 @@ RUN mkdir -p \
         /srv/http \
         /srv/http/netboot \
         /srv/tftp \
-        /run/php \
     && chown -R www-data:www-data /var/lib/pxe-tools \
     && chown root:root /srv/http /srv/http/netboot \
     && chmod 0755 /srv/http /srv/http/netboot \
@@ -220,14 +184,12 @@ ENV PXE_DB_PATH=/var/lib/pxe-tools/pxe-tools.sqlite \
     KERNEL_OPTS="language=fr country=FR locale=fr_FR.UTF-8 keymap=fr ipv6.disable=1" \
     BIOS_BOOTLOADER=lpxelinux.0 \
     UEFI_BOOTLOADER=grubnetx64.efi \
-    UEFI_ENABLED=true \
-    ADMIN_PORT=8443 \
-    ADMIN_HTTP_PORT=8080
+    UEFI_ENABLED=true
 # Lot 3 Spec B : DEBIAN_VERSIONS et DHCP_MODE retirés — gérés en DB respectivement
 # via la table os_images et la setting dhcp_proxy_enabled.
 
 # Compte conservé pour les données et fonctions facultatives existantes. Le container tourne en root
-# pour permettre s6-overlay de lancer dnsmasq (bind :67) et nginx (bind :80).
+# pour permettre s6-overlay de lancer dnsmasq (bind :67) et le serveur HTTP (bind :80).
 ARG ANSIBLE_UID=1001
 ARG ANSIBLE_GID=1001
 RUN groupadd -g "${ANSIBLE_GID}" ansible \
@@ -235,9 +197,7 @@ RUN groupadd -g "${ANSIBLE_GID}" ansible \
     && mkdir -p /home/ansible/.ssh /home/ansible/ansible \
     && chown -R ansible:ansible /home/ansible
 
-# Ports déclaratifs (informatif uniquement — network_mode: host les expose
-# directement sur l'host). Les ports admin réels sont contrôlés par les env
-# vars ADMIN_PORT / ADMIN_HTTP_PORT (default 8443/8080).
+# Ports déclaratifs. Compose utilise directement le réseau de l’hôte.
 EXPOSE 80 67/udp 69/udp 4011/udp
 
 # Healthcheck : PXE HTTP, admin HTTP et admin TLS lorsqu'il est activé.
@@ -249,6 +209,43 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
 ENTRYPOINT ["/init"]
 
 FROM appliance AS php-appliance
+# Historical fixture for parity and upgrade tests.
+ENV ADMIN_PORT=8443 ADMIN_HTTP_PORT=8080
+RUN mkdir -p /run/php
+
+# Code app — PHP + worker.py + scripts shell servis par nginx (.sh aux clients PXE)
+# Note : path /app/ identique côté nginx ET php-fpm (même container = même FS, plus
+# besoin de COPY dupliqué comme dans l'ancienne stack à 4 images).
+#
+# NOTE Tailwind v4 : le CSS est compilé en local par scripts/dev-css.sh (ou
+# scripts/build-css.sh) puis commité (app/public/style.tailwind.css). On ne
+# build pas dans l'image car le binaire Go standalone Tailwind crashe en SIGILL
+# sur les CPU sans AVX (vu sur AMD E1-1200 de pxe). Le compilé est versionné.
+# ----------------------------------------------------------------------------
+COPY app/ /app/
+# Version only affects application metadata, not the package/runtime layers.
+ARG APP_VERSION=0.1.0-dev
+RUN printf '%s\n' "$APP_VERSION" > /app/src/build-version.txt
+RUN chmod +x /app/worker.py \
+    && chown -R root:root /app \
+    && chmod -R go-w /app
+
+# Bootstrap scripts (rendu templates, build GRUB, etc.) — repris du worker actuel
+# ----------------------------------------------------------------------------
+COPY docker/worker/scripts/ /opt/pxe-tools/scripts/
+COPY docker/worker/templates/ /opt/pxe-tools/templates/
+RUN chmod +x /opt/pxe-tools/scripts/*.sh
+
+# s6-overlay services (oneshots bootstrap + 4 longruns + bundle user)
+# ----------------------------------------------------------------------------
+COPY docker/pxe-tools/s6-rc/ /etc/s6-overlay/s6-rc.d/
+RUN find /etc/s6-overlay/s6-rc.d -name 'run' -o -name 'up' -o -name 'down' -o -name 'finish' \
+    | xargs -r chmod +x
+
+# Scripts d'init custom (php-init, bootstrap-tls, render-dnsmasq-conf)
+COPY docker/pxe-tools/init/ /opt/pxe-tools/init/
+RUN chmod +x /opt/pxe-tools/init/*.sh
+
 EXPOSE 8443 8080
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx php8.4-cli php8.4-curl php8.4-fpm php8.4-mysql php8.4-opcache php8.4-sqlite3 mariadb-client \
@@ -280,8 +277,7 @@ COPY app/db/schema.sqlite.sql app/db/schema.sqlite.sql
 COPY app/public/favicon.svg app/public/favicon.svg
 COPY app/public/fonts/mona-sans-latin-wght-normal.woff2 app/public/fonts/
 COPY app/public/img/distros/*.svg app/public/img/distros/
-COPY app/src/Views/pxe/wipe.sh.php app/src/Views/pxe/wipe.sh.php
-COPY docker/worker/templates/preseed.php.j2 docker/worker/templates/preseed-base.cfg.j2 docker/worker/templates/grub.php.j2 docker/worker/templates/
+COPY docker/worker/templates/preseed-base.cfg.j2 docker/worker/templates/
 COPY packaging/ci/collect-rust-notices.py /source/collect-rust-notices.py
 RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
 RUN rustup component add rust-docs
@@ -296,6 +292,18 @@ COPY --chmod=0755 rust/packaging/s6-run /etc/s6-overlay/s6-rc.d/rust-monitor/run
 RUN printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rust-monitor/type \
     && touch /etc/s6-overlay/s6-rc.d/user/contents.d/rust-monitor
 
+# Only the assembled runtime is copied into the distributable image. The
+# reference implementation never enters a layer of the final image.
+FROM appliance AS rust-runtime-files
+WORKDIR /source
+COPY app/ app/
+COPY docker/worker/ docker/worker/
+COPY docker/pxe-tools/init/ docker/pxe-tools/init/
+COPY docker/pxe-tools/s6-rc/ docker/pxe-tools/s6-rc/
+COPY rust/packaging/ rust/packaging/
+RUN python3 rust/packaging/stage-runtime.py /source /runtime \
+    && chmod -R go-w /runtime
+
 FROM appliance AS rust-guided
 ENV PXE_RUST_GUIDED=1 PXE_RUST_DIRECT_HTTP=1 TLS_DIR=/var/lib/pxe-tools-tls
 RUN install -d -o root -g root -m 0700 /var/lib/pxe-tools-tls
@@ -303,23 +311,7 @@ VOLUME ["/var/lib/pxe-tools-tls"]
 COPY --from=rust-build /source/rust/target/release/pxe-tools-rust /usr/lib/pxe-tools/pxe-tools-rust
 COPY --from=rust-build /source/rust-notices/ /usr/share/doc/pxe-tools/rust/
 COPY --chmod=0755 rust/packaging/start-guided.sh /usr/lib/pxe-tools/start-rust-guided.sh
-COPY --chmod=0755 rust/packaging/s6-guided-run /etc/s6-overlay/s6-rc.d/rust-guided/run
-RUN rm /etc/s6-overlay/s6-rc.d/user/contents.d/php-fpm \
-          /etc/s6-overlay/s6-rc.d/user/contents.d/nginx \
-          /etc/s6-overlay/s6-rc.d/worker/dependencies.d/php-fpm \
-    && rm -r /etc/s6-overlay/s6-rc.d/php-fpm /etc/s6-overlay/s6-rc.d/nginx \
-             /etc/s6-overlay/s6-rc.d/render-nginx-conf \
-    && mkdir /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d \
-             /etc/s6-overlay/s6-rc.d/bootstrap-tls/dependencies.d \
-    && printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rust-guided/type \
-    && touch /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/php-init \
-             /etc/s6-overlay/s6-rc.d/bootstrap-tls/dependencies.d/php-init \
-             /etc/s6-overlay/s6-rc.d/render-dnsmasq-conf/dependencies.d/bootstrap-render-templates \
-             /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/bootstrap-tls \
-             /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/bootstrap-render-templates \
-             /etc/s6-overlay/s6-rc.d/rust-guided/dependencies.d/wait-for-net \
-             /etc/s6-overlay/s6-rc.d/worker/dependencies.d/rust-guided \
-             /etc/s6-overlay/s6-rc.d/user/contents.d/rust-guided
+COPY --from=rust-runtime-files /runtime/ /
 EXPOSE 443
 
-FROM php-appliance AS default
+FROM rust-guided AS default
