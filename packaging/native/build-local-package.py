@@ -95,7 +95,7 @@ if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
     fi
     # Dependencies are configured before us and may have started stock nginx.
     # Preserve any preexisting/custom service unless ownership is proven.
-    python3 /usr/lib/pxe-tools/native/reconcile-nginx.py --configure
+    python3 /usr/lib/pxe-tools/native/reconcile-stock.py --configure
     # The incoming code is now installed. The preinst snapshot precedes all
     # init/schema work; failed configure retains its journal for a safe retry.
     python3 /usr/lib/pxe-tools/native/upgrade-lifecycle.py configure
@@ -236,7 +236,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         preinst = PREINST.replace('@@PXE_CACHE_CLEANUP@@', cleanup)
         postinst = POSTINST
         if rust_guided:
-            postinst = replace_exact(postinst, '    python3 /usr/lib/pxe-tools/native/reconcile-nginx.py --configure\n', '')
+            postinst = replace_exact(postinst, '    python3 /usr/lib/pxe-tools/native/reconcile-stock.py --configure\n', '')
         for name, text in [('preinst',preinst),('postinst',postinst),('prerm',PRERM),('postrm',POSTRM)]:
             text = text.replace('@@PXE_UPGRADE_LIFECYCLE@@', lifecycle).replace('@@PXE_PACKAGE_VERSION@@', version)
             p=control/name; p.write_text(text.replace('pxe-tools-local-test', package_name)); p.chmod(0o755)
@@ -278,6 +278,15 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             environment = native/'default.env'
             environment.write_text(''.join(line for line in environment.read_text().splitlines(keepends=True)
                                            if not line.startswith('PXE_NGINX_')))
+        if not rust_guided:
+            shutil.copy2(checked(ROOT/'tests/support/legacy-appliance/reconcile-stock.py'), native)
+            worker = native/'start-worker.py'
+            worker.write_text(replace_exact(
+                worker.read_text(),
+                "    environment['PXE_RUST_GUIDED'] = '1'\n"
+                "    os.execve(RUST_WORKER, [RUST_WORKER, '--work-guided', '/etc/pxe-tools/db.conf', WORKER], environment)",
+                "    os.execve('/usr/bin/python3', ['/usr/bin/python3', WORKER], environment)",
+            ))
         copy_tree(ROOT/'packaging/native/keyrings', native/'keyrings', tracked)
         units=root/'usr/lib/systemd/system'; units.mkdir(parents=True)
         for unit in (sorted((ROOT/'packaging/native').glob('pxe-tools.*'))
@@ -364,7 +373,7 @@ if __name__ == '__main__':
     parser.add_argument('destination',type=Path)
     parser.add_argument('--version',default='0.0.1~local2')
     parser.add_argument('--architecture', choices=GRUB_DEPENDENCIES, default='amd64')
-    parser.add_argument('--rust-binary', type=Path, help='include the local experimental Rust backend')
+    parser.add_argument('--rust-binary', type=Path, help='path to the native Rust binary')
     parser.add_argument('--rust-guided', action='store_true', help='serve guided PXE using Rust without PHP-FPM')
     args=parser.parse_args()
     build(args.destination, args.version, architecture=args.architecture, rust_binary=args.rust_binary,

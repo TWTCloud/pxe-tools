@@ -35,6 +35,11 @@ use tiny_http::{Header, Method, Response, Server};
 
 const MONITORING: &str = "/api/monitoring/installs";
 const BOOT_SELECTED: &str = "/api/boot-selected";
+const PRESEED: &str = "/pxe/preseed.cfg";
+const GRUB_CONFIG: &str = "/pxe/grub.cfg";
+// Already deployed firmware and menus can contain these paths.
+const LEGACY_PRESEED: &str = "/preseed.php";
+const LEGACY_GRUB_CONFIG: &str = "/grub.php";
 const CLIENT_IP: &str = "X-Pxe-Client-Ip";
 const JSON: &str = "application/json; charset=utf-8";
 const TEXT: &str = "text/plain; charset=utf-8";
@@ -630,7 +635,7 @@ fn handle(
             }
             Ok(internal_reply(response(200, TEXT, "")))
         }
-        (Method::Get, "/preseed.php") => {
+        (Method::Get, PRESEED | LEGACY_PRESEED) => {
             let args = parse_query(query.as_bytes());
             let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
             let source = match ip {
@@ -639,7 +644,7 @@ fn handle(
             };
             preseed::serve(&mut db, source, param(&args, "mac"))
         }
-        (Method::Get, "/grub.php") => {
+        (Method::Get, GRUB_CONFIG | LEGACY_GRUB_CONFIG) => {
             let args = parse_query(query.as_bytes());
             let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
             grub::serve(&mut db, ip, param(&args, "mac"), param(&args, "arch"))

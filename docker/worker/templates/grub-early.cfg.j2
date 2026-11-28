@@ -11,4 +11,4 @@
 # en settings DB.
 
 set net_default_server={{ pxe_ip }}
-configfile (http,{{ pxe_ip }})/grub.php?mac=${net_default_mac}&arch=${grub_cpu}
+configfile (http,{{ pxe_ip }}){{ pxe_grub_route }}?mac=${net_default_mac}&arch=${grub_cpu}

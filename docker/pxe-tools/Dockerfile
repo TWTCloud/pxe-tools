@@ -1,6 +1,6 @@
 # PXE Tools — image appliance unique
 # Les services PXE et le worker tournent sous s6-overlay v3 dans un conteneur,
-# network_mode: host. Le service web dépend de la variante construite.
+# network_mode: host. Rust sert le trafic HTTP et HTTPS.
 # Construction locale et candidat de publication multiarchitecture.
 
 FROM debian:trixie-slim AS appliance
@@ -208,68 +208,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
 # s6-overlay init system
 ENTRYPOINT ["/init"]
 
-FROM appliance AS php-appliance
-# Historical fixture for parity and upgrade tests.
-ENV ADMIN_PORT=8443 ADMIN_HTTP_PORT=8080
-RUN mkdir -p /run/php
-
-# Code app — PHP + worker.py + scripts shell servis par nginx (.sh aux clients PXE)
-# Note : path /app/ identique côté nginx ET php-fpm (même container = même FS, plus
-# besoin de COPY dupliqué comme dans l'ancienne stack à 4 images).
-#
-# NOTE Tailwind v4 : le CSS est compilé en local par scripts/dev-css.sh (ou
-# scripts/build-css.sh) puis commité (app/public/style.tailwind.css). On ne
-# build pas dans l'image car le binaire Go standalone Tailwind crashe en SIGILL
-# sur les CPU sans AVX (vu sur AMD E1-1200 de pxe). Le compilé est versionné.
-# ----------------------------------------------------------------------------
-COPY app/ /app/
-# Version only affects application metadata, not the package/runtime layers.
-ARG APP_VERSION=0.1.0-dev
-RUN printf '%s\n' "$APP_VERSION" > /app/src/build-version.txt
-RUN chmod +x /app/worker.py \
-    && chown -R root:root /app \
-    && chmod -R go-w /app
-
-# Bootstrap scripts (rendu templates, build GRUB, etc.) — repris du worker actuel
-# ----------------------------------------------------------------------------
-COPY docker/worker/scripts/ /opt/pxe-tools/scripts/
-COPY docker/worker/templates/ /opt/pxe-tools/templates/
-RUN chmod +x /opt/pxe-tools/scripts/*.sh
-
-# s6-overlay services (oneshots bootstrap + 4 longruns + bundle user)
-# ----------------------------------------------------------------------------
-COPY docker/pxe-tools/s6-rc/ /etc/s6-overlay/s6-rc.d/
-RUN find /etc/s6-overlay/s6-rc.d -name 'run' -o -name 'up' -o -name 'down' -o -name 'finish' \
-    | xargs -r chmod +x
-
-# Scripts d'init custom (php-init, bootstrap-tls, render-dnsmasq-conf)
-COPY docker/pxe-tools/init/ /opt/pxe-tools/init/
-RUN chmod +x /opt/pxe-tools/init/*.sh
-
-EXPOSE 8443 8080
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    nginx php8.4-cli php8.4-curl php8.4-fpm php8.4-mysql php8.4-opcache php8.4-sqlite3 mariadb-client \
-    && rm -f /etc/php/8.4/fpm/pool.d/www.conf \
-    && rm -rf /var/lib/apt/lists/*
-COPY docker/pxe-tools/php-fpm/zz-pxe.conf /etc/php/8.4/fpm/pool.d/zz-pxe.conf
-COPY docker/pxe-tools/php-fpm/opcache.ini /etc/php/8.4/fpm/conf.d/99-opcache.ini
-
-# ----------------------------------------------------------------------------
-# Config nginx :
-#   - nginx.conf, pxe.conf : statiques (placés directement dans /etc/nginx/)
-#   - admin.conf.tmpl : templated avec envsubst au boot par s6 oneshot
-#     `render-nginx-conf` pour permettre override des ports via ADMIN_PORT /
-#     ADMIN_HTTP_PORT (env vars). Source : /opt/pxe-tools/nginx/, output :
-#     /etc/nginx/conf.d/admin.conf.
-# ----------------------------------------------------------------------------
-RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
-COPY docker/pxe-tools/nginx/nginx.conf       /etc/nginx/nginx.conf
-COPY docker/pxe-tools/nginx/pxe.conf         /opt/pxe-tools/nginx/pxe.conf.tmpl
-COPY docker/pxe-tools/nginx/pxe-php.conf     /opt/pxe-tools/nginx/pxe-routes.conf
-COPY docker/pxe-tools/nginx/admin-https.conf.tmpl         /opt/pxe-tools/nginx/admin-https.conf.tmpl
-COPY docker/pxe-tools/nginx/admin-http-redirect.conf.tmpl /opt/pxe-tools/nginx/admin-http-redirect.conf.tmpl
-COPY docker/pxe-tools/nginx/admin-http-serve.conf.tmpl    /opt/pxe-tools/nginx/admin-http-serve.conf.tmpl
-
 FROM rust:1.96.0-trixie AS rust-build
 WORKDIR /source
 COPY rust/ rust/
@@ -284,13 +222,6 @@ RUN rustup component add rust-docs
 RUN cargo build --locked --release --manifest-path rust/Cargo.toml \
     && strip rust/target/release/pxe-tools-rust \
     && python3 /source/collect-rust-notices.py /source/rust-notices
-
-FROM php-appliance AS rust-experimental
-COPY --from=rust-build /source/rust/target/release/pxe-tools-rust /usr/lib/pxe-tools/pxe-tools-rust
-COPY rust/packaging/monitor.conf /opt/pxe-tools/nginx/rust-monitor.d/monitor.conf
-COPY --chmod=0755 rust/packaging/s6-run /etc/s6-overlay/s6-rc.d/rust-monitor/run
-RUN printf 'longrun\n' > /etc/s6-overlay/s6-rc.d/rust-monitor/type \
-    && touch /etc/s6-overlay/s6-rc.d/user/contents.d/rust-monitor
 
 # Only the assembled runtime is copied into the distributable image. The
 # reference implementation never enters a layer of the final image.

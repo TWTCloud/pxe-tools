@@ -209,7 +209,7 @@ class PackageFixture:
         self.state.write_text(json.dumps(state))
 
     def reconciler(self, *, run=None, configuring=False):
-        spec = importlib.util.spec_from_file_location('nginx_ownership_under_test', ROOT / 'packaging/native/reconcile-nginx.py')
+        spec = importlib.util.spec_from_file_location('nginx_ownership_under_test', ROOT / 'tests/support/legacy-appliance/reconcile-stock.py')
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
@@ -238,9 +238,9 @@ class PackageFixture:
         systemctl.chmod(0o755)
         python = bin_dir / 'python3'
         python.write_text(entry +
-            'if Path(sys.argv[1]).name == "reconcile-nginx.py":\n'
+            'if Path(sys.argv[1]).name == "reconcile-stock.py":\n'
             ' spec=importlib.util.spec_from_file_location("fixture_reconciler", '
-            + repr(str(ROOT / 'packaging/native/reconcile-nginx.py')) + ')\n'
+            + repr(str(ROOT / 'tests/support/legacy-appliance/reconcile-stock.py')) + ')\n'
             ' module=importlib.util.module_from_spec(spec)\n'
             ' sys.modules[spec.name]=module\n spec.loader.exec_module(module)\n'
             ' result=module.Reconciler(root=root, run=FixtureRunner(root), configuring=True).reconcile()\n'
@@ -589,14 +589,14 @@ class StableNginxLockFixture(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         (self.root / 'run/lock').mkdir(parents=True)
-        spec = importlib.util.spec_from_file_location('nginx_stable_lock_test', ROOT / 'packaging/native/reconcile-nginx.py')
+        spec = importlib.util.spec_from_file_location('nginx_stable_lock_test', ROOT / 'tests/support/legacy-appliance/reconcile-stock.py')
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
         self.lock = self.root / 'run/lock/pxe-tools-nginx-reconcile.lock'
 
     def test_lock_excludes_another_process_and_is_never_unlinked(self):
         program = '''import importlib.util, os, sys\nfrom pathlib import Path\ns=importlib.util.spec_from_file_location("fixture",sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)\nwith m.stable_nginx_lock(Path(sys.argv[2]),owner=os.getuid()):\n    (Path(sys.argv[2]) / "var/lib/pxe-tools-nginx-ownership").mkdir(parents=True)\n'''
-        command = [sys.executable, '-c', program, str(ROOT / 'packaging/native/reconcile-nginx.py'), str(self.root)]
+        command = [sys.executable, '-c', program, str(ROOT / 'tests/support/legacy-appliance/reconcile-stock.py'), str(self.root)]
         journal_dir = self.root / 'var/lib/pxe-tools-nginx-ownership'
         journal_dir.mkdir(parents=True)
         with self.module.stable_nginx_lock(self.root, owner=os.getuid()):

@@ -59,6 +59,12 @@ case "$variant" in
             test ! -e /opt/pxe-tools/init/php-init.sh
             test ! -e /opt/pxe-tools/init/render-legacy-boot-templates.sh
             test ! -e /opt/pxe-tools/init/render-nginx-conf.sh
+            test ! -e /usr/lib/pxe-tools/native/reconcile-stock.py
+            python3 - <<'PYMODULE'
+import runpy
+module = runpy.run_path('/usr/lib/pxe-tools/native/reconcile-nginx.py')
+assert not hasattr(module['Reconciler'], 'reconcile')
+PYMODULE
             systemctl stop pxe-tools-dnsmasq-tail.service pxe-tools-dnsmasq.service
 APT_GUEST
         ;;

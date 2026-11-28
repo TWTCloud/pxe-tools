@@ -9,11 +9,13 @@ jusqu'à la première invite de connexion d'un client BIOS amd64. Secure Boot x8
 ### Construire le candidat ARM64 pour Debian 13
 
 Le paquet natif peut être construit avec `--architecture arm64` depuis les
-mêmes sources. Sur une machine de construction Debian, préparez le paquet
-expérimental avec la commande suivante.
+mêmes sources. Sur une machine de construction Debian arm64 avec Rust, préparez
+le paquet expérimental.
 
 ```sh
-python3 packaging/native/build-local-package.py "$PWD/pxe-tools-arm64.deb" --architecture arm64
+cargo build --locked --release --manifest-path rust/Cargo.toml
+python3 packaging/native/build-local-package.py "$PWD/pxe-tools-arm64.deb" \
+  --architecture arm64 --rust-guided --rust-binary rust/target/release/pxe-tools-rust
 ```
 
 Le script `packaging/native/build-local-apt-repository.py` peut indexer ce
@@ -39,69 +41,23 @@ pour les clients x86-64.
 
 ## Premier démarrage et réseau
 
-Sur une machine sans données PXE Tools existantes, le paquet démarre
-l'administration sur HTTP 8080. Le serveur HTTP PXE et le proxy DHCP ne sont
-pas démarrés avant la confirmation de la configuration réseau dans l'assistant.
-L'administrateur doit choisir l'interface et le sous-réseau adaptés et s'assurer
-que son réseau dispose d'un serveur DHCP compatible.
+Sur une machine neuve, la console écoute en HTTPS sur le port 443 par défaut.
+`sudo pxe-tools setup` affiche le lien et le code de configuration. Confirmez
+l’interface et le sous-réseau dans l’assistant avant de démarrer le service PXE
+et son proxy DHCP. Le serveur HTTP PXE utilise le port TCP 80.
 
-Le serveur HTTP PXE utilise TCP 80. Si le nginx installé par Debian ou un autre
-service occupe ce port, l'assistant signale le conflit. L'action proposée pour
-`nginx.service` vérifie l'identité des processus et nécessite une confirmation
-explicite : elle arrête temporairement ce service sans modifier son démarrage automatique. Les
-sites qui en dépendent deviennent alors indisponibles. Sa configuration reste en
-place. Aucun autre service n'est arrêté automatiquement ; en présence d'un autre
-occupant, résolvez le conflit avant d'activer le réseau PXE.
+### Mise à niveau des anciennes installations
 
-### Nginx générique installé comme dépendance
+Le serveur Rust gère la console et le trafic HTTP PXE. Le paquet retire les
+anciennes unités web propres à PXE Tools à la mise à niveau. Si un autre
+service occupe déjà le port HTTP demandé, résolvez le conflit sur l’hôte
+avant d’activer le démarrage réseau.
 
-Le correctif de [l'issue61](https://github.com/williamboglietti/pxe-tools/issues/61)
-ajoute une réconciliation au `postinst` du paquet candidat. Il ne fait pas partie
-des octets bêta7 déjà publiés. Les dépendances peuvent démarrer leur service avant
-la configuration de PXE Tools ; aucun `policy-rc.d` global n'est installé pour
-modifier les règles de l'hôte.
+Le désinstallateur sait lire les reçus de propriété émis par les anciens
+paquets. Il vérifie notamment le journal
+`/var/lib/pxe-tools-nginx-ownership/state.json` avant de pouvoir le supprimer.
+Ce contrôle observe l’état du service tiers et ses fichiers de configuration.
 
-Le candidat arrête et désactive uniquement `nginx.service` lorsque sa première
-installation automatique avec PXE Tools est prouvée par APT et dpkg, sans autre
-application demandée dans la transaction hors module Ansible facultatif, que tous
-les fichiers actifs et la page d'accueil sont ceux du paquet, et que le master
-sert toujours cette configuration stock. Une configuration personnalisée, un
-historique insuffisant, une unité modifiée ou un état arrêté/désactivé/masqué
-restent conservés. Le binaire nginx, les sites et les contenus ne sont pas retirés.
-La console8080 et le HTTP de boot restent des unités distinctes ; cette
-réconciliation ne démarre aucune unité PXE, DHCP ou TFTP.
-
-Pour une installation déjà affectée dont la provenance n'est plus disponible,
-après examen des usages et consentement explicite, le candidat fournit :
-
-```sh
-sudo python3 /usr/lib/pxe-tools/native/reconcile-nginx.py --confirm-stock-service
-```
-
-Cette commande refuse elle aussi les sites/contenus personnalisés et les
-observations ambiguës. Elle ne relance pas le job réseau. Avant toute activation
-ultérieure du HTTP PXE, le retour arrière du seul changement de service est
-`sudo systemctl enable --now nginx.service`. Après activation du HTTP PXE, sa
-suspension doit être coordonnée pour libérer80 avant ce retour arrière.
-
-Les ressources et états avant/après sont consignés dans
-`/var/lib/pxe-tools-nginx-ownership/state.json`, format1, fichier root0600
-dans un répertoire root0700. Le journal `prepared` précède les modifications ;
-`complete` atteste leur réussite. Une interruption ou un changement ultérieur
-de l'administrateur impose un examen ; le journal ne permet pas à un futur
-désinstallateur de rétablir aveuglément un ancien état.
-
-Les deux services nginx natifs stockent leurs fichiers temporaires dans leurs
-répertoires respectifs sous `/run`. Ce répertoire peut être en mémoire (tmpfs) :
-des transferts simultanés mis en tampon peuvent donc consommer de la mémoire et
-remplir l'espace disponible, avec des erreurs de requête à la clé. Vérifiez la
-taille et l'utilisation de `/run` selon la charge prévue ; la consommation sous
-charge concurrente n'a pas été mesurée.
-
-L'assistant prépare une clé MOK propre à l'instance pour signer GRUB. Pour un
-client Secure Boot, l'administrateur doit enrôler la clé publique de cette
-instance dans le client. Le test documenté utilise une MOK jetable et un client
-Hyper-V ; la procédure d'enrôlement varie selon le matériel.
 
 ## Mise à niveau et conservation des données
 
@@ -157,8 +113,7 @@ ne les écrasez pas pour tenter de forcer le démarrage.
 
 Après une reprise préparée et vérifiée pour votre instance, contrôlez
 individuellement les services utilisés, notamment `pxe-tools-init.service`,
-`pxe-tools-php.service`, `pxe-tools-nginx.service` et
-`pxe-tools-worker.service`, avec `systemctl status` et leurs journaux. L'état
+`pxe-tools-pxe-http.service` et `pxe-tools-worker.service`, avec `systemctl status` et leurs journaux. L'état
 actif de `pxe-tools-admin.target` ne suffit pas à confirmer leur démarrage.
 Vérifiez aussi `pxe-tools-pxe-http.service` et `pxe-tools-dnsmasq.service` si
 le réseau PXE doit être réactivé. Ne réactivez ce réseau qu'après contrôle et

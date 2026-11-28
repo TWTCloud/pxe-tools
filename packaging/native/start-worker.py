@@ -45,9 +45,10 @@ def main():
     if sys.argv[1:] == ['--archive-keyring']:
         print(environment.get('DEBIAN_ARCHIVE_KEYRING', '/usr/share/keyrings/debian-archive-keyring.gpg'))
         return
-    if environment.get('PXE_RUST_GUIDED') == '1':
-        os.execve(RUST_WORKER, [RUST_WORKER, '--work-guided', '/etc/pxe-tools/db.conf', WORKER], environment)
-    os.execve('/usr/bin/python3', ['/usr/bin/python3', WORKER], environment)
+    if len(sys.argv) != 1:
+        raise SystemExit('Invalid worker launcher argument')
+    environment['PXE_RUST_GUIDED'] = '1'
+    os.execve(RUST_WORKER, [RUST_WORKER, '--work-guided', '/etc/pxe-tools/db.conf', WORKER], environment)
 
 
 if __name__ == '__main__':

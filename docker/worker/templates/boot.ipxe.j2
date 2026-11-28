@@ -39,7 +39,7 @@ goto ${selected}
 {% for version in pxe_debian_versions %}
 :debian-{{ version }}
 echo Démarrage de l'installation Debian {{ version }}...
-kernel ${base}/{{ version }}/${arch}/linux {{ pxe_kernel_opts }} auto=true priority=critical url=http://${orch_ip}/preseed.php?mac=${net0/mac} interface=auto netcfg/dhcp_timeout=30 BOOTIF=01-${net0/mac}
+kernel ${base}/{{ version }}/${arch}/linux {{ pxe_kernel_opts }} auto=true priority=critical url=http://${orch_ip}{{ pxe_preseed_route }}?mac=${net0/mac} interface=auto netcfg/dhcp_timeout=30 BOOTIF=01-${net0/mac}
 initrd ${base}/{{ version }}/${arch}/initrd.gz
 initrd --name firmware ${base}/{{ version }}/${arch}/firmware.cpio.gz
 boot || goto menu

@@ -76,7 +76,8 @@ def setup(client, credentials, config, database, *, probe_pending_reset=False):
     assert client.request('/', secure=False)[:2] == (302, client.origin+'/admin/')
     assert client.request('/admin/')[:2] == (302, '/init/welcome')
     assert client.request('/init/db', secure=False)[0] == 404
-    assert client.request('/preseed.php', secure=False)[0] == 404
+    for route in ('/pxe/preseed.cfg', '/pxe/grub.cfg', '/preseed.php', '/grub.php'):
+        assert client.request(route, secure=False)[0] == 404
     assert client.request('/init/db')[:2] == (302, '/init/admin')
     assert client.request('/init/admin')[:2] == (302, '/init/code')
     assert client.request('/init/code')[2].count(b'name="code"') == 1

@@ -680,12 +680,12 @@ class BuilderHooksTests(unittest.TestCase):
 
     def test_base_hook_checks_removal_before_nginx_and_records_around_first_start(self):
         postinst = self.builder('build-local-package.py').POSTINST
-        self.assertLess(postinst.index('check-removal'), postinst.index('reconcile-nginx.py'))
-        self.assertLess(postinst.index('check-base'), postinst.index('reconcile-nginx.py'))
-        self.assertLess(postinst.index('recover-initialization'), postinst.index('reconcile-nginx.py'))
-        self.assertLess(postinst.index('reconcile-nginx.py'), postinst.index('finish-base'))
+        self.assertLess(postinst.index('check-removal'), postinst.index('reconcile-stock.py'))
+        self.assertLess(postinst.index('check-base'), postinst.index('reconcile-stock.py'))
+        self.assertLess(postinst.index('recover-initialization'), postinst.index('reconcile-stock.py'))
+        self.assertLess(postinst.index('reconcile-stock.py'), postinst.index('finish-base'))
         self.assertIn('configure-secure-tftp.py --initialize-instance', postinst)
-        self.assertLess(postinst.index('reconcile-nginx.py'), postinst.index('configure-secure-tftp.py --initialize-instance'))
+        self.assertLess(postinst.index('reconcile-stock.py'), postinst.index('configure-secure-tftp.py --initialize-instance'))
 
     def test_postinst_finishes_recovered_setup_after_service_start(self):
         postinst = self.builder('build-local-package.py').POSTINST
@@ -709,8 +709,8 @@ class BuilderHooksTests(unittest.TestCase):
             lines = trace.read_text().splitlines()
             find = lambda text: next(index for index, line in enumerate(lines) if text in line)
             self.assertLess(find('check-removal'), find('recover-initialization'))
-            self.assertLess(find('recover-initialization'), find('reconcile-nginx.py'))
-            self.assertLess(find('reconcile-nginx.py'), find('systemctl start pxe-tools-admin.target'))
+            self.assertLess(find('recover-initialization'), find('reconcile-stock.py'))
+            self.assertLess(find('reconcile-stock.py'), find('systemctl start pxe-tools-admin.target'))
             self.assertLess(find('systemctl start pxe-tools-admin.target'), find('finish-base'))
             self.assertFalse(any(' check-base' in line for line in lines))
 

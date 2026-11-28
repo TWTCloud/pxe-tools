@@ -1,5 +1,11 @@
 # Portage Rust de PXE Tools
 
+Le comparatif de l’appliance historique et du moniteur via socket se reproduit
+depuis le [commit précédent la suppression des cibles historiques](https://github.com/TWTCloud/pxe-tools/tree/c315c02adbad696e93277216ac8d8bbb2e04b367).
+Les commandes qui ciblent `php-appliance` ou `rust-experimental` et le script
+`test_rust_monitor_distribution.sh` utilisent ce checkout de référence.
+
+
 Le binaire expérimental dans [rust/](../../../rust/) s'exécute avec nginx
 et une base SQLite jetable. Il écoute sur un socket Unix privé. Le nginx
 du banc renseigne l'adresse du pair pour chaque requête. Les deux backends
