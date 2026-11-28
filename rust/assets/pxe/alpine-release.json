@@ -1,0 +1,15 @@
+{
+  "version": "3.24.4",
+  "branch": "v3.24",
+  "fingerprint": "0482D84022F52DF1C4E7CD43293ACD0907D9495A",
+  "images": {
+    "amd64": {
+      "upstream_arch": "x86_64",
+      "sha256": "1502e776d9ce8cebd5e71f50b9b50b2779757409d4ee471011a56ec8c34951a8"
+    },
+    "arm64": {
+      "upstream_arch": "aarch64",
+      "sha256": "9d10f909d41b8393a80a645e9e2af761fcb1f29b986799edeedfa269c359745e"
+    }
+  }
+}

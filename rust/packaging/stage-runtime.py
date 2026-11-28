@@ -34,6 +34,8 @@ def stage(source, app, runtime, *, copy_tree=local_copy_tree, copy_file=shutil.c
     ):
         for filename in filenames:
             copy_file(assets / directory / filename, runtime / directory / filename)
+    for filename in ('alpine-release.json', 'alpine-release.gpg', 'alpine-service.sh'):
+        copy_file(source / 'rust/assets/pxe' / filename, runtime / 'scripts' / filename)
 
     for directory in ('scripts', 'init'):
         for script in (runtime / directory).glob('*.sh'):

@@ -206,28 +206,24 @@ log_line "Tests planifiés : $JOB_COUNT"
 
 # ---- Téléchargement des binaires statiques --------------------------------
 log_line "Téléchargement de smartctl + badblocks depuis $STATIC_BIN_BASE"
-SMARTCTL=$WORK_DIR/smartctl
-BADBLOCKS=$WORK_DIR/badblocks
+SMARTCTL=$(command -v smartctl || true)
+BADBLOCKS=$(command -v badblocks || true)
 
-if wget -q -O "$SMARTCTL" "$STATIC_BIN_BASE/smartctl" && [ -s "$SMARTCTL" ]; then
-    chmod +x "$SMARTCTL"
-    log_line "  smartctl : OK ($(wc -c < "$SMARTCTL") octets)"
-else
-    log_line "  [WARN] smartctl introuvable — les modes smart_* échoueront"
-    SMARTCTL=""
+if [ -z "$SMARTCTL" ]; then
+    if wget -q -O "$WORK_DIR/smartctl" "$STATIC_BIN_BASE/smartctl" && [ -s "$WORK_DIR/smartctl" ]; then
+        SMARTCTL=$WORK_DIR/smartctl
+        chmod +x "$SMARTCTL"
+    else
+        log_line "  [WARN] smartctl introuvable — les modes smart_* échoueront"
+    fi
 fi
 
-if wget -q -O "$BADBLOCKS" "$STATIC_BIN_BASE/badblocks" && [ -s "$BADBLOCKS" ]; then
-    chmod +x "$BADBLOCKS"
-    log_line "  badblocks : OK ($(wc -c < "$BADBLOCKS") octets)"
-else
-    # Fallback : badblocks peut être déjà dans /usr/sbin sur d-i
-    if command -v badblocks >/dev/null 2>&1; then
-        BADBLOCKS=$(command -v badblocks)
-        log_line "  badblocks : utilise binaire système ($BADBLOCKS)"
+if [ -z "$BADBLOCKS" ]; then
+    if wget -q -O "$WORK_DIR/badblocks" "$STATIC_BIN_BASE/badblocks" && [ -s "$WORK_DIR/badblocks" ]; then
+        BADBLOCKS=$WORK_DIR/badblocks
+        chmod +x "$BADBLOCKS"
     else
         log_line "  [WARN] badblocks introuvable — les modes badblocks_* échoueront"
-        BADBLOCKS=""
     fi
 fi
 

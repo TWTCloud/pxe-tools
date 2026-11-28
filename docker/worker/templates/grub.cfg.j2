@@ -2,6 +2,7 @@
 # Menu GRUB UEFI — chargé par shim (signé MS) → grubx64.efi (custom, signé MOK)
 # kernel + initrd via HTTP (le binaire custom embarque http en builtin)
 # 2nd initrd : firmware.cpio.gz pour firmwares non-free (Realtek, Intel, Broadcom...)
+{% import 'alpine-service.j2' as alpine with context %}
 
 # Modules réseau (no-op si déjà builtin, ce qui est notre cas)
 insmod efinet
@@ -20,6 +21,7 @@ echo " "
 
 menuentry 'Identification du matériel' {
     echo "Démarrage de l'inventaire..."
+{{ alpine.grub('discovery') }}
     linux (http,{{ pxe_ip }})/netboot/{{ pxe_default_netboot_path }}/linux {{ pxe_kernel_opts }} auto=true priority=critical url=http://{{ pxe_ip }}/discovery-preseed.cfg interface=${net_default_mac} netcfg/dhcp_timeout=30 BOOTIF=01-${net_default_mac}
     initrd (http,{{ pxe_ip }})/netboot/{{ pxe_default_netboot_path }}/initrd.gz (http,{{ pxe_ip }})/netboot/{{ pxe_default_netboot_path }}/firmware.cpio.gz
 }
@@ -41,6 +43,7 @@ menuentry 'Installation guidée — Debian {{ v.codename }} {{ v.version_full }}
 {% endfor %}
 menuentry 'Mode dépannage' {
     echo 'Démarrage du mode dépannage...'
+{{ alpine.grub('rescue') }}
     linux (http,{{ pxe_ip }})/netboot/{{ pxe_default_netboot_path }}/linux {{ pxe_kernel_opts }} rescue/enable=true
     initrd (http,{{ pxe_ip }})/netboot/{{ pxe_default_netboot_path }}/initrd.gz (http,{{ pxe_ip }})/netboot/{{ pxe_default_netboot_path }}/firmware.cpio.gz
 }

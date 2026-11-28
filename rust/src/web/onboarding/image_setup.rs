@@ -2,7 +2,7 @@
 
 use super::{field, store};
 use crate::{
-    setting,
+    alpine, setting,
     web::{admin::escape, images, jobs::json_reply, setup::redirect, ui, ErrorBox, Reply},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -13,7 +13,6 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, fmt::Write};
 
 const PAGE: &str = "/init/images";
-pub(super) const BASE_DRAFT: &str = "rust_wizard_image";
 pub(super) const EXTRAS_DRAFT: &str = "rust_wizard_additional_images";
 const AVAILABLE: &str = "arch IN ('amd64','arm64') AND
     ((distro='debian' AND (extract_method='direct' OR
@@ -26,7 +25,6 @@ pub(super) struct Image {
     distro: String,
     version: String,
     arch: String,
-    method: String,
     pub status: String,
     percent: i64,
 }
@@ -66,22 +64,10 @@ fn architecture(value: &str) -> &str {
     }
 }
 
-fn base_entry(db: &Connection) -> rusqlite::Result<Option<i64>> {
-    db.query_row(
-        "SELECT id FROM catalog_entries
-         WHERE distro='debian' AND channel='stable' AND arch IN ('amd64','arm64')
-           AND extract_method='direct'
-         ORDER BY arch='amd64' DESC,major DESC,id DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-    )
-    .optional()
-}
-
 fn image(db: &Connection, id: i64) -> rusqlite::Result<Option<Image>> {
     db.query_row(
         &format!(
-            "SELECT id,distro,COALESCE(version_full,version),arch,status,progress_percent,extract_method
+            "SELECT id,distro,COALESCE(version_full,version),arch,status,progress_percent
                   FROM os_images WHERE id=?1 AND enabled=1 AND {AVAILABLE}"
         ),
         [id],
@@ -93,16 +79,19 @@ fn image(db: &Connection, id: i64) -> rusqlite::Result<Option<Image>> {
                 arch: row.get(3)?,
                 status: row.get(4)?,
                 percent: row.get::<_, i64>(5)?.clamp(0, 100),
-                method: row.get(6)?,
             })
         },
     )
     .optional()
 }
 
-pub(super) fn base(db: &Connection) -> rusqlite::Result<Option<Image>> {
-    let id = setting(db, BASE_DRAFT)?.parse().unwrap_or_default();
-    Ok(image(db, id)?.filter(|image| image.distro == "debian" && image.method == "direct"))
+fn service_status(db: &Connection) -> rusqlite::Result<Option<(String, i64)>> {
+    db.query_row(
+        "SELECT status,progress_percent FROM init_jobs WHERE job_type=?1 ORDER BY id DESC LIMIT 1",
+        [alpine::JOB],
+        |row| Ok((row.get(0)?, row.get::<_, i64>(1)?.clamp(0, 100))),
+    )
+    .optional()
 }
 
 fn extras(db: &Connection) -> Result<Vec<Image>, ErrorBox> {
@@ -119,20 +108,19 @@ fn extras(db: &Connection) -> Result<Vec<Image>, ErrorBox> {
 }
 
 pub(super) fn needs_catalog(db: &Connection) -> rusqlite::Result<bool> {
-    Ok(base_entry(db)?.is_none())
+    db.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM catalog_entries)",
+        [],
+        |row| row.get(0),
+    )
 }
 
 pub(super) fn submit(db: &Connection, fields: &HashMap<String, String>) -> Result<Reply, ErrorBox> {
-    let current = base(db)?;
     match field(fields, "action") {
         "refresh" if fields.len() == 1 => images::refresh_catalog(db)?,
         "retry" if fields.len() == 1 => {
-            let additional = extras(db)?;
-            for image in current
-                .iter()
-                .chain(&additional)
-                .filter(|image| image.failed())
-            {
+            alpine::queue(db, true)?;
+            for image in extras(db)?.iter().filter(|image| image.failed()) {
                 db.execute(
                     "UPDATE os_images SET status='pending',progress_percent=0,message=NULL,error_msg=NULL,
                          updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status IN ('failed','error')",
@@ -141,7 +129,7 @@ pub(super) fn submit(db: &Connection, fields: &HashMap<String, String>) -> Resul
             }
         }
         "continue" if fields.len() == 1 => {
-            if current.is_some_and(|image| image.status == "downloaded") {
+            if alpine::all_ready() {
                 return Ok(redirect(StatusCode::SEE_OTHER, "/init/done"));
             }
             return Ok(redirect(StatusCode::SEE_OTHER, PAGE));
@@ -174,24 +162,12 @@ pub(super) fn submit(db: &Connection, fields: &HashMap<String, String>) -> Resul
                 };
                 selected.push(choice);
             }
-            let service_id = if let Some(current) = current {
-                current.id
-            } else {
-                let Some(choice) = base_entry(db)? else {
-                    images::refresh_catalog(db)?;
-                    return Ok(redirect(StatusCode::SEE_OTHER, PAGE));
-                };
-                let Some(id) = images::queue_image(db, choice, true)? else {
-                    return Ok(invalid());
-                };
-                store(db, BASE_DRAFT, &id.to_string())?;
-                id
-            };
+            alpine::queue(db, false)?;
             selected.sort_unstable();
             let mut saved: Vec<_> = extras(db)?.into_iter().map(|image| image.id).collect();
             for choice in selected {
                 if let Some(id) = images::queue_image(db, choice, true)? {
-                    if id != service_id && !saved.contains(&id) {
+                    if !saved.contains(&id) {
                         saved.push(id);
                     }
                 }
@@ -224,9 +200,9 @@ struct Snapshot {
 
 fn snapshot(db: &Connection) -> Result<Snapshot, ErrorBox> {
     let db = db.unchecked_transaction()?;
-    let base = base(&db)?;
     let extras = extras(&db)?;
-    let recommended = base_entry(&db)?;
+    let ready = alpine::all_ready();
+    let service = service_status(&db)?;
     let job = db.query_row(
         "SELECT status FROM init_jobs
          WHERE job_type IN ('bootstrap:refresh_catalog','bootstrap:refresh_catalog_v2','bootstrap:auto_refresh_catalog_v2')
@@ -235,20 +211,31 @@ fn snapshot(db: &Connection) -> Result<Snapshot, ErrorBox> {
         |row| row.get::<_, String>(0),
     ).optional()?;
     let loading = matches!(job.as_deref(), Some("pending" | "running"));
-    let catalog = choices(&db, recommended, &extras, loading, base.is_some())?;
+    let catalog = choices(&db, &extras, loading)?;
     let catalog_version = URL_SAFE_NO_PAD.encode(&Sha256::digest(catalog.as_bytes())[..9]);
-    let ready = base
-        .as_ref()
-        .is_some_and(|image| image.status == "downloaded");
-    let retry = base.iter().chain(&extras).any(Image::failed);
+    let retry = (!ready && service.as_ref().is_some_and(|(state, _)| state == "failed"))
+        || extras.iter().any(Image::failed);
     let mut downloads = String::new();
-    if base.is_some() || !extras.is_empty() {
+    if ready || service.is_some() || !extras.is_empty() {
         downloads.push_str("<h2>Préparation des images</h2><ul class=\"wizard-downloads\">");
-        for image in base.iter().chain(&extras) {
-            downloads.push_str("<li><strong>");
-            if Some(image.id) == base.as_ref().map(|base| base.id) {
-                downloads.push_str("Image de service · ");
+        write!(
+            downloads,
+            "<li><strong>Image de service · Alpine {} · amd64 et ARM64</strong>",
+            alpine::version()
+        )?;
+        match (ready, service.as_ref()) {
+            (true, _) => downloads.push_str("<span>Prête</span>"),
+            (_, Some((state, _))) if state == "failed" => {
+                downloads.push_str("<span>La préparation d’Alpine a échoué.</span>")
             }
+            (_, Some((state, _))) if state == "running" => {
+                downloads.push_str("<span>Téléchargement et vérification en cours…</span>")
+            }
+            _ => downloads.push_str("<span>En attente</span>"),
+        }
+        downloads.push_str("</li>");
+        for image in &extras {
+            downloads.push_str("<li><strong>");
             escape(&mut downloads, &image.label());
             downloads.push_str("</strong>");
             match image.status.as_str() {
@@ -275,39 +262,23 @@ fn snapshot(db: &Connection) -> Result<Snapshot, ErrorBox> {
         catalog,
         catalog_version,
         downloads,
-        active: loading || base.iter().chain(&extras).any(Image::waiting),
+        active: loading
+            || (!ready
+                && service
+                    .as_ref()
+                    .is_some_and(|(state, _)| matches!(state.as_str(), "pending" | "running")))
+            || extras.iter().any(Image::waiting),
         ready,
         retry,
     })
 }
 
-fn choices(
-    db: &Connection,
-    recommended: Option<i64>,
-    extras: &[Image],
-    loading: bool,
-    started: bool,
-) -> Result<String, ErrorBox> {
-    if recommended.is_none() {
-        return Ok(if loading {
-            r#"<p class="wizard-catalog-loading"><span aria-hidden="true"></span>Chargement du catalogue des systèmes…</p>"#.into()
-        } else {
-            r#"<p>Le catalogue est indisponible. Vérifiez la connexion Internet du serveur PXE, puis réessayez.</p><form method="post" action="/init/images"><button name="action" value="refresh">Recharger le catalogue</button></form>"#.into()
-        });
-    }
+fn choices(db: &Connection, extras: &[Image], loading: bool) -> Result<String, ErrorBox> {
     let mut html = String::new();
-    if !started {
-        let (version, arch): (String, String) = db.query_row(
-            "SELECT version_full,arch FROM catalog_entries WHERE id=?1",
-            [recommended],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        html.push_str("<p><strong>Image de service</strong><br>");
-        escape(
-            &mut html,
-            &format!("Debian {version} · {}", architecture(&arch)),
-        );
-        html.push_str("</p>");
+    if loading {
+        html.push_str(r#"<p class="wizard-catalog-loading"><span aria-hidden="true"></span>Chargement du catalogue des systèmes…</p>"#);
+    } else if needs_catalog(db)? {
+        html.push_str(r#"<p>Le catalogue des systèmes à installer est indisponible.</p><form method="post" action="/init/images"><button class="button--quiet" name="action" value="refresh">Recharger le catalogue</button></form>"#);
     }
     html.push_str(
         r#"<form method="post" action="/init/images" class="form-stack">
@@ -319,11 +290,11 @@ fn choices(
              SELECT distro,version_full,arch,channel,ROW_NUMBER() OVER (
                  PARTITION BY distro ORDER BY major DESC,id DESC
              ) AS position
-             FROM catalog_entries WHERE id<>?1 AND {AVAILABLE}
+             FROM catalog_entries WHERE {AVAILABLE}
          ), selected AS (SELECT * FROM ranked ORDER BY position,distro LIMIT 50)
          SELECT distro,version_full,arch,COALESCE(channel,'') FROM selected ORDER BY distro,position"
     ))?;
-    let mut rows = statement.query([recommended])?;
+    let mut rows = statement.query([])?;
     let mut group = String::new();
     while let Some(row) = rows.next()? {
         let (family, version, arch): (String, String, String) =
@@ -362,7 +333,7 @@ fn choices(
         html.push_str("</fieldset>");
     }
     html.push_str("</div>");
-    if started {
+    if alpine::all_ready() {
         html.push_str(r#"<div class="form-actions"><button class="button--quiet" name="action" value="prepare">Ajouter les systèmes cochés</button></div></details>"#);
     } else {
         html.push_str(r#"</details><div class="form-actions"><button name="action" value="prepare">Préparer les images</button></div>"#);
@@ -377,7 +348,7 @@ pub(super) fn page(db: &Connection) -> Result<Reply, ErrorBox> {
     let retry = if state.retry { "" } else { " hidden" };
     let ready = if state.ready { "" } else { " hidden" };
     let html = format!(
-        r#"<p class="wizard-intro">PXE Tools prépare automatiquement Debian stable pour découvrir et dépanner les appareils. Vous pourrez installer les systèmes de votre choix sur ces appareils.</p>
+        r#"<p class="wizard-intro">PXE Tools utilise Alpine pour la découverte, le secours et les opérations disque. Choisissez aussi les systèmes que vous souhaitez installer.</p>
 <section data-image-downloads aria-live="polite" data-active="{running}">{downloads}</section>
 <form data-image-retry method="post" action="/init/images"{retry}><button class="button--quiet" name="action" value="retry">Relancer les téléchargements en échec</button></form>
 <form data-image-ready method="post" action="/init/images"{ready}><button name="action" value="continue">Continuer vers la validation</button></form>

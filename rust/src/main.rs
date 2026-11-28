@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
+mod alpine;
 mod apt_updates;
 mod boot_networks;
 mod catalog;

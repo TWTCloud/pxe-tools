@@ -26,7 +26,7 @@ def publish(source: Path, destination: Path) -> None:
     # file (or read an arbitrary root file) through this privileged helper.
     if (source.parent.parent != Path('/var/tmp')
             or not source.parent.name.startswith('pxe-image.')
-            or source.name not in ('linux', 'initrd.gz', 'firmware.cpio.gz', 'source.iso', '.rpm-verified')):
+            or source.name not in ('linux', 'initrd.gz', 'firmware.cpio.gz', 'source.iso', '.rpm-verified', 'modloop')):
         raise ValueError('invalid image staging path')
     temporary_root = os.open('/var/tmp', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:

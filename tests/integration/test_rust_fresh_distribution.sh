@@ -450,3 +450,14 @@ docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
 CATALOG_GUEST
 bash tests/integration/test_rust_multinetwork.sh "$container" "$variant"
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"
+if [[ "$variant" == apt && "${GITHUB_ACTIONS:-}" == true && "$(uname -m)" == x86_64 && -c /dev/kvm ]]; then
+    docker exec -e DEBIAN_FRONTEND=noninteractive "$container" \
+        apt-get install -y --no-install-recommends qemu-system-x86
+    docker exec -i -e PXE_DISPOSABLE_ALPINE_BOOT=1 "$container" bash -ec '
+        set -a
+        source /usr/lib/pxe-tools/native/default.env
+        source /var/lib/pxe-tools-native/runtime.env
+        set +a
+        exec python3 -
+    ' < tests/integration/test_alpine_service_boot.py
+fi

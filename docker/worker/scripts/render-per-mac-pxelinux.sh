@@ -68,6 +68,33 @@ except ValueError:
 PY
 
 KERNEL_OPTS="${KERNEL_OPTS:-language=fr country=FR locale=fr_FR.UTF-8 keymap=fr ipv6.disable=1}"
+ALPINE_BOOT=
+if [ "${PXE_RUST_GUIDED:-0}" = 1 ]; then
+    ALPINE_BOOT=$(python3 "$SCRIPT_DIR/alpine_service.py" "${HTTP_ROOT:-/srv/http}" amd64)
+fi
+
+service_boot() {
+    mode="$1"
+    fallback="$2"
+    if [ -n "$ALPINE_BOOT" ]; then
+        alpine_path=${ALPINE_BOOT%% *}
+        repository=${ALPINE_BOOT#* }
+        base="http://$ORCH_IP/netboot/$alpine_path"
+        printf '  KERNEL %s/linux\n  APPEND initrd=%s/initrd.gz ip=dhcp modules=loop,squashfs,sd_mod,usb-storage,nvme,virtio_blk,ahci,vmbus,hv_storvsc alpine_repo=%s modloop=%s/modloop apkovl=%s/service.apkovl.tar.gz pxe_server=%s pxe_service=%s' \
+            "$base" "$base" "$repository" "$base" "$base" "$ORCH_IP" "$mode"
+        set -f
+        for option in $KERNEL_OPTS; do
+            case "$option" in console=*) printf ' %s' "$option" ;; esac
+        done
+        printf '\n'
+    else
+        base="http://$ORCH_IP/netboot/$DEFAULT_NETBOOT_PATH"
+        printf '  KERNEL %s/linux\n  APPEND vga=788 initrd=%s/initrd.gz %s %s\n' \
+            "$base" "$base" "$KERNEL_OPTS" "$fallback"
+    fi
+    printf '  IPAPPEND 2\n'
+}
+
 # DEBIAN_DEFAULT_VERSION is a codename (e.g. trixie), not an os_images.distro.
 # Discovery paths use the same Debian distribution key as the static menu.
 DEFAULT_DISTRO="debian"
@@ -184,10 +211,8 @@ DEFAULT rescue
 PROMPT 0
 TIMEOUT 30
 LABEL rescue
-  MENU LABEL Rescue (Debian Installer rescue mode)
-  KERNEL http://$ORCH_IP/netboot/$DEFAULT_NETBOOT_PATH/linux
-  APPEND vga=788 initrd=http://$ORCH_IP/netboot/$DEFAULT_NETBOOT_PATH/initrd.gz $KERNEL_OPTS rescue/enable=true
-  IPAPPEND 2
+  MENU LABEL Mode de recuperation
+$(service_boot rescue 'rescue/enable=true')
 EOF
         count=$((count + 1))
         continue
@@ -211,9 +236,7 @@ PROMPT 0
 TIMEOUT 30
 LABEL wipe
   MENU LABEL Wipe disques (avant installation)
-  KERNEL http://$ORCH_IP/netboot/$DEFAULT_NETBOOT_PATH/linux
-  APPEND vga=788 initrd=http://$ORCH_IP/netboot/$DEFAULT_NETBOOT_PATH/initrd.gz $KERNEL_OPTS auto=true priority=critical url=http://$ORCH_IP/wipe-preseed.cfg?mac=$mac interface=$mac netcfg/dhcp_timeout=30
-  IPAPPEND 2
+$(service_boot wipe "auto=true priority=critical url=http://$ORCH_IP/wipe-preseed.cfg?mac=$mac interface=$mac netcfg/dhcp_timeout=30")
 EOF
             ;;
         testing)
@@ -225,9 +248,7 @@ PROMPT 0
 TIMEOUT 30
 LABEL disktest
   MENU LABEL Tests disque (smartctl + badblocks)
-  KERNEL http://$ORCH_IP/netboot/$DEFAULT_NETBOOT_PATH/linux
-  APPEND vga=788 initrd=http://$ORCH_IP/netboot/$DEFAULT_NETBOOT_PATH/initrd.gz $KERNEL_OPTS auto=true priority=critical url=http://$ORCH_IP/disktest-preseed.cfg?mac=$mac interface=$mac netcfg/dhcp_timeout=30
-  IPAPPEND 2
+$(service_boot disktest "auto=true priority=critical url=http://$ORCH_IP/disktest-preseed.cfg?mac=$mac interface=$mac netcfg/dhcp_timeout=30")
 EOF
             ;;
         configured|installing)
@@ -284,9 +305,7 @@ PROMPT 0
 TIMEOUT 30
 LABEL discovery
   MENU LABEL Hardware Discovery
-  KERNEL http://$ORCH_IP/netboot/$DEFAULT_NETBOOT_PATH/linux
-  APPEND vga=788 initrd=http://$ORCH_IP/netboot/$DEFAULT_NETBOOT_PATH/initrd.gz $KERNEL_OPTS auto=true priority=critical url=http://$ORCH_IP/discovery-preseed.cfg interface=$mac netcfg/dhcp_timeout=30
-  IPAPPEND 2
+$(service_boot discovery "auto=true priority=critical url=http://$ORCH_IP/discovery-preseed.cfg interface=$mac netcfg/dhcp_timeout=30")
 EOF
             ;;
     esac

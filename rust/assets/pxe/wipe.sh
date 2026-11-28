@@ -44,6 +44,7 @@ valid_serial() {
 ensure_smartctl() {
     [ "$SMARTCTL_TRIED" = 1 ] && return 0
     SMARTCTL_TRIED=1
+    if SMARTCTL=$(command -v smartctl); then return 0; fi
     if wget -q --timeout=8 -O /tmp/pxe-wipe-smartctl "$SMARTCTL_URL" 2>/dev/null \
         && chmod +x /tmp/pxe-wipe-smartctl 2>/dev/null && /tmp/pxe-wipe-smartctl --version >/dev/null 2>&1; then
         SMARTCTL=/tmp/pxe-wipe-smartctl

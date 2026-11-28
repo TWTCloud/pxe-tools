@@ -23,6 +23,7 @@ Usage : render_template.py <template_path> <output_path>
 """
 import json
 from atomic_publish import publish
+from alpine_service import media as alpine_media
 import os
 import sqlite3
 import sys
@@ -209,6 +210,13 @@ def main() -> int:
     ipxe_enabled = db_setting("ipxe_enabled", "off") == "on"
 
     rust_guided = os.environ.get("PXE_RUST_GUIDED") == "1"
+    alpine = {}
+    alpine_repository = ""
+    if rust_guided:
+        for arch in ("amd64", "arm64"):
+            path, repository = alpine_media(os.environ.get("HTTP_ROOT", "/srv/http"), arch)
+            if path:
+                alpine[arch], alpine_repository = path, repository
     admin_port = os.environ.get("ADMIN_PORT", "8443")
     console_https = not rust_guided and db_setting("https_enabled", "off") != "off"
     if rust_guided:
@@ -269,6 +277,8 @@ def main() -> int:
         # menuentries "Chainload iPXE" sur ce flag.
         "pxe_ipxe_enabled": ipxe_enabled,
         "pxe_rust_guided": rust_guided,
+        "pxe_alpine": alpine,
+        "pxe_alpine_repository": alpine_repository,
         "pxe_preseed_route": "/pxe/preseed.cfg" if rust_guided else "/preseed.php",
         "pxe_grub_route": "/pxe/grub.cfg" if rust_guided else "/grub.php",
         # Spec D : architecture par défaut pour les paths netboot (/<version>/<arch>/).

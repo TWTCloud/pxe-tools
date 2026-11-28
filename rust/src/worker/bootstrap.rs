@@ -61,6 +61,7 @@ const JOBS: &[(&str, &str, Option<&str>)] = &[
         None,
     ),
     (AUTO_CATALOG, "bootstrap-refresh-catalog-v2.sh", None),
+    (crate::alpine::JOB, "bootstrap-prepare-alpine.sh", None),
 ];
 
 pub(super) fn supports(kind: &str) -> bool {

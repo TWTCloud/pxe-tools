@@ -364,7 +364,7 @@ fn view(db: &Connection, endpoint: &str) -> Result<Reply, ErrorBox> {
         "/init/images" if plan.role != Role::Console => image_setup::page(db),
         "/init/images/status" if plan.role != Role::Console => image_setup::status(db),
         "/init/images" => Ok(redirect(StatusCode::FOUND, "/init/done")),
-        "/init/done" => done_page(db, &plan),
+        "/init/done" => done_page(&plan),
         _ => Ok(plain(
             StatusCode::METHOD_NOT_ALLOWED,
             "Method not allowed\n",
@@ -435,15 +435,10 @@ fn change(
         ));
     }
     if plan.role != Role::Console {
-        let current = image_setup::base(&tx)?;
-        if current
-            .as_ref()
-            .map(|image| (image.id.to_string(), image.status.as_str()))
-            != Some((field(fields, "image").to_owned(), "downloaded"))
-        {
+        if field(fields, "image") != crate::alpine::version() || !crate::alpine::all_ready() {
             return Ok(invalid(
                 endpoint,
-                "Attendez la fin du téléchargement de l’image Debian sélectionnée.",
+                "Attendez la fin de la préparation de l’image Alpine.",
             ));
         }
         enqueue(&tx, "bootstrap:build_grub", "Préparation du chargeur UEFI")?;
@@ -462,7 +457,7 @@ fn change(
         "DELETE FROM settings WHERE key IN (?1, ?2, ?3, 'init_completed')",
         params![
             NETWORK_DRAFT,
-            image_setup::BASE_DRAFT,
+            "rust_wizard_image",
             image_setup::EXTRAS_DRAFT
         ],
     )?;
@@ -632,7 +627,7 @@ pub(super) fn network_form(
     html
 }
 
-fn done_page(db: &Connection, plan: &Network) -> Result<Reply, ErrorBox> {
+fn done_page(plan: &Network) -> Result<Reply, ErrorBox> {
     let mut html = String::from(
         r#"<p class="wizard-intro">Relisez les paramètres avant de les appliquer.</p><dl class="wizard-summary"><dt>Mode</dt><dd>"#,
     );
@@ -665,15 +660,13 @@ fn done_page(db: &Connection, plan: &Network) -> Result<Reply, ErrorBox> {
             escape(&mut html, cidr);
             html.push_str("</dd>");
         }
-        if let Some(base) = image_setup::base(db)? {
-            html.push_str("<dt>Image de service</dt><dd>");
-            escape(&mut html, &base.label());
-            if base.status == "downloaded" {
-                html.push_str(" · Prête");
-                image = base.id.to_string();
-            }
-            html.push_str("</dd>");
+        html.push_str("<dt>Image de service</dt><dd>Alpine ");
+        escape(&mut html, crate::alpine::version());
+        if crate::alpine::all_ready() {
+            html.push_str(" · Prête");
+            image = crate::alpine::version().to_owned();
         }
+        html.push_str("</dd>");
     }
     html.push_str("</dl>");
     if plan.role == Role::Console || !image.is_empty() {
