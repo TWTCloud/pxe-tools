@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     connect,
-    images::{Change, Changed},
+    images::{BlockReason, Change, Changed},
     media::{self, REDHAT_ROUTE},
     setting,
 };
@@ -33,6 +33,11 @@ const DISTRIBUTIONS: [(&str, &str); 6] = [
     ("fedora", "Fedora Server"),
     ("almalinux", "AlmaLinux"),
     ("rocky", "Rocky Linux"),
+];
+const INSTALLATION_MEDIA: [(&str, &str); 3] = [
+    ("windows", "Windows"),
+    ("proxmox", "Proxmox VE"),
+    ("rhel9", "Red Hat"),
 ];
 
 #[derive(Clone, Copy)]
@@ -410,13 +415,28 @@ fn update(route: Route, method: &Method, path: &Path, form: &[u8]) -> Result<Rep
         _ => return Ok(invalid()),
     };
     if let Some((id, operation)) = operation {
-        match crate::images::change(&tx,id,operation)? {
-            Changed::Unavailable => return Ok(plain(StatusCode::NOT_FOUND,"Image introuvable\n")),
-            Changed::Blocked => return Ok(plain(StatusCode::CONFLICT,
-                "Image en cours de transfert, utilisée par une opération, ou requise pour le secours PXE\n")),
+        match crate::images::change(&tx, id, operation)? {
+            Changed::Unavailable => return Ok(plain(StatusCode::NOT_FOUND, "Image introuvable\n")),
+            Changed::Blocked(reason) => {
+                let message = match reason {
+                    BlockReason::Transfer => "Un téléchargement de cette image est en attente ou en cours. Attendez sa fin.",
+                    BlockReason::InUse => "Une opération PXE utilise cette image. Attendez la fin de l’opération.",
+                    BlockReason::Rescue => RESCUE_IMAGE_HINT,
+                    BlockReason::Deleting => "La suppression de cette image est déjà programmée.",
+                };
+                if *method == Method::DELETE {
+                    return Ok(plain(StatusCode::CONFLICT, message));
+                }
+                let content = format!(
+                    r#"<div class="panel"><p>{message}</p><a class="button button--quiet" href="{ROUTE}">Revenir aux images PXE</a></div>"#
+                );
+                let mut reply = page(ConsoleSection::Images, "Action indisponible", &content);
+                *reply.status_mut() = StatusCode::CONFLICT;
+                return Ok(reply);
+            }
             Changed::Queued(job) => {
                 tx.commit()?;
-                return Ok(redirect(StatusCode::SEE_OTHER,format!("/jobs/{job}")));
+                return Ok(redirect(StatusCode::SEE_OTHER, format!("/jobs/{job}")));
             }
             Changed::Updated => {}
         }
@@ -636,9 +656,12 @@ fn distro_icon(code: &str) -> String {
             r#"<img class="distro-icon" src="/console-assets/{code}.svg" width="28" height="28" alt="">"#
         ),
         "rhel9" => r#"<img class="distro-icon" src="/console-assets/red-hat-enterprise-linux.png" width="28" height="28" alt="">"#.into(),
+        "windows" => r#"<span class="distro-icon windows-mark"><img src="/console-assets/windows-11.png" width="1000" height="404" alt=""></span>"#.into(),
         _ => icon("M4 4h16v16H4zM8 8h8m-8 4h8m-8 4h4"),
     }
 }
+
+const RESCUE_IMAGE_HINT: &str = "Dernière image de découverte et de secours pour cette architecture. Conservez une image Debian de démarrage réseau active pour ces opérations.";
 
 fn heading(distro: &str, label: &str) -> String {
     let mut html = format!(r#"<h3 class="image-name">{}<span>"#, distro_icon(distro));
@@ -655,7 +678,7 @@ fn managed_images(db: &Connection, number: u32, can_edit: bool) -> Result<String
         "SELECT distro, COALESCE(NULLIF(version_full,''),version), arch, status, progress_percent,
                 enabled, id, error_msg,
                 EXISTS(SELECT 1 FROM init_jobs WHERE job_type='image:delete:' || os_images.id
-                       AND status IN ('pending','running'))
+                       AND status IN ('pending','running')), extract_method
          FROM os_images ORDER BY distro,major DESC,version_full DESC,arch,id LIMIT ? OFFSET ?",
     )?;
     let mut rows = query.query([PAGE_SIZE + 1, u64::from(number - 1) * PAGE_SIZE])?;
@@ -670,6 +693,12 @@ fn managed_images(db: &Connection, number: u32, can_edit: bool) -> Result<String
         let enabled: bool = row.get(5)?;
         let id: i64 = row.get(6)?;
         let deleting: bool = row.get(8)?;
+        let rescue = distro == "debian"
+            && enabled
+            && status == "downloaded"
+            && !deleting
+            && row.get::<_, String>(9)? == "direct"
+            && crate::images::is_last_rescue(db, id).unwrap_or(false);
         let (state, tone, status_label) = match (status.as_str(), enabled, deleting) {
             (_, _, true) => ("deleting", "running", "Suppression en cours"),
             ("pending", true, _) => ("pending", "pending", "Téléchargement en attente"),
@@ -721,7 +750,7 @@ fn managed_images(db: &Connection, number: u32, can_edit: bool) -> Result<String
                 (1, "Activer")
             };
             let busy = matches!(state, "pending" | "downloading" | "deleting");
-            let disabled = if busy { " disabled" } else { "" };
+            let disabled = if busy || rescue { " disabled" } else { "" };
             let download = if matches!(status.as_str(), "failed" | "error" | "downloaded") {
                 "Relancer le téléchargement"
             } else {
@@ -734,7 +763,12 @@ fn managed_images(db: &Connection, number: u32, can_edit: bool) -> Result<String
 <form method="post" action="{ROUTE}/{id}/download"><button class="button--quiet"{disabled}>{download}</button></form>
 </div>"#
             )?;
-            if !busy {
+            if rescue {
+                write!(
+                    html,
+                    r#"<p class="record-meta image-protection">{RESCUE_IMAGE_HINT}</p>"#
+                )?;
+            } else if !busy {
                 write!(
                     html,
                     r#"<details class="image-delete"><summary>Supprimer…</summary><form method="post" action="{ROUTE}/{id}"><p>Supprimer cette image et ses fichiers locaux&nbsp;?</p><button class="button--danger" name="_method" value="DELETE">Confirmer la suppression</button></form></details>"#
@@ -824,12 +858,6 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
     }
     html.push_str("</header>");
     html.push_str(&refresh_button(db)?);
-    if can_edit {
-        write!(
-            html,
-            r#"<form class="catalog-selection" method="post" action="{ROUTE}/add" data-catalog-selection>"#,
-        )?;
-    }
     write!(
         html,
         r#"<div class="catalog-tabs" data-catalog-tabs hidden>
@@ -837,7 +865,12 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
 <div class="catalog-tab-list" role="tablist" aria-label="Distributions">"#,
         icon("M15 18l-6-6 6-6")
     )?;
-    for (code, title) in DISTRIBUTIONS {
+    let tabs = DISTRIBUTIONS[..2]
+        .iter()
+        .chain(&INSTALLATION_MEDIA)
+        .chain(&DISTRIBUTIONS[2..])
+        .copied();
+    for (code, title) in tabs.clone() {
         write!(
             html,
             r#"<button type="button" class="catalog-tab" role="tab" id="catalog-tab-{code}" aria-controls="catalog-panel-{code}" aria-selected="false" tabindex="-1">{}<span>{title}</span></button>"#,
@@ -874,7 +907,11 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
                   version_full DESC LIMIT ?2",
     ))?;
     let mut available = false;
-    for (code, title) in DISTRIBUTIONS {
+    for (code, title) in tabs {
+        if matches!(code, "windows" | "proxmox" | "rhel9") {
+            catalog_media(&mut html, code, can_edit)?;
+            continue;
+        }
         let mut rows = query.query(rusqlite::params![code, CATALOG_PER_DISTRIBUTION as i64])?;
         let mut row = rows.next()?;
         write!(
@@ -926,36 +963,56 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
         let disabled = if available { "" } else { " disabled" };
         write!(
             html,
-            r#"<div class="catalog-submit form-actions"><button type="submit"{disabled}>Télécharger la sélection</button></div></form>"#,
-        )?;
-        write!(
-            html,
-            r#"<section class="catalog-media" aria-labelledby="catalog-media-title">
-<header class="section-heading"><h2 id="catalog-media-title">Médias d’installation</h2></header>
-<div class="table-region catalog-table"><table class="catalog-media-table" aria-labelledby="catalog-media-title">
-<thead><tr><th scope="col">Système</th><th scope="col">Préparation</th></tr></thead><tbody>
-<tr><th scope="row"><span class="image-name"><a class="catalog-vendor" href="https://www.proxmox.com/" aria-label="Site officiel de Proxmox">{}</a><span>Proxmox VE {}</span></span></th>
-<td><form method="post" action="{ROUTE}/proxmox" class="catalog-media-form">
-<div class="form-actions"><select name="arch" aria-label="Architecture de Proxmox VE" aria-describedby="proxmox-requirements" required>
-<option value="amd64">Intel / AMD</option><option value="arm64">ARM64</option></select>
-<button aria-describedby="proxmox-requirements">Préparer l’ISO</button></div>
-</form></td></tr>
-<tr><th scope="row"><span class="image-name">{}<span>Red Hat Enterprise Linux 9</span></span></th>
-<td><div class="form-actions"><a class="button" href="{REDHAT_ROUTE}" aria-label="Télécharger depuis Red Hat">Télécharger</a>
-<a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer le DVD</a></div></td></tr>
-<tr><th scope="row"><span class="windows-wordmark"><img src="/console-assets/windows-11.png" width="1000" height="404" alt="Windows 11"></span></th>
-<td><div class="form-actions"><a class="button button--quiet" href="{ROUTE}/media?kind=windows-iso" aria-label="Importer les fichiers Windows">Importer</a>
-<a class="button button--quiet" href="/settings/windows">Gérer les éditions</a></div></td></tr>
-</tbody></table></div>
-<p class="record-meta catalog-media-note" id="proxmox-requirements">Proxmox VE requiert 8 Gio libres sur le serveur et au moins 6 Gio de RAM sur le client PXE.</p>
-</section>"#,
-            distro_icon("proxmox"),
-            media::PROXMOX_VERSION,
-            distro_icon("rhel9")
+            r#"<form id="catalog-selection" class="catalog-submit form-actions" method="post" action="{ROUTE}/add" data-catalog-selection>
+<button type="submit"{disabled}>Télécharger la sélection</button></form>"#,
         )?;
     }
     html.push_str("</section>");
     Ok(html)
+}
+
+fn catalog_media(html: &mut String, code: &str, can_edit: bool) -> Result<(), ErrorBox> {
+    let (name, description) = match code {
+        "windows" => ("Windows", "Importez une ISO de Windows 10 ou 11 depuis un fichier local ou un lien Microsoft. Les éditions disponibles sont lues dans le média."),
+        "proxmox" => ("Proxmox VE", "Téléchargez et préparez l’ISO officielle pour une installation automatisée par le réseau."),
+        "rhel9" => ("Red Hat Enterprise Linux 9", "Téléchargez le DVD avec votre compte Red Hat ou importez un média déjà téléchargé."),
+        _ => unreachable!(),
+    };
+    write!(
+        html,
+        r#"<section id="catalog-panel-{code}" class="catalog-panel catalog-media-panel" aria-labelledby="catalog-heading-{code}">
+<div class="panel catalog-media-body"><h3 id="catalog-heading-{code}">{name}"#,
+    )?;
+    if code == "proxmox" {
+        write!(html, " {}", media::PROXMOX_VERSION)?;
+    }
+    write!(html, r#"</h3><p class="record-meta">{description}</p>"#)?;
+    if can_edit {
+        match code {
+            "windows" => write!(
+                html,
+                r#"<div class="form-actions"><a class="button" href="{ROUTE}/media?kind=windows-iso">Importer une ISO Windows</a>
+<a class="button button--quiet" href="/settings/windows">Gérer les éditions</a></div>"#,
+            )?,
+            "proxmox" => write!(
+                html,
+                r#"<p class="record-meta" id="proxmox-requirements">8 Gio libres sur le serveur et au moins 6 Gio de RAM sur le client PXE.</p>
+<form method="post" action="{ROUTE}/proxmox" class="catalog-media-form form-actions">
+<label class="field"><span>Architecture</span><select name="arch" aria-describedby="proxmox-requirements" required>
+<option value="amd64">Intel / AMD</option><option value="arm64">ARM64</option></select></label>
+<button type="submit" aria-describedby="proxmox-requirements">Préparer l’ISO</button>
+<a class="button button--quiet" href="https://www.proxmox.com/">Site officiel</a></form>"#,
+            )?,
+            "rhel9" => write!(
+                html,
+                r#"<div class="form-actions"><a class="button" href="{REDHAT_ROUTE}">Télécharger depuis Red Hat</a>
+<a class="button button--quiet" href="{ROUTE}/media?kind=rhel9">Importer le DVD</a></div>"#,
+            )?,
+            _ => unreachable!(),
+        }
+    }
+    html.push_str("</div></section>");
+    Ok(())
 }
 
 fn catalog_series(
@@ -1018,7 +1075,7 @@ fn catalog_version(
                 *available = true;
                 write!(
                     html,
-                    r#"<label class="catalog-choice"><input type="checkbox" name="image" value="{id}" aria-label=""#
+                    r#"<label class="catalog-choice"><input type="checkbox" form="catalog-selection" name="image" value="{id}" aria-label=""#
                 )?;
                 escape(html, &format!("{title} {version} · {}", architecture(arch)));
                 html.push_str(r#""></label>"#);
