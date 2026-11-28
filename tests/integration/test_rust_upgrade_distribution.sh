@@ -79,6 +79,14 @@ case "$variant" in
             apt-get install -y --no-install-recommends "/mnt/pxe-fixture/$1" "/mnt/pxe-fixture/$2"
             test "$(dpkg-query -W -f='${Version}' pxe-tools)" = "$3"
             systemctl stop pxe-tools-worker.service
+            # Beta 28 can leave the obsolete PHP service failed after a watcher
+            # start. Exercise the package upgrade with that recorded failure.
+            systemctl start pxe-tools-php.service || true
+            for _ in {1..12}; do
+                if systemctl is-failed --quiet pxe-tools-php.service; then break; fi
+                sleep 1
+            done
+            systemctl is-failed --quiet pxe-tools-php.service
 APT_LEGACY
         schema=/usr/lib/pxe-tools/app/db/schema.sqlite.sql
         cert=/var/lib/pxe-tools-native/tls/cert.pem
@@ -160,7 +168,7 @@ if [ "$variant" = apt ]; then
         systemctl start pxe-tools-admin.target
         systemctl is-active --quiet pxe-tools-worker.service
         for unit in pxe-tools-php.service pxe-tools-nginx.service pxe-tools-dnsmasq.service; do
-            if systemctl is-active --quiet "$unit"; then exit 1; fi
+            if systemctl is-active --quiet "$unit" || systemctl is-failed --quiet "$unit"; then exit 1; fi
         done
         ansible --version
 APT_UPGRADE

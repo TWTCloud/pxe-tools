@@ -41,6 +41,16 @@ case "$variant" in
             systemctl is-active --quiet pxe-tools-admin.target
             systemctl is-active --quiet pxe-tools-worker.service
             if systemctl is-active --quiet pxe-tools-dnsmasq.service; then exit 1; fi
+            # With setup still pending, dnsmasq renders an inert configuration.
+            # Starting the event watcher exercises its real systemd dependencies.
+            systemctl start pxe-tools-dnsmasq-tail.service
+            systemctl is-active --quiet pxe-tools-dnsmasq-tail.service
+            systemctl is-active --quiet pxe-tools-dnsmasq.service
+            test -z "$(ss -Hlun '( sport = :67 or sport = :4011 )')"
+            for unit in pxe-tools-php.service pxe-tools-nginx.service; do
+                if systemctl is-active --quiet "$unit" || systemctl is-failed --quiet "$unit"; then exit 1; fi
+            done
+            systemctl stop pxe-tools-dnsmasq-tail.service pxe-tools-dnsmasq.service
 APT_GUEST
         ;;
     docker)
