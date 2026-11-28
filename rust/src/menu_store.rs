@@ -5,6 +5,7 @@ use std::{
     env,
     fs::{self, File, OpenOptions},
     io,
+    net::Ipv4Addr,
     os::{
         fd::AsRawFd,
         unix::fs::{MetadataExt, OpenOptionsExt},
@@ -20,11 +21,44 @@ pub(crate) struct Menus {
 }
 
 impl Menus {
-    pub(crate) fn lock_configured() -> io::Result<Self> {
+    pub(crate) fn lock_configured() -> io::Result<Vec<Self>> {
         let root = env::var_os("TFTP_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/srv/tftp".into());
-        Self::lock(&root)
+        Self::lock_all(&root)
+    }
+
+    pub(crate) fn lock_all(root: &Path) -> io::Result<Vec<Self>> {
+        let mut menus = vec![Self::lock(root)?];
+        let profiles = root.join(crate::boot_networks::DIRECTORY);
+        match fs::symlink_metadata(&profiles) {
+            Ok(info) if info.is_dir() && info.uid() == 0 && info.mode() & 0o022 == 0 => (),
+            Ok(_) => return Err(invalid("Untrusted PXE network directory")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(menus),
+            Err(error) => return Err(error),
+        }
+        let mut roots = Vec::new();
+        for entry in fs::read_dir(profiles)? {
+            let entry = entry?;
+            if entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<Ipv4Addr>().ok())
+                .is_some()
+                && entry
+                    .path()
+                    .join(".pxe-menu.lock")
+                    .symlink_metadata()
+                    .is_ok()
+            {
+                roots.push(entry.path());
+            }
+        }
+        roots.sort_unstable();
+        for profile in roots {
+            menus.push(Self::lock(&profile)?);
+        }
+        Ok(menus)
     }
 
     pub(crate) fn lock(root: &Path) -> io::Result<Self> {

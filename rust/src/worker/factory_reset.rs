@@ -34,13 +34,15 @@ pub(super) fn wipe(http: &Path, tftp: &Path, mok: &Path, scripts: &Path) -> io::
         ));
     }
     let netboot = http.join("netboot");
-    let _menus = Menus::lock(tftp)?;
+    let profiles = http.join(crate::boot_networks::DIRECTORY);
+    let _menus = Menus::lock_all(tftp)?;
     let transfer = directory(tftp, true)?.ok_or_else(|| invalid("Racine TFTP indisponible"))?;
     let bios_menus = directory(&tftp.join("pxelinux.cfg"), true)?
         .ok_or_else(|| invalid("Répertoire des menus PXE indisponible"))?;
     let images = directory(&netboot, true)?;
+    let scripts_by_network = directory(&profiles, true)?;
     let keys = directory(mok, true)?;
-    for root in [tftp, &netboot, mok] {
+    for root in [tftp, &netboot, &profiles, mok] {
         refuse_submounts(root)?;
     }
 
@@ -53,11 +55,8 @@ pub(super) fn wipe(http: &Path, tftp: &Path, mok: &Path, scripts: &Path) -> io::
     }
     clear_directory(&transfer, &[".pxe-menu.lock", "pxelinux.cfg"])?;
     clear_directory(&bios_menus, &[])?;
-    if let Some(images) = images {
-        clear_directory(&images, &[])?;
-    }
-    if let Some(keys) = keys {
-        clear_directory(&keys, &[])?;
+    for directory in [images, scripts_by_network, keys].into_iter().flatten() {
+        clear_directory(&directory, &[])?;
     }
     Ok(())
 }

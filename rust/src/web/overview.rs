@@ -6,7 +6,7 @@ use super::{
     ui::{page, ConsoleSection},
     ErrorBox, Reply,
 };
-use crate::setting;
+use crate::{boot_networks, setting};
 use rusqlite::Connection;
 use std::{fmt::Write, net::Ipv4Addr};
 
@@ -16,6 +16,7 @@ pub(super) fn show(
     db: &Connection,
     account: &Account,
     bound: Option<Ipv4Addr>,
+    bound_networks: Option<&[boot_networks::Network]>,
 ) -> Result<Reply, ErrorBox> {
     let address = setting(db, "pxe_ip")?;
     let interface = setting(db, "pxe_interface")?;
@@ -39,16 +40,35 @@ pub(super) fn show(
     let mut html = String::from(
         r#"<div class="panel-grid"><section class="panel"><h2>Réseau PXE</h2><dl class="wizard-summary">"#,
     );
-    for (key, value) in [
-        ("Mode", role),
-        ("Interface", interface.as_str()),
-        ("Adresse IPv4", address.as_str()),
-        ("Sous-réseau", subnet.as_str()),
-        ("Écoute HTTP", listener),
-    ] {
-        write!(html, "<dt>{key}</dt><dd>")?;
-        escape(&mut html, if value.is_empty() { "—" } else { value });
-        html.push_str("</dd>");
+    write!(html, "<dt>Mode</dt><dd>{role}</dd>")?;
+    if let Some(networks) = boot_networks::configured(db)? {
+        for saved in networks {
+            let bound = bound_networks
+                .unwrap_or_default()
+                .iter()
+                .find(|item| item.interface == saved.interface && item.subnet == saved.subnet);
+            let value = match bound {
+                Some(item) => format!("{} · {} · En écoute", item.subnet, item.address),
+                None if active => format!("{} · Suspendu", saved.subnet),
+                None => format!("{} · Désactivé", saved.subnet),
+            };
+            html.push_str("<dt>");
+            escape(&mut html, &saved.interface);
+            html.push_str("</dt><dd>");
+            escape(&mut html, &value);
+            html.push_str("</dd>");
+        }
+    } else {
+        for (key, value) in [
+            ("Interface", interface.as_str()),
+            ("Adresse IPv4", address.as_str()),
+            ("Sous-réseau", subnet.as_str()),
+            ("Écoute HTTP", listener),
+        ] {
+            write!(html, "<dt>{key}</dt><dd>")?;
+            escape(&mut html, if value.is_empty() { "—" } else { value });
+            html.push_str("</dd>");
+        }
     }
     html.push_str("</dl>");
     if account.admin {

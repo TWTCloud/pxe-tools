@@ -32,8 +32,11 @@ pub fn serve(
     peer: Option<IpAddr>,
     raw_mac: &str,
     boot_arch: &str,
+    link: Option<&crate::boot_networks::Network>,
 ) -> rusqlite::Result<HttpResponse> {
-    let Some((network, mask)) = parse_subnet(&setting(db, "pxe_subnet")?) else {
+    let Some((network, mask)) = parse_subnet(
+        &link.map_or_else(|| setting(db, "pxe_subnet"), |item| Ok(item.subnet.clone()))?,
+    ) else {
         return Ok(reply(
             503,
             "# PXE network configuration missing or invalid\n",
@@ -44,7 +47,13 @@ pub fn serve(
     else {
         return Ok(reply(403, "# accès refusé : hôte hors subnet PXE\n"));
     };
-    let Ok(server) = setting(db, "pxe_ip")?.parse::<Ipv4Addr>() else {
+    let Ok(server) = link
+        .map_or_else(
+            || setting(db, "pxe_ip"),
+            |item| Ok(item.address.to_string()),
+        )?
+        .parse::<Ipv4Addr>()
+    else {
         return Ok(reply(503, "# PXE address unavailable\n"));
     };
     let mac = normalize_mac(raw_mac).or_else(|| arp_mac(peer));

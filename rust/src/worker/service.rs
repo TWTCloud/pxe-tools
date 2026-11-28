@@ -264,7 +264,7 @@ fn fail_job(database: &Path, id: i64, message: &str) -> rusqlite::Result<()> {
 }
 
 fn cleanup_per_mac(database: &Path, id: i64, tftp: &Path) -> Result<(), ErrorBox> {
-    let menus = Menus::lock(tftp)?;
+    let menus = Menus::lock_all(tftp)?;
     let mut db = open(database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if tx.execute(
@@ -280,7 +280,10 @@ fn cleanup_per_mac(database: &Path, id: i64, tftp: &Path) -> Result<(), ErrorBox
         let rows = devices.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
-    let removed = menus.remove_obsolete(macs.iter().map(String::as_str))?;
+    let mut removed = 0;
+    for menu in menus {
+        removed += menu.remove_obsolete(macs.iter().map(String::as_str))?;
+    }
     tx.execute(
         "UPDATE init_jobs SET status='success',message=?2,progress_percent=100,
              ended_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?1",

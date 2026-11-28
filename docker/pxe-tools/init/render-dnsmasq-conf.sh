@@ -76,6 +76,39 @@ case "$PXE_ENABLED" in
     *) fail_config "état du réseau PXE invalide" ;;
 esac
 
+prepare_log() {
+    case "$PXE_DNSMASQ_LOG" in /*) ;; *) fail_config "chemin de journal dnsmasq absolu requis" ;; esac
+    mkdir -p "$(dirname "$PXE_DNSMASQ_LOG")"
+    if [ -L "$PXE_DNSMASQ_LOG" ] || { [ -e "$PXE_DNSMASQ_LOG" ] && [ ! -f "$PXE_DNSMASQ_LOG" ]; }; then
+        fail_config "journal dnsmasq invalide"
+    fi
+    if [ ! -e "$PXE_DNSMASQ_LOG" ]; then
+        touch "$PXE_DNSMASQ_LOG"
+        chmod 644 "$PXE_DNSMASQ_LOG"
+    fi
+}
+
+# Multi-interface mode uses the same ready addresses as the Rust listener.
+if [ "${PXE_RUST_DIRECT_HTTP:-}" = 1 ] && [ -e /etc/pxe-tools/db.conf ]; then
+    networks=$(/usr/lib/pxe-tools/pxe-tools-rust --active-pxe-networks /etc/pxe-tools/db.conf) ||
+        fail_config "impossible de vérifier les réseaux PXE"
+    if [ "$networks" != null ]; then
+        proxy=$(get_setting 'dhcp_proxy_enabled' off) || read_error
+        : "${TFTP_ROOT:=/srv/tftp}"
+        : "${PXE_DNSMASQ_LOG:=/var/log/dnsmasq/dnsmasq.log}"
+        prepare_log
+        if ! printf '%s\n' "$networks" | python3 /opt/pxe-tools/scripts/boot-network-files.py \
+            dnsmasq "$proxy" "$TFTP_ROOT" "$PXE_DNSMASQ_LOG" > "$CONFIG_TMP"; then
+            fail_config "interfaces PXE indisponibles"
+        fi
+        if ! dnsmasq --test -C "$CONFIG_TMP" >/dev/null 2>&1; then
+            fail_config "configuration dnsmasq générée invalide"
+        fi
+        publish_config
+        exit 0
+    fi
+fi
+
 PXE_INTERFACE=$(get_setting 'pxe_interface' "${PXE_INTERFACE:-}") || read_error
 PXE_IP=$(get_setting 'pxe_ip' "${PXE_IP:-${ORCHESTRATOR_IP:-}}") || read_error
 if [ "${PXE_RUST_DIRECT_HTTP:-}" = 1 ] && [ -e /etc/pxe-tools/db.conf ]; then
@@ -190,14 +223,7 @@ esac
 # défini dans pxe.conf.tmpl). Le fichier est touché ici pour que le sidecar
 # dnsmasq-tail puisse `tail -F` immédiatement au démarrage, sans attendre que
 # dnsmasq ait reçu son 1er event.
-mkdir -p "$(dirname "$PXE_DNSMASQ_LOG")"
-if [ -L "$PXE_DNSMASQ_LOG" ] || { [ -e "$PXE_DNSMASQ_LOG" ] && [ ! -f "$PXE_DNSMASQ_LOG" ]; }; then
-    fail_config "journal dnsmasq invalide"
-fi
-if [ ! -e "$PXE_DNSMASQ_LOG" ]; then
-    touch "$PXE_DNSMASQ_LOG"
-    chmod 644 "$PXE_DNSMASQ_LOG"
-fi
+prepare_log
 
 export PXE_INTERFACE TFTP_ROOT DHCP_MODE PROXY_DHCP_BLOCK PXE_DNSMASQ_LOG
 envsubst '${PXE_INTERFACE} ${TFTP_ROOT} ${DHCP_MODE} ${PROXY_DHCP_BLOCK} ${PXE_DNSMASQ_LOG}' \

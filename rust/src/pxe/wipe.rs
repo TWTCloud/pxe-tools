@@ -28,7 +28,7 @@ pub(crate) fn serve(
     query: &str,
     request: &mut PxeRequest<'_>,
 ) -> rusqlite::Result<HttpResponse> {
-    let subnet = setting(db, "pxe_subnet")?;
+    let subnet = request.subnet(db)?;
     let allowed = match ip {
         Some(IpAddr::V4(peer)) if client_in_subnet(peer, &subnet) => Some(peer),
         _ => None,
@@ -38,7 +38,7 @@ pub(crate) fn serve(
             return Ok(response(404, TEXT, ""));
         };
         let raw = parse_query(query.as_bytes());
-        return script(db, ip, param(&raw, "mac"));
+        return script(db, ip, param(&raw, "mac"), request.network);
     }
     let token = bearer(request).to_owned();
     let is_form = request_header(request, "Content-Type").is_some_and(|raw| {
@@ -178,7 +178,12 @@ impl Job {
     }
 }
 
-fn script(db: &mut Connection, ip: Ipv4Addr, raw_mac: &str) -> rusqlite::Result<HttpResponse> {
+fn script(
+    db: &mut Connection,
+    ip: Ipv4Addr,
+    raw_mac: &str,
+    network: Option<&crate::boot_networks::Network>,
+) -> rusqlite::Result<HttpResponse> {
     let Some(mac) = normalize_mac(raw_mac) else {
         return Ok(response(400, TEXT, "# ERREUR : mac required (?mac=...)\n"));
     };
@@ -206,7 +211,13 @@ fn script(db: &mut Connection, ip: Ipv4Addr, raw_mac: &str) -> rusqlite::Result<
     let Some((action, kind, action_token)) = job.action(&tx)? else {
         return Ok(response(404, TEXT, ""));
     };
-    let Ok(server) = setting(&tx, "pxe_ip")?.parse::<Ipv4Addr>() else {
+    let Ok(server) = network
+        .map_or_else(
+            || setting(&tx, "pxe_ip"),
+            |item| Ok(item.address.to_string()),
+        )?
+        .parse::<Ipv4Addr>()
+    else {
         return Ok(response(503, TEXT, "# PXE address unavailable\n"));
     };
     let Some(disks) = job.disk_lines() else {

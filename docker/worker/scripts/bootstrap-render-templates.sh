@@ -12,6 +12,16 @@
 #   /srv/http/disktest-preseed.cfg       (boot Debian disktest)
 set -euo pipefail
 
+# Legacy one-interface settings do not need a separate tree.
+if [[ "${PXE_RUST_GUIDED:-0}" == 1 && -z "${PXE_PROFILE_ADDRESS:-}" && -f /etc/pxe-tools/db.conf ]]; then
+    if python3 "$(dirname "${BASH_SOURCE[0]}")/boot-network-files.py" menus; then
+        exit 0
+    else
+        status=$?
+        if [[ "$status" != 2 ]]; then exit "$status"; fi
+    fi
+fi
+
 : "${TFTP_ROOT:=/srv/tftp}"
 : "${HTTP_ROOT:=/srv/http}"
 : "${PXE_TOOLS_DATA_DIR:=/var/lib/pxe-tools}"
@@ -53,8 +63,10 @@ if [ -f "$legacy_renderer" ]; then
 fi
 
 # Squelette et données partagées avec le serveur PXE.
-render preseed-base.cfg.j2     "$PXE_TOOLS_DATA_DIR/preseed-base.cfg"
-render data.json.j2            "$PXE_TOOLS_DATA_DIR/data.json"
+if [ -z "${PXE_PROFILE_ADDRESS:-}" ]; then
+    render preseed-base.cfg.j2 "$PXE_TOOLS_DATA_DIR/preseed-base.cfg"
+    render data.json.j2 "$PXE_TOOLS_DATA_DIR/data.json"
+fi
 
 # Preseed boots déclenchés par les menus GRUB (wipe, disktest, discovery)
 render discovery-preseed.cfg.j2 "$HTTP_ROOT/discovery-preseed.cfg"

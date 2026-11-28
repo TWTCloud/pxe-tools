@@ -14,6 +14,7 @@ use serde_json::Value;
 use std::{
     fs,
     net::{IpAddr, Ipv4Addr},
+    path::Path,
     time::Duration,
 };
 use tokio::time::timeout;
@@ -24,6 +25,21 @@ pub(super) const PREFIX: &str = "/pxe/proxmox/";
 struct MediaBinding {
     authority: String,
     pin: String,
+}
+
+pub(super) fn media_matches(
+    root: &Path,
+    version: &str,
+    arch: &str,
+    authority: &str,
+    pin: &str,
+) -> bool {
+    let marker = root.join(format!("netboot/proxmox/{version}/{arch}/.managed-answer"));
+    fs::symlink_metadata(&marker).is_ok_and(|meta| meta.is_file() && meta.len() < 512)
+        && fs::read(&marker)
+            .ok()
+            .and_then(|data| serde_json::from_slice::<MediaBinding>(&data).ok())
+            .is_some_and(|binding| binding.authority == authority && binding.pin == pin)
 }
 
 fn missing() -> Reply {
@@ -42,7 +58,7 @@ pub(super) async fn serve(
     let IpAddr::V4(peer) = peer else {
         return missing();
     };
-    if !secure || site.pxe_ip != Some(server) {
+    if !secure || !site.is_pxe_address(server) {
         return missing();
     }
     let route = path.trim_start_matches(PREFIX);
@@ -107,9 +123,7 @@ fn handle(
         &database,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    if setting(&db, "pxe_enabled")? != "on"
-        || !pxe::client_in_subnet(peer, &setting(&db, "pxe_subnet")?)
-    {
+    if setting(&db, "pxe_enabled")? != "on" || !site.pxe_peer(&db, server, IpAddr::V4(peer))? {
         return Ok(missing());
     }
     if let (Some(action), Some(payload)) = (route.strip_prefix("complete/"), payload) {
@@ -206,15 +220,7 @@ fn handle(
     }
     let authority = format!("{server}:{}", site.console_port.active());
     let pin = site.tls.pin();
-    let marker = site
-        .assets
-        .http_root()
-        .join(format!("netboot/proxmox/{version}/{arch}/.managed-answer"));
-    if !fs::symlink_metadata(&marker).is_ok_and(|meta| meta.is_file() && meta.len() < 512) {
-        return Ok(missing());
-    }
-    let binding: MediaBinding = serde_json::from_slice(&fs::read(marker)?)?;
-    if binding.authority != authority || binding.pin != pin {
+    if !media_matches(site.assets.http_root(), version, &arch, &authority, &pin) {
         return Ok(missing());
     }
     if route == "answer" {

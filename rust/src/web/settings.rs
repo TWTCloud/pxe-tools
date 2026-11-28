@@ -65,6 +65,7 @@ impl Route {
         match self {
             Self::Ansible => 16384,
             Self::VaultUnlock => 4096,
+            Self::Network => 8192,
             _ => 2048,
         }
     }
@@ -136,7 +137,11 @@ impl Route {
                             | "pxe_ip"
                             | "pxe_subnet"
                             | "dhcp_proxy_cidr"
-                    ) || fields
+                    ) && !onboarding::network_address_field(&key)
+                    {
+                        return Ok(invalid());
+                    }
+                    if fields
                         .insert(key.into_owned(), value.into_owned())
                         .is_some()
                     {
@@ -146,7 +151,7 @@ impl Route {
                 let Some(plan) = onboarding::Network::parse(&fields) else {
                     return Ok(plain(
                         StatusCode::UNPROCESSABLE_ENTITY,
-                        "Sélectionnez une IPv4 attribuée et des sous-réseaux cohérents.\n",
+                        "Sélectionnez une IPv4 attribuée par interface, sur des sous-réseaux distincts. Le sous-réseau DHCP personnalisé est réservé à une seule interface.\n",
                     ));
                 };
                 plan.save(&tx)?;

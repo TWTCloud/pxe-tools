@@ -53,6 +53,7 @@ if [ -f "$DB_PATH" ]; then
     fi
     case "$db_ip" in present:*) ORCH_IP="${db_ip#present:}" ;; esac
 fi
+ORCH_IP="${PXE_PROFILE_ADDRESS:-$ORCH_IP}"
 if [ -z "$ORCH_IP" ]; then
     echo "[render-per-mac] ORCHESTRATOR_IP absent (DB + env) → skip"
     exit 0

@@ -5,6 +5,16 @@
 # REBUILD=1 force la régénération.
 set -euo pipefail
 
+# Legacy one-interface settings do not need a separate tree.
+if [[ "${PXE_RUST_GUIDED:-0}" == 1 && -z "${PXE_PROFILE_ADDRESS:-}" && -f /etc/pxe-tools/db.conf ]]; then
+    if python3 "$(dirname "${BASH_SOURCE[0]}")/boot-network-files.py" grub; then
+        exit 0
+    else
+        status=$?
+        if [[ "$status" != 2 ]]; then exit "$status"; fi
+    fi
+fi
+
 : "${TFTP_ROOT:=/srv/tftp}"
 : "${MOK_DIR:=/etc/pxe-tools/mok}"
 : "${BOOTSTRAP_TEMPLATES_DIR:=/opt/pxe-tools/templates}"
@@ -33,6 +43,7 @@ if [ -f "$DB" ]; then
 fi
 # Back-compat env vars : si PXE_IP non posée mais ORCHESTRATOR_IP l'est, hériter.
 if [ "$db_ip_present" = 0 ]; then PXE_IP="${PXE_IP:-${ORCHESTRATOR_IP:-}}"; fi
+PXE_IP="${PXE_PROFILE_ADDRESS:-${PXE_IP:-}}"
 # Pas d'IP serveur PXE (bootstrap initial AVANT l'étape réseau du wizard, ou
 # après un factory reset qui vide settings) → on SKIP proprement. Le GRUB EFI
 # embarque l'IP, donc inutile/impossible de le builder maintenant ; le wizard
