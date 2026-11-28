@@ -32,7 +32,7 @@ MEMBERS = {
     'boot/modloop-lts': ('modloop', 448 * 1024**2),
 }
 PACKAGES = (
-    'smartmontools e2fsprogs-extra util-linux pciutils dmidecode parted '
+    'smartmontools e2fsprogs-extra util-linux-misc blkid pciutils dmidecode parted '
     'mdadm lvm2 cryptsetup dosfstools xfsprogs curl'
 )
 

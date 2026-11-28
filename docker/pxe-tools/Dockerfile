@@ -232,6 +232,7 @@ COPY docker/worker/ docker/worker/
 COPY docker/pxe-tools/init/ docker/pxe-tools/init/
 COPY docker/pxe-tools/s6-rc/ docker/pxe-tools/s6-rc/
 COPY rust/packaging/ rust/packaging/
+COPY rust/assets/pxe/alpine-* rust/assets/pxe/
 RUN python3 rust/packaging/stage-runtime.py /source /runtime \
     && chmod -R go-w /runtime
 
