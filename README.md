@@ -74,20 +74,17 @@ importer ou émettre un certificat qui le couvre depuis **Certificats TLS**.
 
 ## Installation avec Docker
 
-L’image bêta 29 est disponible pour Linux amd64 et arm64. Téléchargez
-l’archive adaptée à votre serveur depuis la [release bêta 29](https://github.com/TWTCloud/pxe-tools/releases/tag/v0.1.0-beta29).
-Les empreintes figurent dans `docker-SHA256SUMS`.
-
-Exemple sur un hôte Linux amd64, depuis la racine du dépôt.
+L’image bêta 29 est publique sur GHCR pour Linux amd64 et arm64. Le registre
+sélectionne l’image adaptée au serveur. Depuis la racine du dépôt sur un hôte
+Docker Linux, téléchargez l’image et démarrez l’appliance.
 
 ```sh
-docker load --input pxe-tools-docker-v0.1.0-beta29-amd64.tar.gz
-export PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta29-amd64
+docker pull ghcr.io/twtcloud/pxe-tools:v0.1.0-beta29
+export PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta29
 docker compose -f compose/docker-compose.yml up -d
 ```
 
-Sur ARM64, utilisez l’archive et le tag terminés par `arm64`. Le fichier
-Compose utilise le réseau de l’hôte pour le PXE. Ouvrez
+Le fichier Compose utilise le réseau de l’hôte pour le PXE. Ouvrez
 `https://<IPv4-du-serveur>/admin/` et lisez le code de l’assistant dans
 le conteneur.
 
@@ -95,8 +92,8 @@ le conteneur.
 docker compose -f compose/docker-compose.yml exec pxe-tools cat /run/pxe-tools-rust-guided/setup-code
 ```
 
-Les comptes qui ont accès à GHCR peuvent aussi télécharger l’index
-multiarchitecture `ghcr.io/twtcloud/pxe-tools:v0.1.0-beta29`.
+Les archives à importer avec `docker load`, leurs empreintes et les offres de
+sources accompagnent la [release bêta 29](https://github.com/TWTCloud/pxe-tools/releases/tag/v0.1.0-beta29).
 
 Le paquet APT et l’image Docker utilisent le serveur HTTP et HTTPS intégré au
 binaire Rust. Les nouvelles configurations PXE utilisent
