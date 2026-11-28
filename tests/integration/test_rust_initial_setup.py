@@ -420,7 +420,9 @@ def verify_device_removal(client, database, authorization, tftp):
     second.mkdir()
     fields = [('machine_ids[]', idle), ('machine_ids[]', active), ('machine_ids[]', idle),
               ('machine_ids[]', device), ('confirm', 'SUPPRIMER')]
-    assert b'bulk-active' in client.request(bulk, authorization=authorization)[2]
+    bulk_page = client.request(bulk, authorization=authorization)[2]
+    assert b'bulk-active' in bulk_page
+    assert b'<nav><a href="/admin/inventaire">Inventaire</a></nav>' in bulk_page
     assert client.request(bulk, form=fields)[0] == 401
     assert client.request(bulk, form=fields, authorization=authorization, origin='https://outside.example')[0] == 403
     assert client.request(bulk, form=fields[:-1], authorization=authorization)[0] == 422
@@ -433,6 +435,7 @@ def verify_device_removal(client, database, authorization, tftp):
     status, _, report = client.request(bulk, form=fields, authorization=authorization)
     assert status == 200
     assert '2 appareil(s) supprimé(s), dont 1 en cours d’opération. 1 appareil(s) déjà absent(s).'.encode() in report
+    assert '<a href="/admin/inventaire">Revenir à l’inventaire</a>'.encode() in report
     assert not first.exists() and not second.exists() and not list(menus.glob('*.pending-delete-*'))
     with closing(sqlite3.connect(database)) as db:
         assert db.execute('SELECT hostname FROM machines').fetchall() == [('reset-fixture',)]
@@ -785,7 +788,9 @@ def verify_preset_editor(client, database, authorization):
         db.execute("INSERT INTO settings(key,value) VALUES('ansible_repo_url','https://example.test/fixture.git') "
                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
     endpoint = f'/presets/{preset}'
-    assert endpoint.encode() in request('/presets')[2]
+    presets_page = request('/presets')[2]
+    assert endpoint.encode() in presets_page
+    assert b'<a href="/admin/inventaire">Inventaire</a>' in presets_page
     assert client.request(endpoint+'.json')[0] == 401
     initial = request(endpoint+'.json')
     assert initial[0] == 200 and json.loads(initial[2])['admin_user_pwhash'] == password
@@ -1613,7 +1618,9 @@ def verify_bulk_deployment(client, database, authorization):
             ).lastrowid)
             inventories.append(inventory)
     assert client.request('/admin/inventaire/bulk')[0] == 401
-    assert b'Data &lt;bulk&gt;' in client.request('/admin/inventaire/bulk', authorization=authorization)[2]
+    bulk_page = client.request('/admin/inventaire/bulk', authorization=authorization)[2]
+    assert b'Data &lt;bulk&gt;' in bulk_page
+    assert b'<nav><a href="/admin/inventaire">Inventaire</a></nav>' in bulk_page
     selection = [('preset_id',preset), *[('machine_ids[]',device) for device in devices]]
     assert post('preflight', selection, secure=False)[0] == 404
     assert post('preflight', selection, origin='https://outside.example')[0] == 403
