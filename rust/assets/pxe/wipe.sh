@@ -52,8 +52,11 @@ ensure_smartctl() {
 }
 read_disk_serial() {
     d="$1"; b="${d##*/}"
-    s=$(norm_serial "$(cat "$d/device/serial" 2>/dev/null)")
-    valid_serial "$s" || s=""
+    for path in "$d/device/serial" "$d/serial" "$d/device/device/serial"; do
+        s=$(norm_serial "$(cat "$path" 2>/dev/null)")
+        valid_serial "$s" && break
+        s=""
+    done
     if [ -z "$s" ]; then
         c=$(printf '%s' "$b" | sed -n 's/^\(nvme[0-9][0-9]*\)n[0-9][0-9]*$/\1/p')
         [ -n "$c" ] && s=$(norm_serial "$(cat "/sys/class/nvme/$c/serial" 2>/dev/null)")

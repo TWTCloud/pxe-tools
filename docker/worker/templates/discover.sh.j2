@@ -90,8 +90,8 @@ BOARD_NAME=$(read_dmi board_name)
 # on le télécharge depuis /static-bin/ (pattern identique à smartctl/badblocks
 # pour disktest.sh). Si le binaire n'est pas servi (404) ou échoue à exécuter,
 # DMIDECODE reste vide et on tombe sur les fallbacks sysfs.
-DMIDECODE=""
-if wget -q -O /tmp/dmidecode "$STATIC_BIN_BASE/dmidecode" 2>/dev/null; then
+DMIDECODE=$(command -v dmidecode || true)
+if [ -z "$DMIDECODE" ] && wget -q -O /tmp/dmidecode "$STATIC_BIN_BASE/dmidecode" 2>/dev/null; then
     chmod +x /tmp/dmidecode 2>/dev/null
     if /tmp/dmidecode --version >/dev/null 2>&1; then
         DMIDECODE=/tmp/dmidecode

@@ -256,8 +256,11 @@ valid_serial() {
 # Même ordre de sources que le discovery : sysfs, contrôleur NVMe, puis smartctl -i.
 read_disk_serial() {
     rds_dir="$1"; rds_base="${rds_dir##*/}"
-    rds_s=$(norm_serial "$(cat "$rds_dir/device/serial" 2>/dev/null)")
-    valid_serial "$rds_s" || rds_s=""
+    for rds_path in "$rds_dir/device/serial" "$rds_dir/serial" "$rds_dir/device/device/serial"; do
+        rds_s=$(norm_serial "$(cat "$rds_path" 2>/dev/null)")
+        valid_serial "$rds_s" && break
+        rds_s=""
+    done
     if [ -z "$rds_s" ]; then
         rds_ctrl=$(printf '%s' "$rds_base" | sed -n 's/^\(nvme[0-9][0-9]*\)n[0-9][0-9]*$/\1/p')
         [ -n "$rds_ctrl" ] && rds_s=$(norm_serial "$(cat "$SYS_NVME/$rds_ctrl/serial" 2>/dev/null)")
