@@ -3852,6 +3852,7 @@ UNIT_HASHES = {'pxe-tools-dnsmasq-tail.service': '86d1b7e600e0b9fc997aff6a9fba96
 # These are the exact unit files produced by the native Rust package build.
 # The first Rust release used the previous HTTP listener unit.
 RUST_UNIT_HASHES = {
+    'pxe-tools-dnsmasq-tail.service': ('83c575f249e898b7e485b120370974fa1b81f999207a90aa358bf21fbccedf78',),
     'pxe-tools.target': ('59eec753bb90211a4ca8aa52c122e0af7cee471a872944152ba4fb8cccbc6b2c',),
     'pxe-tools-admin.target': ('075cc60949ab9efa926dae5dba3f6d8d0826e1467e7c29c589d0180b17260546',),
     'pxe-tools-worker.service': ('4dca4a7df55c52abe758408c355c79521150887f29917061b06735e5b8bb55b4',),

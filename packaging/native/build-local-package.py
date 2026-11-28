@@ -94,6 +94,17 @@ if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
     # The incoming code is now installed. The preinst snapshot precedes all
     # init/schema work; failed configure retains its journal for a safe retry.
     python3 /usr/lib/pxe-tools/native/upgrade-lifecycle.py configure
+    if grep -qx 'PXE_RUST_DIRECT_HTTP=1' /usr/lib/pxe-tools/native/default.env; then
+        # Old watchers could start these compatibility units on Rust installs.
+        # Clear only records for the packaged units, leaving local overrides alone.
+        for unit in pxe-tools-php.service pxe-tools-nginx.service; do
+            if systemctl is-failed --quiet "$unit" &&
+               [ "$(systemctl show --property=FragmentPath --value "$unit")" = "/usr/lib/systemd/system/$unit" ] &&
+               [ -z "$(systemctl show --property=DropInPaths --value "$unit")" ]; then
+                systemctl reset-failed "$unit" || true
+            fi
+        done
+    fi
     # Existing instance data may contain queued jobs or an enabled DHCP setup.
     # Leave its startup under the administrator's control.
     if [ "$recovered" = recovered ]; then
@@ -151,6 +162,7 @@ def native_php_routes(config: str) -> str:
 def configure_guided_units(units: Path) -> None:
     for name, php, guided in (
         ('pxe-tools-worker.service', 'pxe-tools-nginx.service', 'pxe-tools-init.service'),
+        ('pxe-tools-dnsmasq-tail.service', 'pxe-tools-nginx.service', 'pxe-tools-pxe-http.service'),
         ('pxe-tools.target', 'pxe-tools-php.service pxe-tools-nginx.service ', ''),
         ('pxe-tools-admin.target', 'pxe-tools-nginx.service pxe-tools-worker.service',
          'pxe-tools-pxe-http.service pxe-tools-worker.service'),
