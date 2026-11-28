@@ -16,7 +16,9 @@ const PAGE: &str = "/init/images";
 pub(super) const BASE_DRAFT: &str = "rust_wizard_image";
 pub(super) const EXTRAS_DRAFT: &str = "rust_wizard_additional_images";
 const AVAILABLE: &str = "arch IN ('amd64','arm64') AND
-    ((distro='debian' AND extract_method='direct') OR (distro='ubuntu' AND extract_method='iso_extract')
+    ((distro='debian' AND (extract_method='direct' OR
+         (extract_method='iso_extract' AND channel='testing' AND NULLIF(iso_url,'') IS NOT NULL)))
+      OR (distro='ubuntu' AND extract_method='iso_extract')
       OR (distro IN ('fedora','centos','almalinux','rocky') AND extract_method='direct'))";
 
 pub(super) struct Image {
@@ -24,6 +26,7 @@ pub(super) struct Image {
     distro: String,
     version: String,
     arch: String,
+    method: String,
     pub status: String,
     percent: i64,
 }
@@ -78,7 +81,7 @@ fn base_entry(db: &Connection) -> rusqlite::Result<Option<i64>> {
 fn image(db: &Connection, id: i64) -> rusqlite::Result<Option<Image>> {
     db.query_row(
         &format!(
-            "SELECT id,distro,COALESCE(version_full,version),arch,status,progress_percent
+            "SELECT id,distro,COALESCE(version_full,version),arch,status,progress_percent,extract_method
                   FROM os_images WHERE id=?1 AND enabled=1 AND {AVAILABLE}"
         ),
         [id],
@@ -90,6 +93,7 @@ fn image(db: &Connection, id: i64) -> rusqlite::Result<Option<Image>> {
                 arch: row.get(3)?,
                 status: row.get(4)?,
                 percent: row.get::<_, i64>(5)?.clamp(0, 100),
+                method: row.get(6)?,
             })
         },
     )
@@ -98,7 +102,7 @@ fn image(db: &Connection, id: i64) -> rusqlite::Result<Option<Image>> {
 
 pub(super) fn base(db: &Connection) -> rusqlite::Result<Option<Image>> {
     let id = setting(db, BASE_DRAFT)?.parse().unwrap_or_default();
-    Ok(image(db, id)?.filter(|image| image.distro == "debian"))
+    Ok(image(db, id)?.filter(|image| image.distro == "debian" && image.method == "direct"))
 }
 
 fn extras(db: &Connection) -> Result<Vec<Image>, ErrorBox> {
@@ -311,8 +315,13 @@ fn choices(
 <div class="form-stack network-details"><p class="muted">Cochez les versions à préparer dès maintenant. Vous pourrez ajouter d’autres médias, dont Windows, dans Images PXE après l’assistant.</p>"#,
     );
     let mut statement = db.prepare(&format!(
-        "SELECT distro,version_full,arch FROM catalog_entries WHERE id<>?1 AND {AVAILABLE}
-         ORDER BY distro, major DESC, discovered_at DESC, id LIMIT 50"
+        "WITH ranked AS (
+             SELECT distro,version_full,arch,channel,ROW_NUMBER() OVER (
+                 PARTITION BY distro ORDER BY major DESC,id DESC
+             ) AS position
+             FROM catalog_entries WHERE id<>?1 AND {AVAILABLE}
+         ), selected AS (SELECT * FROM ranked ORDER BY position,distro LIMIT 50)
+         SELECT distro,version_full,arch,COALESCE(channel,'') FROM selected ORDER BY distro,position"
     ))?;
     let mut rows = statement.query([recommended])?;
     let mut group = String::new();
@@ -341,6 +350,12 @@ fn choices(
             r#""><span>"#
         });
         escape(&mut html, &format!("{version} · {}", architecture(&arch)));
+        let channel: String = row.get(3)?;
+        if let Some((tone, label)) = images::catalog_channel(&channel) {
+            html.push_str(r#"<span class="wizard-image-channel">"#);
+            ui::status_badge(&mut html, tone, label);
+            html.push_str("</span>");
+        }
         html.push_str("</span></label>");
     }
     if !group.is_empty() {

@@ -18,6 +18,7 @@ type ErrorBox = Box<dyn Error + Send + Sync>;
 
 pub(crate) const DEBIAN_MIRROR: &str = "https://deb.debian.org/debian";
 const DEBIAN_ARCHIVE: &str = "https://cdimage.debian.org/cdimage/archive/";
+const DEBIAN_TESTING: &str = "https://cdimage.debian.org/cdimage/weekly-builds/";
 const UBUNTU_MIRROR: &str = "https://releases.ubuntu.com/";
 const UBUNTU_ARM: &str = "https://cdimage.ubuntu.com/releases/";
 const UBUNTU_ARCHIVE: &str = "https://old-releases.ubuntu.com/releases/";
@@ -33,22 +34,32 @@ pub(crate) fn rpm_label(distro: &str) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn rpm_repository(distro: &str, version: &str, arch: &str) -> Option<String> {
-    let upstream = ARCHES.iter().find(|(name, _)| *name == arch)?.1;
-    Some(match (distro, version) {
-        ("fedora", "43" | "44" | "45") => format!(
-            "https://dl.fedoraproject.org/pub/fedora/linux/releases/{version}/Server/{upstream}/os"
+fn rpm_source(distro: &str) -> Option<(&'static str, &'static [u32])> {
+    Some(match distro {
+        "fedora" => (
+            "https://dl.fedoraproject.org/pub/fedora/linux/releases/",
+            &[43, 44, 45],
         ),
-        ("centos", "9" | "10") => {
-            format!("https://mirror.stream.centos.org/{version}-stream/BaseOS/{upstream}/os")
-        }
-        ("almalinux", "8" | "9" | "10") => {
-            format!("https://repo.almalinux.org/almalinux/{version}/BaseOS/{upstream}/os")
-        }
-        ("rocky", "8" | "9" | "10") => {
-            format!("https://download.rockylinux.org/pub/rocky/{version}/BaseOS/{upstream}/os")
-        }
+        "centos" => ("https://mirror.stream.centos.org/", &[9, 10]),
+        "almalinux" => ("https://repo.almalinux.org/almalinux/", &[8, 9, 10]),
+        "rocky" => ("https://download.rockylinux.org/pub/rocky/", &[8, 9, 10]),
         _ => return None,
+    })
+}
+
+fn rpm_major(version: &str, minimum: u32) -> Option<u32> {
+    let major = version.parse::<u32>().ok()?;
+    ((minimum..=999).contains(&major) && version == major.to_string()).then_some(major)
+}
+
+pub(crate) fn rpm_repository(distro: &str, version: &str, arch: &str) -> Option<String> {
+    let (root, known) = rpm_source(distro)?;
+    rpm_major(version, known[0])?;
+    let upstream = ARCHES.iter().find(|(name, _)| *name == arch)?.1;
+    Some(match distro {
+        "fedora" => format!("{root}{version}/Server/{upstream}/os"),
+        "centos" => format!("{root}{version}-stream/BaseOS/{upstream}/os"),
+        _ => format!("{root}{version}/BaseOS/{upstream}/os"),
     })
 }
 
@@ -65,18 +76,20 @@ pub(crate) const DEBIAN_RELEASES: &[DebianRelease] = &[
         major: 12,
         codename: "bookworm",
         channel: "oldstable",
-        fallback: Some("12.14.0"),
+        fallback: Some("12.15.0"),
         archives: &[
-            "12.13.0", "12.12.0", "12.11.0", "12.10.0", "12.9.0", "12.8.0", "12.7.0", "12.6.0",
-            "12.5.0", "12.4.0", "12.2.0", "12.1.0", "12.0.0",
+            "12.14.0", "12.13.0", "12.12.0", "12.11.0", "12.10.0", "12.9.0", "12.8.0", "12.7.0",
+            "12.6.0", "12.5.0", "12.4.0", "12.2.0", "12.1.0", "12.0.0",
         ],
     },
     DebianRelease {
         major: 13,
         codename: "trixie",
         channel: "stable",
-        fallback: Some("13.5.0"),
-        archives: &["13.4.0", "13.3.0", "13.2.0", "13.1.0", "13.0.0"],
+        fallback: Some("13.8.0"),
+        archives: &[
+            "13.7.0", "13.6.0", "13.5.0", "13.4.0", "13.3.0", "13.2.0", "13.1.0", "13.0.0",
+        ],
     },
     DebianRelease {
         major: 14,
@@ -103,15 +116,15 @@ const UBUNTU_RELEASES: &[UbuntuRelease] = &[
         codename: "jammy",
         channel: "oldstable",
         fallback: "22.04.5",
-        archives: &["22.04.4", "22.04.3", "22.04.2", "22.04.1"],
+        archives: &["22.04.4", "22.04.3", "22.04.2", "22.04.1", "22.04"],
     },
     UbuntuRelease {
         major: 24,
         base: "24.04",
         codename: "noble",
-        channel: "stable",
+        channel: "oldstable",
         fallback: "24.04.5",
-        archives: &["24.04.2", "24.04.1"],
+        archives: &["24.04.2", "24.04.1", "24.04"],
     },
     UbuntuRelease {
         major: 26,
@@ -235,21 +248,45 @@ fn strings_or_defaults(body: impl Iterator<Item = String>, default: &[&str]) -> 
     versions
 }
 
-fn debian(fetch: &impl Fn(&str) -> Option<String>) -> Vec<Entry> {
-    let listing = fetch(DEBIAN_ARCHIVE).unwrap_or_default();
-    let links: Vec<_> = listing
+fn directory_names(contents: &str) -> impl Iterator<Item = &str> {
+    contents
         .split("href=\"")
         .skip(1)
-        .filter_map(|item| item.split_once("/\"").map(|(version, _)| version))
-        .collect();
+        .filter_map(|link| link.split_once('"')?.0.strip_suffix('/'))
+}
+
+fn debian(fetch: &impl Fn(&str) -> Option<String>) -> Vec<Entry> {
+    let listing = fetch(DEBIAN_ARCHIVE).unwrap_or_default();
     let mut entries = Vec::new();
     for release in DEBIAN_RELEASES {
+        if release.channel == "testing" {
+            for &(arch, _) in ARCHES {
+                let directory = format!("{DEBIAN_TESTING}{arch}/iso-cd/");
+                let file = format!("debian-testing-{arch}-netinst.iso");
+                if fetch(&format!("{directory}SHA256SUMS"))
+                    .is_some_and(|sums| checksum(&sums, &file).is_some())
+                {
+                    entries.push(Entry {
+                        major: release.major,
+                        codename: Some(release.codename),
+                        channel: release.channel,
+                        version: format!("{}-testing", release.major),
+                        arch,
+                        urls: Sources {
+                            firmware: Some(debian_firmware(release.codename)),
+                            iso: Some(format!("{directory}{file}")),
+                            ..Sources::default()
+                        },
+                    });
+                }
+            }
+        }
         let current = release
             .fallback
             .and_then(|_| current_debian_release(release, fetch));
         let archives = strings_or_defaults(
-            links.iter().filter(|version| matches!(version_parts(version), Some((major,_,Some(_))) if major == release.major))
-                .map(|version| (*version).to_owned()),
+            directory_names(&listing).filter(|version| matches!(version_parts(version), Some((major,_,Some(_))) if major == release.major))
+                .map(str::to_owned),
             release.archives,
         );
         for (version, direct) in current.iter().map(|version| (version, true)).chain(
@@ -287,22 +324,29 @@ fn debian(fetch: &impl Fn(&str) -> Option<String>) -> Vec<Entry> {
 fn ubuntu(fetch: &impl Fn(&str) -> Option<String>) -> Vec<Entry> {
     let mut entries = Vec::new();
     for release in UBUNTU_RELEASES {
-        let current = ubuntu_versions(fetch, UBUNTU_MIRROR, release.base, &[release.fallback]);
-        let archives = ubuntu_versions(fetch, UBUNTU_ARCHIVE, release.base, release.archives);
-        for (version, current) in current.iter().map(|version| (version, true)).chain(
-            archives
+        let base = release.base;
+        let archive_root = format!("{UBUNTU_ARCHIVE}{base}/");
+        let archive_index = fetch(&archive_root);
+        for &(arch, _) in ARCHES {
+            let current_root = if arch == "amd64" {
+                format!("{UBUNTU_MIRROR}{base}/")
+            } else {
+                format!("{UBUNTU_ARM}{base}/release/")
+            };
+            let current_index = fetch(&format!("{current_root}SHA256SUMS"));
+            let current =
+                ubuntu_versions(current_index.as_deref(), base, arch, &[release.fallback]);
+            let archives = ubuntu_versions(archive_index.as_deref(), base, arch, release.archives);
+            for (version, root) in current
                 .iter()
-                .filter(|version| !current.contains(version))
-                .map(|version| (version, false)),
-        ) {
-            for &(arch, _) in ARCHES {
-                let base = release.base;
-                let iso = format!("ubuntu-{version}-live-server-{arch}.iso");
-                let url = match (current, arch) {
-                    (true, "amd64") => format!("{UBUNTU_MIRROR}{base}/{iso}"),
-                    (true, _) => format!("{UBUNTU_ARM}{base}/release/{iso}"),
-                    (false, _) => format!("{UBUNTU_ARCHIVE}{base}/{iso}"),
-                };
+                .map(|version| (version, &current_root))
+                .chain(
+                    archives
+                        .iter()
+                        .filter(|version| !current.contains(version))
+                        .map(|version| (version, &archive_root)),
+                )
+            {
                 entries.push(Entry {
                     major: release.major,
                     codename: Some(release.codename),
@@ -310,7 +354,7 @@ fn ubuntu(fetch: &impl Fn(&str) -> Option<String>) -> Vec<Entry> {
                     version: version.clone(),
                     arch,
                     urls: Sources {
-                        iso: Some(url),
+                        iso: Some(format!("{root}ubuntu-{version}-live-server-{arch}.iso")),
                         ..Sources::default()
                     },
                 });
@@ -321,17 +365,23 @@ fn ubuntu(fetch: &impl Fn(&str) -> Option<String>) -> Vec<Entry> {
 }
 
 fn ubuntu_versions(
-    fetch: &impl Fn(&str) -> Option<String>,
-    root: &str,
+    listing: Option<&str>,
     base: &str,
+    arch: &str,
     fallback: &[&str],
 ) -> Vec<String> {
-    let listing = fetch(&format!("{root}{base}/")).unwrap_or_default();
+    let Some(listing) = listing else {
+        return fallback.iter().map(|version| (*version).into()).collect();
+    };
+    let file_suffix = format!("live-server-{arch}.iso");
     strings_or_defaults(
         listing.split("ubuntu-").skip(1).filter_map(|item| {
             let (version, suffix) = item.split_once('-')?;
-            if suffix.starts_with("live-server-amd64.iso")
-                && version_parts(version).is_some()
+            if suffix.strip_prefix(&file_suffix).is_some_and(|tail| {
+                tail.chars().next().is_none_or(|next| {
+                    next.is_ascii_whitespace() || matches!(next, '"' | '\'' | '<')
+                })
+            }) && version_parts(version).is_some()
                 && (version == base
                     || version
                         .strip_prefix(base)
@@ -342,36 +392,92 @@ fn ubuntu_versions(
                 None
             }
         }),
-        fallback,
+        &[],
     )
 }
 
-fn rpm(distro: &str) -> Vec<Entry> {
-    let versions: &[(u32, &str)] = match distro {
-        "fedora" => &[(44, "oldstable"), (45, "stable")],
-        "centos" => &[(9, "oldstable"), (10, "stable")],
-        _ => &[(8, "oldstable"), (9, "oldstable"), (10, "stable")],
+fn rpm_bootable(index: &str) -> bool {
+    let mut checksums = index
+        .lines()
+        .skip_while(|line| line.trim() != "[checksums]")
+        .skip(1)
+        .take_while(|line| !line.trim().starts_with('['))
+        .filter_map(|line| {
+            let (name, value) = line.split_once('=')?;
+            let digest = value.trim().strip_prefix("sha256:")?;
+            (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .then_some(name.trim())
+        });
+    let (mut kernel, mut initrd) = (false, false);
+    checksums.any(|name| {
+        kernel |= name == "images/pxeboot/vmlinuz";
+        initrd |= name == "images/pxeboot/initrd.img";
+        kernel && initrd
+    })
+}
+
+fn rpm(distro: &str, fetch: &(impl Fn(&str) -> Option<String> + Sync)) -> Vec<Entry> {
+    let Some((root, known)) = rpm_source(distro) else {
+        return Vec::new();
     };
-    versions
-        .iter()
-        .flat_map(|&(major, channel)| {
-            ARCHES.iter().filter_map(move |&(arch, _)| {
-                let version = major.to_string();
-                let base = rpm_repository(distro, &version, arch)?;
-                let dir = format!("{base}/images/pxeboot");
-                Some(Entry {
-                    major,
-                    codename: None,
-                    channel,
-                    version,
-                    arch,
-                    urls: Sources {
-                        kernel: Some(format!("{dir}/vmlinuz")),
-                        initrd: Some(format!("{dir}/initrd.img")),
-                        ..Sources::default()
-                    },
+    let listing = fetch(root);
+    let versions: BTreeSet<_> = match listing.as_deref() {
+        Some(index) => directory_names(index)
+            .filter_map(|name| {
+                let version = if distro == "centos" {
+                    name.strip_suffix("-stream")?
+                } else {
+                    name
+                };
+                rpm_major(version, known[0])
+            })
+            .collect(),
+        None => known.iter().copied().collect(),
+    };
+    let verify = listing.is_some();
+    let media = std::thread::scope(|scope| {
+        let probes = versions
+            .iter()
+            .rev()
+            .take(8)
+            .flat_map(|&major| {
+                ARCHES.iter().filter_map(move |&(arch, _)| {
+                    let repo = rpm_repository(distro, &major.to_string(), arch)?;
+                    Some(scope.spawn(move || {
+                        if verify
+                            && !fetch(&format!("{repo}/.treeinfo"))
+                                .is_some_and(|index| rpm_bootable(&index))
+                        {
+                            return None;
+                        }
+                        Some((major, arch, format!("{repo}/images/pxeboot")))
+                    }))
                 })
             })
+            .collect::<Vec<_>>();
+        probes
+            .into_iter()
+            .filter_map(|probe| probe.join().ok().flatten())
+            .collect::<Vec<_>>()
+    });
+    let latest = media.first().map(|image| image.0);
+    media
+        .into_iter()
+        .map(|(major, arch, dir)| Entry {
+            major,
+            codename: None,
+            channel: if Some(major) == latest {
+                "stable"
+            } else {
+                "oldstable"
+            },
+            version: major.to_string(),
+            arch,
+            urls: Sources {
+                kernel: Some(format!("{dir}/vmlinuz")),
+                initrd: Some(format!("{dir}/initrd.img")),
+                ..Sources::default()
+            },
         })
         .collect()
 }
@@ -414,7 +520,7 @@ pub(crate) fn refresh(config: &Path) -> Result<(), ErrorBox> {
 fn refresh_entries(
     db: &mut Connection,
     job: Option<i64>,
-    fetch: impl Fn(&str) -> Option<String>,
+    fetch: impl Fn(&str) -> Option<String> + Sync,
 ) -> Result<usize, ErrorBox> {
     let mut count = 0;
     for (index, (code, label)) in [
@@ -432,12 +538,12 @@ fn refresh_entries(
             db,
             job,
             (1 + index * 99 / 6) as u8,
-            &format!("Discovery {label}…"),
+            &format!("Lecture du catalogue {label}…"),
         );
         let entries = match code {
             "debian" => debian(&fetch),
             "ubuntu" => ubuntu(&fetch),
-            _ => rpm(code),
+            _ => rpm(code, &fetch),
         };
         if entries.is_empty() {
             continue;
