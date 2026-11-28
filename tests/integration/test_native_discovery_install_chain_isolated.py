@@ -773,7 +773,7 @@ else:
         logs=result.stdout+result.stderr
     for marker in (
         'PXE request peer=192.0.2.100 route=/api/discovery status=200',
-        'PXE request peer=192.0.2.100 route=/preseed.php status=200',
+        'PXE request peer=192.0.2.100 route=/pxe/preseed.cfg status=200',
         'PXE request peer=192.0.2.100 route=/api/install-end status=200',
         'PXE first boot peer=192.0.2.100 status=200 bytes=9',
     ):
@@ -1186,7 +1186,7 @@ print('Authenticated UI scheduled installation and requested reboot after menu g
                 access=docker('exec',app,'tail','-n','80','/var/lib/pxe-tools-native/log/nginx-access.log',
                               check=False).stdout
                 for path, status in re.findall(r'"(?:GET|POST|HEAD) (/[^ ?"\\]*)(?:\?[^ "]+)? HTTP/[\d.]+" (\d{3}) ',access):
-                    if path.startswith(('/preseed.php','/netboot/','/debian/dists/','/api/')):
+                    if path.startswith(('/pxe/preseed.cfg','/preseed.php','/netboot/','/debian/dists/','/api/')):
                         receipt=(path,status)
                         if receipt not in http_reported:
                             print('Isolated HTTP:',*receipt,flush=True)

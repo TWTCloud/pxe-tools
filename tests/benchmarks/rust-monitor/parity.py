@@ -150,7 +150,7 @@ def php_preseed(root, port):
 def compare_grub(ports, paths):
     mac = "02:00:00:00:04:00"
     route = GRUB + "?" + urlencode({"mac": mac, "arch": "aarch64"})
-    for port, database in zip(ports, paths):
+    for index, (port, database) in enumerate(zip(ports, paths)):
         assert response(port, route, peer="outside", spoof=True)[0] == 403
         status, _, _, menu = response(port, route, peer="lan")
         assert status == 200 and b"/netboot/trixie/arm64/linux" in menu
@@ -170,7 +170,8 @@ def compare_grub(ports, paths):
                                 (machine[0], "grub-fixture")).lastrowid
         status, _, _, menu = response(port, route, peer="lan")
         assert status == 200 and b"/netboot/bookworm/arm64/linux" in menu
-        assert b"/preseed.php?mac=" + mac.encode() in menu
+        preseed = b"/pxe/preseed.cfg" if index else b"/preseed.php"
+        assert preseed + b"?mac=" + mac.encode() in menu
         with closing(sqlite3.connect(database)) as db:
             assert db.execute("SELECT checkpoint FROM machine_events WHERE action_id=? AND checkpoint IS NOT NULL",
                               (action,)).fetchall() == [("grub_config_served_install",)]

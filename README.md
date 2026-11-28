@@ -74,12 +74,12 @@ importer ou émettre un certificat qui le couvre depuis **Certificats TLS**.
 
 ## Installation avec Docker
 
-L’image bêta 25 est disponible pour Linux amd64 et arm64. Depuis la racine
+L’image bêta 29 est disponible pour Linux amd64 et arm64. Depuis la racine
 du dépôt sur un hôte Docker Linux, téléchargez l'image et démarrez l'appliance.
 
 ```sh
-docker pull ghcr.io/twtcloud/pxe-tools:v0.1.0-beta25
-PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta25 \
+docker pull ghcr.io/twtcloud/pxe-tools:v0.1.0-beta29
+PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta29 \
   docker compose -f compose/docker-compose.yml up -d
 ```
 
@@ -88,14 +88,18 @@ Le fichier Compose utilise le réseau de l’hôte pour le PXE. Ouvrez
 le conteneur.
 
 ```sh
-PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta25 \
+PXE_TOOLS_IMAGE=ghcr.io/twtcloud/pxe-tools:v0.1.0-beta29 \
   docker compose -f compose/docker-compose.yml exec pxe-tools cat /run/pxe-tools-rust-guided/setup-code
 ```
 
 Les notes de mise à niveau et les offres de sources accompagnent la
-[bêta 25](https://github.com/TWTCloud/pxe-tools/releases/tag/v0.1.0-beta25).
+[bêta 29](https://github.com/TWTCloud/pxe-tools/releases/tag/v0.1.0-beta29).
 
-Le paquet APT et l’image Docker de PXE Tools utilisent le serveur HTTP et HTTPS intégré au binaire Rust. Les URL historiques `/grub.php` et `/preseed.php` restent utilisables par les chargeurs déjà installés. La cible Docker `php-appliance` sert aux essais historiques et doit être sélectionnée explicitement.
+Le paquet APT et l’image Docker utilisent le serveur HTTP et HTTPS intégré au
+binaire Rust. Les nouvelles configurations PXE utilisent
+`/pxe/grub.cfg` et `/pxe/preseed.cfg`. Le serveur répond aussi aux anciens
+chargeurs qui pointent vers `/grub.php` et `/preseed.php`.
+
 
 ## Données et limites
 

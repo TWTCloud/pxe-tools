@@ -680,12 +680,12 @@ class BuilderHooksTests(unittest.TestCase):
 
     def test_base_hook_checks_removal_before_nginx_and_records_around_first_start(self):
         postinst = self.builder('build-local-package.py').POSTINST
-        self.assertLess(postinst.index('check-removal'), postinst.index('reconcile-nginx.py'))
-        self.assertLess(postinst.index('check-base'), postinst.index('reconcile-nginx.py'))
-        self.assertLess(postinst.index('recover-initialization'), postinst.index('reconcile-nginx.py'))
-        self.assertLess(postinst.index('reconcile-nginx.py'), postinst.index('finish-base'))
+        self.assertLess(postinst.index('check-removal'), postinst.index('reconcile-stock.py'))
+        self.assertLess(postinst.index('check-base'), postinst.index('reconcile-stock.py'))
+        self.assertLess(postinst.index('recover-initialization'), postinst.index('reconcile-stock.py'))
+        self.assertLess(postinst.index('reconcile-stock.py'), postinst.index('finish-base'))
         self.assertIn('configure-secure-tftp.py --initialize-instance', postinst)
-        self.assertLess(postinst.index('reconcile-nginx.py'), postinst.index('configure-secure-tftp.py --initialize-instance'))
+        self.assertLess(postinst.index('reconcile-stock.py'), postinst.index('configure-secure-tftp.py --initialize-instance'))
 
     def test_postinst_finishes_recovered_setup_after_service_start(self):
         postinst = self.builder('build-local-package.py').POSTINST
@@ -709,8 +709,8 @@ class BuilderHooksTests(unittest.TestCase):
             lines = trace.read_text().splitlines()
             find = lambda text: next(index for index, line in enumerate(lines) if text in line)
             self.assertLess(find('check-removal'), find('recover-initialization'))
-            self.assertLess(find('recover-initialization'), find('reconcile-nginx.py'))
-            self.assertLess(find('reconcile-nginx.py'), find('systemctl start pxe-tools-admin.target'))
+            self.assertLess(find('recover-initialization'), find('reconcile-stock.py'))
+            self.assertLess(find('reconcile-stock.py'), find('systemctl start pxe-tools-admin.target'))
             self.assertLess(find('systemctl start pxe-tools-admin.target'), find('finish-base'))
             self.assertFalse(any(' check-base' in line for line in lines))
 
@@ -849,9 +849,12 @@ class NativeFirstBootCompatibility(unittest.TestCase):
             shutil.copytree(ROOT, source, ignore=shutil.ignore_patterns('.git', '__pycache__', '*.pyc', '.DS_Store'))
             subprocess.run(['git', 'init', '-q', str(source)], check=True)
             subprocess.run(['git', '-C', str(source), 'add', '-A'], check=True)
-            for name, builder in (('base', 'build-local-package.py'), ('ansible', 'build-local-ansible-package.py')):
+            for name, builder in (
+                ('base', 'tests/support/legacy-appliance/build-package.py'),
+                ('ansible', 'packaging/native/build-local-ansible-package.py'),
+            ):
                 package = work / (name + '.deb')
-                subprocess.run([sys.executable, str(source / 'packaging/native' / builder), str(package),
+                subprocess.run([sys.executable, str(source / builder), str(package),
                                 '--version', '0.1.0~fixture'], check=True, stdout=subprocess.DEVNULL)
                 extracted = work / (name + '-tree')
                 subprocess.run(['dpkg-deb', '-x', str(package), str(extracted)], check=True)

@@ -31,7 +31,7 @@ chmod 0755 "$work"
 if [ "$mode" = apt ]; then
     version="${PXE_TEST_APT_VERSION:-0.1.0~lab1}"
     for arch in amd64 arm64; do
-        python3 packaging/native/build-apt-package-candidate.py "$work/candidate-$arch.deb" \
+        python3 tests/support/legacy-appliance/build-package.py "$work/candidate-$arch.deb" \
             --architecture "$arch" --version "$version" --maintainer 'Fixture <fixture@example.invalid>'
         test "$(dpkg-deb -f "$work/candidate-$arch.deb" Architecture)" = "$arch"
         test "$(stat -c %s "$work/candidate-$arch.deb")" -le 26214400
@@ -95,17 +95,9 @@ else
     if [ -n "${PXE_DOCKER_DOCUMENTATION:-}" ]; then
         labels+=(--label "org.opencontainers.image.documentation=$PXE_DOCKER_DOCUMENTATION")
     fi
-    target=()
-    case "${PXE_DOCKER_BUILD_TARGET:-rust-guided}" in
-        rust-guided) ;;  # Exercise the default build used by local installations.
-        php-appliance) target=(--target php-appliance) ;;
-        *) exit 2 ;;
-    esac
-    docker build "${target[@]}" --platform "linux/$architecture" --build-arg "APP_VERSION=${PXE_TEST_APT_VERSION:-0.1.0~lab1}" \
+    docker build --platform "linux/$architecture" \
         "${labels[@]}" -f docker/pxe-tools/Dockerfile -t "$image" .
-    if [ "${PXE_DOCKER_BUILD_TARGET:-rust-guided}" = rust-guided ]; then
-        PXE_RUST_GUIDED_DOCKER_IMAGE="$image" bash tests/integration/test_rust_fresh_distribution.sh docker
-    fi
+    PXE_RUST_GUIDED_DOCKER_IMAGE="$image" bash tests/integration/test_rust_fresh_distribution.sh docker
     docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes {{.Id}}' "$image"
     docker run -d --name "$name" "$image" >/dev/null
     docker exec "$name" dpkg-query -W -f='Debian source: ${source:Package} ${source:Version}\n' | sort -u
@@ -116,7 +108,7 @@ fi
 
 admin_probe=(curl -fsS http://127.0.0.1:8080/healthz)
 admin_init=(curl -fsSL http://127.0.0.1:8080/init)
-if [ "$mode" = docker ] && [ "${PXE_DOCKER_BUILD_TARGET:-rust-guided}" = rust-guided ]; then
+if [ "$mode" = docker ]; then
     admin_probe=(curl -kfsS https://127.0.0.1/healthz)
     admin_init=(curl -kfsSL https://127.0.0.1/admin/)
 fi

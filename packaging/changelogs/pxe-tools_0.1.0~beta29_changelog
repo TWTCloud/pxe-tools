@@ -1,0 +1,155 @@
+pxe-tools (0.1.0~beta29) stable; urgency=medium
+
+  * Terminer la distribution du serveur Rust intégré, sans PHP-FPM ni Nginx.
+  * Utiliser les nouvelles URL PXE tout en conservant les anciens chargeurs.
+  * Retirer les anciennes unités web PXE Tools à la mise à niveau.
+  * Préremplir le code de configuration et permettre de régler le port HTTPS.
+
+ -- PXE Tools <security@pxetools.com>  Sat, 28 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta28) stable; urgency=medium
+
+  * Retrouver l’adresse IPv4 de l’interface PXE au démarrage.
+  * Régénérer les chargeurs et les menus avant d’annoncer la nouvelle adresse.
+  * Laisser la console accessible lorsque le démarrage PXE est suspendu.
+  * Réutiliser le trousseau Debian du worker au démarrage sur Ubuntu et Zorin.
+
+ -- PXE Tools <security@pxetools.com>  Fri, 27 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta27) stable; urgency=medium
+
+  * Autoriser la connexion HTTPS via le nom DNS local du serveur.
+  * Reconnaître les alias exacts indiqués dans le certificat actif.
+  * Inclure les noms locaux dans le certificat d’une installation neuve.
+
+ -- PXE Tools <security@pxetools.com>  Fri, 27 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta26) stable; urgency=medium
+
+  * Garder la même disposition pendant la vérification des mises à jour.
+  * Afficher les étapes de l’installation et reprendre le suivi après le redémarrage.
+  * Donner accès aux notes des versions proposées ou installées.
+
+ -- PXE Tools <security@pxetools.com>  Thu, 26 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta25) stable; urgency=medium
+
+  * Configurer une autorité ACME privée depuis la page Certificats TLS.
+  * Afficher l’état des demandes ACME et l’expiration des certificats.
+  * Utiliser Inventaire dans la console et afficher /admin/inventaire après la découverte PXE.
+  * Rediriger les anciennes adresses d’inventaire en conservant les filtres.
+
+ -- PXE Tools <security@pxetools.com>  Thu, 26 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta24) stable; urgency=medium
+
+  * Afficher un onglet par distribution et conserver la sélection entre les onglets.
+  * Faire défiler les onglets avec des chevrons lorsque la place manque.
+  * Uniformiser la hauteur des lignes et aligner les logos des médias d’installation.
+  * Utiliser le logo orange et noir d’origine de Proxmox.
+
+ -- PXE Tools <security@pxetools.com>  Thu, 26 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta23) stable; urgency=medium
+
+  * Présenter le catalogue de téléchargement dans un tableau par distribution et version.
+  * Afficher les sélections amd64 et ARM64 côte à côte et garder le bouton de téléchargement visible.
+  * Présenter les actions de préparation de Proxmox VE, RHEL et Windows dans le tableau des médias.
+
+ -- PXE Tools <security@pxetools.com>  Thu, 26 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta22) stable; urgency=medium
+
+  * Rétablir la sélection multiple des images PXE par version et architecture.
+  * Afficher les visuels officiels de Windows 11 et Red Hat Enterprise Linux.
+  * Fiabiliser l’installation des mises à jour APT depuis la console web.
+
+ -- PXE Tools <security@pxetools.com>  Thu, 26 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta21) stable; urgency=medium
+
+  * Télécharger et installer Proxmox VE depuis son ISO officielle.
+  * Restaurer les installateurs réseau CentOS Stream, Fedora, AlmaLinux et Rocky Linux.
+  * Télécharger les médias RHEL depuis Red Hat via un jeton API.
+  * Regrouper le profil et les jetons personnels dans le menu de compte.
+  * Reconnaître les unités systemd Rust pendant la désinstallation.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta20) stable; urgency=medium
+
+  * Harmoniser l’inventaire, les filtres, les tableaux et l’en-tête.
+  * Rétablir les titres lisibles des tâches et l’historique d’activité.
+  * Restaurer le catalogue des images par distribution et les actions par image.
+  * Afficher une barre de progression pendant la vérification des mises à jour.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta19) stable; urgency=medium
+
+  * Rétablir la sélection multiple et le suivi des images dans l’assistant.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta18) stable; urgency=medium
+
+  * Vérifier et installer les mises à jour APT depuis la console web.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta17) stable; urgency=medium
+
+  * Proposer les interfaces détectées et l’ajout de PXE au DHCP existant par défaut.
+  * Rétablir la vue d’ensemble et les réglages réseau PXE après l’assistant.
+  * Rétablir la recherche et le filtre par état dans l’inventaire.
+  * Dupliquer les modèles et retrouver leurs réglages de localisation, miroir et paquets.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta16) stable; urgency=medium
+
+  * Initialiser SQLite et créer le compte administrateur avec une seule saisie du code.
+  * Raccourcir le code de configuration à trois groupes de quatre caractères.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta15) stable; urgency=medium
+
+  * Moderniser la console et l’assistant avec un affichage adapté au mobile.
+  * Ajouter pxe-tools setup et une commande copiable dans l’assistant.
+  * Gérer les comptes, les droits et les jetons d’API.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta14) stable; urgency=medium
+
+  * Ouvrir l’assistant HTTPS et la console sur les IPv4 privées actives.
+  * Inclure les adresses locales dans le certificat initial.
+  * Conserver l’adresse PXE dédiée aux ressources de démarrage.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta13) stable; urgency=medium
+
+  * Servir la console HTTPS, l’API et les fichiers PXE depuis Rust.
+  * Confirmer le premier démarrage Debian avant de clôturer l’installation.
+  * Préparer Ubuntu Server et RHEL 9 et importer les médias Windows 10 et 11.
+    Les éditions Windows peuvent partager l’image d’installation en cache.
+  * Gérer le certificat local, l’import de certificats et ACME dans la console.
+
+ -- PXE Tools <security@pxetools.com>  Wed, 25 Nov 2026 00:00:00 +0000
+
+pxe-tools (0.1.0~beta12) stable; urgency=medium
+
+  * Ajouter la prise en charge des serveurs Debian 13 ARM64.
+  * Publier des index APT signés pour amd64 et arm64 avec le module Ansible facultatif.
+
+ -- PXE Tools <security@pxetools.com>  Mon, 23 Nov 2026 07:59:30 +0000
+
+pxe-tools (0.1.0~beta11) stable; urgency=medium
+
+  * Enchaîner le premier démarrage de Debian et le provisionnement Ansible.
+  * Permettre de choisir le nom du compte technique des nouvelles installations.
+  * Améliorer la navigation de l’assistant et signaler les conflits sur le port HTTP de démarrage.
+
+ -- PXE Tools <security@pxetools.com>  Mon, 23 Nov 2026 05:54:08 +0000

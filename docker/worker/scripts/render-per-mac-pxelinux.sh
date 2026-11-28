@@ -39,6 +39,10 @@ if [ -e /etc/pxe-tools/db.conf ] && [ ! -f "$DB_PATH" ]; then
     exit 1
 fi
 PXELINUX_DIR="$TFTP_ROOT/pxelinux.cfg"
+PRESEED_ROUTE=/preseed.php
+if [ "${PXE_RUST_GUIDED:-0}" = 1 ]; then
+    PRESEED_ROUTE=/pxe/preseed.cfg
+fi
 
 # Lecture ORCHESTRATOR_IP : une valeur vide enregistrée reste vide.
 ORCH_IP="${ORCHESTRATOR_IP:-}"
@@ -237,7 +241,7 @@ TIMEOUT 30
 LABEL install
   MENU LABEL Installation Debian ${m_distro:-$DEFAULT_DISTRO} ${m_version_full} (auto)
   KERNEL http://$ORCH_IP/netboot/$machine_netboot_path/linux
-  APPEND vga=788 initrd=http://$ORCH_IP/netboot/$machine_netboot_path/initrd.gz $KERNEL_OPTS auto=true priority=critical url=http://$ORCH_IP/preseed.php?mac=$mac interface=$mac netcfg/dhcp_timeout=30 hostname=${hostname:-unassigned}
+  APPEND vga=788 initrd=http://$ORCH_IP/netboot/$machine_netboot_path/initrd.gz $KERNEL_OPTS auto=true priority=critical url=http://$ORCH_IP${PRESEED_ROUTE}?mac=$mac interface=$mac netcfg/dhcp_timeout=30 hostname=${hostname:-unassigned}
   IPAPPEND 2
 EOF
             ;;
@@ -264,7 +268,7 @@ LABEL localboot
 LABEL reinstall
   MENU LABEL Forcer la réinstallation
   KERNEL http://$ORCH_IP/netboot/$machine_netboot_path/linux
-  APPEND vga=788 initrd=http://$ORCH_IP/netboot/$machine_netboot_path/initrd.gz $KERNEL_OPTS auto=true priority=critical url=http://$ORCH_IP/preseed.php?mac=$mac interface=$mac netcfg/dhcp_timeout=30 hostname=${hostname:-unassigned}
+  APPEND vga=788 initrd=http://$ORCH_IP/netboot/$machine_netboot_path/initrd.gz $KERNEL_OPTS auto=true priority=critical url=http://$ORCH_IP${PRESEED_ROUTE}?mac=$mac interface=$mac netcfg/dhcp_timeout=30 hostname=${hostname:-unassigned}
   IPAPPEND 2
 EOF
             ;;

@@ -269,6 +269,8 @@ def main() -> int:
         # menuentries "Chainload iPXE" sur ce flag.
         "pxe_ipxe_enabled": ipxe_enabled,
         "pxe_rust_guided": rust_guided,
+        "pxe_preseed_route": "/pxe/preseed.cfg" if rust_guided else "/preseed.php",
+        "pxe_grub_route": "/pxe/grub.cfg" if rust_guided else "/grub.php",
         # Spec D : architecture par défaut pour les paths netboot (/<version>/<arch>/).
         # Utilisé par grub.cfg.j2, pxelinux-default.j2, grub.php.j2, boot.ipxe.j2.
         # En multi-arch full (Spec D.4), preseed.php fera un lookup machine.boot_arch

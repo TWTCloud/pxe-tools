@@ -1215,7 +1215,10 @@ async fn dispatch(
             return reply;
         }
     }
-    let dynamic = matches!(path, "/preseed.php" | "/grub.php" | "/wipe.sh")
+    let dynamic = matches!(
+        path,
+        crate::PRESEED | crate::LEGACY_PRESEED | crate::GRUB_CONFIG | crate::LEGACY_GRUB_CONFIG | "/wipe.sh"
+    )
         || path.starts_with("/api/")
         || path.starts_with("/pxe/postboot/");
     if !dynamic {
@@ -1285,7 +1288,7 @@ async fn dispatch(
     let body = result.into_reader().into_inner();
     let route = match path {
         "/api/discovery" => Some("/api/discovery"),
-        "/preseed.php" => Some("/preseed.php"),
+        crate::PRESEED | crate::LEGACY_PRESEED => Some(path),
         "/api/install-end" => Some("/api/install-end"),
         "/api/machine-ready" => Some("/api/machine-ready"),
         path if path.starts_with("/pxe/postboot/") => Some("/pxe/postboot/"),

@@ -28,7 +28,7 @@ menuentry 'Identification du matériel' {
 {% for v in pxe_debian_versions_full %}
 menuentry 'Installation automatique — Debian {{ v.codename }} {{ v.version_full }}' {
     echo "Démarrage de l'installation automatique..."
-    linux (http,{{ pxe_ip }})/netboot/{{ v.distro }}/{{ v.version_full }}/{{ pxe_default_arch }}/linux {{ pxe_kernel_opts }} auto=true priority=critical url=http://{{ pxe_ip }}/preseed.php?distro={{ v.codename }} interface=auto netcfg/dhcp_timeout=30 hostname=unassigned domain=lan
+    linux (http,{{ pxe_ip }})/netboot/{{ v.distro }}/{{ v.version_full }}/{{ pxe_default_arch }}/linux {{ pxe_kernel_opts }} auto=true priority=critical url=http://{{ pxe_ip }}{{ pxe_preseed_route }}?distro={{ v.codename }} interface=auto netcfg/dhcp_timeout=30 hostname=unassigned domain=lan
     initrd (http,{{ pxe_ip }})/netboot/{{ v.distro }}/{{ v.version_full }}/{{ pxe_default_arch }}/initrd.gz (http,{{ pxe_ip }})/netboot/{{ v.distro }}/{{ v.version_full }}/{{ pxe_default_arch }}/firmware.cpio.gz
 }
 

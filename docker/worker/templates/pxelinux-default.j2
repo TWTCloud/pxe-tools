@@ -40,7 +40,7 @@ LABEL discovery
 LABEL debian-{{ v.codename }}-{{ v.version_full }}-auto
   MENU LABEL Installation automatique - Debian {{ v.codename }} {{ v.version_full }}
   KERNEL http://{{ pxe_ip }}/netboot/{{ v.distro }}/{{ v.version_full }}/{{ pxe_default_arch }}/linux
-  APPEND vga=788 initrd=http://{{ pxe_ip }}/netboot/{{ v.distro }}/{{ v.version_full }}/{{ pxe_default_arch }}/initrd.gz,http://{{ pxe_ip }}/netboot/{{ v.distro }}/{{ v.version_full }}/{{ pxe_default_arch }}/firmware.cpio.gz {{ pxe_kernel_opts }} auto=true priority=critical url=http://{{ pxe_ip }}/preseed.php?distro={{ v.codename }} interface=auto netcfg/dhcp_timeout=30 hostname=unassigned domain=lan
+  APPEND vga=788 initrd=http://{{ pxe_ip }}/netboot/{{ v.distro }}/{{ v.version_full }}/{{ pxe_default_arch }}/initrd.gz,http://{{ pxe_ip }}/netboot/{{ v.distro }}/{{ v.version_full }}/{{ pxe_default_arch }}/firmware.cpio.gz {{ pxe_kernel_opts }} auto=true priority=critical url=http://{{ pxe_ip }}{{ pxe_preseed_route }}?distro={{ v.codename }} interface=auto netcfg/dhcp_timeout=30 hostname=unassigned domain=lan
 
 LABEL debian-{{ v.codename }}-{{ v.version_full }}-manual
   MENU LABEL Installation manuelle - Debian {{ v.codename }} {{ v.version_full }}
