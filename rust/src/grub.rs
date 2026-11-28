@@ -7,12 +7,12 @@ use serde_json::{json, Value};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 
-const DISCOVERY: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-discovery.cfg"));
-const INSTALL: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-install.cfg"));
-const LOCAL: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-local.cfg"));
-const RESCUE: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-rescue.cfg"));
-const DISK_TEST: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-disktest.cfg"));
-const WIPE: &str = include_str!(concat!(env!("OUT_DIR"), "/grub-wipe.cfg"));
+const DISCOVERY: &str = include_str!("../assets/pxe/grub-discovery.cfg").trim_ascii_end();
+const INSTALL: &str = include_str!("../assets/pxe/grub-install.cfg").trim_ascii_end();
+const LOCAL: &str = include_str!("../assets/pxe/grub-local.cfg").trim_ascii_end();
+const RESCUE: &str = include_str!("../assets/pxe/grub-rescue.cfg").trim_ascii_end();
+const DISK_TEST: &str = include_str!("../assets/pxe/grub-disktest.cfg").trim_ascii_end();
+const WIPE: &str = include_str!("../assets/pxe/grub-wipe.cfg").trim_ascii_end();
 
 struct Machine {
     mac: String,

@@ -14,6 +14,8 @@ SOURCE = ROOT / "docker/pxe-tools/init/php-init.sh"
 
 def run_init(temp_root: Path) -> subprocess.CompletedProcess[str]:
     script = SOURCE.read_text(encoding="utf-8")
+    script = script.replace('. "${0%/*}/database-init.sh"',
+                     (SOURCE.parent / 'database-init.sh').read_text())
     script = script.replace("/etc/pxe-tools", str(temp_root / "etc/pxe-tools"))
     script = script.replace("/var/lib/pxe-tools", str(temp_root / "var/lib/pxe-tools"))
     script = script.replace("/run/php", str(temp_root / "run/php"))

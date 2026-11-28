@@ -96,10 +96,14 @@ else
         labels+=(--label "org.opencontainers.image.documentation=$PXE_DOCKER_DOCUMENTATION")
     fi
     target=()
-    if [ "${PXE_DOCKER_BUILD_TARGET:-}" = rust-guided ]; then target=(--target rust-guided); fi
+    case "${PXE_DOCKER_BUILD_TARGET:-rust-guided}" in
+        rust-guided) ;;  # Exercise the default build used by local installations.
+        php-appliance) target=(--target php-appliance) ;;
+        *) exit 2 ;;
+    esac
     docker build "${target[@]}" --platform "linux/$architecture" --build-arg "APP_VERSION=${PXE_TEST_APT_VERSION:-0.1.0~lab1}" \
         "${labels[@]}" -f docker/pxe-tools/Dockerfile -t "$image" .
-    if [ "${PXE_DOCKER_BUILD_TARGET:-}" = rust-guided ]; then
+    if [ "${PXE_DOCKER_BUILD_TARGET:-rust-guided}" = rust-guided ]; then
         PXE_RUST_GUIDED_DOCKER_IMAGE="$image" bash tests/integration/test_rust_fresh_distribution.sh docker
     fi
     docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes {{.Id}}' "$image"
@@ -112,7 +116,7 @@ fi
 
 admin_probe=(curl -fsS http://127.0.0.1:8080/healthz)
 admin_init=(curl -fsSL http://127.0.0.1:8080/init)
-if [ "$mode" = docker ] && [ "${PXE_DOCKER_BUILD_TARGET:-}" = rust-guided ]; then
+if [ "$mode" = docker ] && [ "${PXE_DOCKER_BUILD_TARGET:-rust-guided}" = rust-guided ]; then
     admin_probe=(curl -kfsS https://127.0.0.1/healthz)
     admin_init=(curl -kfsSL https://127.0.0.1/admin/)
 fi

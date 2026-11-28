@@ -15,10 +15,10 @@ use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
 const BASE: &str = include_str!("../../docker/worker/templates/preseed-base.cfg.j2");
-const DISK_GUARD: &str = include_str!(concat!(env!("OUT_DIR"), "/disk-guard.sh"));
-const FIRST_BOOT: &str = include_str!(concat!(env!("OUT_DIR"), "/first-boot.sh"));
-const INSTALL_LOG: &str = include_str!(concat!(env!("OUT_DIR"), "/install-log.sh"));
-const TARGET_HOSTNAME: &str = include_str!(concat!(env!("OUT_DIR"), "/target-hostname.sh"));
+const DISK_GUARD: &str = include_str!("../assets/pxe/disk-guard.sh").trim_ascii_end();
+const FIRST_BOOT: &str = include_str!("../assets/pxe/first-boot.sh").trim_ascii_end();
+const INSTALL_LOG: &str = include_str!("../assets/pxe/install-log.sh").trim_ascii_end();
+const TARGET_HOSTNAME: &str = include_str!("../assets/pxe/target-hostname.sh").trim_ascii_end();
 
 pub(crate) fn first_boot_script(pxe: Ipv4Addr, port: u16, mac: &str, token: &str) -> String {
     let script = FIRST_BOOT

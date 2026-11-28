@@ -21,6 +21,11 @@ if _inventory_spec is None or _inventory_spec.loader is None:
     raise RuntimeError('Package source inventory unavailable')
 source_inventory = importlib.util.module_from_spec(_inventory_spec)
 _inventory_spec.loader.exec_module(source_inventory)
+_runtime_spec = importlib.util.spec_from_file_location('pxe_rust_runtime', ROOT/'rust/packaging/stage-runtime.py')
+if _runtime_spec is None or _runtime_spec.loader is None:
+    raise RuntimeError('Rust runtime staging unavailable')
+rust_runtime = importlib.util.module_from_spec(_runtime_spec)
+_runtime_spec.loader.exec_module(rust_runtime)
 GRUB_DEPENDENCIES = {
     'amd64': 'grub-efi-amd64-bin, grub-efi-amd64-signed',
     'arm64': 'grub-efi-arm64-bin',
@@ -235,17 +240,20 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         for name, text in [('preinst',preinst),('postinst',postinst),('prerm',PRERM),('postrm',POSTRM)]:
             text = text.replace('@@PXE_UPGRADE_LIFECYCLE@@', lifecycle).replace('@@PXE_PACKAGE_VERSION@@', version)
             p=control/name; p.write_text(text.replace('pxe-tools-local-test', package_name)); p.chmod(0o755)
-        php_files = ('*.php', '*.php.j2') if rust_guided else ()
-        copy_tree(ROOT/'app', root/'usr/lib/pxe-tools/app', tracked, exclude=php_files)
-        if not rust_guided:
-            (root/'usr/lib/pxe-tools/app/src/native-build-version.txt').write_text(version + '\n', encoding='utf-8')
-        legacy_scripts = ('bootstrap-release-nginx-port.sh', 'native-release-nginx-port.py') if rust_guided else ()
-        copy_tree(ROOT/'docker/worker/scripts', root/'opt/pxe-tools/scripts', tracked, exclude=php_files + legacy_scripts)
-        copy_tree(ROOT/'docker/worker/templates', root/'opt/pxe-tools/templates', tracked, exclude=php_files)
-        legacy_init = ('php-init.sh', 'render-nginx-conf.sh') if rust_guided else ()
-        copy_tree(ROOT/'docker/pxe-tools/init', root/'opt/pxe-tools/init', tracked, exclude=legacy_init)
+        app = root/'usr/lib/pxe-tools/app'
+        runtime = root/'opt/pxe-tools'
         if rust_guided:
-            shutil.copy2(checked(ROOT/'docker/pxe-tools/init/php-init.sh'), root/'opt/pxe-tools/init/sqlite-init.sh')
+            def copy_runtime_tree(source, target, *, exclude):
+                copy_tree(source, target, tracked, exclude=exclude)
+
+            rust_runtime.stage(ROOT, app, runtime, copy_tree=copy_runtime_tree,
+                               copy_file=lambda source, target: shutil.copy2(checked(source), target))
+        else:
+            copy_tree(ROOT/'app', app, tracked)
+            (app/'src/native-build-version.txt').write_text(version + '\n', encoding='utf-8')
+            copy_tree(ROOT/'docker/worker/scripts', runtime/'scripts', tracked)
+            copy_tree(ROOT/'docker/worker/templates', runtime/'templates', tracked)
+            copy_tree(ROOT/'docker/pxe-tools/init', runtime/'init', tracked)
         copy_tree(ROOT/'docker/pxe-tools/static-bin', root/'usr/lib/pxe-tools/static-bin', tracked)
         copy_tree(ROOT/'docker/pxe-tools/keyrings', root/'usr/lib/pxe-tools/keyrings', tracked)
         # Carry the selected core licence and the currently verified upstream
@@ -266,7 +274,10 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             shutil.copy2(checked(ROOT/'packaging/native'/name), native/name)
         if rust_guided:
             init = native/'init.sh'
-            init.write_text(replace_exact(init.read_text(), '/init/php-init.sh', '/init/sqlite-init.sh'))
+            init.write_text(replace_exact(init.read_text(), 'php-init', 'sqlite-init'))
+            environment = native/'default.env'
+            environment.write_text(''.join(line for line in environment.read_text().splitlines(keepends=True)
+                                           if not line.startswith('PXE_NGINX_')))
         copy_tree(ROOT/'packaging/native/keyrings', native/'keyrings', tracked)
         units=root/'usr/lib/systemd/system'; units.mkdir(parents=True)
         for unit in (sorted((ROOT/'packaging/native').glob('pxe-tools.*'))

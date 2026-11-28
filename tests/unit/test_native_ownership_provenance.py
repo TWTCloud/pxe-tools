@@ -811,6 +811,8 @@ class NativeFirstBootCompatibility(unittest.TestCase):
                 (root / part).mkdir(parents=True, exist_ok=True)
             store = ownership.Store(root, owner=0)
             script = (ROOT / 'docker/pxe-tools/init/php-init.sh').read_text()
+            script = script.replace('. "${0%/*}/database-init.sh"',
+                             ((ROOT / 'docker/pxe-tools/init') / 'database-init.sh').read_text())
             for path in ('/etc/pxe-tools', '/var/lib/pxe-tools', '/run/php'):
                 script = script.replace(path, str(root / path.lstrip('/')))
             fixture = root / 'php-init.sh'

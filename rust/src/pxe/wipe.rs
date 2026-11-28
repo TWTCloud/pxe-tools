@@ -19,7 +19,7 @@ use std::{
 };
 
 const MENU: &str = "wipe";
-const SCRIPT: &str = include_str!(concat!(env!("OUT_DIR"), "/wipe.sh"));
+const SCRIPT: &str = include_str!("../../assets/pxe/wipe.sh");
 
 pub(crate) fn serve(
     db: &mut Connection,

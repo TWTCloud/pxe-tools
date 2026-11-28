@@ -1,14 +1,12 @@
 #!/bin/bash
-# Rendu de TOUS les templates Jinja2 PXE → fichiers servis par nginx/dnsmasq.
+# Rendu de TOUS les templates Jinja2 PXE → fichiers servis aux clients PXE.
 # Always rerender (cheap) — variables peuvent changer entre runs.
 #
 # Cibles :
 #   /srv/tftp/pxelinux.cfg/default       (BIOS PXE menu)
 #   /srv/tftp/grub/grub.cfg              (UEFI fallback menu)
-#   /srv/http/preseed.php                (preseed dynamique par MAC)
-#   /srv/http/grub.php                   (config GRUB dynamique par MAC)
-#   /var/lib/pxe-tools/preseed-base.cfg  (squelette lu par preseed.php)
-#   /var/lib/pxe-tools/data.json         (vars projet pour preseed.php)
+#   /var/lib/pxe-tools/preseed-base.cfg  (squelette lu par le serveur PXE)
+#   /var/lib/pxe-tools/data.json         (variables projet pour le serveur PXE)
 #   /srv/http/discovery-preseed.cfg      (boot Debian discovery)
 #   /srv/http/wipe-preseed.cfg           (boot Debian wipe)
 #   /srv/http/disktest-preseed.cfg       (boot Debian disktest)
@@ -49,9 +47,9 @@ if [ -x "$BOOTSTRAP_SCRIPTS_DIR/render-per-mac-pxelinux.sh" ]; then
     }
 fi
 
-if [ "${PXE_RUST_GUIDED:-0}" != 1 ]; then
-    render preseed.php.j2      "$HTTP_ROOT/preseed.php"
-    render grub.php.j2         "$HTTP_ROOT/grub.php"
+legacy_renderer=/opt/pxe-tools/init/render-legacy-boot-templates.sh
+if [ -f "$legacy_renderer" ]; then
+    source "$legacy_renderer"
 fi
 
 # Squelette et données partagées avec le serveur PXE.
@@ -65,7 +63,7 @@ render disktest-preseed.cfg.j2  "$HTTP_ROOT/disktest-preseed.cfg"
 
 # Scripts shell exécutés par les preseeds — ORCH_IP injecté depuis settings DB
 # (pxe_ip), pas de fallback hardcodé. Rendu vers HTTP_ROOT pour servir
-# via nginx (root /srv/http) — wget côté machine cible récupère le contenu rendu.
+# depuis HTTP_ROOT — wget côté machine cible récupère le contenu rendu.
 # wipe.sh est désormais rendu dynamiquement par PxeController::wipeScript (route
 # /wipe.sh côté front controller) : disques + token inlinés par MAC à la requête.
 render discover.sh.j2           "$HTTP_ROOT/discover.sh"
