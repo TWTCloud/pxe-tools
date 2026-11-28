@@ -83,7 +83,7 @@ def main():
                        (json.dumps({'ansible_role':'base'}),))
         database.chmod(0o600)
         base=root/'base.deb';module=root/'module.deb'
-        subprocess.run(['python3',str(ROOT/'packaging/native/build-apt-package-candidate.py'),str(base),'--version','0.1.0~beta1','--maintainer','PXE Tools <security@pxetools.com>'],check=True,stdout=subprocess.DEVNULL)
+        subprocess.run(['python3',str(ROOT/'tests/support/legacy-appliance/build-package.py'),str(base),'--version','0.1.0~beta1','--maintainer','PXE Tools <security@pxetools.com>'],check=True,stdout=subprocess.DEVNULL)
         subprocess.run(['python3',str(ROOT/'packaging/native/build-local-ansible-package.py'),str(module),'--release','--version','0.1.0~beta1'],check=True,stdout=subprocess.DEVNULL)
         base.chmod(0o644);module.chmod(0o644)
         test_fresh_database_mode(root)

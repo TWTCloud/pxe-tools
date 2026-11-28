@@ -27,7 +27,7 @@ def main():
         unsafe_file.chmod(0o666)
         unsafe_conf.chmod(0o666)
         unsafe_unit.chmod(0o664)
-        builder = source/'packaging/native/build-apt-package-candidate.py'
+        builder = source/'tests/support/legacy-appliance/build-package.py'
         untracked = source/'app/fixture-untracked'; untracked.write_text('fixture-only'); untracked.chmod(0o644)
         denied = subprocess.run(['python3', str(builder), str(work/'untracked.deb'), '--version', '0.1.0~fixture',
                                  '--maintainer', 'Fixture <fixture@example.invalid>'], capture_output=True)
@@ -40,11 +40,11 @@ def main():
         unsafe_file.chmod(0o666)
         for mask in (0o002, 0o022, 0o077):
             for name, script, options in (
-                ('base', 'build-apt-package-candidate.py', ['--maintainer', 'Fixture <fixture@example.invalid>']),
-                ('ansible', 'build-local-ansible-package.py', ['--release']),
+                ('base', 'tests/support/legacy-appliance/build-package.py', ['--maintainer', 'Fixture <fixture@example.invalid>']),
+                ('ansible', 'packaging/native/build-local-ansible-package.py', ['--release']),
             ):
                 package = work/f'{name}-{mask:03o}.deb'
-                subprocess.run(['python3', str(source/'packaging/native'/script), str(package),
+                subprocess.run(['python3', str(source/script), str(package),
                                 '--version', '0.1.0~modefixture', *options], check=True,
                                stdout=subprocess.DEVNULL, umask=mask)
                 if name == 'base':

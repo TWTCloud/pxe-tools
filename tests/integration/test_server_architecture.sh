@@ -31,7 +31,7 @@ chmod 0755 "$work"
 if [ "$mode" = apt ]; then
     version="${PXE_TEST_APT_VERSION:-0.1.0~lab1}"
     for arch in amd64 arm64; do
-        python3 packaging/native/build-apt-package-candidate.py "$work/candidate-$arch.deb" \
+        python3 tests/support/legacy-appliance/build-package.py "$work/candidate-$arch.deb" \
             --architecture "$arch" --version "$version" --maintainer 'Fixture <fixture@example.invalid>'
         test "$(dpkg-deb -f "$work/candidate-$arch.deb" Architecture)" = "$arch"
         test "$(stat -c %s "$work/candidate-$arch.deb")" -le 26214400

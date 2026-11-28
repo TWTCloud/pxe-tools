@@ -849,9 +849,12 @@ class NativeFirstBootCompatibility(unittest.TestCase):
             shutil.copytree(ROOT, source, ignore=shutil.ignore_patterns('.git', '__pycache__', '*.pyc', '.DS_Store'))
             subprocess.run(['git', 'init', '-q', str(source)], check=True)
             subprocess.run(['git', '-C', str(source), 'add', '-A'], check=True)
-            for name, builder in (('base', 'build-local-package.py'), ('ansible', 'build-local-ansible-package.py')):
+            for name, builder in (
+                ('base', 'tests/support/legacy-appliance/build-package.py'),
+                ('ansible', 'packaging/native/build-local-ansible-package.py'),
+            ):
                 package = work / (name + '.deb')
-                subprocess.run([sys.executable, str(source / 'packaging/native' / builder), str(package),
+                subprocess.run([sys.executable, str(source / builder), str(package),
                                 '--version', '0.1.0~fixture'], check=True, stdout=subprocess.DEVNULL)
                 extracted = work / (name + '-tree')
                 subprocess.run(['dpkg-deb', '-x', str(package), str(extracted)], check=True)

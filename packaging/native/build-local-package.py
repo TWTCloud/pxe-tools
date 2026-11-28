@@ -373,9 +373,9 @@ if __name__ == '__main__':
     parser.add_argument('destination',type=Path)
     parser.add_argument('--version',default='0.0.1~local2')
     parser.add_argument('--architecture', choices=GRUB_DEPENDENCIES, default='amd64')
-    parser.add_argument('--rust-binary', type=Path, help='path to the native Rust binary')
-    parser.add_argument('--rust-guided', action='store_true', help='serve guided PXE using Rust without PHP-FPM')
+    parser.add_argument('--rust-binary', type=Path, required=True, help='path to the native Rust binary')
+    parser.add_argument('--rust-guided', action='store_true', help=argparse.SUPPRESS)
     args=parser.parse_args()
     build(args.destination, args.version, architecture=args.architecture, rust_binary=args.rust_binary,
-          rust_guided=args.rust_guided)
+          rust_guided=True)
     print('Experimental local package built:',args.destination)
