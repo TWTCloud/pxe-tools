@@ -107,22 +107,34 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
     client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     client.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'eth0\0')
     client.bind(('', 68))
-    deadline = time.monotonic() + 12
-    while time.monotonic() < deadline:
-        client.sendto(packet, (sys.argv[1].rsplit('.', 1)[0] + '.255', 67))
+
+    def exchange(destination):
+        deadline = time.monotonic() + 10
         client.settimeout(1)
-        try:
-            reply, peer = client.recvfrom(2048)
-        except TimeoutError:
-            continue
-        if reply[4:8] != xid:
-            continue
-        assert reply[16:20] == b'\0' * 4, 'proxy DHCP offered an IP lease'
-        assert reply[20:24] == server, (sys.argv[1], peer, socket.inet_ntoa(reply[20:24]))
-        assert reply[108:236].split(b'\0', 1)[0] == b'grubnetx64.efi'
-        break
-    else:
-        raise SystemExit(f'No UEFI ProxyDHCP offer received from {sys.argv[1]}')
+        while time.monotonic() < deadline:
+            client.sendto(packet, destination)
+            try:
+                reply, peer = client.recvfrom(2048)
+            except TimeoutError:
+                continue
+            if reply[4:8] == xid:
+                assert reply[20:24] == server, (destination, peer, socket.inet_ntoa(reply[20:24]))
+                return reply
+        raise SystemExit(f'No UEFI ProxyDHCP reply from {destination}')
+
+    prefix = sys.argv[1].rsplit('.', 1)[0]
+    offer = exchange((prefix + '.255', 67))
+    assert offer[16:20] == b'\0' * 4, 'proxy DHCP offered an IP lease'
+    # UEFI boot parameters are sent by ProxyDHCP on 4011 after the client has
+    # an address. dnsmasq can leave the filename empty in the initial offer.
+    xid = os.urandom(4)
+    packet[4:8] = xid
+    packet[10:12] = b'\0\0'
+    packet[12:16] = socket.inet_aton(prefix + '.20')
+    packet[242] = 3
+    reply = exchange((sys.argv[1], 4011))
+    filename = reply[108:236].split(b'\0', 1)[0]
+    assert filename == b'grubnetx64.efi', filename
 PYTHON
     local tftp menu seed install mac="02:00:00:00:ae:0$id"
     tftp=$(sudo nsenter -t "$pid" -n curl --noproxy '*' -fsS --max-time 8 "tftp://$server_ip/pxelinux.cfg/default")
@@ -132,15 +144,20 @@ PYTHON
     [[ "$menu" == *"http://$server_ip/"* && "$menu" != *"$other"* ]]
     [[ "$seed" == *"http://$server_ip/"* && "$seed" != *"$other"* ]]
     docker exec -i "$server" python3 - "$mac" <<'PYTHON'
+import json
 import sqlite3
 import sys
 
 with sqlite3.connect('/var/lib/pxe-tools/pxe-tools.sqlite') as db:
     machine, = db.execute('SELECT id FROM machines WHERE mac=?', [sys.argv[1]]).fetchone()
+    action = db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES(?,'install_only','pending',?)",
+                        (machine, '0' * 63 + sys.argv[1][-1])).lastrowid
+    config = {
+        'codename': 'trixie', '_pending_action_id': action, 'system_disk_path': '/dev/vda',
+        'system_disk_identity': {'kind': 'serial', 'value': 'MULTINETWORK-FIXTURE', 'status': 'valid'},
+    }
     db.execute("UPDATE machines SET status='configured',hostname='pxe-fixture',install_config_json=? WHERE id=?",
-               ('{"codename":"trixie"}', machine))
-    db.execute("INSERT INTO actions(machine_id,type,status,token) VALUES(?,'install_only','pending',?)",
-               (machine, '0' * 31 + sys.argv[1][-1]))
+               (json.dumps(config), machine))
 PYTHON
     install=$(sudo nsenter -t "$pid" -n curl --noproxy '*' -fsS --max-time 8 \
         "http://$server_ip/pxe/preseed.cfg?mac=$mac")
