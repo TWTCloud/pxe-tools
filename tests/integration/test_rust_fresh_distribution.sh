@@ -364,9 +364,11 @@ docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
     client=(curl -kfsS --max-time 8 --user setup-fixture:fixture-only-password)
     route="$origin/settings/images"
     archive='https://cdimage.debian.org/cdimage/archive/13.7.0/amd64/iso-cd/debian-13.7.0-amd64-netinst.iso'
-    fixture=$(mktemp -d)
+    # The APT guest mounts /tmp with noexec. Keep the executable on its root filesystem.
+    fixture=$(mktemp -d /var/tmp/pxe-catalog.XXXXXXXX)
     trap 'rm -rf -- "$fixture"' EXIT
     install -m 0755 /tmp/pxe-catalog-curl "$fixture/curl"
+    test "$("$fixture/curl" https://deb.debian.org/debian/dists/trixie/Release)" = 'Version: 13.8'
     PATH="$fixture:$PATH" /usr/lib/pxe-tools/pxe-tools-rust --refresh-catalog "$config"
     test "$(sqlite3 "$database" "SELECT count(DISTINCT distro) FROM catalog_entries")" = 6
     test "$(sqlite3 "$database" "SELECT group_concat(arch) FROM catalog_entries
