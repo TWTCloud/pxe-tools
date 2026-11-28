@@ -349,7 +349,7 @@ if [[ "$variant" == docker ]]; then
     docker exec "$container" curl -kfsS --max-time 5 https://127.0.0.1:9443/healthz >/dev/null
 fi
 printf 'HTTPS port trial, confirmation and restart passed (%s)\n' "$variant"
-docker cp tests/integration/fixtures/catalog_curl.py "$container:/tmp/pxe-catalog-curl"
+docker exec -i "$container" bash -c 'cat > /tmp/pxe-catalog-curl' < tests/integration/fixtures/catalog_curl.py
 docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
     set -euo pipefail
     if [[ "$1" == apt ]]; then
