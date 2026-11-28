@@ -4,7 +4,7 @@ use super::{record_plan, schedule_allowed, Device};
 use crate::{
     connect,
     linux_install::{Plan, Source},
-    preseed, pxe, setting,
+    preseed, pxe,
     web::{
         admin::escape,
         linux_boot::{self, Entry, RhelRepositories},
@@ -193,11 +193,15 @@ pub(in crate::web) fn serve(
     else {
         return Ok(unavailable());
     };
-    let subnet = setting(&tx, "pxe_subnet")?;
     let Some(client) = device.inventory["discovery_ip"]
         .as_str()
         .and_then(|value| value.parse::<Ipv4Addr>().ok())
-        .filter(|client| pxe::client_in_subnet(*client, &subnet))
+        .map(|client| {
+            crate::boot_networks::contains_client(&tx, client)
+                .map(|allowed| allowed.then_some(client))
+        })
+        .transpose()?
+        .flatten()
     else {
         return Ok(plain(
             StatusCode::CONFLICT,

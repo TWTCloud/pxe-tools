@@ -36,8 +36,9 @@ pub fn serve(
     db: &mut Connection,
     source: Option<Ipv4Addr>,
     raw_mac: &str,
+    link: Option<&crate::boot_networks::Network>,
 ) -> rusqlite::Result<HttpResponse> {
-    let subnet = setting(db, "pxe_subnet")?;
+    let subnet = link.map_or_else(|| setting(db, "pxe_subnet"), |item| Ok(item.subnet.clone()))?;
     let Some((network, mask)) = parse_subnet(&subnet) else {
         return Ok(reply(
             503,
@@ -87,7 +88,10 @@ pub fn serve(
         return Ok(reply(404, ""));
     }
 
-    let pxe_server = setting(&tx, "pxe_ip")?;
+    let pxe_server = link.map_or_else(
+        || setting(&tx, "pxe_ip"),
+        |item| Ok(item.address.to_string()),
+    )?;
     let Ok(pxe_server) = pxe_server.parse::<Ipv4Addr>() else {
         return Ok(reply(
             503,

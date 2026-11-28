@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
-use super::{client_in_subnet, log_event, machine_for_mac, normalize_mac};
-use crate::{monitoring::Catalog, setting};
+use super::{log_event, machine_for_mac, normalize_mac};
+use crate::monitoring::Catalog;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::json;
 use std::net::Ipv4Addr;
@@ -40,7 +40,7 @@ pub(crate) fn dhcp(
         id
     };
     if let Some(ip) = ip {
-        if client_in_subnet(ip, &setting(&tx, "pxe_subnet")?) {
+        if crate::boot_networks::contains_client(&tx, ip)? {
             // Preserve the PHP observation format for databases shared across editions.
             let message = format!(r#"PXE DHCP observed {{"mac":"{mac}","ip":"{ip}"}}"#);
             log_event(

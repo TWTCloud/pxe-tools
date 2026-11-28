@@ -517,21 +517,27 @@ fn static_pxe_address(
     cidr: u8,
     gateway: Option<Ipv4Addr>,
 ) -> rusqlite::Result<bool> {
-    let Some((network, mask)) = pxe::parse_subnet(&setting(db, "pxe_subnet")?) else {
-        return Ok(false);
-    };
-    let Ok(server) = setting(db, "pxe_ip")?.parse::<Ipv4Addr>() else {
-        return Ok(false);
-    };
-    Ok(
+    let validate = |network: &str, server: Ipv4Addr| {
+        let Some((network, mask)) = pxe::parse_subnet(network) else {
+            return false;
+        };
         static_ipv4_host(address, Ipv4Addr::from(network), mask.count_ones() as u8)
             && address != server
             && static_ipv4_host(address, address, cidr)
             && match gateway {
                 Some(gateway) => gateway != address && static_ipv4_host(gateway, address, cidr),
                 None => static_ipv4_host(server, address, cidr),
-            },
-    )
+            }
+    };
+    if let Some(networks) = crate::boot_networks::configured(db)? {
+        return Ok(networks
+            .iter()
+            .any(|item| validate(&item.subnet, item.address)));
+    }
+    let Ok(server) = setting(db, "pxe_ip")?.parse::<Ipv4Addr>() else {
+        return Ok(false);
+    };
+    Ok(validate(&setting(db, "pxe_subnet")?, server))
 }
 
 fn selection(form: &[u8]) -> Option<Selection> {

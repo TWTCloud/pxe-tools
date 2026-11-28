@@ -42,7 +42,7 @@ pub(super) async fn serve(
     let IpAddr::V4(peer) = peer else {
         return missing();
     };
-    if !secure || site.pxe_ip != Some(server) {
+    if !secure || !site.is_pxe_address(server) {
         return missing();
     }
     let route = path.trim_start_matches(PREFIX);
@@ -107,9 +107,7 @@ fn handle(
         &database,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    if setting(&db, "pxe_enabled")? != "on"
-        || !pxe::client_in_subnet(peer, &setting(&db, "pxe_subnet")?)
-    {
+    if setting(&db, "pxe_enabled")? != "on" || !site.pxe_peer(&db, server, IpAddr::V4(peer))? {
         return Ok(missing());
     }
     if let (Some(action), Some(payload)) = (route.strip_prefix("complete/"), payload) {

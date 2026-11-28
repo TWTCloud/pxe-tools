@@ -82,6 +82,7 @@ struct Site {
     assets: assets::Assets,
     catalog: Arc<monitoring::Catalog>,
     pxe_ip: Option<Ipv4Addr>,
+    boot_networks: Option<Vec<crate::boot_networks::Network>>,
     addresses: Vec<Ipv4Addr>,
     local_names: Vec<String>,
     console_port: console_port::ConsolePort,
@@ -97,6 +98,43 @@ struct Site {
     acme_challenge: Arc<acme::ChallengeResponse>,
 }
 
+impl Site {
+    fn boot_network(
+        &self,
+        address: Ipv4Addr,
+        peer: IpAddr,
+    ) -> Option<&crate::boot_networks::Network> {
+        self.boot_networks.as_ref()?.iter().find(|network| {
+            (address == network.address || (address.is_loopback() && peer.is_loopback()))
+                && (peer.is_loopback() || network.contains(peer))
+        })
+    }
+
+    fn is_pxe_address(&self, address: Ipv4Addr) -> bool {
+        self.boot_networks
+            .as_ref()
+            .map_or(self.pxe_ip == Some(address), |networks| {
+                networks.iter().any(|network| network.address == address)
+            })
+    }
+
+    fn pxe_peer(
+        &self,
+        db: &rusqlite::Connection,
+        address: Ipv4Addr,
+        peer: IpAddr,
+    ) -> rusqlite::Result<bool> {
+        if self.boot_networks.is_some() {
+            return Ok(self
+                .boot_network(address, peer)
+                .is_some_and(|network| network.contains(peer)));
+        }
+        Ok(
+            matches!(peer, IpAddr::V4(peer) if crate::pxe::client_in_subnet(peer, &setting(db, "pxe_subnet")?)),
+        )
+    }
+}
+
 pub fn serve(config: &Path) -> Result<(), ErrorBox> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -107,13 +145,19 @@ pub fn serve(config: &Path) -> Result<(), ErrorBox> {
 }
 
 async fn run(config: &Path) -> Result<(), ErrorBox> {
-    let pxe_ip = active_pxe_address(config)?;
+    let boot_networks = crate::boot_networks::active(config, true)?;
+    let pxe_ip = match &boot_networks {
+        Some(networks) => networks.first().map(|network| network.address),
+        None => active_pxe_address(config)?,
+    };
     let mut addresses = admin_addresses()?;
-    if let Some(address) = pxe_ip {
-        if !addresses.contains(&address) {
-            addresses.push(address);
-        }
+    if let Some(networks) = &boot_networks {
+        addresses.extend(networks.iter().map(|network| network.address));
+    } else {
+        addresses.extend(pxe_ip);
     }
+    addresses.sort_unstable();
+    addresses.dedup();
     let public_host = env::var("PXE_PUBLIC_HOST")
         .ok()
         .filter(|name| !name.is_empty())
@@ -143,6 +187,7 @@ async fn run(config: &Path) -> Result<(), ErrorBox> {
         assets,
         catalog: Arc::new(serde_json::from_str(include_str!("checkpoints.json"))?),
         pxe_ip,
+        boot_networks,
         addresses,
         local_names: admin_hostnames(),
         console_port: console_port::ConsolePort::new(https_port),
@@ -596,8 +641,8 @@ async fn dispatch(
             let issued_host = site.tls.issued_host();
             let public_host = issued_host.as_deref().or(site.public_host.as_deref());
             let host = site
-                .pxe_ip
-                .filter(|address| *address == local)
+                .is_pxe_address(local)
+                .then_some(())
                 .and(public_host)
                 .or_else(|| {
                     requested_host.as_ref().map(Authority::host).filter(|name| {
@@ -947,7 +992,13 @@ async fn dispatch(
             if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
-            let limit = if path == "/init/images" { 4096 } else { 2048 };
+            let limit = if matches!(path, "/init/network" | "/init/complete") {
+                8192
+            } else if path == "/init/images" {
+                4096
+            } else {
+                2048
+            };
             match read_form(&parts.headers, body, limit).await {
                 Ok(form) => Some(form),
                 Err(reply) => return reply,
@@ -1113,27 +1164,25 @@ async fn dispatch(
         };
     }
 
-    let Some(server) = site
-        .pxe_ip
-        .filter(|address| local.is_loopback() || local == *address)
-    else {
+    let network = site.boot_network(local, peer);
+    let server = if site.boot_networks.is_some() {
+        network.map(|network| network.address)
+    } else {
+        site.pxe_ip
+            .filter(|address| local.is_loopback() || local == *address)
+    };
+    let Some(server) = server else {
         return plain(StatusCode::NOT_FOUND, "Not found\n");
     };
     if readable && path.starts_with(crate::media::RHEL_PREFIX) {
         let Ok(permit) = site.requests.try_acquire() else {
             return plain(StatusCode::SERVICE_UNAVAILABLE, "Busy\n");
         };
-        let config = site.database.clone();
+        let site_for_check = site.clone();
         let allowed = task::spawn_blocking(move || -> Option<bool> {
-            let IpAddr::V4(peer) = peer else {
-                return Some(false);
-            };
-            let path = configured_database(&config)?;
+            let path = configured_database(&site_for_check.database)?;
             let db = crate::connect(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-            Some(crate::pxe::client_in_subnet(
-                peer,
-                &setting(&db, "pxe_subnet").ok()?,
-            ))
+            site_for_check.pxe_peer(&db, server, peer).ok()
         })
         .await
         .ok()
@@ -1209,6 +1258,7 @@ async fn dispatch(
                 &parts.headers,
                 parts.method == Method::HEAD,
                 editions.as_deref(),
+                network,
             )
             .await
         {
@@ -1217,9 +1267,12 @@ async fn dispatch(
     }
     let dynamic = matches!(
         path,
-        crate::PRESEED | crate::LEGACY_PRESEED | crate::GRUB_CONFIG | crate::LEGACY_GRUB_CONFIG | "/wipe.sh"
-    )
-        || path.starts_with("/api/")
+        crate::PRESEED
+            | crate::LEGACY_PRESEED
+            | crate::GRUB_CONFIG
+            | crate::LEGACY_GRUB_CONFIG
+            | "/wipe.sh"
+    ) || path.starts_with("/api/")
         || path.starts_with("/pxe/postboot/");
     if !dynamic {
         return plain(StatusCode::NOT_FOUND, "Not found\n");
@@ -1258,6 +1311,7 @@ async fn dispatch(
             )
         })
         .collect();
+    let network = network.cloned();
     let site = site.clone();
     let result = task::spawn_blocking(move || {
         let mut body = Cursor::new(data);
@@ -1266,6 +1320,7 @@ async fn dispatch(
             method,
             headers,
             body: &mut body,
+            network: network.as_ref(),
         };
         handle_request(
             &mut request,

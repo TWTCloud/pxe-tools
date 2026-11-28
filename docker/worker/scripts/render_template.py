@@ -201,7 +201,7 @@ def main() -> int:
         fetch_default_netboot_path_from_db(arch_default) or f"debian/{arch_default}"
     )
     # Lot 3 Spec B : settings DB en priorité (avec env vars en fallback compat).
-    orch_ip = db_setting("pxe_ip", os.environ.get("ORCHESTRATOR_IP", ""))
+    orch_ip = os.environ.get("PXE_PROFILE_ADDRESS") or db_setting("pxe_ip", os.environ.get("ORCHESTRATOR_IP", ""))
     root_pwd_hash = db_setting("root_password_hash", os.environ.get("ROOT_PASSWORD_HASH", ""))
     ansible_pubkey = db_setting("ansible_ssh_pubkey", "") if db_setting("ansible_enabled", "off") == "on" else ""
     # Spec H : toggle iPXE chainload (off par défaut). Quand on, pxelinux et grub

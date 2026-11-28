@@ -9,7 +9,12 @@ use super::{
     ui::{self, WizardStep},
     ErrorBox, Reply,
 };
-use crate::{connect, pxe::parse_subnet, setting};
+use crate::{
+    boot_networks::{self, Network as Link},
+    connect,
+    pxe::parse_subnet,
+    setting,
+};
 use hyper::StatusCode;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -34,6 +39,8 @@ pub(super) struct Network {
     subnet: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     proxy_subnet: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    additional: Vec<Link>,
 }
 
 impl Network {
@@ -51,19 +58,38 @@ impl Network {
                 address: Ipv4Addr::UNSPECIFIED,
                 subnet: String::new(),
                 proxy_subnet: None,
+                additional: Vec::new(),
             });
         }
-        let detected = field(fields, "network_address");
-        let (interface, address, subnet) = if detected.is_empty() {
+        let mut selections: Vec<_> = fields
+            .iter()
+            .filter(|(name, value)| network_address_field(name) && !value.is_empty())
+            .collect();
+        selections.sort_unstable_by_key(|(key, _)| *key);
+        let mut links = Vec::new();
+        if !selections.is_empty() {
+            let detected = boot_networks::detected();
+            for (_, selection) in selections {
+                let network = detected
+                    .iter()
+                    .find(|item| format!("{}|{}", item.interface, item.address) == *selection)?;
+                links.push(network.clone());
+            }
+        }
+        if links.len() > 1 {
+            if !boot_networks::valid(&links) || !field(fields, "dhcp_proxy_cidr").is_empty() {
+                return None;
+            }
+        }
+        let (interface, address, subnet) = if links.is_empty() {
             (
                 field(fields, "pxe_interface").to_owned(),
                 field(fields, "pxe_ip").parse::<Ipv4Addr>().ok()?,
                 field(fields, "pxe_subnet").to_owned(),
             )
         } else {
-            detected_networks()
-                .into_iter()
-                .find(|(interface, address, _)| format!("{interface}|{address}") == detected)?
+            let first = links.remove(0);
+            (first.interface, first.address, first.subnet)
         };
         let (network, mask) = parse_subnet(&subnet)?;
         if address.is_unspecified()
@@ -89,6 +115,7 @@ impl Network {
             } else {
                 None
             },
+            additional: links,
         };
         plan.assigned().then_some(plan)
     }
@@ -121,6 +148,8 @@ impl Network {
             address,
             subnet: setting(db, "pxe_subnet")?,
             proxy_subnet,
+            additional: boot_networks::configured(db)?
+                .map_or_else(Vec::new, |items| items.into_iter().skip(1).collect()),
         })
     }
 
@@ -135,6 +164,17 @@ impl Network {
             store(db, "pxe_ip", &self.address.to_string())?;
             store(db, "pxe_subnet", &self.subnet)?;
             store(db, "network_override", "off")?;
+            let values = if self.additional.is_empty() {
+                String::new()
+            } else {
+                let mut links = vec![
+                    Link::new(self.interface.clone(), self.address, &self.subnet)
+                        .ok_or("Invalid primary PXE network")?,
+                ];
+                links.extend(self.additional.iter().cloned());
+                serde_json::to_string(&links)?
+            };
+            store(db, boot_networks::KEY, &values)?;
         }
         if self.role == Role::Proxy {
             let (network, mask) =
@@ -165,7 +205,11 @@ impl Network {
             return true;
         }
         #[cfg(target_os = "linux")]
-        return super::validate_interface(self.address, &self.interface).is_ok();
+        return super::validate_interface(self.address, &self.interface).is_ok()
+            && self
+                .additional
+                .iter()
+                .all(|link| super::validate_interface(link.address, &link.interface).is_ok());
         #[cfg(not(target_os = "linux"))]
         false
     }
@@ -183,6 +227,9 @@ pub(crate) fn refresh_pxe_address(config: &Path) -> Result<String, ErrorBox> {
     let plan = Network::current(&tx)?;
     if !plan.enabled() {
         return Ok("unchanged".into());
+    }
+    if !plan.additional.is_empty() {
+        return Ok("multiple".into());
     }
     let networks = detected_networks();
     if networks
@@ -245,46 +292,18 @@ pub(crate) fn finish_pxe_address(config: &Path, address: Ipv4Addr) -> Result<(),
 }
 
 fn detected_networks() -> Vec<(String, Ipv4Addr, String)> {
-    if !cfg!(target_os = "linux") {
-        return Vec::new();
-    }
-    let Ok(output) = std::process::Command::new("/usr/bin/ip")
-        .args(["-j", "-4", "addr", "show", "up"])
-        .output()
-    else {
-        return Vec::new();
-    };
-    let Ok(links) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout) else {
-        return Vec::new();
-    };
-    let mut choices = Vec::new();
-    for link in links {
-        let (Some(interface), Some(addresses)) =
-            (link["ifname"].as_str(), link["addr_info"].as_array())
-        else {
-            continue;
-        };
-        for entry in addresses {
-            let (Some(address), Some(prefix)) = (
-                entry["local"]
-                    .as_str()
-                    .and_then(|ip| ip.parse::<Ipv4Addr>().ok()),
-                entry["prefixlen"].as_u64(),
-            ) else {
-                continue;
-            };
-            if entry["family"] == "inet"
-                && prefix <= 32
-                && !address.is_unspecified()
-                && !address.is_loopback()
-                && !address.is_multicast()
-                && address.octets()[0] < 240
-            {
-                choices.push((interface.to_owned(), address, format!("{address}/{prefix}")));
-            }
-        }
-    }
-    choices
+    boot_networks::detected()
+        .into_iter()
+        .map(|item| (item.interface, item.address, item.subnet))
+        .collect()
+}
+
+pub(super) fn network_address_field(name: &str) -> bool {
+    name == "network_address"
+        || name
+            .strip_prefix("network_address_")
+            .and_then(|index| index.parse::<usize>().ok())
+            .is_some_and(|index| index < 128)
 }
 
 pub(super) fn is_route(path: &str) -> bool {
@@ -374,7 +393,7 @@ fn change(
     }
     if endpoint == "/init/network" {
         let Some(plan) = Network::parse(fields) else {
-            return Ok(invalid(endpoint, "Sélectionnez une interface, une adresse IPv4 attribuée et un sous-réseau cohérent."));
+            return Ok(invalid(endpoint, "Sélectionnez une IPv4 attribuée par interface, sur des sous-réseaux distincts. Le sous-réseau DHCP personnalisé est réservé à une seule interface."));
         };
         store(&tx, NETWORK_DRAFT, &serde_json::to_string(&plan)?)?;
         let next = if plan.role == Role::Console {
@@ -537,42 +556,57 @@ pub(super) fn network_form(
     );
     let choices = detected_networks();
     let saved_network = plan.filter(|saved| !saved.address.is_unspecified());
-    let selected = if let Some(saved) = saved_network {
-        let subnet = parse_subnet(&saved.subnet);
-        choices.iter().position(|(interface, ip, cidr)| {
-            *interface == saved.interface && *ip == saved.address && parse_subnet(cidr) == subnet
+    let saved_choice = |interface: &str, ip: Ipv4Addr, cidr: &str| {
+        saved_network.is_some_and(|saved| {
+            (saved.interface == interface
+                && saved.address == ip
+                && parse_subnet(&saved.subnet) == parse_subnet(cidr))
+                || saved
+                    .additional
+                    .iter()
+                    .any(|item| item.interface == interface && item.address == ip)
         })
-    } else {
-        (choices.len() == 1).then_some(0)
     };
-    let manual = choices.is_empty() || (saved_network.is_some() && selected.is_none());
+    let manual = choices.is_empty()
+        || (saved_network.is_some()
+            && !choices
+                .iter()
+                .any(|(interface, ip, cidr)| saved_choice(interface, *ip, cidr)));
     if choices.is_empty() {
-        html.push_str(r#"<p class="muted">Aucune adresse IPv4 utilisable n’a été détectée. Vérifiez que l’interface est active ou renseignez ses paramètres ci-dessous.</p>"#);
+        html.push_str(r#"<p class="muted">Aucune interface avec une IPv4 active. Connectez le réseau ou renseignez son adresse ci-dessous.</p>"#);
     } else {
-        html.push_str(r#"<div class="field"><label for="network-address">Interface et adresse IPv4 pour PXE</label>
-<select id="network-address" name="network_address" aria-describedby="network-address-help">"#);
-        if selected.is_none() && !manual {
-            html.push_str(r#"<option value="" selected disabled>Choisir une interface et une adresse IPv4</option>"#);
-        }
-        for (index, (interface, ip, subnet)) in choices.iter().enumerate() {
-            html.push_str("<option value=\"");
+        html.push_str(r#"<fieldset class="form-stack"><legend>Réseaux desservis</legend>
+<p class="muted">Cochez une IPv4 par interface. Chaque client reçoit l’adresse indiquée sur sa ligne.</p>"#);
+        for (index, (interface, ip, subnet)) in choices.iter().take(128).enumerate() {
+            let checked =
+                if saved_choice(interface, *ip, subnet) || (plan.is_none() && choices.len() == 1) {
+                    " checked"
+                } else {
+                    ""
+                };
+            html.push_str(&format!(r#"<label class="check-label"><input type="checkbox" name="network_address_{index}" value=""#));
             escape(&mut html, &format!("{interface}|{ip}"));
-            html.push('"');
-            if selected == Some(index) {
-                html.push_str(" selected");
-            }
-            html.push('>');
-            escape(&mut html, &format!("{interface} · {subnet}"));
-            html.push_str("</option>");
+            html.push_str(&format!(r#""{checked}><span>"#));
+            escape(&mut html, interface);
+            html.push_str("<small>");
+            escape(&mut html, &format!("{subnet} · Serveur PXE {ip}"));
+            html.push_str("</small></span></label>");
         }
-        let manual_selected = if manual { " selected" } else { "" };
-        html.push_str(&format!(r#"<option value=""{manual_selected}>Saisie manuelle</option></select>
-<small id="network-address-help">Choisissez l’interface reliée au réseau des appareils à démarrer.</small></div>"#));
+        html.push_str("</fieldset>");
+        if saved_network.is_some_and(|saved| {
+            saved.additional.iter().any(|item| {
+                !choices
+                    .iter()
+                    .any(|(interface, _, _)| *interface == item.interface)
+            })
+        }) {
+            html.push_str(r#"<p class="muted">Certaines interfaces configurées sont hors ligne. Réactivez-les avant d’enregistrer pour les conserver.</p>"#);
+        }
     }
     let open = if manual { " open" } else { "" };
     html.push_str(&format!(r#"<details{open}><summary>Saisir les paramètres IPv4</summary><div class="form-stack network-details">"#));
     if !choices.is_empty() {
-        html.push_str(r#"<p class="muted">Sélectionnez « Saisie manuelle » dans la liste pour utiliser ces valeurs.</p>"#);
+        html.push_str(r#"<p class="muted">Décochez les réseaux détectés pour utiliser la saisie manuelle.</p>"#);
     }
     let address = saved_network.map_or_else(String::new, |saved| saved.address.to_string());
     for (key, label, value, placeholder) in [
@@ -605,7 +639,7 @@ pub(super) fn network_form(
     let proxy_open = if proxy_subnet.is_some() { " open" } else { "" };
     html.push_str(&format!(r#"</div></details><details class="network-proxy-subnet"{proxy_open}>
 <summary>Sous-réseau personnalisé pour le proxy DHCP</summary><div class="field network-details">
-<label for="dhcp_proxy_cidr">Sous-réseau du proxy DHCP (facultatif)</label>
+<label for="dhcp_proxy_cidr">Sous-réseau du proxy DHCP pour une seule interface (facultatif)</label>
 <input id="dhcp_proxy_cidr" name="dhcp_proxy_cidr" placeholder="Même sous-réseau que PXE" autocomplete="off" spellcheck="false" value=""#));
     escape(&mut html, proxy_subnet.unwrap_or_default());
     html.push_str(r#""></div></details>"#);
@@ -633,6 +667,14 @@ fn done_page(db: &Connection, plan: &Network) -> Result<Reply, ErrorBox> {
         html.push_str("</dd><dt>Sous-réseau</dt><dd>");
         escape(&mut html, &plan.subnet);
         html.push_str("</dd>");
+        for item in &plan.additional {
+            html.push_str("<dt>Autre interface</dt><dd>");
+            escape(
+                &mut html,
+                &format!("{} · {} · {}", item.interface, item.subnet, item.address),
+            );
+            html.push_str("</dd>");
+        }
         if let Some(cidr) = &plan.proxy_subnet {
             html.push_str("<dt>Sous-réseau du proxy DHCP</dt><dd>");
             escape(&mut html, cidr);

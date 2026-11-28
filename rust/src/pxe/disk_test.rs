@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     arg, bearer, decimal, disk_identity::serial, failure, header, install, json_response,
-    php_string, read_body, request_header, setting, ApiResult, HttpResponse, PxeRequest,
+    php_string, read_body, request_header, ApiResult, HttpResponse, PxeRequest,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use qualification::Qualification;
@@ -41,7 +41,7 @@ pub(crate) fn serve(
     let values = Input::new(query, &body, is_form);
     let test = decimal(values.get("test_id"));
     let peer = match ip {
-        Some(IpAddr::V4(peer)) if client_in_subnet(peer, &setting(db, "pxe_subnet")?) => Some(peer),
+        Some(IpAddr::V4(peer)) if client_in_subnet(peer, &request.subnet(db)?) => Some(peer),
         _ => None,
     };
     if route == "/api/disktest-job" {

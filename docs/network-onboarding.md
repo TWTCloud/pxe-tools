@@ -1,5 +1,16 @@
 # Configuration réseau au premier démarrage
 
+## Choisir plusieurs réseaux
+
+Dans l’assistant ou dans **Paramètres → Réseau**, cochez les interfaces qui
+desservent les appareils. Choisissez une IPv4 par interface et des sous-réseaux
+distincts. La liste indique l’adresse PXE que les clients utiliseront sur
+chaque réseau. Avec un DHCP externe déjà configuré pour PXE, annoncez sur chaque
+réseau l’adresse indiquée pour ce réseau, dans les options de démarrage du DHCP.
+
+Les installations déjà configurées conservent leur sélection à la mise à niveau.
+L’adresse peut être redétectée au démarrage dans le sous-réseau associé.
+
 Ce parcours est un candidat de développement ; il ne modifie pas une installation existante tant que les réglages ne sont pas enregistrés et appliqués. Sa validation et sa publication dans une nouvelle version APT sont deux étapes distinctes.
 
 ## Parcours courant

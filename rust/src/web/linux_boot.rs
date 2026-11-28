@@ -4,7 +4,7 @@ use super::{bytes, plain, ErrorBox, Reply, Site};
 use crate::{
     configured_database, connect, install,
     linux_install::{self, Plan, Source},
-    pxe::{client_in_subnet, log_event},
+    pxe::log_event,
     setting,
 };
 use hyper::{header, Response, StatusCode, Uri};
@@ -229,7 +229,7 @@ pub(super) fn menu(
         return Ok(plain(StatusCode::SERVICE_UNAVAILABLE, "PXE indisponible\n"));
     };
     let db = connect(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    if !matches!(peer, IpAddr::V4(peer) if client_in_subnet(peer, &setting(&db, "pxe_subnet")?)) {
+    if !site.pxe_peer(&db, server, peer)? {
         return Ok(plain(
             StatusCode::FORBIDDEN,
             "Client hors du sous-réseau PXE\n",
@@ -417,8 +417,7 @@ pub(super) fn automatic(
     };
     let mut db = connect(&database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if setting(&tx, "pxe_enabled")? != "on" || !client_in_subnet(peer, &setting(&tx, "pxe_subnet")?)
-    {
+    if setting(&tx, "pxe_enabled")? != "on" || !site.pxe_peer(&tx, server, IpAddr::V4(peer))? {
         return Ok(missing());
     }
     let session = tx.query_row(

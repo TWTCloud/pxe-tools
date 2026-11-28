@@ -70,7 +70,7 @@ APT_GUEST
         ;;
     docker)
         docker network create --internal "$container" >/dev/null
-        docker run -d --name "$container" --network "$container" \
+        docker run -d --name "$container" --network "$container" --cap-add NET_ADMIN \
             --hostname "$server_name" --dns-search "$search_domain" \
             "${PXE_RUST_GUIDED_DOCKER_IMAGE:?}" >/dev/null
         docker exec "$container" bash -ec '
@@ -349,4 +349,5 @@ if [[ "$variant" == docker ]]; then
     docker exec "$container" curl -kfsS --max-time 5 https://127.0.0.1:9443/healthz >/dev/null
 fi
 printf 'HTTPS port trial, confirmation and restart passed (%s)\n' "$variant"
+bash tests/integration/test_rust_multinetwork.sh "$container" "$variant"
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"

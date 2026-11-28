@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 mod apt_updates;
+mod boot_networks;
 mod catalog;
 mod discovery;
 mod disk_identity;
@@ -51,6 +52,16 @@ struct PxeRequest<'a> {
     method: Method,
     headers: Vec<(String, String)>,
     body: &'a mut dyn Read,
+    network: Option<&'a boot_networks::Network>,
+}
+
+impl PxeRequest<'_> {
+    fn subnet(&self, db: &Connection) -> rusqlite::Result<String> {
+        self.network.map_or_else(
+            || setting(db, "pxe_subnet"),
+            |network| Ok(network.subnet.clone()),
+        )
+    }
 }
 
 enum Routes<'a> {
@@ -108,6 +119,14 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     if let [flag, config] = args.as_slice() {
+        if (flag == "--pxe-networks" || flag == "--active-pxe-networks")
+            && Path::new(config).is_absolute()
+        {
+            let networks =
+                boot_networks::active(Path::new(config), flag == "--active-pxe-networks")?;
+            println!("{}", serde_json::to_string(&networks)?);
+            return Ok(());
+        }
         if flag == "--console-https-port" && Path::new(config).is_absolute() {
             println!("{}", web::configured_console_port(Path::new(config))?);
             return Ok(());
@@ -273,6 +292,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                         method: request.method().clone(),
                         headers,
                         body: request.as_reader(),
+                        network: None,
                     };
                     // This legacy listener only accepts requests on its private
                     // Unix socket. nginx supplies the original client address.
@@ -332,7 +352,7 @@ fn handle(
     match (method, path) {
         (Method::Get, MONITORING) => {
             let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            let subnet = setting(&db, "pxe_subnet")?;
+            let subnet = request.subnet(&db)?;
             let result = if matches!(ip, Some(IpAddr::V4(ip)) if ip.is_loopback())
                 || in_subnet(ip, &subnet)
             {
@@ -353,7 +373,7 @@ fn handle(
         }
         (Method::Get, BOOT_SELECTED) => {
             let db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            if !in_subnet(ip, &setting(&db, "pxe_subnet")?) {
+            if !in_subnet(ip, &request.subnet(&db)?) {
                 return Ok(response(404, TEXT, "# boot signal unavailable\n"));
             }
             let args = parse_query(query.as_bytes());
@@ -455,7 +475,7 @@ fn handle(
                     mac,
                 ),
                 "/api/install-end" => {
-                    let allowed = in_subnet(ip, &setting(&db, "pxe_subnet")?);
+                    let allowed = in_subnet(ip, &request.subnet(&db)?);
                     install::end(
                         &mut db,
                         allowed,
@@ -535,7 +555,7 @@ fn handle(
                 let Some(ip) = ip.filter(|ip| {
                     ip.is_loopback()
                         || is_mapped_loopback(*ip)
-                        || in_subnet(Some(*ip), &setting(&db, "pxe_subnet").unwrap_or_default())
+                        || in_subnet(Some(*ip), &request.subnet(&db).unwrap_or_default())
                         || in_subnet(
                             Some(*ip),
                             &setting(&db, "docker_internal_cidr").unwrap_or_default(),
@@ -580,7 +600,7 @@ fn handle(
         }
         (Method::Post, "/api/internal/install-log") => {
             let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-            let allowed = in_subnet(ip, &setting(&db, "pxe_subnet")?);
+            let allowed = in_subnet(ip, &request.subnet(&db)?);
             let args = parse_query(query.as_bytes());
             let body = read_body(request, install::LOG_CHUNK_MAX + 1).unwrap_or_default();
             let result = install::append_log(
@@ -642,16 +662,22 @@ fn handle(
                 Some(IpAddr::V4(ip)) => Some(ip),
                 _ => None,
             };
-            preseed::serve(&mut db, source, param(&args, "mac"))
+            preseed::serve(&mut db, source, param(&args, "mac"), request.network)
         }
         (Method::Get, GRUB_CONFIG | LEGACY_GRUB_CONFIG) => {
             let args = parse_query(query.as_bytes());
             let mut db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-            grub::serve(&mut db, ip, param(&args, "mac"), param(&args, "arch"))
+            grub::serve(
+                &mut db,
+                ip,
+                param(&args, "mac"),
+                param(&args, "arch"),
+                request.network,
+            )
         }
         (Method::Get, path) if path.starts_with("/pxe/postboot/") => {
             let db = connect(path_to_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            serve_postboot(&db, ip, path)
+            serve_postboot(&db, ip, path, request.network, &request.subnet(&db)?)
         }
         (method, path) => Ok(not_found(&method, path)),
     }
@@ -665,6 +691,8 @@ fn serve_postboot(
     db: &Connection,
     ip: Option<IpAddr>,
     path: &str,
+    network: Option<&boot_networks::Network>,
+    subnet: &str,
 ) -> rusqlite::Result<HttpResponse> {
     let not_found = || response(404, "text/plain", "Not found\n");
     let Some((id, name)) = path.trim_start_matches("/pxe/postboot/").split_once('/') else {
@@ -676,10 +704,7 @@ fn serve_postboot(
         _ => return Ok(not_found()),
     };
     let id = decimal(id);
-    if id <= 0
-        || !in_subnet(ip, &setting(db, "pxe_subnet")?)
-        || !install::application_file_allowed(db, id)?
-    {
+    if id <= 0 || !in_subnet(ip, subnet) || !install::application_file_allowed(db, id)? {
         return Ok(not_found());
     }
     let root = std::env::var_os("POSTBOOT_OUTPUT_DIR")
@@ -694,9 +719,27 @@ fn serve_postboot(
     if !file.starts_with(&root) || !file.is_file() {
         return Ok(not_found());
     }
-    let Ok(data) = fs::read(file) else {
+    let Ok(mut data) = fs::read(file) else {
         return Ok(not_found());
     };
+    if let Some(network) = network.filter(|_| name == "postboot.sh") {
+        let Ok(script) = std::str::from_utf8(&data) else {
+            return Ok(not_found());
+        };
+        data = script
+            .lines()
+            .map(|line| {
+                if line.starts_with("PXE_IP=\"") {
+                    format!("PXE_IP=\"{}\"", network.address)
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes();
+        data.push(b'\n');
+    }
     Ok(internal_reply(
         Response::from_data(data).with_header(header("Content-Type", mime)),
     ))

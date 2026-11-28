@@ -104,6 +104,7 @@ impl Assets {
         headers: &HeaderMap,
         head: bool,
         winpe: Option<&super::winpe::Editions>,
+        network: Option<&crate::boot_networks::Network>,
     ) -> Option<Reply> {
         let segments = path
             .strip_prefix('/')?
@@ -123,6 +124,8 @@ impl Assets {
             .collect::<Option<Vec<_>>>()?;
         let names: Vec<&str> = segments.iter().map(|value| value.as_ref()).collect();
 
+        let script_root =
+            || network.map_or_else(|| self.root.clone(), |link| link.directory(&self.root));
         let (base, path, mime) = match names.as_slice() {
             ["pxe", "windows", name]
                 if matches!(winpe, Some(super::winpe::Editions::Legacy))
@@ -167,12 +170,12 @@ impl Assets {
             | "disktest-preseed.cfg"
             | "wipe-preseed.cfg"
             | "boot.ipxe")] => (
-                self.root.clone(),
+                script_root(),
                 PathBuf::from(name),
                 "text/plain; charset=utf-8",
             ),
             [name @ ("discover.sh" | "disktest.sh")] => {
-                (self.root.clone(), PathBuf::from(name), "text/x-shellscript")
+                (script_root(), PathBuf::from(name), "text/x-shellscript")
             }
             ["MOK.der"] => (
                 self.root.clone(),
