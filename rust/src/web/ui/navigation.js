@@ -326,6 +326,61 @@
 })();
 
 (() => {
+  const status = document.querySelector('#catalogue [data-catalog-refresh]');
+  const pending = state => state === 'pending' || state === 'running';
+  if (!status || !pending(status.dataset.catalogRefresh)) return;
+
+  async function updateVersions() {
+    const response = await fetch('/settings/images/add', { cache: 'no-store' });
+    if (response.redirected || [401, 403, 404].includes(response.status)) return true;
+    if (!response.ok) return false;
+    const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+    const catalog = document.getElementById('catalogue');
+    const image = 'input[name="image"]';
+    const selection = new Set([...catalog.querySelectorAll(`${image}:checked`)]
+      .map(input => input.getAttribute('aria-label')));
+    const focused = catalog.contains(document.activeElement) && document.activeElement.matches(image)
+      ? document.activeElement.getAttribute('aria-label') : null;
+    const tables = page.querySelectorAll('[data-catalog-versions]');
+    if (!tables.length) return false;
+    for (const table of tables) {
+      const current = document.getElementById(`catalog-panel-${table.dataset.catalogVersions}`);
+      const replacement = table.tBodies[0];
+      current.querySelector('tbody').replaceWith(replacement);
+      for (const input of replacement.querySelectorAll(image)) {
+        const label = input.getAttribute('aria-label');
+        input.checked = selection.has(label);
+        if (label === focused) input.focus({ preventScroll: true });
+      }
+    }
+    catalog.querySelector('[data-catalog-selection]')?.dispatchEvent(new Event('change'));
+    return true;
+  }
+
+  async function poll() {
+    try {
+      const response = await fetch('/settings/images/refresh-button', { cache: 'no-store' });
+      if (response.redirected || [401, 403, 404].includes(response.status)) return;
+      if (response.ok) {
+        const next = new DOMParser().parseFromString(await response.text(), 'text/html')
+          .querySelector('[data-catalog-refresh]');
+        if (!next) return;
+        const state = next.dataset.catalogRefresh;
+        status.dataset.catalogRefresh = state;
+        if (status.innerHTML !== next.innerHTML) status.replaceChildren(...next.childNodes);
+        if (state === 'success' && await updateVersions()) return;
+        if (state !== 'success' && !pending(state)) return;
+      }
+    } catch {
+      // Retry while the console is temporarily unavailable.
+    }
+    setTimeout(poll, 2000);
+  }
+
+  setTimeout(poll, 1000);
+})();
+
+(() => {
   let list = document.getElementById('activity-list');
   const freshness = document.querySelector('[data-activity-refresh]');
   if (!list || !freshness) return;
