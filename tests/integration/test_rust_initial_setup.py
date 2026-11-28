@@ -641,20 +641,26 @@ def verify_image_console(client, database, authorization, http_root):
         db.executemany("""INSERT INTO catalog_entries(id,distro,version_full,arch,extract_method)
                           VALUES(?,?,?,?,?)""", [(9001,'debian','13.0-console','arm64','direct'),
                                                  (9002,'other','1.0-console','amd64','direct')])
+        archive = 'https://cdimage.debian.org/cdimage/archive/13.7.0/amd64/iso-cd/debian-13.7.0-amd64-netinst.iso'
+        db.execute("""INSERT INTO catalog_entries(id,distro,version_full,major,codename,arch,extract_method,iso_url)
+                      VALUES(9003,'debian','13.7.0',13,'trixie','amd64','iso_extract',?)""", (archive,))
+        db.execute("""INSERT INTO catalog_entries(id,distro,version_full,major,arch,extract_method)
+                      VALUES(9004,'debian','13.6.0',13,'amd64','iso_extract')""")
         db.execute("INSERT INTO os_images(distro,version,arch,status) VALUES('legacy','<trixie>','amd64','downloaded')")
         db.execute("INSERT INTO init_jobs(job_type,status) VALUES('bootstrap:refresh_catalog','running')")
     assert client.request(endpoint)[0] == 401
     assert client.request(endpoint, secure=False)[0] == 404
     assert action('/refresh', form={}, origin='https://other.example')[0] == 403
-    assert action('/refresh', form={})[:2] == (303, endpoint)
+    assert action('/refresh', form={})[:2] == (303, endpoint+'#catalogue')
     with closing(sqlite3.connect(database)) as db, db:
         assert db.execute("SELECT COUNT(*) FROM init_jobs WHERE status IN ('running','pending')").fetchone() == (1,)
         db.execute("UPDATE init_jobs SET status='success' WHERE job_type='bootstrap:refresh_catalog'")
     assert action('/add', form={'image':'9002'})[0] == 422
+    assert action('/add', form={'image':'9004'})[0] == 422
     assert action('/add', form={'image':'9001'})[:2] == (303, endpoint)
     assert action('', form={'action':'refresh', 'image':'9001'})[0] == 422
     for _ in range(2):
-        assert action('/refresh', form={})[:2] == (303, endpoint)
+        assert action('/refresh', form={})[:2] == (303, endpoint+'#catalogue')
     with closing(sqlite3.connect(database)) as db, db:
         job, = db.execute("SELECT id FROM init_jobs WHERE job_type='bootstrap:refresh_catalog_v2'").fetchall()
         assert json.loads(db.execute("SELECT value FROM settings WHERE key='catalog_job_ids'").fetchone()[0]) == list(job)
@@ -666,6 +672,22 @@ def verify_image_console(client, database, authorization, http_root):
     assert b'&lt;trixie&gt;' in page and b'1.0-console' not in page
     assert f'data-image-id="{image}" data-state="downloading"'.encode() in page
     assert b'<progress value="61" max="100"' in page
+    assert b'data-catalog-refresh="pending"' in page and 'Dans la file des tâches'.encode() in page
+    assert b'13.7.0 <small>Archive</small>' in page and b'13.6.0' not in page
+    assert action('/add', form={'image':'9003'})[:2] == (303, endpoint)
+    with closing(sqlite3.connect(database)) as db, db:
+        assert db.execute("SELECT extract_method,iso_url,status FROM os_images WHERE version_full='13.7.0'").fetchone() == (
+            'iso_extract', archive, 'pending',
+        )
+        db.execute("UPDATE init_jobs SET status='running',progress_percent=42 WHERE id=?", job)
+        db.execute("DELETE FROM os_images WHERE version_full='13.7.0'")
+        db.execute("DELETE FROM catalog_entries WHERE id IN (9003,9004)")
+    fragment = action('/refresh-button')[2]
+    assert b'data-catalog-refresh="running"' in fragment and b'<progress value="42" max="100"' in fragment
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE init_jobs SET status='success' WHERE id=?", job)
+    fragment = action('/refresh-button')[2]
+    assert b'data-catalog-refresh="success"' in fragment and 'Catalogue à jour'.encode() in fragment
     auto = {'catalog_auto_refresh_enabled':'on','catalog_auto_refresh_interval_hours':'24'}
     assert action('/auto-refresh',form={**auto,'catalog_auto_refresh_interval_hours':'48'})[0] == 422
     assert action('/auto-refresh',form=auto,origin='https://other.example')[0] == 403

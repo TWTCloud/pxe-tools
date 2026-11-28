@@ -18,8 +18,14 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{fmt::Write, path::Path};
 
 pub(super) const ROUTE: &str = "/settings/images";
+pub(super) const MAX_CATALOG_FORM: usize = 16 * 1024;
 const PAGE_SIZE: u64 = 100;
 const CATALOG_PER_DISTRIBUTION: usize = 50;
+const SELECTABLE_CATALOG_IMAGE: &str = "c.arch IN ('amd64','arm64')
+    AND ((c.distro='debian' AND (c.extract_method='direct'
+          OR (c.extract_method='iso_extract' AND NULLIF(c.iso_url,'') IS NOT NULL)))
+      OR (c.distro='ubuntu' AND c.extract_method='iso_extract')
+      OR (c.distro IN ('fedora','centos','almalinux','rocky') AND c.extract_method='direct'))";
 const DISTRIBUTIONS: [(&str, &str); 6] = [
     ("debian", "Debian"),
     ("ubuntu", "Ubuntu Server"),
@@ -416,7 +422,12 @@ fn update(route: Route, method: &Method, path: &Path, form: &[u8]) -> Result<Rep
         }
     }
     tx.commit()?;
-    Ok(redirect(StatusCode::SEE_OTHER, ROUTE))
+    let destination = if matches!(route, Route::Refresh) {
+        "/settings/images#catalogue"
+    } else {
+        ROUTE
+    };
+    Ok(redirect(StatusCode::SEE_OTHER, destination))
 }
 
 fn invalid() -> Reply {
@@ -432,7 +443,7 @@ fn queue_form(
     let mut rows = Vec::new();
     for (name, value) in fields {
         match name.as_ref() {
-            "image" if images.len() < DISTRIBUTIONS.len() * CATALOG_PER_DISTRIBUTION => {
+            "image" if images.len() < 2 * DISTRIBUTIONS.len() * CATALOG_PER_DISTRIBUTION => {
                 match value.parse::<i64>() {
                     Ok(id) if id > 0 => images.push(id),
                     _ => return Ok(Some(invalid())),
@@ -590,19 +601,31 @@ fn refresh_settings(db: &Connection) -> Result<String, ErrorBox> {
 
 fn refresh_button(db: &Connection) -> Result<String, ErrorBox> {
     let mut html = String::new();
-    if let Some(status) = db
+    if let Some((status, percent)) = db
         .query_row(
-            "SELECT status FROM init_jobs
+            "SELECT status, progress_percent FROM init_jobs
          WHERE job_type IN ('bootstrap:refresh_catalog','bootstrap:refresh_catalog_v2','bootstrap:auto_refresh_catalog_v2')
-         ORDER BY id DESC LIMIT 1",
+         ORDER BY status IN ('pending','running') DESC,id DESC LIMIT 1",
             [],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
         .optional()?
     {
-        html.push_str(r#"<p class="record-meta">Dernière actualisation du catalogue&nbsp; "#);
-        status_badge(&mut html, &status, super::activity::status_label(&status));
+        let (state, label) = match status.as_str() {
+            "pending" => ("pending", "Dans la file des tâches"),
+            "running" => ("running", "En cours"),
+            "success" => ("success", "Catalogue à jour"),
+            "failed" => ("failed", "Échec de l’actualisation"),
+            _ => ("neutral", super::activity::status_label(&status)),
+        };
+        write!(html, r#"<div data-catalog-refresh="{state}" role="status"><p class="record-meta">Actualisation du catalogue&nbsp; "#)?;
+        status_badge(&mut html, state, label);
         html.push_str("</p>");
+        if state == "running" {
+            let percent = percent.clamp(0, 100);
+            write!(html, r#"<div class="image-progress"><progress value="{percent}" max="100" aria-label="Actualisation du catalogue"></progress><span class="record-meta">{percent} %</span></div>"#)?;
+        }
+        html.push_str("</div>");
     }
     Ok(html)
 }
@@ -758,31 +781,24 @@ fn architecture(arch: &str) -> &str {
 
 pub(super) fn queue_image(db: &Connection, id: i64, resume: bool) -> rusqlite::Result<Option<i64>> {
     db.execute(
-        "INSERT INTO os_images(distro,version,version_full,arch,codename,major,channel,
+        &format!("INSERT INTO os_images(distro,version,version_full,arch,codename,major,channel,
                     kernel_url,initrd_url,firmware_url,iso_url,extract_method,enabled,status)
                 SELECT distro,version_full,version_full,arch,codename,major,channel,
                     kernel_url,initrd_url,firmware_url,iso_url,extract_method,1,'pending'
-                FROM catalog_entries WHERE id=?1 AND arch IN ('amd64','arm64')
-                    AND ((distro='debian' AND extract_method='direct')
-                      OR (distro='ubuntu' AND extract_method='iso_extract')
-                      OR (distro IN ('fedora','centos','almalinux','rocky') AND extract_method='direct'))
+                FROM catalog_entries c WHERE c.id=?1 AND {SELECTABLE_CATALOG_IMAGE}
                 ON CONFLICT(distro,version_full,arch) WHERE version_full IS NOT NULL
                 DO UPDATE SET enabled=1,
                     status=CASE WHEN os_images.status IN ('downloaded','downloading')
                                 THEN os_images.status ELSE 'pending' END,
                     error_msg=CASE WHEN os_images.status IN ('downloaded','downloading')
                                    THEN os_images.error_msg ELSE NULL END
-                WHERE os_images.extract_method=excluded.extract_method AND ?2",
+                WHERE os_images.extract_method=excluded.extract_method AND ?2"),
         rusqlite::params![id, resume],
     )?;
     db.query_row(
-        "SELECT i.id FROM os_images i JOIN catalog_entries c
+        &format!("SELECT i.id FROM os_images i JOIN catalog_entries c
                      ON i.distro=c.distro AND i.version_full=c.version_full AND i.arch=c.arch
-                  WHERE c.id=?1 AND c.arch IN ('amd64','arm64')
-                    AND i.extract_method=c.extract_method
-                    AND ((c.distro='debian' AND c.extract_method='direct')
-                      OR (c.distro='ubuntu' AND c.extract_method='iso_extract')
-                      OR (c.distro IN ('fedora','centos','almalinux','rocky') AND c.extract_method='direct'))",
+                  WHERE c.id=?1 AND i.extract_method=c.extract_method AND {SELECTABLE_CATALOG_IMAGE}"),
         [id],
         |row| row.get(0),
     )
@@ -831,26 +847,24 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
         r#"</div><button type="button" class="catalog-tab-arrow" data-tab-scroll="1" aria-label="Afficher les onglets suivants" hidden>{}</button></div>"#,
         icon("M9 18l6-6-6-6")
     )?;
-    let mut query = db.prepare(
+    let mut query = db.prepare(&format!(
         "WITH entries AS (
-            SELECT c.id,c.version_full,c.arch,c.major, EXISTS(
+            SELECT c.id,c.version_full,c.arch,c.major,c.extract_method, EXISTS(
                 SELECT 1 FROM os_images i WHERE i.distro=c.distro AND i.arch=c.arch
                     AND COALESCE(NULLIF(i.version_full,''),i.version)=c.version_full
             ) AS managed FROM catalog_entries c
-            WHERE c.distro=?1 AND c.arch IN ('amd64','arm64')
-               AND ((c.distro='debian' AND c.extract_method='direct')
-                 OR (c.distro='ubuntu' AND c.extract_method='iso_extract')
-                 OR (c.distro IN ('fedora','centos','almalinux','rocky') AND c.extract_method='direct'))
-            ORDER BY c.major DESC,c.version_full DESC,c.arch,c.id LIMIT ?2
+            WHERE c.distro=?1 AND {SELECTABLE_CATALOG_IMAGE}
          )
          SELECT version_full,
                 MAX(CASE WHEN arch='amd64' THEN id END),
                 MAX(arch='amd64' AND managed),
                 MAX(CASE WHEN arch='arm64' THEN id END),
-                MAX(arch='arm64' AND managed)
+                MAX(arch='arm64' AND managed),
+                ?1='debian' AND MIN(extract_method='iso_extract')
          FROM entries GROUP BY version_full
-         ORDER BY MAX(major) DESC,version_full DESC",
-    )?;
+         ORDER BY MAX(major) DESC,CAST(substr(version_full,instr(version_full,'.')+1) AS INTEGER) DESC,
+                  version_full DESC LIMIT ?2",
+    ))?;
     let mut available = false;
     for (code, title) in DISTRIBUTIONS {
         let mut rows = query.query(rusqlite::params![code, CATALOG_PER_DISTRIBUTION as i64])?;
@@ -859,7 +873,7 @@ fn catalog(db: &Connection, can_edit: bool) -> Result<String, ErrorBox> {
             html,
             r#"<section id="catalog-panel-{code}" class="catalog-panel" aria-labelledby="catalog-heading-{code}">
 <h3 id="catalog-heading-{code}">{title}</h3>
-<div class="table-region catalog-table"><table class="catalog-versions" aria-labelledby="catalog-heading-{code}">
+<div class="table-region catalog-table"><table class="catalog-versions" data-catalog-versions="{code}" aria-labelledby="catalog-heading-{code}">
 <thead><tr><th scope="col">Version</th><th scope="col">Intel / AMD<br><small>amd64</small></th>
 <th scope="col">ARM 64 bits<br><small>arm64</small></th></tr></thead><tbody>"#,
         )?;
@@ -918,6 +932,9 @@ fn catalog_version(
     let version: String = row.get(0)?;
     html.push_str(r#"<tr><th scope="row" class="catalog-version">"#);
     escape(html, &version);
+    if row.get(5)? {
+        html.push_str(" <small>Archive</small>");
+    }
     html.push_str("</th>");
     for (arch, column) in [("amd64", 1), ("arm64", 3)] {
         let id: Option<i64> = row.get(column)?;

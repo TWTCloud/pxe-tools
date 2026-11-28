@@ -1034,7 +1034,11 @@ async fn dispatch(
             if parts.method == Method::DELETE {
                 Some(Bytes::new())
             } else {
-                match read_form(&parts.headers, body, 8192).await {
+                let limit = match route {
+                    images::Route::List | images::Route::Add => images::MAX_CATALOG_FORM,
+                    _ => 8192,
+                };
+                match read_form(&parts.headers, body, limit).await {
                     Ok(form) => Some(form),
                     Err(reply) => return reply,
                 }
