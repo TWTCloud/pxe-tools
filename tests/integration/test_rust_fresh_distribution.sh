@@ -48,8 +48,13 @@ case "$variant" in
             systemctl is-active --quiet pxe-tools-dnsmasq.service
             test -z "$(ss -Hlun '( sport = :67 or sport = :4011 )')"
             for unit in pxe-tools-php.service pxe-tools-nginx.service; do
-                if systemctl is-active --quiet "$unit" || systemctl is-failed --quiet "$unit"; then exit 1; fi
+                test "$(systemctl show --property=LoadState --value "$unit")" = not-found
+                if systemctl is-failed --quiet "$unit"; then exit 1; fi
             done
+            test -z "$(find /usr/lib/pxe-tools /opt/pxe-tools -type f \( -name '*.php' -o -name '*.php.j2' \) -print -quit)"
+            test ! -e /opt/pxe-tools/init/php-init.sh
+            test ! -d /opt/pxe-tools/nginx
+            test ! -d /run/php
             systemctl stop pxe-tools-dnsmasq-tail.service pxe-tools-dnsmasq.service
 APT_GUEST
         ;;

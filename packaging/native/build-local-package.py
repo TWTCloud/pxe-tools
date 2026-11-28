@@ -96,10 +96,10 @@ if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
     python3 /usr/lib/pxe-tools/native/upgrade-lifecycle.py configure
     if grep -qx 'PXE_RUST_DIRECT_HTTP=1' /usr/lib/pxe-tools/native/default.env; then
         # Old watchers could start these compatibility units on Rust installs.
-        # Clear only records for the packaged units, leaving local overrides alone.
+        # Clear cached failures of the removed units while preserving local overrides.
         for unit in pxe-tools-php.service pxe-tools-nginx.service; do
             if systemctl is-failed --quiet "$unit" &&
-               [ "$(systemctl show --property=FragmentPath --value "$unit")" = "/usr/lib/systemd/system/$unit" ] &&
+               [ -z "$(systemctl show --property=FragmentPath --value "$unit")" ] &&
                [ -z "$(systemctl show --property=DropInPaths --value "$unit")" ]; then
                 systemctl reset-failed "$unit" || true
             fi
@@ -136,15 +136,16 @@ if [ "$1" = purge ]; then echo 'PXE Tools: instance data, native runtime and con
 '''
 
 
-def copy_tree(source: Path, destination: Path, tracked: set[str]) -> None:
+def copy_tree(source: Path, destination: Path, tracked: set[str], *, exclude: tuple[str, ...] = ()) -> None:
+    patterns = shutil.ignore_patterns('.DS_Store', '__pycache__', '*.pyc', *exclude)
     for item in [source, *source.rglob('*')]:
-        if any(part == '__pycache__' for part in item.relative_to(source).parts) or item.name == '.DS_Store' or item.suffix == '.pyc':
+        if any(part in patterns('', [part]) for part in item.relative_to(source).parts):
             continue
         if item.is_symlink() or not (item.is_file() or item.is_dir()):
             raise ValueError('Unsupported source item: ' + str(item.relative_to(ROOT)))
         if item.is_file():
             source_inventory.checked_file(ROOT, item, tracked)
-    shutil.copytree(source, destination, ignore=shutil.ignore_patterns('.DS_Store', '__pycache__', '*.pyc'))
+    shutil.copytree(source, destination, ignore=patterns)
 
 
 def replace_exact(text: str, old: str, new: str) -> str:
@@ -234,11 +235,17 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
         for name, text in [('preinst',preinst),('postinst',postinst),('prerm',PRERM),('postrm',POSTRM)]:
             text = text.replace('@@PXE_UPGRADE_LIFECYCLE@@', lifecycle).replace('@@PXE_PACKAGE_VERSION@@', version)
             p=control/name; p.write_text(text.replace('pxe-tools-local-test', package_name)); p.chmod(0o755)
-        copy_tree(ROOT/'app', root/'usr/lib/pxe-tools/app', tracked)
-        (root/'usr/lib/pxe-tools/app/src/native-build-version.txt').write_text(version + '\n', encoding='utf-8')
-        copy_tree(ROOT/'docker/worker/scripts', root/'opt/pxe-tools/scripts', tracked)
-        copy_tree(ROOT/'docker/worker/templates', root/'opt/pxe-tools/templates', tracked)
-        copy_tree(ROOT/'docker/pxe-tools/init', root/'opt/pxe-tools/init', tracked)
+        php_files = ('*.php', '*.php.j2') if rust_guided else ()
+        copy_tree(ROOT/'app', root/'usr/lib/pxe-tools/app', tracked, exclude=php_files)
+        if not rust_guided:
+            (root/'usr/lib/pxe-tools/app/src/native-build-version.txt').write_text(version + '\n', encoding='utf-8')
+        legacy_scripts = ('bootstrap-release-nginx-port.sh', 'native-release-nginx-port.py') if rust_guided else ()
+        copy_tree(ROOT/'docker/worker/scripts', root/'opt/pxe-tools/scripts', tracked, exclude=php_files + legacy_scripts)
+        copy_tree(ROOT/'docker/worker/templates', root/'opt/pxe-tools/templates', tracked, exclude=php_files)
+        legacy_init = ('php-init.sh', 'render-nginx-conf.sh') if rust_guided else ()
+        copy_tree(ROOT/'docker/pxe-tools/init', root/'opt/pxe-tools/init', tracked, exclude=legacy_init)
+        if rust_guided:
+            shutil.copy2(checked(ROOT/'docker/pxe-tools/init/php-init.sh'), root/'opt/pxe-tools/init/sqlite-init.sh')
         copy_tree(ROOT/'docker/pxe-tools/static-bin', root/'usr/lib/pxe-tools/static-bin', tracked)
         copy_tree(ROOT/'docker/pxe-tools/keyrings', root/'usr/lib/pxe-tools/keyrings', tracked)
         # Carry the selected core licence and the currently verified upstream
@@ -252,15 +259,22 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
                 raise ValueError('Rust notices require a binary and the crate source inventory')
             shutil.copytree(rust_notices, docs/'rust')
         native=root/'usr/lib/pxe-tools/native'; native.mkdir(parents=True)
-        for name in ('default.env','init.sh','start-php-fpm.sh','start-worker.py','configure-secure-tftp.py','php-fpm.conf','nginx.conf','pxe-nginx.conf','render-pxe-http.py','upgrade-lifecycle.py','reconcile-nginx.py','ownership-provenance.py','uninstall-apt.py'):
+        legacy_native = () if rust_guided else ('start-php-fpm.sh', 'php-fpm.conf', 'nginx.conf', 'pxe-nginx.conf',
+                                                'render-pxe-http.py')
+        for name in ('default.env','init.sh','start-worker.py','configure-secure-tftp.py','upgrade-lifecycle.py',
+                     'reconcile-nginx.py','ownership-provenance.py','uninstall-apt.py', *legacy_native):
             shutil.copy2(checked(ROOT/'packaging/native'/name), native/name)
+        if rust_guided:
+            init = native/'init.sh'
+            init.write_text(replace_exact(init.read_text(), '/init/php-init.sh', '/init/sqlite-init.sh'))
         copy_tree(ROOT/'packaging/native/keyrings', native/'keyrings', tracked)
         units=root/'usr/lib/systemd/system'; units.mkdir(parents=True)
         for unit in (sorted((ROOT/'packaging/native').glob('pxe-tools.*'))
                      + sorted((ROOT/'packaging/native').glob('pxe-tools-*.service'))
                      + sorted((ROOT/'packaging/native').glob('pxe-tools-*.target'))):
+            if rust_guided and unit.name in ('pxe-tools-php.service', 'pxe-tools-nginx.service'):
+                continue
             shutil.copy2(checked(unit), units/unit.name)
-        templates=root/'opt/pxe-tools/nginx'; templates.mkdir(parents=True)
         rust_assets = ROOT/'rust/packaging'
         if rust_binary is not None:
             binary = root/'usr/lib/pxe-tools/pxe-tools-rust'
@@ -282,6 +296,7 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
                 environment.write('PXE_RUST_GUIDED=1\nPXE_RUST_DIRECT_HTTP=1\n')
                 environment.write(f'PXE_APT_CONSOLE_UPDATES=1\nPXE_APT_PACKAGE_VERSION={version}\n')
         else:
+            templates=root/'opt/pxe-tools/nginx'; templates.mkdir(parents=True)
             php_routes = checked(ROOT/'docker/pxe-tools/nginx/pxe-php.conf').read_text()
             (templates/'pxe-routes.conf').write_text(native_php_routes(php_routes))
         if rust_binary is not None and not rust_guided:
@@ -292,21 +307,22 @@ def build(destination: Path, version: str, *, package_name: str = 'pxe-tools-loc
             routing = templates/'rust-monitor.d'
             routing.mkdir()
             (routing/'monitor.conf').write_text(native_php_routes(checked(rust_assets/'monitor.conf').read_text()))
-        for name in ('admin-http-serve.conf.tmpl','admin-http-redirect.conf.tmpl','admin-https.conf.tmpl'):
-            data=checked(ROOT/'docker/pxe-tools/nginx'/name).read_text()
-            data=data.replace('/app/public','/usr/lib/pxe-tools/app/public')
-            data=data.replace('/run/php/php8.4-fpm.sock','/run/pxe-tools-php/fpm.sock')
-            data=data.replace('/var/log/nginx/','/var/lib/pxe-tools-native/log/')
-            data=data.replace('include fastcgi_params;', 'include /etc/nginx/fastcgi_params;')
-            if name == 'admin-https.conf.tmpl':
-                data = replace_exact(data, '/var/lib/pxe-tools/tls/', '/var/lib/pxe-tools-native/tls/')
-            (templates/name).write_text(data)
-        pxe=checked(ROOT/'docker/pxe-tools/nginx/pxe.conf').read_text()
-        pxe=replace_exact(pxe,'listen 80 default_server;', 'listen @@PXE_IPV4@@:80 default_server;\n    listen 127.0.0.1:80;')
-        pxe=replace_exact(pxe,'    listen [::]:80 default_server;\n', '')
-        pxe=replace_exact(pxe,'    root /srv/http;', '    root @@HTTP_ROOT@@;')
-        pxe=pxe.replace('/var/log/nginx/','/var/lib/pxe-tools-native/log/')
-        (native/'pxe.conf').write_text(pxe)
+        if not rust_guided:
+            for name in ('admin-http-serve.conf.tmpl','admin-http-redirect.conf.tmpl','admin-https.conf.tmpl'):
+                data=checked(ROOT/'docker/pxe-tools/nginx'/name).read_text()
+                data=data.replace('/app/public','/usr/lib/pxe-tools/app/public')
+                data=data.replace('/run/php/php8.4-fpm.sock','/run/pxe-tools-php/fpm.sock')
+                data=data.replace('/var/log/nginx/','/var/lib/pxe-tools-native/log/')
+                data=data.replace('include fastcgi_params;', 'include /etc/nginx/fastcgi_params;')
+                if name == 'admin-https.conf.tmpl':
+                    data = replace_exact(data, '/var/lib/pxe-tools/tls/', '/var/lib/pxe-tools-native/tls/')
+                (templates/name).write_text(data)
+            pxe=checked(ROOT/'docker/pxe-tools/nginx/pxe.conf').read_text()
+            pxe=replace_exact(pxe,'listen 80 default_server;', 'listen @@PXE_IPV4@@:80 default_server;\n    listen 127.0.0.1:80;')
+            pxe=replace_exact(pxe,'    listen [::]:80 default_server;\n', '')
+            pxe=replace_exact(pxe,'    root /srv/http;', '    root @@HTTP_ROOT@@;')
+            pxe=pxe.replace('/var/log/nginx/','/var/lib/pxe-tools-native/log/')
+            (native/'pxe.conf').write_text(pxe)
         dns=root/'opt/pxe-tools/dnsmasq'; dns.mkdir(parents=True)
         text=checked(ROOT/'docker/dnsmasq/pxe.conf.tmpl').read_text()
         text=replace_exact(text,'dhcp-script=/usr/local/bin/dhcp-hook.sh','dhcp-script=/opt/pxe-tools/native/dhcp-hook.sh')

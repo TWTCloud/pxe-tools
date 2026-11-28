@@ -36,6 +36,7 @@ class Systemd:
         self.enabled = {unit: 'enabled' if unit.endswith('.target') else 'static' for unit in lifecycle.UNITS}
         self.calls = []
         self.fail_start = set()
+        self.missing = set()
         self.fail_stop = False
         self.on_freeze = None
         self.on_start = None
@@ -71,6 +72,8 @@ class Systemd:
             prop = args[1].split('=', 1)[1]
             if prop == 'ActiveState':
                 output = 'active' if unit in self.active else 'inactive'
+            elif prop == 'LoadState':
+                output = 'not-found' if unit in self.missing else 'loaded'
             elif prop == 'MainPID':
                 output = '123' if unit in self.active else '0'
             elif prop == 'FreezerState':
@@ -94,7 +97,7 @@ class Systemd:
         elif action == 'is-active':
             status = 0 if unit in self.active else 3
         elif action == 'is-enabled':
-            output = self.enabled[unit]
+            output = 'not-found' if unit in self.missing else self.enabled[unit]
         elif action == 'freeze':
             if unit not in self.active:
                 status = 1
@@ -239,6 +242,23 @@ class NativeUpgrade(unittest.TestCase):
                                               'pxe-tools-pxe-http.service', 'pxe-tools-worker.service'})
         self.assertEqual((self.root/'etc/pxe-tools/master.key').read_bytes(), b'k'*32)
         self.assertTrue((snapshot/'result.json').exists())
+        self.assertIsNone(self.subject.load())
+
+    def test_guided_upgrade_continues_after_dpkg_removes_legacy_units(self):
+        self.subject.prepare('1.2.3')
+        environment = self.root/'usr/lib/pxe-tools/native/default.env'
+        environment.parent.mkdir(parents=True)
+        environment.write_text('PXE_RUST_GUIDED=1\n')
+        self.systemd.missing.update(lifecycle.LEGACY_WEB_UNITS)
+        self.systemd.calls.clear()
+        self.subject.configure()
+        self.assertEqual(self.systemd.active, set(lifecycle.UNITS) - lifecycle.LEGACY_WEB_UNITS)
+        self.assertFalse(any(lifecycle.LEGACY_WEB_UNITS.intersection(call)
+                             for call in self.systemd.calls if call[0] in ('stop', 'start')))
+        self.subject.prepare('1.2.4')
+        for unit in lifecycle.LEGACY_WEB_UNITS:
+            self.assertEqual(self.subject.load()['units'][unit], {'active': False, 'enabled': 'not-found'})
+        self.subject.configure()
         self.assertIsNone(self.subject.load())
 
     def test_guided_upgrade_dhcp_failure_leaves_the_rust_frontend_active(self):
