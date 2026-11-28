@@ -221,6 +221,14 @@ fn finish(
              ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
             params![id, crate::alpine::version()],
         )?;
+        let prepared = tx.query_row(
+            "SELECT job_type=?2 FROM init_jobs WHERE id=?1",
+            params![id, crate::alpine::JOB],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if prepared && crate::setting(&tx, "pxe_enabled")? == "on" {
+            crate::pxe::enqueue_menus(&tx)?;
+        }
     }
     tx.commit()
 }

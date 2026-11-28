@@ -317,12 +317,6 @@ impl Worker<'_> {
                 id,
                 "Tâche historique Nginx. Consultez l’état du serveur Rust.",
             )?;
-        } else if kind == crate::alpine::JOB {
-            bootstrap::run(database, id, &self.scripts)?;
-            let db = open(database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-            if crate::alpine::all_ready() && setting(&db, "pxe_enabled")? == "on" {
-                crate::pxe::enqueue_menus(&db)?;
-            }
         } else if bootstrap::supports(kind) {
             return bootstrap::run(database, id, &self.scripts);
         } else if kind.starts_with("action:render_postboot:") {

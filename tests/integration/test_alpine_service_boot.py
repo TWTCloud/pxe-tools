@@ -130,8 +130,9 @@ def main():
                            env=dict(os.environ, PXE_PROFILE_ADDRESS=SERVER, HTTP_ROOT=str(HTTP_ROOT),
                                     PXE_RUST_GUIDED='1', KERNEL_OPTS='console=ttyS0,115200n8'))
         menu = tftp/'pxelinux.cfg/default'
-        assert f'/netboot/{base}/linux' in menu.read_text()
-        menu.write_text('SERIAL 0 115200\n' + menu.read_text())
+        menu_text = menu.read_text()
+        assert f'http://{SERVER}/{base}/linux' in menu_text, menu_text
+        menu.write_text('SERIAL 0 115200\n' + menu_text)
         with subprocess.Popen([BINARY, str(db), str(address)]) as api:
             try:
                 deadline = time.monotonic() + 5
