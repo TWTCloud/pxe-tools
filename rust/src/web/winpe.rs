@@ -22,10 +22,126 @@ use std::{
 
 pub(super) const PREFIX: &str = "/pxe/windows/";
 pub(super) const BOOT: &str = "/pxe/windows/boot.ipxe";
+pub(super) const SHARED_PREFIX: &str = "/pxe/windows/media/";
 pub(super) const SETTINGS: &str = "/settings/windows";
 pub(super) const FILES: [&str; 4] = ["wimboot", "BCD", "boot.sdi", "boot.wim"];
 const SELECTION: &str = "winpe_edition";
+const SHARED_SELECTION: &str = "winpe_shared_media";
 const MANIFEST_LIMIT: u64 = 32768;
+
+#[derive(Deserialize)]
+pub(super) struct SharedMedia {
+    pub(super) iso_sha256: String,
+    language: String,
+    arch: String,
+    editions: Vec<InstallEdition>,
+    install_image: String,
+    install_sha256: String,
+    install_size: u64,
+    boot_sha256: String,
+}
+
+#[derive(Deserialize)]
+struct InstallEdition {
+    edition: String,
+    index: u8,
+}
+
+impl SharedMedia {
+    pub(super) fn read(root: &Path, id: &str) -> Option<Self> {
+        if !crate::media::digest(id) {
+            return None;
+        }
+        let base = root.join("media");
+        let library = base.join("windows");
+        let directory = library.join(id);
+        if [&base, &library, &directory]
+            .into_iter()
+            .any(|path| !fs::symlink_metadata(path).is_ok_and(|info| info.is_dir()))
+        {
+            return None;
+        }
+        let manifest = directory.join("media.json");
+        let media: Self = read_manifest(&manifest).ok()?;
+        if media.iso_sha256 != id
+            || media.arch != "amd64"
+            || !crate::media::WINDOWS_ISOS
+                .iter()
+                .any(|(language, _, _)| *language == media.language)
+            || !matches!(media.install_image.as_str(), "install.wim" | "install.esd")
+            || !crate::media::digest(&media.install_sha256)
+            || !crate::media::digest(&media.boot_sha256)
+            || media.install_size == 0
+            || media.editions.is_empty()
+            || media.editions.len() > 2
+            || media
+                .editions
+                .iter()
+                .any(|edition| !(1..=128).contains(&edition.index) || edition.label().is_none())
+            || matches!(media.editions.as_slice(), [a, b] if a.index == b.index || a.edition == b.edition)
+            || !fs::symlink_metadata(directory.join(&media.install_image))
+                .is_ok_and(|info| info.is_file() && info.len() == media.install_size)
+            || ["wimboot", "boot.wim"].iter().any(|file| {
+                !fs::symlink_metadata(directory.join(file))
+                    .is_ok_and(|info| info.is_file() && info.len() > 0)
+            })
+        {
+            return None;
+        }
+        Some(media)
+    }
+
+    fn collection(root: &Path) -> Vec<Self> {
+        let Ok(entries) = fs::read_dir(root.join("media/windows")) else {
+            return Vec::new();
+        };
+        let mut media: Vec<_> = entries
+            .flatten()
+            .filter_map(|entry| Self::read(root, entry.file_name().to_str()?))
+            .take(64)
+            .collect();
+        media.sort_by(|left, right| {
+            left.language
+                .cmp(&right.language)
+                .then(left.iso_sha256.cmp(&right.iso_sha256))
+        });
+        media
+    }
+
+    pub(super) fn allows_asset(&self, file: &str) -> bool {
+        matches!(file, "wimboot" | "boot.wim") || file == self.install_image
+    }
+
+    pub(super) fn selected(root: &Path, config: &Path) -> Option<Self> {
+        let database = configured_database(config)?;
+        let db = connect(&database, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+        Self::read(root, &setting(&db, SHARED_SELECTION).ok()?)
+    }
+
+    fn description(&self) -> String {
+        let language = crate::media::WINDOWS_ISOS
+            .iter()
+            .find(|(language, _, _)| *language == self.language)
+            .map_or(self.language.as_str(), |(_, label, _)| *label);
+        let editions = self
+            .editions
+            .iter()
+            .filter_map(InstallEdition::label)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("Windows 11 x64 · {language} · {editions}")
+    }
+}
+
+impl InstallEdition {
+    fn label(&self) -> Option<&'static str> {
+        match self.edition.as_str() {
+            "Core" => Some("Famille"),
+            "Professional" => Some("Pro"),
+            _ => None,
+        }
+    }
+}
 
 pub(super) struct Edition {
     id: String,
@@ -147,58 +263,116 @@ impl Editions {
         &self,
         db: &Connection,
         path: &Path,
+        root: &Path,
         form: Option<&[u8]>,
+        preview_enabled: bool,
     ) -> Result<Reply, ErrorBox> {
-        let Self::Imported(editions) = self else {
-            if form.is_some() {
-                return Ok(plain(
-                    StatusCode::CONFLICT,
-                    "Éditions Windows indisponibles\n",
-                ));
-            }
-            let message = if matches!(self, Self::Invalid) {
-                "<p>Le manifeste des éditions Windows est invalide.</p>"
-            } else {
-                "<p>Préparez un média WinPE et son manifeste pour chaque édition à proposer.</p>"
-            };
-            return Ok(page(
-                ConsoleSection::Settings,
-                "Installation Windows",
-                message,
-            ));
-        };
         if let Some(form) = form {
             let mut fields = form_urlencoded::parse(form);
-            let id = match (fields.next(), fields.next()) {
-                (Some((key, id)), None) if key == "edition" && self.contains(&id) => id,
-                _ => return Ok(plain(StatusCode::BAD_REQUEST, "Édition Windows invalide\n")),
+            let (key, value) = match (fields.next(), fields.next()) {
+                (Some((key, value)), None) if key == "edition" && self.contains(&value) => {
+                    (SELECTION, value)
+                }
+                (Some((key, value)), None)
+                    if key == "media"
+                        && preview_enabled
+                        && SharedMedia::read(root, &value).is_some() =>
+                {
+                    (SHARED_SELECTION, value)
+                }
+                _ => {
+                    return Ok(plain(
+                        StatusCode::BAD_REQUEST,
+                        "Média ou édition Windows invalide\\n",
+                    ))
+                }
             };
-            let db = connect(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-            db.execute(
+            let mut db = connect(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            let tx = db.transaction()?;
+            tx.execute(
                 "INSERT INTO settings(key,value) VALUES(?1,?2)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
-                params![SELECTION, id.as_ref()],
+                params![key, value.as_ref()],
             )?;
+            if key == SELECTION {
+                tx.execute("DELETE FROM settings WHERE key=?1", [SHARED_SELECTION])?;
+            }
+            tx.commit()?;
             return Ok(redirect(StatusCode::SEE_OTHER, SETTINGS));
         }
-        let selected = setting(db, SELECTION)?;
-        let mut html = String::from(
-            r#"<form method="post" action="/settings/windows"><label>Édition pour le client PXE Windows<select name="edition" required>"#,
+        let shared = SharedMedia::collection(root);
+        let mut html = format!(
+            r#"<div class="panel-stack"><section class="panel">
+<h2>Médias officiels en cache</h2><p><a href="{}">Préparer Windows 11 x64</a></p>"#,
+            crate::media::WINDOWS_ROUTE
         );
-        if !self.contains(&selected) {
-            html.push_str(r#"<option value="" selected disabled>Choisir une édition</option>"#);
+        if shared.is_empty() {
+            html.push_str("<p>Aucun média officiel préparé.</p>");
+        } else if preview_enabled {
+            let selected = setting(db, SHARED_SELECTION)?;
+            write!(
+                html,
+                r#"<form class="form-stack" method="post" action="{SETTINGS}">
+<div class="field"><label for="winpe-media">Média WinPE pour le client de test</label>
+<select id="winpe-media" name="media" required>"#
+            )?;
+            if !shared.iter().any(|media| media.iso_sha256 == selected) {
+                html.push_str(r#"<option value="" selected disabled>Choisir un média</option>"#);
+            }
+            for media in &shared {
+                let option = if media.iso_sha256 == selected {
+                    " selected"
+                } else {
+                    ""
+                };
+                write!(html, r#"<option value="{}"{option}>"#, media.iso_sha256)?;
+                escape(&mut html, &media.description());
+                html.push_str("</option>");
+            }
+            html.push_str(r#"</select></div><p>Ce mode prépare le démarrage réseau de WinPE sur le client de test configuré.</p>
+<div class="form-actions"><button>Choisir le média de test</button></div></form>"#);
+        } else {
+            html.push_str("<ul>");
+            for media in &shared {
+                html.push_str("<li>");
+                escape(&mut html, &media.description());
+                html.push_str("</li>");
+            }
+            html.push_str("</ul>");
         }
-        for edition in editions {
-            let checked = if edition.id == selected {
-                " selected"
-            } else {
-                ""
-            };
-            write!(html, "<option value=\"{}\"{checked}>", edition.id)?;
-            escape(&mut html, &edition.label);
-            write!(html, " (index {})</option>", edition.image_index)?;
+        html.push_str(r#"</section><section class="panel"><h2>Archives WinPE importées</h2>"#);
+        match self {
+            Self::Imported(editions) => {
+                let selected = setting(db, SELECTION)?;
+                write!(
+                    html,
+                    r#"<form class="form-stack" method="post" action="{SETTINGS}">
+<div class="field"><label for="winpe-edition">Édition pour le client PXE Windows</label>
+<select id="winpe-edition" name="edition" required>"#
+                )?;
+                if !self.contains(&selected) {
+                    html.push_str(
+                        r#"<option value="" selected disabled>Choisir une édition</option>"#,
+                    );
+                }
+                for edition in editions {
+                    let checked = if edition.id == selected {
+                        " selected"
+                    } else {
+                        ""
+                    };
+                    write!(html, r#"<option value="{}"{checked}>"#, edition.id)?;
+                    escape(&mut html, &edition.label);
+                    write!(html, " (index {})</option>", edition.image_index)?;
+                }
+                html.push_str(r#"</select></div><div class="form-actions"><button>Enregistrer</button></div></form>"#);
+            }
+            Self::Invalid => {
+                html.push_str("<p>Le manifeste des éditions Windows est invalide.</p>")
+            }
+            Self::Legacy => html.push_str("<p>Aucune archive WinPE importée.</p>"),
         }
-        html.push_str(r#"</select></label><button>Enregistrer</button></form><p><a href="/settings/images">Images PXE</a></p>"#);
+        html.push_str("</section></div>");
         Ok(page(
             ConsoleSection::Settings,
             "Installation Windows",
@@ -211,6 +385,16 @@ pub(super) fn logs_request(path: &str) -> bool {
     if matches!(path, "/boot.ipxe" | BOOT) {
         return true;
     }
+    if let Some((id, asset)) = path
+        .strip_prefix(SHARED_PREFIX)
+        .and_then(|path| path.split_once('/'))
+    {
+        return crate::media::digest(id)
+            && matches!(
+                asset,
+                "wimboot" | "boot.wim" | "install.wim" | "install.esd"
+            );
+    }
     match path.strip_prefix(PREFIX).map(|path| path.split_once('/')) {
         Some(Some((id, asset))) => {
             valid_id(id)
@@ -222,10 +406,14 @@ pub(super) fn logs_request(path: &str) -> bool {
 }
 
 fn prepared_media(directory: &Path) -> Result<PreparedMedia, ErrorBox> {
+    read_manifest(&directory.join("case.json"))
+}
+
+fn read_manifest<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, ErrorBox> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(directory.join("case.json"))?;
+        .open(path)?;
     if !file.metadata()?.is_file() {
         return Err("Le manifeste Windows doit être un fichier ordinaire".into());
     }
@@ -299,6 +487,24 @@ initrd --name boot.wim ${{base}}boot.wim || goto refused
 boot || goto refused
 :refused
 echo WinPE requiert un amorcage UEFI x86-64 et les fichiers du banc.
+exit
+"#
+    ))
+}
+
+pub(super) fn shared_script(server: Ipv4Addr, port: u16, media: &SharedMedia) -> Reply {
+    let origin = origin(server, port);
+    let id = &media.iso_sha256;
+    response(format!(
+        r#"#!ipxe
+iseq ${{platform}} efi || goto refused
+iseq ${{buildarch}} x86_64 || goto refused
+set base {origin}{SHARED_PREFIX}{id}/
+kernel ${{base}}wimboot || goto refused
+initrd --name boot.wim ${{base}}boot.wim || goto refused
+boot || goto refused
+:refused
+echo Ce media WinPE requiert un demarrage UEFI x86-64.
 exit
 "#
     ))

@@ -289,18 +289,26 @@ fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
     };
     let mut html = String::from("<dl><dt>Type</dt><dd>");
     let redhat = job.job_type == media::REDHAT_JOB;
-    escape(&mut html, if redhat { "DVD RHEL" } else { &job.job_type });
+    let media_preparation = redhat || job.job_type == media::JOB;
+    escape(
+        &mut html,
+        match job.job_type.as_str() {
+            media::REDHAT_JOB => "DVD RHEL",
+            media::JOB => "Préparation d’un média PXE",
+            other => other,
+        },
+    );
     html.push_str("</dd><dt>État</dt><dd>");
     status_badge(
         &mut html,
         &job.status,
         super::activity::status_label(&job.status),
     );
-    if redhat {
+    if media_preparation {
         let active = matches!(job.status.as_str(), "pending" | "running");
         let poll = if active {
             format!(
-                r#" data-rhel-job="/jobs/{id}/status" data-rhel-state="{}""#,
+                r#" data-media-job="/jobs/{id}/status" data-media-state="{}""#,
                 job.status
             )
         } else {
@@ -313,7 +321,7 @@ fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
             r#"</p><div class="image-progress"><progress aria-label="Progression de la préparation" max="100" value="{0}"></progress><span>{0} %</span></div></div>"#,
             job.progress_percent
         )?;
-        if job.status == "failed" {
+        if redhat && job.status == "failed" {
             write!(
                 html,
                 r#"<p><a href="{}">Relancer avec un jeton Red Hat</a></p>"#,
@@ -329,7 +337,7 @@ fn detail(db: &Connection, id: i64, fragment: bool) -> Result<Reply, ErrorBox> {
         escape(&mut html, job.message.as_deref().unwrap_or_default());
         html.push_str("</p>");
     }
-    if !redhat || !log.is_empty() {
+    if !media_preparation || !log.is_empty() {
         html.push_str("<pre>");
         escape(&mut html, &log);
         html.push_str("</pre>");

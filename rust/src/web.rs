@@ -1093,7 +1093,12 @@ async fn dispatch(
                 return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n")
             }
             (presets::ROUTE, form) => admin::Action::Presets(form),
-            (winpe::SETTINGS, form) => admin::Action::Windows(windows_editions(site).await, form),
+            (winpe::SETTINGS, form) => admin::Action::Windows(
+                windows_editions(site).await,
+                site.assets.http_root().to_path_buf(),
+                site.winpe_client.is_some(),
+                form,
+            ),
             _ => unreachable!("matched settings path"),
         };
         return site.admin.serve(&parts, peer, &site.database, action).await;
@@ -1227,6 +1232,36 @@ async fn dispatch(
     }
     let winpe = winpe::allowed(site.winpe_client, peer);
     if winpe && readable {
+        if path == winpe::BOOT || path.starts_with(winpe::SHARED_PREFIX) {
+            let root = site.assets.http_root().to_path_buf();
+            let config = site.database.clone();
+            let shared = task::spawn_blocking(move || winpe::SharedMedia::selected(&root, &config))
+                .await
+                .ok()
+                .flatten();
+            if let Some(asset) = path.strip_prefix(winpe::SHARED_PREFIX) {
+                if let Some((id, name)) = asset.split_once('/') {
+                    if let Some(media) = shared.filter(|media| media.iso_sha256 == id) {
+                        if let Some(reply) = site
+                            .assets
+                            .serve_shared_windows(
+                                &media,
+                                name,
+                                &parts.headers,
+                                parts.method == Method::HEAD,
+                            )
+                            .await
+                        {
+                            return reply;
+                        }
+                    }
+                }
+                return plain(StatusCode::NOT_FOUND, "Not found\n");
+            }
+            if let Some(media) = shared {
+                return winpe::shared_script(server, site.http_port, &media);
+            }
+        }
         if path == winpe::BOOT {
             let editions = windows_editions(site).await;
             if matches!(editions.as_ref(), winpe::Editions::Legacy) {

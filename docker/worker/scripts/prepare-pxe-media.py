@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 from urllib.parse import urlencode, urljoin, urlsplit
+from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
 
@@ -44,6 +45,10 @@ RHEL_FILES = {".treeinfo", ".discinfo", "media.repo", "RPM-GPG-KEY-redhat-releas
 RHEL_PREFIXES = ("BaseOS/", "AppStream/")
 REDHAT_CDN_HOSTS = {"access.cdn.redhat.com", "cdn.redhat.com"}
 REDHAT_JSON_LIMIT = 64 * 1024
+WINDOWS_CDN = {"software.download.prss.microsoft.com"}
+WIMBOOT_URL = "https://github.com/ipxe/wimboot/releases/download/v2.9.0/wimboot"
+WIMBOOT_SHA = "5f067ccdc4d084d5bf77b6c853bd0f8402dfc2b4cd1b103d358993ae97fae8e3"
+WIMBOOT_HOSTS = {"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
 RHEL_BOOT = ("images/install.img", "images/pxeboot/vmlinuz", "images/pxeboot/initrd.img")
 
 
@@ -92,13 +97,14 @@ def copy_bounded(source, destination, limit, report=None):
     return written
 
 
-def download(url, target, hosts, progress=None):
+def download(url, target, hosts, progress=None, *, limit=MAX_MEDIA, validate_path=None):
     for _ in range(6):
         parsed = urlsplit(url)
         if (len(url) > 4096 or parsed.scheme != "https" or not parsed.hostname
                 or parsed.hostname not in hosts or not re.fullmatch(r"[a-z0-9.-]+", parsed.hostname)
                 or parsed.username is not None or parsed.password is not None
-                or parsed.port not in (None, 443) or parsed.fragment or "\\" in url):
+                or parsed.port not in (None, 443) or parsed.fragment or "\\" in url
+                or (validate_path is not None and not validate_path(parsed.path))):
             raise MediaError("L’hôte HTTPS de la source ou de sa redirection est refusé.")
         resource = parsed.path or "/"
         if parsed.query:
@@ -109,16 +115,18 @@ def download(url, target, hosts, progress=None):
             if response.status in (301, 302, 303, 307, 308) and response.getheader("Location"):
                 url = urljoin(url, response.getheader("Location"))
                 continue
+            if response.status in (401, 403, 404) and hosts == WINDOWS_CDN:
+                raise MediaError("Le lien Microsoft est expiré ou indisponible. Générez un nouveau lien.")
             if response.status != 200:
                 raise MediaError("La source HTTPS ne fournit pas le média demandé.")
             length = response.getheader("Content-Length")
-            if length is not None and (not length.isdecimal() or int(length) > MAX_MEDIA):
+            if length is not None and (not length.isdecimal() or int(length) > limit):
                 raise MediaError("La taille annoncée du média dépasse la limite de préparation.")
             length = int(length) if length is not None else None
             report = None
             if progress is not None and length:
                 if length > shutil.disk_usage(target.parent).free:
-                    raise MediaError("Espace insuffisant pour télécharger le DVD RHEL.")
+                    raise MediaError("Espace insuffisant pour télécharger le média.")
                 last = 15
 
                 def report(written):
@@ -129,7 +137,7 @@ def download(url, target, hosts, progress=None):
                         progress(percent)
 
             with target.open("xb") as destination:
-                size = copy_bounded(response, destination, MAX_MEDIA, report)
+                size = copy_bounded(response, destination, limit, report)
             if not size or length is not None and size != length:
                 raise MediaError("Le téléchargement du média est incomplet.")
             return target
@@ -338,6 +346,106 @@ def publish_winpe(archive, stage, cache, destination, bundle_sha):
     return f"Édition Windows {destination.name} prête dans la console."
 
 
+def windows_editions(image, stage):
+    xml = stage / "wim.xml"
+    subprocess.run(
+        ["wimlib-imagex", "info", image, f"--extract-xml={xml}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+    )
+    if not 0 < xml.stat().st_size <= 1024 * 1024:
+        raise MediaError("Les métadonnées de l’image Windows sont invalides.")
+    payload = xml.read_bytes()
+    if b"<!DOCTYPE" in payload.replace(b"\x00", b"").upper():
+        raise MediaError("Les métadonnées de l’image Windows sont invalides.")
+    try:
+        data = ElementTree.fromstring(payload)
+    except ElementTree.ParseError:
+        raise MediaError("Les métadonnées de l’image Windows sont illisibles.") from None
+    editions = {}
+    for item in data.findall("IMAGE"):
+        edition = item.findtext("WINDOWS/EDITIONID") or item.findtext("FLAGS")
+        if edition not in {"Core", "Professional"}:
+            continue
+        index = item.get("INDEX", "")
+        if (item.findtext("WINDOWS/ARCH") != "9" or not re.fullmatch(r"[1-9][0-9]{0,2}", index)
+                or int(index) > 128 or edition in editions or int(index) in editions.values()):
+            raise MediaError("Les éditions de l’image Windows x64 sont ambiguës.")
+        editions[edition] = int(index)
+    if not editions:
+        raise MediaError("Cette image ne contient aucune édition Windows Famille ou Pro x64.")
+    return [{"edition": edition, "index": editions[edition]}
+            for edition in ("Core", "Professional") if edition in editions]
+
+
+def prepare_official_windows(request, root, stage, cache, progress, local_iso=None):
+    sha = request["sha256"]
+    destination = directory(root, "media/windows") / sha
+    if destination.exists() or destination.is_symlink():
+        record = destination / "media.json"
+        if destination.is_symlink() or not record.is_file() or record.is_symlink():
+            raise MediaError("Le dossier de ce média Windows doit être vérifié.")
+        data = json.loads(record.read_text())
+        if data["iso_sha256"] != sha or data["language"] != request["profile"]:
+            raise MediaError("Le média Windows en cache ne correspond pas à la demande.")
+        image = data["install_image"]
+        if (image in {"install.wim", "install.esd"}
+                and all((destination / name).is_file() and not (destination / name).is_symlink()
+                        for name in ("boot.wim", "wimboot", image))):
+            return "Média Windows 11 déjà préparé dans le cache PXE."
+        raise MediaError("Le média Windows en cache est incomplet.")
+    source = local_iso
+    if source is None:
+        progress(15)
+        source = download(
+            request["source"], stage / "windows.iso", WINDOWS_CDN, progress,
+            validate_path=lambda path: path.startswith("/dbazure/") and path.endswith(".iso"),
+        )
+    progress(85)
+    if windows.fingerprint(source) != sha:
+        raise MediaError("L’ISO ne correspond pas à l’empreinte Microsoft de cette langue.")
+    progress(95)
+    if shutil.disk_usage(stage).free < source.stat().st_size:
+        raise MediaError("Espace insuffisant pour extraire les fichiers Windows.")
+    installation = windows.extract(source, sha, cache)
+    image = Path(installation["path"])
+    editions = windows_editions(image, stage)
+    prepared = stage / "windows"
+    prepared.mkdir()
+    listing = subprocess.check_output(["7z", "l", "-slt", source], text=True)
+    entries = [line.removeprefix("Path = ") for line in listing.splitlines()
+               if line.lower() == "path = sources/boot.wim"]
+    if len(entries) != 1:
+        raise MediaError("L’ISO ne contient pas de fichier WinPE unique.")
+    boot = prepared / "boot.wim"
+    with boot.open("xb") as output:
+        subprocess.run(["7z", "x", "-so", source, entries[0]], stdout=output, check=True)
+    with boot.open("rb") as stream:
+        if stream.read(8) != b"MSWIM\0\0\0":
+            raise MediaError("Le fichier de démarrage WinPE est invalide.")
+    loader = download(WIMBOOT_URL, prepared / "wimboot", WIMBOOT_HOSTS, limit=2 * 1024**2)
+    if windows.fingerprint(loader) != WIMBOOT_SHA:
+        raise MediaError("Le chargeur iPXE ne correspond pas à sa révision vérifiée.")
+    os.link(image, prepared / image.name)
+    boot.chmod(0o444)
+    loader.chmod(0o444)
+    record = {
+        "iso_sha256": sha,
+        "language": request["profile"],
+        "arch": "amd64",
+        "editions": editions,
+        "install_image": image.name,
+        "install_sha256": installation["install_sha256"],
+        "install_size": installation["size"],
+        "boot_sha256": windows.fingerprint(boot),
+    }
+    manifest = prepared / "media.json"
+    manifest.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    manifest.chmod(0o444)
+    prepared.chmod(0o755)
+    prepared.rename(destination)
+    return "Windows 11 x64 préparé · WinPE partagé et éditions détectées."
+
+
 def prepare(request, root, progress):
     kind, sha, profile = request["kind"], request["sha256"], request["profile"]
     if kind == "proxmox":
@@ -347,9 +455,10 @@ def prepare(request, root, progress):
             return load("proxmox_media", "proxmox-media.py").prepare(
                 request, root, download, windows.fingerprint, directory, MediaError,
             )
-    if (kind not in ("rhel9", "windows-iso", "windows-wim", "windows-esd", "winpe")
+    if (kind not in ("rhel9", "windows-iso", "windows-wim", "windows-esd", "winpe", "windows-official")
             or not SHA256.fullmatch(sha)
-            or (not re.fullmatch(r"[a-z0-9-]{1,40}", profile) if kind == "winpe" else profile != "")):
+            or (not re.fullmatch(r"[a-z0-9-]{1,40}", profile)
+                if kind in ("winpe", "windows-official") else profile != "")):
         raise MediaError("Le type, l’identifiant ou l’empreinte du média est invalide.")
     offline_token = request.get("redhat_token")
     if offline_token is not None and (kind != "rhel9" or request["remote"] or request["source"]
@@ -362,6 +471,15 @@ def prepare(request, root, progress):
         fcntl.flock(lock, fcntl.LOCK_EX)
         stage = Path(tmp)
         cache = directory(root, "media/windows-cache")
+        if kind == "windows-official":
+            if profile not in {"fr-fr", "en-us", "en-gb"}:
+                raise MediaError("La sélection du média officiel Windows est invalide.")
+            local_iso = None
+            if not request["remote"]:
+                if not request["source"].lower().endswith(".iso"):
+                    raise MediaError("Sélectionnez un fichier ISO dans le dossier privé.")
+                local_iso = local_file(inbox, request["source"])
+            return prepare_official_windows(request, root, stage, cache, progress, local_iso)
         rhel = directory(root, "media/rhel9") / sha if kind == "rhel9" else None
         if rhel is not None and (rhel / ".pxe-media.json").is_file():
             return "DVD RHEL déjà préparé dans le cache PXE."

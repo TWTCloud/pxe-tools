@@ -15,6 +15,28 @@ pub const JOB: &str = "media:prepare";
 pub const REDHAT_JOB: &str = "media:prepare:rhel";
 pub const REDHAT_ROUTE: &str = "/settings/images/rhel";
 pub const REDHAT_TOKEN_LIMIT: usize = 4096;
+pub const WINDOWS_ROUTE: &str = "/settings/images/windows";
+pub const WINDOWS_DOWNLOAD_PAGE: &str =
+    "https://www.microsoft.com/fr-fr/software-download/windows11";
+pub const WINDOWS_CDN: &str = "software.download.prss.microsoft.com";
+// Windows 11 x64 consumer ISO checksums from the official download page.
+pub const WINDOWS_ISOS: [(&str, &str, &str); 3] = [
+    (
+        "fr-fr",
+        "Français",
+        "aa515279f02fb2b425eff341f0a1f158d61288c72cca5f9d87b79b5a23f7f918",
+    ),
+    (
+        "en-us",
+        "Anglais",
+        "bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650",
+    ),
+    (
+        "en-gb",
+        "Anglais international",
+        "7e3f373bd3c2321b5d5125dfcf718dfbf1a0abc50a267118669951890df98a5d",
+    ),
+];
 
 // DVD checksums and advertised sizes from the Red Hat Developer release catalogue.
 pub const RHEL_DVDS: [(&str, &str, &str, &str); 4] = [
@@ -92,7 +114,7 @@ pub fn download_hosts() -> Vec<String> {
         .collect()
 }
 
-fn allowed_url(value: &str) -> bool {
+fn allowed_url(value: &str, hosts: impl IntoIterator<Item = impl AsRef<str>>) -> bool {
     if value.len() > 4096 || value.contains(['#', '\\']) {
         return false;
     }
@@ -105,7 +127,20 @@ fn allowed_url(value: &str) -> bool {
     uri.scheme_str() == Some("https")
         && !authority.as_str().contains('@')
         && authority.port_u16().is_none_or(|port| port == 443)
-        && download_hosts().contains(&authority.host().to_ascii_lowercase())
+        && hosts
+            .into_iter()
+            .any(|host| authority.host().eq_ignore_ascii_case(host.as_ref()))
+}
+
+fn inbox_filename(value: &str) -> bool {
+    value.len() <= 200
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
 impl Import {
@@ -135,6 +170,24 @@ impl Import {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"._~-".contains(&b));
         }
+        if self.kind == "windows-official" {
+            let approved = WINDOWS_ISOS
+                .iter()
+                .any(|(language, _, hash)| *language == self.profile && *hash == self.sha256);
+            return approved
+                && if self.remote {
+                    allowed_url(&self.source, [WINDOWS_CDN])
+                        && self.source.parse::<Uri>().is_ok_and(|uri| {
+                            uri.path().starts_with("/dbazure/") && uri.path().ends_with(".iso")
+                        })
+                } else {
+                    inbox_filename(&self.source)
+                        && self
+                            .source
+                            .rsplit_once('.')
+                            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("iso"))
+                };
+        }
         matches!(
             self.kind.as_str(),
             "rhel9" | "windows-iso" | "windows-wim" | "windows-esd" | "winpe"
@@ -145,18 +198,9 @@ impl Import {
                 self.profile.is_empty()
             })
             && (if self.remote {
-                allowed_url(&self.source)
+                allowed_url(&self.source, download_hosts())
             } else {
-                self.source.len() <= 200
-                    && self
-                        .source
-                        .as_bytes()
-                        .first()
-                        .is_some_and(u8::is_ascii_alphanumeric)
-                    && self
-                        .source
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                inbox_filename(&self.source)
             })
     }
 }
@@ -288,12 +332,17 @@ fn prepare(
     let mut summary = None;
     for line in reader.lines() {
         let Ok(line) = line else { break };
-        if redhat {
+        if redhat || request.kind == "windows-official" {
             if let Some(pct) = line
                 .strip_prefix("progress:")
                 .and_then(|value| value.parse().ok())
             {
-                if let Some(message) = redhat_progress(pct) {
+                let message = if redhat {
+                    redhat_progress(pct)
+                } else {
+                    windows_progress(pct)
+                };
+                if let Some(message) = message {
                     progress(pct, message);
                     continue;
                 }
@@ -323,6 +372,15 @@ fn redhat_progress(percent: u8) -> Option<&'static str> {
         15..=80 => "Téléchargement du DVD depuis Red Hat",
         85 => "Vérification de l’empreinte SHA-256 du DVD",
         95 => "Extraction des fichiers de démarrage et des dépôts RHEL",
+        _ => return None,
+    })
+}
+
+fn windows_progress(percent: u8) -> Option<&'static str> {
+    Some(match percent {
+        15..=80 => "Téléchargement de l’ISO depuis Microsoft",
+        85 => "Vérification de l’empreinte publiée par Microsoft",
+        95 => "Préparation de WinPE et lecture des éditions Windows",
         _ => return None,
     })
 }
