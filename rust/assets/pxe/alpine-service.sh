@@ -43,7 +43,11 @@ mem=$(awk '$1=="MemAvailable:" {print $2}' /proc/meminfo)
 printf 'PXE_ALPINE_SERVICE_READY mode=%s available_kib=%s\n' "$mode" "$mem" >/dev/console
 if [ "$mode" = rescue ]; then
     echo 'PXE Tools · Secours Alpine · shell local · disques non montés' >/dev/console
-    exec /bin/busybox setsid /bin/busybox cttyhack /bin/sh -i </dev/console >/dev/console 2>&1
+    tty=$(awk '{print $NF}' /sys/class/tty/console/active)
+    [ "$tty" != tty0 ] || tty=tty1
+    console=/dev/$tty
+    [ -c "$console" ] || console=/dev/console
+    exec /bin/busybox setsid -c /bin/sh -i <"$console" >"$console" 2>&1
 fi
 
 script=$(mktemp /run/pxe-service.XXXXXXXX)
