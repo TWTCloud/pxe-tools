@@ -933,7 +933,7 @@ fn catalog_version(
     html.push_str(r#"<tr><th scope="row" class="catalog-version">"#);
     escape(html, &version);
     if row.get(5)? {
-        html.push_str(r#" <small class="record-meta">Archive</small>"#);
+        html.push_str(" <small>Archive</small>");
     }
     html.push_str("</th>");
     for (arch, column) in [("amd64", 1), ("arm64", 3)] {

@@ -673,7 +673,7 @@ def verify_image_console(client, database, authorization, http_root):
     assert f'data-image-id="{image}" data-state="downloading"'.encode() in page
     assert b'<progress value="61" max="100"' in page
     assert b'data-catalog-refresh="pending"' in page and 'Dans la file des tâches'.encode() in page
-    assert b'13.7.0 <small class="record-meta">Archive</small>' in page and b'13.6.0' not in page
+    assert b'13.7.0 <small>Archive</small>' in page and b'13.6.0' not in page
     assert action('/add', form={'image':'9003'})[:2] == (303, endpoint)
     with closing(sqlite3.connect(database)) as db, db:
         assert db.execute("SELECT extract_method,iso_url,status FROM os_images WHERE version_full='13.7.0'").fetchone() == (

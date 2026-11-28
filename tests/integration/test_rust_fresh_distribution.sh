@@ -365,9 +365,11 @@ docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
     archive='https://cdimage.debian.org/cdimage/archive/13.7.0/amd64/iso-cd/debian-13.7.0-amd64-netinst.iso'
     entry=$(sqlite3 "$database" "INSERT INTO catalog_entries
       (distro,version_full,major,codename,arch,extract_method,iso_url)
-      VALUES('debian','13.7.0',13,'trixie','amd64','iso_extract','$archive') RETURNING id")
+      VALUES('debian','13.7.0',13,'trixie','amd64','iso_extract','$archive')
+      ON CONFLICT(distro,version_full,arch) DO UPDATE SET iso_url=excluded.iso_url,extract_method='iso_extract'
+      RETURNING id")
     catalog=$("${client[@]}" "$route/add")
-    [[ "$catalog" == *'13.7.0 <small class="record-meta">Archive</small>'* ]]
+    [[ "$catalog" == *'13.7.0 <small>Archive</small>'* ]]
     [[ "$catalog" == *"name=\"image\" value=\"$entry\""* ]]
     post=(-o /dev/null -w '%{http_code}' -H "Origin: $origin")
     test "$("${client[@]}" "${post[@]}" --data "image=$entry" "$route/add")" = 303
