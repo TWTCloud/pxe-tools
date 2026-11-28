@@ -103,6 +103,10 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     if let [flag, config] = args.as_slice() {
+        if flag == "--console-https-port" && Path::new(config).is_absolute() {
+            println!("{}", web::configured_console_port(Path::new(config))?);
+            return Ok(());
+        }
         if flag == "--refresh-pxe-address" && Path::new(config).is_absolute() {
             println!("{}", web::refresh_pxe_address(Path::new(config))?);
             return Ok(());
@@ -148,6 +152,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     if let [flag, config, path] = args.as_slice() {
+        if flag == "--set-console-https-port" && Path::new(config).is_absolute() {
+            return web::set_console_port(
+                Path::new(config),
+                path.to_str().ok_or("Invalid HTTPS console port")?,
+            );
+        }
         if flag == "--finish-pxe-address" && Path::new(config).is_absolute() {
             return web::finish_pxe_address(
                 Path::new(config),

@@ -210,9 +210,9 @@ def main() -> int:
 
     rust_guided = os.environ.get("PXE_RUST_GUIDED") == "1"
     admin_port = os.environ.get("ADMIN_PORT", "8443")
-    console_https = rust_guided or db_setting("https_enabled", "off") != "off"
+    console_https = not rust_guided and db_setting("https_enabled", "off") != "off"
     if rust_guided:
-        console_port = os.environ.get("PXE_HTTPS_PORT", "443")
+        console_port = os.environ.get("PXE_HTTP_PORT", "80")
     elif console_https:
         console_port = admin_port
     else:
@@ -264,6 +264,7 @@ def main() -> int:
         "pxe_admin_port": admin_port,
         "pxe_console_scheme": "https" if console_https else "http",
         "pxe_console_port_suffix": console_port_suffix,
+        "pxe_console_path": "/" if rust_guided else "/admin/inventaire",
         # Spec H : toggle iPXE chainload — pxelinux/grub conditionnent leurs
         # menuentries "Chainload iPXE" sur ce flag.
         "pxe_ipxe_enabled": ipxe_enabled,

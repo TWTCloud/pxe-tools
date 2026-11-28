@@ -14,6 +14,8 @@ import sys
 
 
 SERVICE = 'pxe-tools-pxe-http.service'
+BINARY = '/usr/lib/pxe-tools/pxe-tools-rust'
+DB_CONF = '/etc/pxe-tools/db.conf'
 SETUP_CODE = Path('/run/pxe-tools-rust-guided/setup-code')
 SETUP_ROUTES = {'/init/welcome', '/init/admin'}
 
@@ -99,14 +101,39 @@ def show_setup():
         print(f'Code de configuration\n  {code}')
 
 
+def configure_web_port(port):
+    if not re.fullmatch(r'[0-9]{1,5}', port) or not 1 <= int(port) <= 65535:
+        raise RuntimeError('Choisissez un port HTTPS entre 1 et 65535.')
+    state = subprocess.check_output(
+        ['/usr/bin/systemctl', 'show', '--property=ActiveState', '--value', SERVICE],
+        text=True, timeout=5,
+    ).strip()
+    if state not in {'inactive', 'failed'}:
+        raise RuntimeError('Utilisez les paramètres HTTPS de la console quand le service est actif.')
+    result = subprocess.run(
+        ['/usr/sbin/runuser', '-u', 'www-data', '--', BINARY, '--set-console-https-port', DB_CONF, port],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or 'Impossible d’enregistrer le port HTTPS.')
+    print(f'Port HTTPS {int(port)} enregistré pour le prochain démarrage de PXE Tools.')
+
+
 def main():
     parser = argparse.ArgumentParser(prog='pxe-tools', description='Administration locale de PXE Tools')
-    parser.add_argument('commande', choices=['setup'], help='affiche le lien et le code de configuration')
-    parser.parse_args()
+    subcommands = parser.add_subparsers(dest='commande', required=True)
+    subcommands.add_parser('setup', help='affiche le lien et le code de configuration')
+    web_port = subcommands.add_parser('web-port', help='définit le port HTTPS pour le prochain démarrage')
+    web_port.add_argument('port')
+    args = parser.parse_args()
     if os.geteuid() != 0:
-        parser.exit(1, 'Exécutez sudo pxe-tools setup sur le serveur.\n')
+        command = 'setup' if args.commande == 'setup' else 'web-port PORT'
+        parser.exit(1, f'Exécutez sudo pxe-tools {command} sur le serveur.\n')
     try:
-        show_setup()
+        if args.commande == 'setup':
+            show_setup()
+        else:
+            configure_web_port(args.port)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         parser.exit(1, f'{error}\n')
 

@@ -63,6 +63,7 @@ pub(super) enum Action {
     Windows(Arc<super::winpe::Editions>, Option<Bytes>),
     Activity(super::activity::View, Arc<crate::monitoring::Catalog>),
     Settings(super::settings::Route, Option<Bytes>),
+    ConsolePort(super::console_port::Visit),
     Setup(String, Option<Bytes>),
     Certificates(Arc<super::certificates::Certificates>, Option<Bytes>),
     Acme(Arc<super::certificates::Certificates>, Bytes),
@@ -129,6 +130,7 @@ impl Action {
                 select(SettingsRead, SettingsEdit)
             }
             Self::Settings(..)
+            | Self::ConsolePort(..)
             | Self::Setup(..)
             | Self::Certificates(..)
             | Self::Acme(..)
@@ -505,6 +507,9 @@ impl Console {
                 }
                 if let Action::Settings(route, form) = action {
                     return route.serve(&db, &db_path, form, wants_json).ok();
+                }
+                if let Action::ConsolePort(visit) = action {
+                    return visit.serve(&db, &username).ok();
                 }
                 render_devices(&db, page, &query).ok()
             })();

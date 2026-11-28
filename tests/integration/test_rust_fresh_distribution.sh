@@ -185,4 +185,118 @@ SQL
         printf 'PXE renewed its address and left the console accessible with an ambiguous IPv4.\n'
 NETWORK_GUEST
 fi
+docker exec -i "$container" bash -es -- "$variant" <<'CONSOLE_GUEST'
+    set -euo pipefail
+    variant=$1
+    route=/settings/console
+    origin=https://127.0.0.1
+    trial=https://127.0.0.1:8443
+    selected=https://127.0.0.1:9443
+    client=(curl -ksS --max-time 5 --user setup-fixture:fixture-only-password)
+    status=(-o /dev/null -w '%{http_code}')
+    binary=/usr/lib/pxe-tools/pxe-tools-rust
+    config=/etc/pxe-tools/db.conf
+
+    post() {
+        "${client[@]}" "${status[@]}" -H "Origin: $1" -d "$3" "$2$route"
+    }
+    configured() {
+        "$binary" --console-https-port "$config"
+    }
+    redirect() {
+        curl -fsS --max-time 5 -o /dev/null -w '%{redirect_url}' http://127.0.0.1/
+    }
+    wait_closed() {
+        for _ in {1..20}; do
+            if [[ -z "$(ss -Hln "( sport = :$1 )")" ]]; then return 0; fi
+            sleep .2
+        done
+        return 1
+    }
+
+    test "$(curl -ksS --max-time 5 "${status[@]}" "$origin$route")" = 401
+    test "$(post "$origin" "$origin" port=80)" = 422
+    occupied=$(mktemp)
+    python3 -u - "$occupied" <<'PY' &
+import socket
+import sys
+import time
+from pathlib import Path
+
+with socket.socket() as server:
+    server.bind(('127.0.0.1', 0))
+    server.listen()
+    Path(sys.argv[1]).write_text(str(server.getsockname()[1]))
+    time.sleep(30)
+PY
+    occupant=$!
+    trap 'kill "$occupant" 2>/dev/null || true; rm -f -- "$occupied"' EXIT
+    for _ in {1..30}; do
+        if [[ -s "$occupied" ]]; then break; fi
+        sleep .1
+    done
+    test "$(post "$origin" "$origin" "port=$(<"$occupied")")" = 409
+    kill "$occupant"
+    wait "$occupant" 2>/dev/null || true
+    rm -f -- "$occupied"
+    trap - EXIT
+
+    test "$(post "$origin" "$origin" port=8443)" = 303
+    test "$(configured)" = 443
+    pending=$("${client[@]}" -f "$origin$route")
+    [[ "$pending" == *"$trial$route"* ]]
+    token=$(sed -nE 's/.*name="cancel" value="([a-f0-9]{32})".*/\1/p' <<< "$pending")
+    [[ "$token" =~ ^[a-f0-9]{32}$ ]]
+    test "$(post "$origin" "$origin" "confirm=$token")" = 403
+    test "$(post "$origin" "$trial" "confirm=$token")" = 403
+    test "$(post "$origin" "$origin" port=9443)" = 409
+    test "$(redirect)" = "$origin/admin/"
+    if [[ "$variant" == docker && "$(uname -m)" == x86_64 ]]; then
+        # Verify timer cleanup even with no browser request on the new port.
+        sleep 122
+    else
+        test "$(post "$origin" "$origin" "cancel=$token")" = 303
+    fi
+    wait_closed 8443
+    test "$(configured)" = 443
+    "${client[@]}" -f "$origin$route" >/dev/null
+
+    test "$(post "$origin" "$origin" port=9443)" = 303
+    cookie=$(mktemp)
+    trap 'rm -f -- "$cookie"' EXIT
+    browser=(curl -ksS --max-time 5 -H 'Accept: text/html')
+    test "$("${browser[@]}" "${status[@]}" -c "$cookie" -H "Origin: $origin" \
+        -d "username=setup-fixture&password=fixture-only-password" "$origin/login")" = 303
+    proof=$("${browser[@]}" -f -b "$cookie" "$selected$route")
+    token=$(sed -nE 's/.*name="confirm" value="([a-f0-9]{32})".*/\1/p' <<< "$proof")
+    [[ "$token" =~ ^[a-f0-9]{32}$ ]]
+    test "$("${browser[@]}" "${status[@]}" -b "$cookie" -H "Origin: $selected" \
+        -d "confirm=$token" "$selected$route")" = 303
+    test "$(configured)" = 9443
+    test "$(redirect)" = "$selected/admin/"
+    test "$(curl -fsS --max-time 5 http://127.0.0.1/healthz)" = ok
+    "${client[@]}" -f "$selected/admin/inventaire" >/dev/null
+    wait_closed 443
+    if [[ "$variant" == apt ]]; then
+        systemctl restart pxe-tools-pxe-http.service
+        "${client[@]}" -f "$selected$route" >/dev/null
+        if pxe-tools web-port 8444; then exit 1; fi
+        systemctl stop pxe-tools-pxe-http.service
+        pxe-tools web-port 8444
+        systemctl start pxe-tools-pxe-http.service
+        "${client[@]}" -f "https://127.0.0.1:8444$route" >/dev/null
+        output=$(pxe-tools setup)
+        [[ "$output" == *":8444/admin/"* ]]
+    fi
+CONSOLE_GUEST
+if [[ "$variant" == docker ]]; then
+    docker restart "$container" >/dev/null
+    for _ in {1..60}; do
+        if docker exec "$container" /opt/pxe-tools/init/healthcheck.sh >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+    docker exec "$container" /opt/pxe-tools/init/healthcheck.sh
+    docker exec "$container" curl -kfsS --max-time 5 https://127.0.0.1:9443/healthz >/dev/null
+fi
+printf 'HTTPS port trial, confirmation and restart passed (%s)\n' "$variant"
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"

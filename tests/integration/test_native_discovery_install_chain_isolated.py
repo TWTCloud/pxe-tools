@@ -666,8 +666,8 @@ def run_packaged_rust(app, lan, dhcp, client, root, fixture, discovery_template)
     if not settings.startswith('HTTP/1.1 200 ') or 'ui_device_term' in settings:
         raise RuntimeError('The retired terminology selector is still present')
     discovery=request(pxe_url+'/discover.sh')
-    if not discovery.startswith('HTTP/1.1 200 ') or 'CONSOLE_URL="https://$ORCH_IP/admin/inventaire"' not in discovery:
-        raise RuntimeError('The discovery script did not link to the HTTPS inventory')
+    if not discovery.startswith('HTTP/1.1 200 ') or 'CONSOLE_URL="http://$ORCH_IP/"' not in discovery:
+        raise RuntimeError('The discovery script did not link to the console redirect')
     if amd64:
         windows=pxe_url+'/pxe/windows/'
         boot=request(windows+'boot.ipxe')
