@@ -51,6 +51,10 @@ pub(crate) fn all_ready() -> bool {
     ready("amd64") && ready("arm64")
 }
 
+pub(crate) fn menus_ready(db: &Connection) -> rusqlite::Result<bool> {
+    Ok(all_ready() && crate::setting(db, "alpine_boot_menus_version")? == version())
+}
+
 fn path(arch: &str) -> Option<String> {
     if !matches!(arch, "amd64" | "arm64") {
         return None;

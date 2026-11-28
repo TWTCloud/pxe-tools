@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -115,10 +116,22 @@ def main():
         with disk.open('xb') as raw:
             raw.truncate(64 * 1024**2)
             raw.write(b'ALPINE-DISPOSABLE-DISK')
-        for script in ('discover.sh', 'disktest.sh'):
+        tftp = root/'tftp'
+        (tftp/'pxelinux.cfg').mkdir(parents=True)
+        shutil.copyfile('/usr/lib/PXELINUX/lpxelinux.0', tftp/'lpxelinux.0')
+        for module in ('ldlinux.c32', 'menu.c32', 'libcom32.c32', 'libutil.c32'):
+            shutil.copyfile(Path('/usr/lib/syslinux/modules/bios')/module, tftp/module)
+        for script, target in (
+            ('discover.sh.j2', root/'discover.sh'), ('disktest.sh.j2', root/'disktest.sh'),
+            ('pxelinux-default.j2', tftp/'pxelinux.cfg/default'),
+        ):
             subprocess.run(['python3', str(SCRIPTS/'render_template.py'),
-                            f'/opt/pxe-tools/templates/{script}.j2', str(root/script)], check=True,
-                           env=dict(os.environ, PXE_PROFILE_ADDRESS=SERVER))
+                            f'/opt/pxe-tools/templates/{script}', str(target)], check=True,
+                           env=dict(os.environ, PXE_PROFILE_ADDRESS=SERVER, HTTP_ROOT=str(HTTP_ROOT),
+                                    PXE_RUST_GUIDED='1', KERNEL_OPTS='console=ttyS0,115200n8'))
+        menu = tftp/'pxelinux.cfg/default'
+        assert f'/netboot/{base}/linux' in menu.read_text()
+        menu.write_text('SERIAL 0 115200\n' + menu.read_text())
         with subprocess.Popen([BINARY, str(db), str(address)]) as api:
             try:
                 deadline = time.monotonic() + 5
@@ -182,18 +195,29 @@ def run_modes(root, db, address, disk, base, branch):
                     status, _, _ = request(address, 'POST',
                         f'/api/internal/dhcp-event?mac={MAC}&ip={PEER}', peer='127.0.0.1')
                     assert status == 200
+                network = 'user,id=service'
+                if mode == 'discovery':
+                    # Start the BIOS PXE ROM, then the packaged PXELINUX and the
+                    # rendered unknown-client menu. User networking isolates DHCP.
+                    network += f',tftp={root/"tftp"},bootfile=lpxelinux.0'
                 command = [
                     'qemu-system-x86_64', '-accel', 'kvm', '-cpu', 'host', '-smp', '1', '-m', '1024',
                     '-nodefaults', '-nographic', '-no-reboot', '-serial', 'stdio',
-                    '-netdev', 'user,id=service', '-device', f'virtio-net-pci,netdev=service,mac={MAC}',
+                    '-netdev', network, '-device', f'virtio-net-pci,netdev=service,mac={MAC}',
                     '-drive', f'file={disk},if=none,id=testdisk,format=raw',
                     '-device', f'virtio-blk-pci,drive=testdisk,serial={SERIAL}',
-                    '-kernel', str(HTTP_ROOT / base / 'linux'), '-initrd', str(HTTP_ROOT / base / 'initrd.gz'),
-                    '-append', (f"ip=dhcp modules=loop,squashfs,virtio_blk "
-                                f"alpine_repo=https://dl-cdn.alpinelinux.org/alpine/{branch}/main "
-                                f"modloop={url}/modloop apkovl={url}/service.apkovl.tar.gz "
-                                f"pxe_server={SERVER} pxe_service={mode} BOOTIF={BOOTIF} console=ttyS0,115200n8"),
                 ]
+                if mode == 'discovery':
+                    command += ['-boot', 'order=n,strict=on']
+                else:
+                    command += [
+                        '-kernel', str(HTTP_ROOT / base / 'linux'),
+                        '-initrd', str(HTTP_ROOT / base / 'initrd.gz'),
+                        '-append', (f"ip=dhcp modules=loop,squashfs,virtio_blk "
+                                    f"alpine_repo=https://dl-cdn.alpinelinux.org/alpine/{branch}/main "
+                                    f"modloop={url}/modloop apkovl={url}/service.apkovl.tar.gz "
+                                    f"pxe_server={SERVER} pxe_service={mode} BOOTIF={BOOTIF} console=ttyS0,115200n8"),
+                    ]
                 check_console(command, mode, db)
                 with disk.open('rb') as raw:
                     prefix = raw.read(len(b'ALPINE-DISPOSABLE-DISK'))

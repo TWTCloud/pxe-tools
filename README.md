@@ -100,6 +100,23 @@ binaire Rust. Les nouvelles configurations PXE utilisent
 `/pxe/grub.cfg` et `/pxe/preseed.cfg`. Le serveur répond aussi aux anciens
 chargeurs qui pointent vers `/grub.php` et `/preseed.php`.
 
+## Découverte, secours et opérations disque
+
+Dans les versions qui incluent Alpine, le serveur prépare automatiquement son
+image de service amd64 et arm64 à partir des archives Alpine LTS signées. Suivez
+la préparation dans **Images PXE**. Une instance déjà configurée utilise ses
+médias Debian de service le temps que les fichiers Alpine soient préparés.
+Les images Debian restent disponibles pour installer Debian. Une fois la
+transition terminée, elles peuvent être supprimées depuis **Images PXE** si
+aucune opération ne les utilise.
+
+Le client PXE exécute Alpine en RAM. Il récupère les fichiers de démarrage
+auprès du serveur PXE et les paquets d’outillage signés auprès du dépôt Alpine.
+Pour un réseau isolé, configurez `PXE_ALPINE_REPOSITORY` dans l’environnement du
+serveur PXE et du worker avec l’adresse d’un miroir de la même branche Alpine
+accessible aux clients. Le mode secours fournit un terminal local sans monter
+les disques. Les opérations disque lancées depuis la console ciblent toujours
+les disques sélectionnés par leur identité.
 
 ## Données et limites
 

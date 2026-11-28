@@ -213,5 +213,14 @@ fn finish(
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
                    [crate::now().to_string()])?;
     }
+    if updated == 1 && ok && crate::alpine::all_ready() {
+        tx.execute(
+            "INSERT INTO settings(key,value)
+             SELECT 'alpine_boot_menus_version',?2 FROM init_jobs
+             WHERE id=?1 AND job_type='bootstrap:render_templates'
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+            params![id, crate::alpine::version()],
+        )?;
+    }
     tx.commit()
 }

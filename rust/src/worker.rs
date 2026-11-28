@@ -24,8 +24,8 @@ pub fn recover(path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let deletions = tx.execute(
         "UPDATE init_jobs SET status='pending', updated_at=CURRENT_TIMESTAMP
-         WHERE status='running' AND (job_type GLOB 'image:delete:[0-9]*' OR job_type IN (?1,?2))",
-        [factory_reset::JOB, crate::media::JOB],
+         WHERE status='running' AND (job_type GLOB 'image:delete:[0-9]*' OR job_type IN (?1,?2,?3))",
+        [factory_reset::JOB, crate::media::JOB, crate::alpine::JOB],
     )?;
     let failed = tx.execute(
         "UPDATE init_jobs SET status='failed', ended_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP,

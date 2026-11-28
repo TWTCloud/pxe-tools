@@ -238,7 +238,7 @@ fn last_rescue_image(db: &Connection, image: &Image, http: &Path) -> Result<bool
     if base
         && image.enabled
         && image.status == "downloaded"
-        && !crate::alpine::ready(&image.key.arch)
+        && !crate::alpine::menus_ready(db)?
         && image.key.available(http)?
     {
         let mut replacements = db.prepare(
