@@ -2211,7 +2211,10 @@ def resume_uninstall(root, runner, units, mounts_provider, *, owner=0,
             for unit in dict.fromkeys((*units, *state['masks'])):
                 status = runner(['systemctl', 'show', '--property=LoadState', '--value', unit],
                                 check=False, text=True, stdout=-1, stderr=-1, timeout=30)
-                if status.returncode or status.stdout.strip() != 'masked':
+                optional_missing = (unit in LEGACY_WEB_UNITS and unit not in state['masks'] and
+                                    state['initial_units'].get(unit) == {'active': False, 'enabled': 'not-found'})
+                load_state = status.stdout.strip()
+                if status.returncode or (load_state != 'masked' and not (optional_missing and load_state == 'not-found')):
                     raise RuntimeError('Package purge is incomplete and a service mask is missing; inspect before any package operation')
             raise RuntimeError('Package purge is incomplete. Inspect sudo dpkg --audit; after resolving errors, '
                                'run sudo dpkg --purge pxe-tools-ansible pxe-tools, then retry --resume. '
@@ -3846,6 +3849,7 @@ UNITS = ('pxe-tools.target', 'pxe-tools-admin.target', 'pxe-tools-worker.service
 
 APT_UPDATE_UNIT = 'pxe-tools-apt-update.service'
 PRODUCT_UNITS = UNITS + (APT_UPDATE_UNIT,)
+LEGACY_WEB_UNITS = {'pxe-tools-php.service', 'pxe-tools-nginx.service'}
 
 UNIT_HASHES = {'pxe-tools-dnsmasq-tail.service': '86d1b7e600e0b9fc997aff6a9fba96b5c4522e3e6af5b63451a1f05662b245d2', 'pxe-tools-dnsmasq.service': '691030281153890ea1a1433cba22eca55bd0e772ce72254e695a899066e9c609', 'pxe-tools-init.service': '79785fa3530786658bb278d55c6356703517db00da975028963a470450df5187', 'pxe-tools-nginx.service': 'ee3a5893223d469f2021171339e67967387de4dd8f0e18e5075bd47943cc0b3e', 'pxe-tools-php.service': '12d0d54bbd463f424f0ed33850949aa245b4e15d8bec5391219d8745292eb04d', 'pxe-tools-pxe-http.service': '6bfbf1e6463786671154911b68d0c206d08192d792dd14134f6ef530ba9aedba', 'pxe-tools-worker.service': '654a7103bdea22658f79e4dfb9c135204a2584cb38c11658be26718c87fa8f1b', 'pxe-tools-admin.target': '280dd012f0ebe0720ed1f437c41ce9ccd9d5f63eb58c726fe980fb99ad79b2ac', 'pxe-tools.target': '8d3a636b9177d68ddc12cfde6449a13dc4a6acd138129db035ce83c8298af68c'}
 
@@ -3929,11 +3933,19 @@ def validate_product_units(root, runner, units, *, owner=0):
                 pass  # PHP and the first Rust packages predate console updates.
             else:
                 units += (APT_UPDATE_UNIT,)
+        omitted = set()
         for unit in units:
             if unit not in PRODUCT_UNITS:
                 raise ValueError('unsupported product unit')
-            actual = digest(package_dir, unit)
-            if actual != UNIT_HASHES.get(unit) and actual not in RUST_UNIT_HASHES.get(unit, ()):
+            try:
+                actual = digest(package_dir, unit)
+            except FileNotFoundError:
+                if (unit not in LEGACY_WEB_UNITS or
+                        digest(package_dir, 'pxe-tools-pxe-http.service') not in
+                        RUST_UNIT_HASHES['pxe-tools-pxe-http.service']):
+                    raise
+                actual = None
+            if actual is not None and actual != UNIT_HASHES.get(unit) and actual not in RUST_UNIT_HASHES.get(unit, ()):
                 raise ValueError('package unit changed; preserved: ' + unit)
             allowed_masks = set()
             for parts, local in local_dirs:
@@ -3958,8 +3970,14 @@ def validate_product_units(root, runner, units, *, owner=0):
                     raise RuntimeError('cannot inspect unit: ' + unit)
                 return result.stdout.strip()
             fragment = show('FragmentPath')
+            if actual is None and not allowed_masks:
+                if (fragment or show('LoadState') != 'not-found' or show('DropInPaths') or
+                        show('ActiveState') not in ('inactive', 'failed')):
+                    raise ValueError('unexpected legacy unit; preserved: ' + unit)
+                omitted.add(unit)
+                continue
             standard = {'/usr/lib/systemd/system/' + unit, '/lib/systemd/system/' + unit}
-            if fragment not in standard | allowed_masks:
+            if fragment not in (allowed_masks if actual is None else standard | allowed_masks):
                 raise ValueError('unexpected unit fragment; preserved: ' + unit)
             if fragment in allowed_masks and show('ActiveState') not in ('inactive', 'failed'):
                 raise ValueError('masked unit is still active: ' + unit)
@@ -3977,7 +3995,7 @@ def validate_product_units(root, runner, units, *, owner=0):
                         raise ValueError('Ansible unit drop-in changed; preserved')
                 finally:
                     os.close(folder)
-        return units
+        return tuple(unit for unit in units if unit not in omitted)
     finally:
         for descriptor in opened:
             os.close(descriptor)

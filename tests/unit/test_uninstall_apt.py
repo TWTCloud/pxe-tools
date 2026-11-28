@@ -618,16 +618,19 @@ class PackagedUnitHashTests(unittest.TestCase):
             shutil.copyfile(rust / http_unit, directory / http_unit)
             update = uninstall.APT_UPDATE_UNIT
             active = 'inactive'
+            missing = set()
 
             def runner(command, **options):
                 prop = command[2]
                 name = command[-1]
                 if prop == '--property=FragmentPath':
-                    result = '/usr/lib/systemd/system/' + name
+                    result = '' if name in missing else '/usr/lib/systemd/system/' + name
+                elif prop == '--property=LoadState' and name in missing:
+                    result = 'not-found'
                 elif prop == '--property=DropInPaths':
                     result = ''
-                elif prop == '--property=ActiveState' and name == update:
-                    result = active
+                elif prop == '--property=ActiveState' and (name == update or name in missing):
+                    result = active if name == update else 'inactive'
                 else:
                     raise AssertionError(command)
                 return subprocess.CompletedProcess(command, 0, stdout=result)
@@ -647,7 +650,24 @@ class PackagedUnitHashTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'local unit drop-in; preserved: ' + update):
                 validate()
             overrides.rmdir()
+            missing.update(uninstall.LEGACY_WEB_UNITS)
+            for name in missing:
+                (directory / name).unlink()
+            self.assertEqual(validate(), tuple(name for name in uninstall.PRODUCT_UNITS if name not in missing))
+            legacy_dropin = root / 'etc/systemd/system/pxe-tools-php.service.d'
+            legacy_dropin.mkdir()
+            with self.assertRaisesRegex(ValueError, 'local unit drop-in; preserved: pxe-tools-php.service'):
+                validate()
+            legacy_dropin.rmdir()
             unit = directory / http_unit
+            content = unit.read_bytes()
+            shutil.copyfile(SCRIPT.parent / http_unit, unit)
+            with self.assertRaises(FileNotFoundError):
+                validate()  # An incomplete legacy package is not a Rust layout.
+            for name in missing:
+                shutil.copyfile(SCRIPT.parent / name, directory / name)
+            missing.clear()
+            unit.write_bytes(content)
             unit.write_bytes(unit.read_bytes() + b'# local edit\n')
             with self.assertRaisesRegex(ValueError, 'package unit changed; preserved: ' + http_unit):
                 validate()

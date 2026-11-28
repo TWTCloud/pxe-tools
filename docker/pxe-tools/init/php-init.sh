@@ -322,10 +322,12 @@ fi
 # -----------------------------------------------------------------------------
 if [ ! -f "$DB_CONF" ]; then
     echo "[php-init] db.conf absent → wizard /init/db prendra le relais"
-    # On crée juste le répertoire sessions PHP + perms (toujours nécessaires)
+    # Préparer les sessions web. Le socket PHP ne concerne que sa variante.
     prepare_sessions
-    mkdir -p /run/php
-    chown www-data:www-data /run/php
+    if [ "${PXE_RUST_GUIDED:-0}" != 1 ]; then
+        mkdir -p /run/php
+        chown www-data:www-data /run/php
+    fi
     # Le wizard doit pouvoir créer sa base ; ne jamais parcourir récursivement
     # un arbre de données susceptible de contenir des entrées non fiables.
     if [ -L /var/lib/pxe-tools ] || [ ! -d /var/lib/pxe-tools ]; then
@@ -513,9 +515,11 @@ PYTHON
 fi
 
 # -----------------------------------------------------------------------------
-# 5. Sessions PHP + socket php-fpm — toujours nécessaires
+# 5. Sessions web et socket de la variante PHP
 # -----------------------------------------------------------------------------
 prepare_sessions
 
-mkdir -p /run/php
-chown www-data:www-data /run/php
+if [ "${PXE_RUST_GUIDED:-0}" != 1 ]; then
+    mkdir -p /run/php
+    chown www-data:www-data /run/php
+fi

@@ -170,6 +170,11 @@ if [ "$variant" = apt ]; then
         for unit in pxe-tools-php.service pxe-tools-nginx.service pxe-tools-dnsmasq.service; do
             if systemctl is-active --quiet "$unit" || systemctl is-failed --quiet "$unit"; then exit 1; fi
         done
+        for unit in pxe-tools-php.service pxe-tools-nginx.service; do
+            test "$(systemctl show --property=LoadState --value "$unit")" = not-found
+            test ! -e "/usr/lib/systemd/system/$unit"
+        done
+        test -z "$(find /usr/lib/pxe-tools /opt/pxe-tools -type f \( -name '*.php' -o -name '*.php.j2' \) -print -quit)"
         ansible --version
 APT_UPGRADE
 else

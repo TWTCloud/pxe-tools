@@ -32,6 +32,7 @@ UNITS = (
     'pxe-tools-pxe-http.service', 'pxe-tools-php.service',
     'pxe-tools-dnsmasq.service', 'pxe-tools-init.service',
 )
+LEGACY_WEB_UNITS = {'pxe-tools-php.service', 'pxe-tools-nginx.service'}
 NETWORK = {'pxe-tools.target', 'pxe-tools-dnsmasq-tail.service',
            'pxe-tools-pxe-http.service', 'pxe-tools-dnsmasq.service'}
 START_ORDER = ('pxe-tools-init.service', 'pxe-tools-php.service', 'pxe-tools-nginx.service',
@@ -204,6 +205,9 @@ class Lifecycle:
         self.check_effective_configuration()
         units = {}
         for unit in UNITS:
+            if self.legacy_web_state(unit) == 'not-found':
+                units[unit] = {'active': False, 'enabled': 'not-found'}
+                continue
             active = self.systemctl('show', '--property=ActiveState', '--value', unit).stdout.strip()
             if active not in ('active', 'inactive', 'failed'):
                 raise RuntimeError('PXE Tools services are transitioning; retry the upgrade shortly')
@@ -215,8 +219,15 @@ class Lifecycle:
         self.save(state)
         return state
 
+    def legacy_web_state(self, unit):
+        if unit in LEGACY_WEB_UNITS:
+            return self.systemctl('show', '--property=LoadState', '--value', unit).stdout.strip()
+        return None
+
     def check_effective_configuration(self):
         for unit in ('pxe-tools-worker.service', 'pxe-tools-php.service', 'pxe-tools-init.service'):
+            if self.legacy_web_state(unit) in ('not-found', 'masked'):
+                continue
             files = self.systemctl('show', '--property=EnvironmentFiles', '--value', unit).stdout.strip()
             expected = ['/usr/lib/pxe-tools/native/default.env']
             if unit != 'pxe-tools-init.service':
@@ -399,7 +410,7 @@ class Lifecycle:
         self.systemctl('stop', 'pxe-tools-worker.service')
         self.paused_worker = None
         self.thaw_worker()
-        self.systemctl('stop', *STOP_ORDER)
+        self.systemctl('stop', *(unit for unit in STOP_ORDER if self.legacy_web_state(unit) != 'not-found'))
         for unit in UNITS:
             if self.systemctl('is-active', '--quiet', unit, check=False).returncode == 0:
                 raise RuntimeError('PXE Tools service remained active after stop')
@@ -492,11 +503,12 @@ class Lifecycle:
         # Preserve the previous operator choices when restoring or aborting.
         active = {unit for unit, previous in state['units'].items() if previous['active']}
         network = NETWORK
-        if not old and self.environments().get('PXE_RUST_GUIDED') == '1':
+        guided = not old and self.environments().get('PXE_RUST_GUIDED') == '1'
+        if guided:
             frontend = 'pxe-tools-pxe-http.service'
             if 'pxe-tools-nginx.service' in active:
                 active.add(frontend)
-            active -= {'pxe-tools-php.service', 'pxe-tools-nginx.service'}
+            active -= LEGACY_WEB_UNITS
             network = NETWORK - {frontend}
         # The recorded dependency closure is represented by the active roles.
         # Ignore Wants/Requires to avoid starting roles stopped by the operator.
@@ -519,6 +531,8 @@ class Lifecycle:
                     failures.append(unit)
                     break
         for unit in UNITS:
+            if guided and self.legacy_web_state(unit) == 'not-found':
+                continue  # dpkg removed these vendor units as part of the Rust upgrade.
             enabled = self.systemctl('is-enabled', unit, check=False).stdout.strip()
             if enabled != state['units'][unit]['enabled']:
                 failures.append(unit + ' enablement changed')
