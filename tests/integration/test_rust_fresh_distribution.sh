@@ -349,5 +349,45 @@ if [[ "$variant" == docker ]]; then
     docker exec "$container" curl -kfsS --max-time 5 https://127.0.0.1:9443/healthz >/dev/null
 fi
 printf 'HTTPS port trial, confirmation and restart passed (%s)\n' "$variant"
+docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
+    set -euo pipefail
+    if [[ "$1" == apt ]]; then
+        systemctl stop pxe-tools-worker.service
+    else
+        /command/s6-svc -d /run/service/worker
+    fi
+    config=/etc/pxe-tools/db.conf
+    database=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["path"])' "$config")
+    port=$(/usr/lib/pxe-tools/pxe-tools-rust --console-https-port "$config")
+    origin="https://127.0.0.1:$port"
+    client=(curl -kfsS --max-time 8 --user setup-fixture:fixture-only-password)
+    route="$origin/settings/images"
+    archive='https://cdimage.debian.org/cdimage/archive/13.7.0/amd64/iso-cd/debian-13.7.0-amd64-netinst.iso'
+    entry=$(sqlite3 "$database" "INSERT INTO catalog_entries
+      (distro,version_full,major,codename,arch,extract_method,iso_url)
+      VALUES('debian','13.7.0',13,'trixie','amd64','iso_extract','$archive') RETURNING id")
+    catalog=$("${client[@]}" "$route/add")
+    [[ "$catalog" == *'13.7.0 <small class="record-meta">Archive</small>'* ]]
+    [[ "$catalog" == *"name=\"image\" value=\"$entry\""* ]]
+    post=(-o /dev/null -w '%{http_code}' -H "Origin: $origin")
+    test "$("${client[@]}" "${post[@]}" --data "image=$entry" "$route/add")" = 303
+    queued=$(sqlite3 "$database" "SELECT extract_method||'|'||iso_url||'|'||status
+      FROM os_images WHERE distro='debian' AND version_full='13.7.0' AND arch='amd64'")
+    test "$queued" = "iso_extract|$archive|pending"
+    test "$("${client[@]}" "${post[@]}" --data '' "$route/refresh")" = 303
+    pending=$("${client[@]}" "$route/refresh-button")
+    [[ "$pending" == *'data-catalog-refresh="pending"'* ]]
+    sqlite3 "$database" "UPDATE init_jobs SET status='running',progress_percent=42
+      WHERE job_type='bootstrap:refresh_catalog_v2' AND status='pending'"
+    current=$("${client[@]}" "$route/refresh-button")
+    [[ "$current" == *'data-catalog-refresh="running"'* && "$current" == *'<progress value="42"'* ]]
+    sqlite3 "$database" "UPDATE init_jobs SET status='success',progress_percent=100
+      WHERE job_type='bootstrap:refresh_catalog_v2' AND status='running'"
+    finished=$("${client[@]}" "$route/refresh-button")
+    [[ "$finished" == *'data-catalog-refresh="success"'* && "$finished" == *'Catalogue à jour'* ]]
+    sqlite3 "$database" "DELETE FROM os_images WHERE distro='debian' AND version_full='13.7.0' AND arch='amd64';
+      DELETE FROM catalog_entries WHERE id=$entry"
+    printf 'Debian archive selection and catalog refresh states passed (%s)\n' "$1"
+CATALOG_GUEST
 bash tests/integration/test_rust_multinetwork.sh "$container" "$variant"
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"
