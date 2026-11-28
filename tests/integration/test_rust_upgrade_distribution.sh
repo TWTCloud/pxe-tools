@@ -79,14 +79,26 @@ case "$variant" in
             apt-get install -y --no-install-recommends "/mnt/pxe-fixture/$1" "/mnt/pxe-fixture/$2"
             test "$(dpkg-query -W -f='${Version}' pxe-tools)" = "$3"
             systemctl stop pxe-tools-worker.service
-            # Beta 28 can leave the obsolete PHP service failed after a watcher
-            # start. Exercise the package upgrade with that recorded failure.
-            systemctl start pxe-tools-php.service || true
+            # Reproduce the failed unit left by a legacy watcher even when the
+            # current published baseline has already removed its PHP files.
+            unit=pxe-tools-php.service
+            fixture=
+            if [[ $(systemctl show -p LoadState --value "$unit") == not-found ]]; then
+                fixture="/run/systemd/system/$unit"
+                printf '[Service]\nExecStart=/bin/false\n' > "$fixture"
+                systemctl daemon-reload
+            fi
+            systemctl start "$unit" || true
             for _ in {1..12}; do
-                if systemctl is-failed --quiet pxe-tools-php.service; then break; fi
+                if systemctl is-failed --quiet "$unit"; then break; fi
                 sleep 1
             done
-            systemctl is-failed --quiet pxe-tools-php.service
+            if [[ -n "$fixture" ]]; then
+                rm -- "$fixture"
+                systemctl daemon-reload
+                test -z "$(systemctl show -p FragmentPath --value "$unit")"
+            fi
+            systemctl is-failed --quiet "$unit"
 APT_LEGACY
         schema=/usr/lib/pxe-tools/app/db/schema.sqlite.sql
         cert=/var/lib/pxe-tools-native/tls/cert.pem
