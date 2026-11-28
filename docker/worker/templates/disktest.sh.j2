@@ -35,9 +35,9 @@ log_line() {
     msg="[$(date +%H:%M:%S)] $1"
     echo "$msg"
     if [ "$TEST_ID" -gt 0 ] 2>/dev/null; then
-        enc=$(echo "$msg" | sed 's/%/%25/g; s/ /%20/g; s|/|%2F|g; s/:/%3A/g; s/=/%3D/g; s/&/%26/g; s/+/%2B/g')
-        wget -q -O /dev/null --header="Authorization: Bearer $BOOT_TOKEN" \
-            "$API_BASE/disktest-progress?test_id=$TEST_ID&mac=$MAC&line=$enc" 2>/dev/null || true
+        wget -q -O /dev/null --post-data="$msg" --header="Content-Type: text/plain; charset=utf-8" \
+            --header="Authorization: Bearer $BOOT_TOKEN" \
+            "$API_BASE/disktest-progress?test_id=$TEST_ID&mac=$MAC" 2>/dev/null || true
     fi
 }
 
@@ -138,7 +138,18 @@ write_state() {
 }
 
 # ---- MAC interface principale ---------------------------------------------
-MAIN_IF=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')
+MAIN_IF=
+if [ -n "${PXE_BOOT_MAC:-}" ]; then
+    for address in /sys/class/net/*/address; do
+        if [ "$(cat "$address" 2>/dev/null)" = "$PXE_BOOT_MAC" ]; then
+            MAIN_IF=${address%/address}
+            MAIN_IF=${MAIN_IF##*/}
+            break
+        fi
+    done
+    [ -n "$MAIN_IF" ] || exit 1
+fi
+[ -n "$MAIN_IF" ] || MAIN_IF=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')
 [ -z "$MAIN_IF" ] && MAIN_IF=$(ls /sys/class/net/ 2>/dev/null | grep -v '^lo$' | head -1)
 MAC=$(cat /sys/class/net/"$MAIN_IF"/address 2>/dev/null)
 [ -z "$MAC" ] && MAC="00:00:00:00:00:00"
@@ -206,28 +217,24 @@ log_line "Tests planifiés : $JOB_COUNT"
 
 # ---- Téléchargement des binaires statiques --------------------------------
 log_line "Téléchargement de smartctl + badblocks depuis $STATIC_BIN_BASE"
-SMARTCTL=$WORK_DIR/smartctl
-BADBLOCKS=$WORK_DIR/badblocks
+SMARTCTL=$(command -v smartctl || true)
+BADBLOCKS=$(command -v badblocks || true)
 
-if wget -q -O "$SMARTCTL" "$STATIC_BIN_BASE/smartctl" && [ -s "$SMARTCTL" ]; then
-    chmod +x "$SMARTCTL"
-    log_line "  smartctl : OK ($(wc -c < "$SMARTCTL") octets)"
-else
-    log_line "  [WARN] smartctl introuvable — les modes smart_* échoueront"
-    SMARTCTL=""
+if [ -z "$SMARTCTL" ]; then
+    if wget -q -O "$WORK_DIR/smartctl" "$STATIC_BIN_BASE/smartctl" && [ -s "$WORK_DIR/smartctl" ]; then
+        SMARTCTL=$WORK_DIR/smartctl
+        chmod +x "$SMARTCTL"
+    else
+        log_line "  [WARN] smartctl introuvable — les modes smart_* échoueront"
+    fi
 fi
 
-if wget -q -O "$BADBLOCKS" "$STATIC_BIN_BASE/badblocks" && [ -s "$BADBLOCKS" ]; then
-    chmod +x "$BADBLOCKS"
-    log_line "  badblocks : OK ($(wc -c < "$BADBLOCKS") octets)"
-else
-    # Fallback : badblocks peut être déjà dans /usr/sbin sur d-i
-    if command -v badblocks >/dev/null 2>&1; then
-        BADBLOCKS=$(command -v badblocks)
-        log_line "  badblocks : utilise binaire système ($BADBLOCKS)"
+if [ -z "$BADBLOCKS" ]; then
+    if wget -q -O "$WORK_DIR/badblocks" "$STATIC_BIN_BASE/badblocks" && [ -s "$WORK_DIR/badblocks" ]; then
+        BADBLOCKS=$WORK_DIR/badblocks
+        chmod +x "$BADBLOCKS"
     else
         log_line "  [WARN] badblocks introuvable — les modes badblocks_* échoueront"
-        BADBLOCKS=""
     fi
 fi
 
@@ -249,8 +256,11 @@ valid_serial() {
 # Même ordre de sources que le discovery : sysfs, contrôleur NVMe, puis smartctl -i.
 read_disk_serial() {
     rds_dir="$1"; rds_base="${rds_dir##*/}"
-    rds_s=$(norm_serial "$(cat "$rds_dir/device/serial" 2>/dev/null)")
-    valid_serial "$rds_s" || rds_s=""
+    for rds_path in "$rds_dir/device/serial" "$rds_dir/serial" "$rds_dir/device/device/serial"; do
+        rds_s=$(norm_serial "$(cat "$rds_path" 2>/dev/null)")
+        valid_serial "$rds_s" && break
+        rds_s=""
+    done
     if [ -z "$rds_s" ]; then
         rds_ctrl=$(printf '%s' "$rds_base" | sed -n 's/^\(nvme[0-9][0-9]*\)n[0-9][0-9]*$/\1/p')
         [ -n "$rds_ctrl" ] && rds_s=$(norm_serial "$(cat "$SYS_NVME/$rds_ctrl/serial" 2>/dev/null)")

@@ -146,6 +146,15 @@ impl Assets {
                     "application/octet-stream",
                 )
             }
+            ["netboot", "alpine-service", version, arch, name @ ("modloop" | "service.apkovl.tar.gz")]
+                if *version == crate::alpine::version() && matches!(*arch, "amd64" | "arm64") =>
+            {
+                (
+                    self.root.join("netboot/alpine-service"),
+                    [version, arch, name].iter().collect::<PathBuf>(),
+                    "application/octet-stream",
+                )
+            }
             ["netboot", dirs @ .., name] if !dirs.is_empty() => {
                 let mime = match *name {
                     "linux" | "vmlinuz" | "initrd" | "initrd.gz" | "initrd.lz" | "initrd.img"

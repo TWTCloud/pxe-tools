@@ -435,6 +435,24 @@ docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
     reply=$("${client[@]}" --no-fail -w '\n%{http_code}' -H "Origin: $origin" \
       --data '_method=DELETE' "$route/$rescue")
     [[ "$reply" == *'Dernière image de découverte et de secours pour cette architecture'*$'\n409' ]]
+    alpine_version=$(python3 -c 'import json; print(json.load(open("/opt/pxe-tools/scripts/alpine-release.json"))["version"])')
+    alpine_tree="$http/netboot/alpine-service/$alpine_version"
+    for arch in amd64 arm64; do
+        install -d -m 0755 "$alpine_tree/$arch"
+        printf '%s\n' "$alpine_version" >"$alpine_tree/$arch/.alpine-ready"
+        for file in linux initrd.gz modloop service.apkovl.tar.gz; do
+            printf 'fixture' >"$alpine_tree/$arch/$file"
+        done
+    done
+    [[ "$("${client[@]}" "$route")" != *"action=\"/settings/images/$rescue\""* ]]
+    sqlite3 "$database" "INSERT INTO settings(key,value) VALUES('alpine_boot_menus_version','$alpine_version')"
+    [[ "$("${client[@]}" "$route")" == *"action=\"/settings/images/$rescue\""* ]]
+    sqlite3 "$database" "DELETE FROM settings WHERE key='alpine_boot_menus_version'"
+    for arch in amd64 arm64; do
+        rm -- "$alpine_tree/$arch/"{.alpine-ready,linux,initrd.gz,modloop,service.apkovl.tar.gz}
+        rmdir -- "$alpine_tree/$arch"
+    done
+    rmdir -- "$alpine_tree" "$http/netboot/alpine-service"
     fallback=$(sqlite3 "$database" "INSERT INTO os_images
       (distro,version,version_full,codename,major,arch,extract_method,enabled,status)
       VALUES ('debian','12.15.0','12.15.0','bookworm',12,'amd64','direct',1,'downloaded') RETURNING id")
@@ -450,3 +468,14 @@ docker exec -i "$container" bash -es -- "$variant" <<'CATALOG_GUEST'
 CATALOG_GUEST
 bash tests/integration/test_rust_multinetwork.sh "$container" "$variant"
 printf 'Fresh Rust distribution ready for setup over HTTPS (%s)\n' "$variant"
+if [[ "$variant" == apt && "${GITHUB_ACTIONS:-}" == true && "$(uname -m)" == x86_64 && -c /dev/kvm ]]; then
+    docker exec -e DEBIAN_FRONTEND=noninteractive "$container" \
+        apt-get install -y --no-install-recommends qemu-system-x86 ipxe-qemu
+    docker exec -i -e PXE_DISPOSABLE_ALPINE_BOOT=1 "$container" bash -ec '
+        set -a
+        source /usr/lib/pxe-tools/native/default.env
+        source /var/lib/pxe-tools-native/runtime.env
+        set +a
+        exec python3 -
+    ' < tests/integration/test_alpine_service_boot.py
+fi

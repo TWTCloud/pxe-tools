@@ -1,0 +1,19 @@
+{# Alpine service URLs use the interface that served this menu. #}
+{% macro options(base, mode) -%}
+ip=dhcp modules=loop,squashfs,sd_mod,usb-storage,nvme,virtio_blk,ahci,vmbus,hv_storvsc alpine_repo={{ pxe_alpine_repository }} modloop={{ base }}/modloop apkovl={{ base }}/service.apkovl.tar.gz pxe_server={{ pxe_ip }} pxe_service={{ mode }}{% for option in pxe_kernel_opts.split() if option.startswith('console=') %} {{ option }}{% endfor %}
+{%- endmacro %}
+{% macro bios(mode) -%}
+{% set base = 'http://' ~ pxe_ip ~ '/netboot/' ~ pxe_alpine['amd64'] -%}
+  KERNEL {{ base }}/linux
+  APPEND initrd={{ base }}/initrd.gz {{ options(base, mode) }}
+  IPAPPEND 2
+{%- endmacro %}
+{% macro grub(mode) -%}
+{% for arch, path in pxe_alpine.items() %}
+    {% if arch == 'amd64' %}if [ "$grub_cpu" = x86_64 ]; then{% else %}if [ "$grub_cpu" = arm64 ]; then{% endif %}
+        linux (http,{{ pxe_ip }})/netboot/{{ path }}/linux {{ options('http://' ~ pxe_ip ~ '/netboot/' ~ path, mode) }} BOOTIF=01-${net_default_mac}
+        initrd (http,{{ pxe_ip }})/netboot/{{ path }}/initrd.gz
+        boot
+    fi
+{% endfor %}
+{%- endmacro %}

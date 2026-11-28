@@ -44,6 +44,7 @@ valid_serial() {
 ensure_smartctl() {
     [ "$SMARTCTL_TRIED" = 1 ] && return 0
     SMARTCTL_TRIED=1
+    if SMARTCTL=$(command -v smartctl); then return 0; fi
     if wget -q --timeout=8 -O /tmp/pxe-wipe-smartctl "$SMARTCTL_URL" 2>/dev/null \
         && chmod +x /tmp/pxe-wipe-smartctl 2>/dev/null && /tmp/pxe-wipe-smartctl --version >/dev/null 2>&1; then
         SMARTCTL=/tmp/pxe-wipe-smartctl
@@ -51,8 +52,11 @@ ensure_smartctl() {
 }
 read_disk_serial() {
     d="$1"; b="${d##*/}"
-    s=$(norm_serial "$(cat "$d/device/serial" 2>/dev/null)")
-    valid_serial "$s" || s=""
+    for path in "$d/device/serial" "$d/serial" "$d/device/device/serial"; do
+        s=$(norm_serial "$(cat "$path" 2>/dev/null)")
+        valid_serial "$s" && break
+        s=""
+    done
     if [ -z "$s" ]; then
         c=$(printf '%s' "$b" | sed -n 's/^\(nvme[0-9][0-9]*\)n[0-9][0-9]*$/\1/p')
         [ -n "$c" ] && s=$(norm_serial "$(cat "/sys/class/nvme/$c/serial" 2>/dev/null)")
@@ -85,9 +89,9 @@ log_line() {
     msg="[$(date +%H:%M:%S)] $1"
     echo "$msg"
     if [ "$WIPE_ID" -gt 0 ] 2>/dev/null; then
-        enc=$(echo "$msg" | sed 's/%/%25/g; s/ /%20/g; s|/|%2F|g; s/:/%3A/g; s/=/%3D/g; s/&/%26/g; s/+/%2B/g')
-        wget -q -O /dev/null --header="Authorization: Bearer $BOOT_TOKEN" \
-            "$API_BASE/wipe-progress?wipe_id=$WIPE_ID&mac=$MAC&line=$enc" 2>/dev/null || true
+        wget -q -O /dev/null --post-data="$msg" --header="Content-Type: text/plain; charset=utf-8" \
+            --header="Authorization: Bearer $BOOT_TOKEN" \
+            "$API_BASE/wipe-progress?wipe_id=$WIPE_ID&mac=$MAC" 2>/dev/null || true
     fi
 }
 

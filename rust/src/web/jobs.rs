@@ -180,6 +180,7 @@ pub(super) fn title(kind: &str) -> &str {
         "bootstrap:install_pxe_bins" => "Préparation du démarrage par le réseau",
         "bootstrap:generate_mok" => "Mise en place du démarrage sécurisé",
         "bootstrap:download_images" => "Téléchargement des systèmes d’exploitation",
+        crate::alpine::JOB => "Préparation du système de service Alpine",
         "bootstrap:build_grub" => "Préparation du chargeur de démarrage",
         "bootstrap:render_templates" => "Création des menus de démarrage",
         "bootstrap:regen_mok" => "Renouvellement du démarrage sécurisé",

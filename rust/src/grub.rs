@@ -191,6 +191,11 @@ pub fn serve(
     };
     let proto = if proto == "tftp" { "tftp" } else { "http" };
     let mut body = format!("set timeout=3\nset default=0\nset net_default_server={server}\n\n");
+    if let Some(service) = crate::alpine::grub(server, arch, menu, proto, &signal(menu), kernel) {
+        body.push_str(&service);
+        tx.commit()?;
+        return Ok(reply(200, &body));
+    }
     let linux = machine.as_ref().and_then(|machine| {
         serde_json::from_str::<Value>(machine.config.as_deref().unwrap_or_default())
             .ok()

@@ -235,7 +235,12 @@ fn transferring(image: &Image) -> bool {
 
 fn last_rescue_image(db: &Connection, image: &Image, http: &Path) -> Result<bool, ErrorBox> {
     let base = image.key.distro == "debian" && image.extract_method == "direct";
-    if base && image.enabled && image.status == "downloaded" && image.key.available(http)? {
+    if base
+        && image.enabled
+        && image.status == "downloaded"
+        && !crate::alpine::menus_ready(db)?
+        && image.key.available(http)?
+    {
         let mut replacements = db.prepare(
             "SELECT id,distro,version,version_full,arch FROM os_images
              WHERE distro='debian' AND arch=? AND extract_method='direct'

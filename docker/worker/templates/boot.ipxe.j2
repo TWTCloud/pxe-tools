@@ -10,6 +10,7 @@
 #   ${net0/mac}   = MAC du premier NIC
 #   ${ip}         = IP attribuée par DHCP
 #   ${buildarch}  = i386, x86_64, arm32, arm64
+{% import 'alpine-service.j2' as alpine with context %}
 
 set orch_ip {{ pxe_ip }}
 set base http://${orch_ip}/netboot
@@ -53,12 +54,22 @@ goto menu
 
 {% endif %}
 :rescue
+{% for arch, path in pxe_alpine.items() %}
+iseq ${arch} {{ arch }} && goto alpine-rescue-{{ arch }} ||
+{% endfor %}
 echo Démarrage en mode récupération Debian {{ pxe_debian_default_version }}...
 kernel ${base}/{{ pxe_debian_default_version }}/${arch}/linux {{ pxe_kernel_opts }} rescue/enable=true
 initrd ${base}/{{ pxe_debian_default_version }}/${arch}/initrd.gz
 initrd --name firmware ${base}/{{ pxe_debian_default_version }}/${arch}/firmware.cpio.gz
 boot || goto menu
 
+{% for arch, path in pxe_alpine.items() %}
+:alpine-rescue-{{ arch }}
+{% set service = 'http://' ~ pxe_ip ~ '/netboot/' ~ path %}
+kernel {{ service }}/linux {{ alpine.options(service, 'rescue') }} BOOTIF=01-${net0/mac} || goto menu
+initrd {{ service }}/initrd.gz || goto menu
+boot || goto menu
+{% endfor %}
 :shell
 echo Console iPXE — tapez "exit" pour revenir au menu, "reboot" pour relancer.
 shell

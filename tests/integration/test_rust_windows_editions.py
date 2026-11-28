@@ -940,7 +940,7 @@ def check_lan(binary, root, tls, env):
                 )
             state = image_state()
             assert not state['active'] and 'Ubuntu Server' in state['catalog'] and 'ARM 64 bits' in state['catalog']
-            assert 'image:debian:13.5.0:amd64' not in state['catalog']
+            assert 'image:debian:13.5.0:amd64' in state['catalog']
             assert request('/init/images', **secure, form={'action': 'prepare', 'image:centos:999:amd64': 'on'},
                            headers=admin)[0] == 422
             selection = {'action': 'prepare', 'image:debian:12.14.0:amd64': 'on', 'image:ubuntu:24.04.5:arm64': 'on'}
@@ -950,21 +950,27 @@ def check_lan(binary, root, tls, env):
                 assert request('/init/images', **secure, form=selection, headers=admin)[:2] == (303, '/init/images')
             with sqlite3.connect(runtime/'install.sqlite') as db:
                 images = db.execute('SELECT distro,version_full,arch,status FROM os_images ORDER BY id').fetchall()
-                assert images[0] == ('debian', '13.5.0', 'amd64', 'pending') and len(images) == 3
+                assert len(images) == 2
                 assert ('ubuntu', '24.04.5', 'arm64', 'pending') in images
-                db.execute("UPDATE os_images SET status='downloading', progress_percent=37 WHERE version_full='13.5.0'")
+                db.execute("UPDATE init_jobs SET status='running', progress_percent=37 WHERE job_type='bootstrap:prepare_alpine_service'")
             state = image_state()
             assert state['active'] and not state['ready'] and 'value="37"' in state['downloads']
             assert request('/init/images', **secure, form={'action': 'continue'}, headers=admin)[:2] == (303, '/init/images')
             _, pending_image = wizard_page('/init/done', 'Validation', headers=admin)
             assert b'name="confirmation"' not in pending_image
             with sqlite3.connect(runtime/'install.sqlite') as db:
-                db.execute("UPDATE os_images SET status='failed' WHERE version_full='13.5.0'")
+                db.execute("UPDATE init_jobs SET status='failed' WHERE job_type='bootstrap:prepare_alpine_service'")
             assert image_state()['retry']
             assert request('/init/images', **secure, form={'action': 'retry'}, headers=admin)[:2] == (303, '/init/images')
             with sqlite3.connect(runtime/'install.sqlite') as db:
-                assert db.execute("SELECT status,progress_percent FROM os_images WHERE version_full='13.5.0'").fetchone() == ('pending', 0)
-                db.execute("UPDATE os_images SET status='downloaded' WHERE version_full='13.5.0'")
+                status, = db.execute("SELECT status FROM init_jobs WHERE job_type='bootstrap:prepare_alpine_service' ORDER BY id DESC LIMIT 1").fetchone()
+                assert status == 'pending'
+            release = json.loads((ROOT/'rust/assets/pxe/alpine-release.json').read_text())['version']
+            for arch in ('amd64', 'arm64'):
+                service_media = Path(env['HTTP_ROOT'])/'netboot'/'alpine-service'/release/arch
+                service_media.mkdir(parents=True)
+                for asset in ('.alpine-ready', 'linux', 'initrd.gz', 'modloop', 'service.apkovl.tar.gz'):
+                    (service_media/asset).write_text(release+'\n')
             state = image_state()
             assert state['ready'] and state['active'] and 'Ubuntu Server' in state['downloads']
             assert request('/init/images', **secure, form={'action': 'continue'}, headers=admin)[:2] == (303, '/init/done')

@@ -61,6 +61,7 @@ const JOBS: &[(&str, &str, Option<&str>)] = &[
         None,
     ),
     (AUTO_CATALOG, "bootstrap-refresh-catalog-v2.sh", None),
+    (crate::alpine::JOB, "bootstrap-prepare-alpine.sh", None),
 ];
 
 pub(super) fn supports(kind: &str) -> bool {
@@ -211,6 +212,23 @@ fn finish(
         tx.execute("INSERT INTO settings(key,value) VALUES('catalog_auto_refresh_last_at',?1)
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
                    [crate::now().to_string()])?;
+    }
+    if updated == 1 && ok && crate::alpine::all_ready() {
+        tx.execute(
+            "INSERT INTO settings(key,value)
+             SELECT 'alpine_boot_menus_version',?2 FROM init_jobs
+             WHERE id=?1 AND job_type='bootstrap:render_templates'
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+            params![id, crate::alpine::version()],
+        )?;
+        let prepared = tx.query_row(
+            "SELECT job_type=?2 FROM init_jobs WHERE id=?1",
+            params![id, crate::alpine::JOB],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if prepared && crate::setting(&tx, "pxe_enabled")? == "on" {
+            crate::pxe::enqueue_menus(&tx)?;
+        }
     }
     tx.commit()
 }

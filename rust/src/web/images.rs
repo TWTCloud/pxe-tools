@@ -50,6 +50,7 @@ pub(super) enum Route {
     Refresh,
     RefreshStatus,
     AutoRefresh,
+    PrepareService,
     Status,
     Toggle(i64),
     Download(i64),
@@ -75,6 +76,7 @@ impl Route {
             "/settings/images/refresh" => Self::Refresh,
             "/settings/images/refresh-button" => Self::RefreshStatus,
             "/settings/images/auto-refresh" => Self::AutoRefresh,
+            "/settings/images/prepare-service" => Self::PrepareService,
             "/api/images-status" => Self::Status,
             _ => {
                 let route = path.strip_prefix("/settings/images/")?;
@@ -400,6 +402,10 @@ fn update(route: Route, method: &Method, path: &Path, form: &[u8]) -> Result<Rep
             refresh_catalog(&tx)?;
             None
         }
+        Route::PrepareService if form.is_empty() => {
+            crate::alpine::queue(&tx, true)?;
+            None
+        }
         Route::AutoRefresh => {
             if !auto_refresh(&tx, input)? {
                 return Ok(invalid());
@@ -672,8 +678,12 @@ fn heading(distro: &str, label: &str) -> String {
 
 fn managed_images(db: &Connection, number: u32, can_edit: bool) -> Result<String, ErrorBox> {
     let mut html = String::from(
-        r#"<section data-image-progress aria-labelledby="managed-images"><header class="section-heading"><h2 id="managed-images">Images sur ce serveur</h2><a class="button button--quiet" href="/settings/images#catalogue">Parcourir le catalogue</a></header><div class="image-list">"#,
+        r#"<section data-image-progress aria-labelledby="managed-images"><header class="section-heading"><h2 id="managed-images">Images sur ce serveur</h2><a class="button button--quiet" href="/settings/images#catalogue">Parcourir le catalogue</a></header>"#,
     );
+    if setting(db, "pxe_enabled")? == "on" || crate::alpine::all_ready() {
+        service_image(&mut html, db, can_edit)?;
+    }
+    html.push_str(r#"<div class="image-list">"#);
     let mut query = db.prepare(
         "SELECT distro, COALESCE(NULLIF(version_full,''),version), arch, status, progress_percent,
                 enabled, id, error_msg,
@@ -803,6 +813,44 @@ fn managed_images(db: &Connection, number: u32, can_edit: bool) -> Result<String
     }
     html.push_str("</section>");
     Ok(html)
+}
+
+fn service_image(html: &mut String, db: &Connection, can_edit: bool) -> Result<(), ErrorBox> {
+    let job: Option<(i64, String)> = db
+        .query_row(
+            "SELECT id,status FROM init_jobs WHERE job_type=?1 ORDER BY id DESC LIMIT 1",
+            [crate::alpine::JOB],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let ready = crate::alpine::all_ready();
+    let (tone, status) = match (ready, job.as_ref().map(|(_, state)| state.as_str())) {
+        (true, _) => ("success", "Prête"),
+        (_, Some("running")) => ("running", "Préparation en cours"),
+        (_, Some("failed")) => ("failed", "Préparation échouée"),
+        _ => ("pending", "En attente"),
+    };
+    write!(
+        html,
+        r#"<article class="panel"><h3>Image de service · Alpine {}</h3><p class="record-meta">Découverte, secours et opérations disque · amd64 et ARM64</p>"#,
+        crate::alpine::version()
+    )?;
+    status_badge(html, tone, status);
+    if let Some((id, state)) = job.filter(|_| !ready) {
+        write!(
+            html,
+            r#"<div class="form-actions"><a class="button button--quiet" href="/jobs/{id}">Voir la préparation</a>"#
+        )?;
+        if can_edit && state == "failed" {
+            write!(
+                html,
+                r#"<form method="post" action="{ROUTE}/prepare-service"><button>Relancer la préparation</button></form>"#
+            )?;
+        }
+        html.push_str("</div>");
+    }
+    html.push_str("</article>");
+    Ok(())
 }
 
 fn architecture(arch: &str) -> &str {

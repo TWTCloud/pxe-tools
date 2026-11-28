@@ -214,12 +214,13 @@ def verify_configuration(client, database, authorization, packaged, boot_fixture
             assert request('/init/images', form={'action':'prepare'})[:2] == (303, '/init/images')
         with closing(sqlite3.connect(database)) as db:
             values = dict(db.execute('SELECT key,value FROM settings'))
-            assert db.execute("SELECT COUNT(*) FROM os_images WHERE version_full='13.0'").fetchone() == (1,)
+            assert db.execute("SELECT COUNT(*) FROM os_images WHERE version_full='13.0'").fetchone() == (0,)
+            assert db.execute("SELECT COUNT(*) FROM init_jobs WHERE job_type='bootstrap:prepare_alpine_service'").fetchone() == (1,)
             assert values['pxe_enabled'] == 'off'
         result = request('/init/complete', form={'confirmation':'yes',
-                         'plan':values['rust_wizard_network'], 'image':values['rust_wizard_image']})
-        assert result[0] == 422 and 'téléchargement' in result[2].decode(), result
-        print('Rust wizard validated the interface, queued Debian once, and kept PXE inactive during download', flush=True)
+                         'plan':values['rust_wizard_network'], 'image':'3.24.4'})
+        assert result[0] == 422 and 'image Alpine' in result[2].decode(), result
+        print('Rust wizard validated the interface, queued Alpine once, and kept PXE inactive during preparation', flush=True)
         if boot_fixture:
             verify_activation(client, database, request, plan, *boot_fixture)
             return
@@ -244,10 +245,14 @@ def verify_activation(client, database, request, plan, http_root, tftp_root, inp
     alias = http_root/'netboot/trixie/amd64'
     alias.parent.mkdir()
     alias.symlink_to('../debian/13.0/amd64')
-    # The parent lab has authenticated these Debian netboot bytes. This
-    # fixture begins with the post-download state for the chosen image.
-    with closing(sqlite3.connect(database)) as db, db:
-        db.execute("UPDATE os_images SET status='downloaded' WHERE version_full='13.0' AND enabled=1")
+    # Service file readiness belongs to the wizard fixture. Actual Alpine boot
+    # is exercised separately against the signed vendor media.
+    release = json.loads(Path('/opt/pxe-tools/scripts/alpine-release.json').read_text())['version']
+    for arch in ('amd64', 'arm64'):
+        service = http_root/'netboot'/'alpine-service'/release/arch
+        service.mkdir(parents=True)
+        for name in ('.alpine-ready', 'linux', 'initrd.gz', 'modloop', 'service.apkovl.tar.gz'):
+            (service/name).write_text(release+'\n')
     page = request('/init/done')
     assert page[0] == 200
     fields = ConfirmationInputs(page[2]).values

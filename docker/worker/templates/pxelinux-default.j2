@@ -1,6 +1,7 @@
 # {{ ansible_managed }}
 # Menu PXE servi par TFTP (BIOS legacy via lpxelinux.0)
 # Note : le 2nd initrd (firmware.cpio.gz) charge les firmwares non-free au boot
+{% import 'alpine-service.j2' as alpine with context %}
 
 UI menu.c32
 PROMPT 0
@@ -19,6 +20,9 @@ MENU AUTOBOOT Demarrage automatique dans # secondes...
 # pour POST /api/discovery avec la même MAC que celle vue par le firmware).
 LABEL discovery
   MENU LABEL Hardware Discovery (auto)
+{% if 'amd64' in pxe_alpine %}
+{{ alpine.bios('discovery') }}
+{% else %}
   KERNEL http://{{ pxe_ip }}/netboot/{{ pxe_default_netboot_path }}/linux
   # firmware.cpio.gz volontairement omis : il pèse ~474 MB et sature les
   # machines à RAM faible (ex: Atom N570 956 MB → tmpfs full → segfault
@@ -34,6 +38,7 @@ LABEL discovery
   # le BOOTIF) puis reçoit un config per-MAC déterministe au boot suivant.
   APPEND vga=788 initrd=http://{{ pxe_ip }}/netboot/{{ pxe_default_netboot_path }}/initrd.gz {{ pxe_kernel_opts }} auto=true priority=critical url=http://{{ pxe_ip }}/discovery-preseed.cfg interface=auto netcfg/dhcp_timeout=30
   IPAPPEND 2
+{% endif %}
 
 {# Layout v2 : 1 menu par couple (codename, version_full) → path /netboot/<distro>/<version_full>/<arch>/ #}
 {% for v in pxe_debian_versions_full %}
@@ -50,8 +55,12 @@ LABEL debian-{{ v.codename }}-{{ v.version_full }}-manual
 {% endfor %}
 LABEL rescue
   MENU LABEL Mode rescue (depannage)
+{% if 'amd64' in pxe_alpine %}
+{{ alpine.bios('rescue') }}
+{% else %}
   KERNEL http://{{ pxe_ip }}/netboot/{{ pxe_default_netboot_path }}/linux
   APPEND vga=788 initrd=http://{{ pxe_ip }}/netboot/{{ pxe_default_netboot_path }}/initrd.gz,http://{{ pxe_ip }}/netboot/{{ pxe_default_netboot_path }}/firmware.cpio.gz {{ pxe_kernel_opts }} rescue/enable=true
+{% endif %}
 
 {% if pxe_ipxe_enabled %}
 LABEL ipxe-chainload

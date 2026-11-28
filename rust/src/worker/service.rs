@@ -102,6 +102,12 @@ pub(crate) fn run(config: &Path, helper: &Path) -> Result<(), ErrorBox> {
             }
             if due(&mut last_runtime, 60) {
                 worker.runtime(&database)?;
+                if setting(&db, "pxe_enabled")? == "on" && !crate::alpine::all_ready() {
+                    crate::alpine::queue(
+                        &open(&database, OpenFlags::SQLITE_OPEN_READ_WRITE)?,
+                        false,
+                    )?;
+                }
             }
             if due(&mut last_catalog, 60) {
                 schedule::run(&database, "catalog", &worker.workspace)?;
@@ -245,11 +251,15 @@ fn next_init(db: &Connection, vault_locked: bool) -> rusqlite::Result<Option<(i6
     db.query_row(
         "SELECT id,job_type FROM init_jobs WHERE status='pending'
          AND NOT (?1 AND job_type GLOB 'machine:ansible_redeploy:*')
-         AND NOT (?2 AND job_type=?3)
+         AND NOT (?2 AND job_type IN (?3, ?4))
+         AND NOT (job_type=?4 AND EXISTS(
+             SELECT 1 FROM init_jobs WHERE job_type IN ('bootstrap:generate_mok','bootstrap:regen_mok')
+               AND status IN ('pending','running')
+         ))
          AND NOT (job_type='bootstrap:build_grub' AND EXISTS(
              SELECT 1 FROM init_jobs WHERE job_type='bootstrap:generate_mok' AND status IN ('pending','running')
          )) ORDER BY id LIMIT 1",
-        params![vault_locked, catalog_blocked, schedule::AUTO_CATALOG],
+        params![vault_locked, catalog_blocked, schedule::AUTO_CATALOG, crate::alpine::JOB],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional()
 }
