@@ -830,7 +830,8 @@ def check_lan(binary, root, tls, env):
                     path, **secure, headers=headers, form=form, response_header='Content-Type')
                 assert status == expected and content_type.startswith('text/html'), (path, status)
                 assert b'class="wizard-main"' in document
-                assert b'aria-current="step">' + phase.encode() + b'</li>' in document
+                if phase:
+                    assert b'aria-current="step">' + phase.encode() + b'</li>' in document
                 link = re.search(rb'<link rel="stylesheet" href="([^"]+)">', document)
                 assert link and link[1].startswith(b'/console-assets/style.css')
                 return link[1].decode(), document
@@ -845,10 +846,11 @@ def check_lan(binary, root, tls, env):
                 digest = base64.b64encode(sha256(script).digest()).decode()
                 assert f"script-src 'sha256-{digest}'" in policy.split('; ')
 
-            css_path, welcome = wizard_page('/init/welcome', 'Stockage')
-            assert b'id="setup-command"' not in welcome and b'<script>' not in welcome
+            css_path, welcome = wizard_page('/init/welcome', None)
+            assert b'id="setup-command"' not in welcome and b'id="setup-continue"' in welcome
             assert request('/init/db', **secure)[:2] == (302, '/init/admin')
-            check_setup_command('/init/admin', 'Compte')
+            assert request('/init/admin', **secure)[:2] == (302, '/init/code')
+            check_setup_command('/init/code', 'Code')
             style_status, css_type, style = request(css_path, **secure, response_header='Content-Type')
             assert style_status == 200 and css_type.startswith('text/css')
             assert b'.auth-layout' in style and b'.workspace' in style and b'.wizard-main' in style

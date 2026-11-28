@@ -78,30 +78,46 @@ docker exec "$container" bash -ec '
     origin=https://127.0.0.1
     code=$(</run/pxe-tools-rust-guided/setup-code)
     [[ "$code" =~ ^[0-9a-f]{4}(-[0-9a-f]{4}){2}$ ]]
-    page=$(curl -kfsS --max-time 5 "$origin/init/admin")
+    welcome=$(curl -kfsS --max-time 5 "$origin/init/welcome")
+    [[ "$welcome" == *"Bienvenue dans PXE Tools"* && "$welcome" == *"href=\"/init/code\""* ]]
+    test "$(curl -kfsS --max-time 5 -o /dev/null -w "%{redirect_url}" "$origin/init/admin")" = "$origin/init/code"
+    page=$(curl -kfsS --max-time 5 "$origin/init/code")
     [[ "$page" == *"/console-assets/style.css"* && "$page" == *"id=\"copy-setup-command\""* ]]
     test "$(grep -o "name=\"code\"" <<< "$page" | wc -l)" -eq 1
+    [[ "$page" != *"name=\"username\""* && "$page" != *"$code"* ]]
     css=$(curl -kfsS --max-time 5 "$origin/console-assets/style.css")
     [[ "$css" == *".setup-command-row"* ]]
     if [[ "$variant" == apt ]]; then
         test "$(dpkg-query -S /usr/bin/pxe-tools)" = "pxe-tools: /usr/bin/pxe-tools"
         [[ "$page" == *"value=\"sudo pxe-tools setup\" readonly"* ]]
         output=$(pxe-tools setup)
-        [[ "$output" == *"https://$address/init/welcome"* && "$output" == *"$code"* ]]
+        [[ "$output" == *"https://$address/init/welcome#code=$code"* ]]
         if runuser -u nobody -- pxe-tools setup; then exit 1; fi
     else
         [[ "$page" == *"value=\"cat /run/pxe-tools-rust-guided/setup-code\" readonly"* ]]
     fi
-    request=(curl -ksS --max-time 5 -o /dev/null -w "%{http_code} %{redirect_url}" -H "Origin: $origin"
-             --data-urlencode "username=setup-fixture" --data-urlencode "password=fixture-only-password"
+    request=(curl -ksS --max-time 5 -o /dev/null -w "%{http_code} %{redirect_url}" -H "Origin: $origin")
+    account=(--data-urlencode "username=setup-fixture" --data-urlencode "password=fixture-only-password"
              --data-urlencode "password_confirm=fixture-only-password")
     wrong_code="0${code:1}"
     [[ "$wrong_code" != "$code" ]] || wrong_code="1${code:1}"
-    test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=$wrong_code")" = "403 "
+    test "$("${request[@]}" "$origin/init/code" --data-urlencode "code=$wrong_code")" = "403 "
+    test "$(curl -ksS --max-time 5 -o /dev/null -w "%{http_code}" -H "Origin: https://unrelated.example.test" \
+        --data-urlencode "code=$code" "$origin/init/code")" = 403
+    test "$("${request[@]}" "$origin/init/admin" "${account[@]}")" = "403 "
+    test "$("${request[@]}" -b "__Host-pxe-setup=0123456789abcdef0123456789abcdef" "$origin/init/admin" "${account[@]}")" = "403 "
     test ! -e /etc/pxe-tools/db.conf
+    setup_cookie=$(mktemp)
     submitted="${code^^}"
-    test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=${submitted//-/ }")" = "303 $origin/admin/inventaire"
-    test "$("${request[@]}" "$origin/init/admin" --data-urlencode "code=$code")" = "409 "
+    test "$("${request[@]}" -c "$setup_cookie" "$origin/init/code" --data-urlencode "code=${submitted//-/ }")" = "303 $origin/init/admin"
+    grep -q "^#HttpOnly_.*__Host-pxe-setup" "$setup_cookie"
+    test ! -e /etc/pxe-tools/db.conf
+    account_page=$(curl -kfsS --max-time 5 -b "$setup_cookie" "$origin/init/admin")
+    [[ "$account_page" == *"name=\"username\""* && "$account_page" != *"name=\"code\""* ]]
+    test "$("${request[@]}" -b "$setup_cookie" "$origin/init/admin" "${account[@]}")" = "303 $origin/login"
+    test "$("${request[@]}" -b "$setup_cookie" "$origin/init/admin" "${account[@]}")" = "403 "
+    test "$("${request[@]}" "$origin/init/code" --data-urlencode "code=$code")" = "409 "
+    rm "$setup_cookie"
     curl -kfsS --max-time 5 --user setup-fixture:fixture-only-password "$origin/admin/inventaire" >/dev/null
 
     tls_cert=/run/pxe-tools-rust-guided/cert.pem
