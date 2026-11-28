@@ -78,7 +78,8 @@ def setup(client, credentials, config, database, *, probe_pending_reset=False):
     assert client.request('/init/db', secure=False)[0] == 404
     assert client.request('/preseed.php', secure=False)[0] == 404
     assert client.request('/init/db')[:2] == (302, '/init/admin')
-    assert client.request('/init/admin')[2].count(b'name="code"') == 1
+    assert client.request('/init/admin')[:2] == (302, '/init/code')
+    assert client.request('/init/code')[2].count(b'name="code"') == 1
     admin_form = {'code': code, 'username': 'operator',
                   'password': 'fixture-password', 'password_confirm': 'fixture-password'}
     assert client.request('/init/admin', form=admin_form, origin='https://outside.example')[0] == 403
@@ -526,7 +527,7 @@ def verify_factory_reset(client, database, authorization, credentials, http, tft
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
     client.ready()
     assert client.request('/admin/inventaire', authorization=authorization)[0] == 401
-    assert client.request('/init')[:2] == (302, '/init/admin')
+    assert client.request('/init')[:2] == (302, '/init/welcome')
     code = (credentials/'setup-code').read_text().strip()
     new_auth = {'code':code, 'username':'after-reset', 'password':'fixture-password', 'password_confirm':'fixture-password'}
     assert client.request('/init/admin', form=new_auth)[:2] == (303, '/admin/inventaire')

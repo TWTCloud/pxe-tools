@@ -51,7 +51,7 @@ fn brand() -> String {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum WizardStep {
-    Storage,
+    Code,
     Account,
     Network,
     Images,
@@ -83,12 +83,7 @@ pub(super) enum SetupCodeHelp {
     Container,
 }
 
-pub(super) fn wizard_with_setup_code(
-    step: WizardStep,
-    title: &str,
-    help: SetupCodeHelp,
-    form: &str,
-) -> Reply {
+pub(super) fn wizard_with_setup_code(help: SetupCodeHelp, form: &str, status: StatusCode) -> Reply {
     let (command, terminal) = match help {
         SetupCodeHelp::Host => ("sudo pxe-tools setup", "sur le serveur PXE Tools"),
         SetupCodeHelp::Container => (
@@ -97,20 +92,30 @@ pub(super) fn wizard_with_setup_code(
         ),
     };
     let content = format!(
-        r#"<div class="setup-help">
-<label for="setup-command">Récupérer le code de configuration</label>
+        r#"{form}<details class="setup-help"><summary>Où trouver le code ?</summary>
 <p id="setup-command-help">Exécutez cette commande dans un terminal {terminal}, puis saisissez le code affiché.</p>
 <div class="setup-command-row">
-<input id="setup-command" type="text" value="{command}" readonly spellcheck="false" aria-describedby="setup-command-help">
+<input id="setup-command" type="text" value="{command}" readonly spellcheck="false" aria-label="Commande pour récupérer le code" aria-describedby="setup-command-help">
 <button id="copy-setup-command" class="button--quiet" type="button" aria-label="Copier la commande" hidden>Copier</button>
 </div>
 <p id="setup-command-feedback" class="setup-command-feedback" role="status"></p>
-</div>{form}"#
+</details>"#
     );
     wizard_document(
-        Some(step),
-        title,
+        Some(WizardStep::Code),
+        "Code de configuration",
         &content,
+        status,
+        Some((SETUP_COMMAND_SCRIPT, SETUP_POLICY.as_str())),
+    )
+}
+
+pub(super) fn wizard_welcome() -> Reply {
+    wizard_document(
+        None,
+        "Bienvenue dans PXE Tools",
+        r#"<p class="wizard-intro">Créez votre compte d’administration. Vous pourrez ensuite choisir le mode réseau et les images de démarrage de votre serveur.</p>
+<div class="form-actions"><a class="button" id="setup-continue" href="/init/code">Commencer</a></div>"#,
         StatusCode::OK,
         Some((SETUP_COMMAND_SCRIPT, SETUP_POLICY.as_str())),
     )
@@ -130,7 +135,7 @@ fn wizard_document(
     if let Some(step) = step {
         layout.push_str(r#"<ol class="wizard-steps" aria-label="Étapes de configuration">"#);
         for (phase, label) in [
-            (WizardStep::Storage, "Stockage"),
+            (WizardStep::Code, "Code"),
             (WizardStep::Account, "Compte"),
             (WizardStep::Network, "Réseau"),
             (WizardStep::Images, "Images"),

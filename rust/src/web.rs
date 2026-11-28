@@ -632,14 +632,18 @@ async fn dispatch(
             return reply;
         }
     }
-    if matches!(path, "/init" | "/init/welcome" | "/init/db" | "/init/admin") {
+    if matches!(
+        path,
+        "/init" | "/init/welcome" | "/init/code" | "/init/db" | "/init/admin"
+    ) {
         if !secure || !setup_allowed {
             return plain(StatusCode::NOT_FOUND, "Not found\n");
         }
         if readable {
-            return site.setup.page(path, &site.database).await;
+            return site.setup.page(path, &site.database, &parts.headers).await;
         }
-        if parts.method == Method::POST && matches!(path, "/init/db" | "/init/admin") {
+        if parts.method == Method::POST && matches!(path, "/init/code" | "/init/db" | "/init/admin")
+        {
             if !admin_origin(&parts.headers, peer, site) {
                 return plain(StatusCode::FORBIDDEN, "Invalid origin\n");
             }
@@ -647,7 +651,10 @@ async fn dispatch(
                 Ok(form) => form,
                 Err(reply) => return reply,
             };
-            return site.setup.submit(path, &site.database, &form).await;
+            return site
+                .setup
+                .submit(path, &site.database, &parts.headers, &form)
+                .await;
         }
         return plain(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed\n");
     }

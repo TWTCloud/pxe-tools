@@ -25,6 +25,12 @@ reste disponible et indique que le démarrage PXE est suspendu.
 
 ## Console et services de démarrage
 
+Sur une instance neuve, `sudo pxe-tools setup` fournit un lien HTTPS vers
+l’assistant. Le code se trouve dans le fragment du lien (`#code=…`) et reste
+dans le navigateur jusqu’à la validation du formulaire. Vous pouvez aussi
+saisir le code manuellement. Après validation, créez le compte puis
+connectez-vous avec son identifiant et son mot de passe.
+
 La console Rust en APT et Docker utilise le port HTTPS TCP 443 par défaut.
 Le démarrage utilise TCP 80 en HTTP, UDP 69 pour TFTP et UDP 67/4011 pour le proxy DHCP.
 

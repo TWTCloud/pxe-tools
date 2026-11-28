@@ -174,13 +174,17 @@ pub(super) fn credential(db: &Connection, user: &str) -> rusqlite::Result<Option
 }
 
 pub(super) fn token(headers: &HeaderMap) -> Option<String> {
+    token_named(headers, NAME)
+}
+
+pub(super) fn token_named(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut tokens = headers
         .get_all(COOKIE)
         .iter()
         .filter_map(|header| header.to_str().ok())
         .flat_map(|header| header.split(';'))
         .filter_map(|part| part.trim().split_once('='))
-        .filter_map(|(key, value)| (key == NAME).then_some(value));
+        .filter_map(|(key, value)| (key == name).then_some(value));
     let value = tokens.next()?;
     (tokens.next().is_none()
         && value.len() == 32

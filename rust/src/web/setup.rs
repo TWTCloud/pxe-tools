@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 use super::{
-    bytes, credential_directory, plain,
+    bytes, credential_directory, plain, sessions,
     ui::{self, SetupCodeHelp, WizardStep},
     ErrorBox, Reply,
 };
 use crate::{configured_database, connect, setting, worker::factory_reset};
-use hyper::{header::LOCATION, Response, StatusCode};
+use hyper::{
+    header::{HeaderMap, LOCATION, SET_COOKIE},
+    Response, StatusCode,
+};
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use std::{
     collections::HashMap,
@@ -14,12 +17,16 @@ use std::{
     io::{self, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
 use tokio::{sync::Semaphore, task};
 
 const SCHEMA: &str = include_str!("../../../app/db/schema.sqlite.sql");
+const SETUP_COOKIE: &str = "__Host-pxe-setup";
+const GRANT_AGE: u64 = 15 * 60;
+const MAX_GRANTS: usize = 64;
 
 enum Stage {
     Database,
@@ -32,6 +39,7 @@ pub(super) struct Wizard {
     code: Option<String>,
     code_help: SetupCodeHelp,
     write: Arc<Semaphore>,
+    grants: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl Wizard {
@@ -48,40 +56,43 @@ impl Wizard {
                 SetupCodeHelp::Host
             },
             write: Arc::new(Semaphore::new(1)),
+            grants: Arc::default(),
         }
     }
 
     pub(super) async fn landing(&self, config: &Path) -> Option<Reply> {
         match read_stage(config).await {
-            Some(Stage::Database) => Some(redirect(StatusCode::FOUND, "/init/welcome")),
-            Some(Stage::Admin) => Some(redirect(StatusCode::FOUND, "/init/admin")),
+            Some(Stage::Database | Stage::Admin) => {
+                Some(redirect(StatusCode::FOUND, "/init/welcome"))
+            }
             Some(Stage::Resetting) => Some(redirect(StatusCode::FOUND, "/init")),
             Some(Stage::Closed) => None,
             None => Some(unavailable()),
         }
     }
 
-    pub(super) async fn page(&self, path: &str, config: &Path) -> Reply {
+    pub(super) async fn page(&self, path: &str, config: &Path, headers: &HeaderMap) -> Reply {
         match (read_stage(config).await, path) {
-            (Some(Stage::Database), "/init" | "/init/welcome") => ui::wizard(
-                Some(WizardStep::Storage),
-                "Configuration initiale",
-                r#"<p class="wizard-intro">Créez votre compte d’administration pour initialiser le stockage SQLite. Vous pourrez ensuite choisir le mode de fonctionnement de PXE Tools.</p>
-<div class="form-actions"><a class="button" href="/init/admin">Continuer</a></div>"#,
-                StatusCode::OK,
-            ),
-            (Some(Stage::Database | Stage::Admin), "/init/admin") => ui::wizard_with_setup_code(
-                WizardStep::Account,
-                "Compte d’administration",
-                self.code_help,
-                r#"<form class="form-stack" method="post" action="/init/admin">
-<div class="field"><label for="setup-code">Code de configuration</label><input id="setup-code" name="code" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required></div>
+            (Some(Stage::Database | Stage::Admin), "/init/welcome") => ui::wizard_welcome(),
+            (Some(Stage::Database), "/init") => ui::wizard_welcome(),
+            (Some(Stage::Admin), "/init") => redirect(StatusCode::FOUND, "/init/welcome"),
+            (Some(Stage::Database | Stage::Admin), "/init/code") => self.code_page(StatusCode::OK),
+            (Some(Stage::Database | Stage::Admin), "/init/admin") if self.authorized(headers) => {
+                ui::wizard(
+                    Some(WizardStep::Account),
+                    "Créer le compte d’administration",
+                    r#"<form class="form-stack" method="post" action="/init/admin">
 <div class="field"><label for="setup-user">Identifiant</label><input id="setup-user" name="username" autocomplete="username" required maxlength="256"></div>
 <div class="field"><label for="setup-password">Mot de passe</label><input id="setup-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="72" aria-describedby="setup-password-help" required><small id="setup-password-help">Au moins 8 caractères.</small></div>
 <div class="field"><label for="setup-confirm">Confirmer le mot de passe</label><input id="setup-confirm" name="password_confirm" type="password" autocomplete="new-password" minlength="8" maxlength="72" required></div>
 <div class="form-actions"><button type="submit">Créer le compte</button></div>
 </form>"#,
-            ),
+                    StatusCode::OK,
+                )
+            }
+            (Some(Stage::Database | Stage::Admin), "/init/admin") => {
+                redirect(StatusCode::FOUND, "/init/code")
+            }
             (Some(Stage::Database | Stage::Admin), _) => redirect(StatusCode::FOUND, "/init/admin"),
             (Some(Stage::Resetting), _) => ui::wizard(
                 None,
@@ -94,13 +105,75 @@ impl Wizard {
         }
     }
 
-    pub(super) async fn submit(&self, path: &str, config: &Path, form: &[u8]) -> Reply {
-        let step = if path == "/init/db" {
-            WizardStep::Storage
+    fn code_page(&self, status: StatusCode) -> Reply {
+        let message = if status == StatusCode::FORBIDDEN {
+            r#"<p class="wizard-error" role="alert">Code de configuration invalide. Vérifiez le code affiché sur le serveur.</p>"#
         } else {
-            WizardStep::Account
+            ""
         };
-        let back = "/init/admin";
+        ui::wizard_with_setup_code(
+            self.code_help,
+            &format!(
+                r#"<p class="wizard-intro">Validez le code affiché à la fin de l’installation pour créer le compte d’administration.</p>
+{message}<form class="form-stack" method="post" action="/init/code">
+<div class="field"><label for="setup-code">Code de configuration</label><input id="setup-code" name="code" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="setup-code-prefilled" required>
+<small id="setup-code-prefilled" role="status" hidden>Le code a été renseigné depuis le lien d’installation.</small></div>
+<div class="form-actions"><button type="submit">Valider le code</button></div></form>"#
+            ),
+            status,
+        )
+    }
+
+    fn authorized(&self, headers: &HeaderMap) -> bool {
+        sessions::token_named(headers, SETUP_COOKIE).is_some_and(|token| {
+            self.grants.lock().is_ok_and(|grants| {
+                grants
+                    .get(&token)
+                    .is_some_and(|deadline| *deadline > Instant::now())
+            })
+        })
+    }
+
+    async fn validate_code(&self, config: &Path) -> Reply {
+        let Ok(_permit) = self.write.try_acquire() else {
+            return plain(StatusCode::CONFLICT, "Configuration en cours\n");
+        };
+        match read_stage(config).await {
+            Some(Stage::Database | Stage::Admin) => {}
+            Some(Stage::Closed) => return closed(),
+            Some(Stage::Resetting) => return resetting(),
+            None => return unavailable(),
+        }
+        let Ok(token) = crate::random_token() else {
+            return unavailable();
+        };
+        let Ok(mut grants) = self.grants.lock() else {
+            return unavailable();
+        };
+        let now = Instant::now();
+        grants.retain(|_, deadline| *deadline > now);
+        if grants.len() == MAX_GRANTS {
+            return plain(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Trop de validations de code en cours\n",
+            );
+        }
+        grants.insert(token.clone(), now + Duration::from_secs(GRANT_AGE));
+        setup_cookie(&token, "/init/admin")
+    }
+
+    pub(super) async fn submit(
+        &self,
+        path: &str,
+        config: &Path,
+        headers: &HeaderMap,
+        form: &[u8],
+    ) -> Reply {
+        let (step, back) = if path == "/init/admin" {
+            (WizardStep::Account, "/init/admin")
+        } else {
+            (WizardStep::Code, "/init/code")
+        };
         let mut fields = HashMap::new();
         for (name, value) in form_urlencoded::parse(form) {
             if fields
@@ -115,21 +188,28 @@ impl Wizard {
                 );
             }
         }
-        let supplied = fields
-            .remove("code")
-            .and_then(|code| normalize_setup_code(&code));
-        let valid = supplied
+        let supplied = fields.remove("code");
+        let granted = path == "/init/admin" && supplied.is_none() && self.authorized(headers);
+        let valid_code = supplied
+            .as_deref()
+            .and_then(normalize_setup_code)
             .zip(self.code.as_ref())
             .is_some_and(|(supplied, expected)| {
                 bool::from(supplied.as_bytes().ct_eq(expected.as_bytes()))
             });
-        if !valid {
-            return ui::wizard_error(
-                step,
-                StatusCode::FORBIDDEN,
-                "Code de configuration invalide.",
-                back,
-            );
+        if path == "/init/code" {
+            if !valid_code || !fields.is_empty() {
+                return self.code_page(StatusCode::FORBIDDEN);
+            }
+            return self.validate_code(config).await;
+        }
+        if !granted && !valid_code {
+            let (message, back) = if supplied.is_none() && path == "/init/admin" {
+                ("Validez le code de configuration pour continuer. Une validation est valable 15 minutes.", "/init/code")
+            } else {
+                ("Code de configuration invalide.", "/init/code")
+            };
+            return ui::wizard_error(step, StatusCode::FORBIDDEN, message, back);
         }
         let credentials = if path == "/init/db" {
             None
@@ -159,11 +239,26 @@ impl Wizard {
             return plain(StatusCode::CONFLICT, "Configuration en cours\n");
         };
         let config = config.to_owned();
-        let reply = task::spawn_blocking(move || {
+        let grants = self.grants.clone();
+        let reply = task::spawn_blocking(move || -> Result<Reply, ErrorBox> {
             // Retain the permit even if the HTTP client disconnects.
             let _permit = permit;
             if let Some((username, password)) = credentials {
-                return create_admin(&config, &username, &password);
+                let reply = create_admin(&config, &username, &password)?;
+                if reply.status() == StatusCode::SEE_OTHER {
+                    if let Ok(mut grants) = grants.lock() {
+                        grants.clear();
+                    }
+                    return Ok(setup_cookie(
+                        "",
+                        if granted {
+                            "/login"
+                        } else {
+                            "/admin/inventaire"
+                        },
+                    ));
+                }
+                return Ok(reply);
             }
             match stage(&config)? {
                 Stage::Database => {
@@ -185,6 +280,17 @@ impl Wizard {
             Err(_) => unavailable(),
         }
     }
+}
+
+fn setup_cookie(token: &str, target: &str) -> Reply {
+    let age = if token.is_empty() { 0 } else { GRANT_AGE };
+    let value =
+        format!("{SETUP_COOKIE}={token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={age}");
+    let mut reply = redirect(StatusCode::SEE_OTHER, target);
+    reply
+        .headers_mut()
+        .insert(SET_COOKIE, value.parse().expect("valid setup cookie"));
+    reply
 }
 
 fn normalize_setup_code(code: &str) -> Option<String> {

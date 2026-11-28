@@ -96,7 +96,8 @@ def show_setup():
     else:
         print('Le compte initial est déjà configuré. Ouvrez la console HTTPS.')
     for _, _, url in [endpoint for endpoint in choices if not endpoint[0].is_loopback] or choices:
-        print(f'  {url}')
+        fragment = f'#code={code}' if code is not None else ''
+        print(f'  {url}{fragment}')
     if code is not None:
         print(f'Code de configuration\n  {code}')
 
