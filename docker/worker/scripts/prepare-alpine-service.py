@@ -11,9 +11,11 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 
+sys.dont_write_bytecode = True
 from atomic_publish import publish as publish_small
 import importlib.util
 

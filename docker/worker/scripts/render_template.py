@@ -22,11 +22,13 @@ migration), ou si la table os_images n'existe pas encore.
 Usage : render_template.py <template_path> <output_path>
 """
 import json
-from atomic_publish import publish
-from alpine_service import media as alpine_media
 import os
 import sqlite3
 import sys
+
+sys.dont_write_bytecode = True
+from atomic_publish import publish
+from alpine_service import media as alpine_media
 import urllib.parse
 from contextlib import closing
 from jinja2 import Environment, FileSystemLoader, StrictUndefined

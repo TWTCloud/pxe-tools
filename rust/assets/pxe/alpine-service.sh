@@ -49,7 +49,8 @@ fi
 script=$(mktemp /run/pxe-service.XXXXXXXX)
 trap 'unlink "$script"' EXIT
 ORCH_IP="$server"
-export ORCH_IP
+PXE_BOOT_MAC="$mac"
+export ORCH_IP PXE_BOOT_MAC
 if [ "$mode" = discovery ]; then
     wget -q -T 10 -O /dev/null "http://$server/api/discovery?phase=alpine_ready&mac=$mac" || true
 fi

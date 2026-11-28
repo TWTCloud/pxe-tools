@@ -138,7 +138,18 @@ write_state() {
 }
 
 # ---- MAC interface principale ---------------------------------------------
-MAIN_IF=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')
+MAIN_IF=
+if [ -n "${PXE_BOOT_MAC:-}" ]; then
+    for address in /sys/class/net/*/address; do
+        if [ "$(cat "$address" 2>/dev/null)" = "$PXE_BOOT_MAC" ]; then
+            MAIN_IF=${address%/address}
+            MAIN_IF=${MAIN_IF##*/}
+            break
+        fi
+    done
+    [ -n "$MAIN_IF" ] || exit 1
+fi
+[ -n "$MAIN_IF" ] || MAIN_IF=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')
 [ -z "$MAIN_IF" ] && MAIN_IF=$(ls /sys/class/net/ 2>/dev/null | grep -v '^lo$' | head -1)
 MAC=$(cat /sys/class/net/"$MAIN_IF"/address 2>/dev/null)
 [ -z "$MAC" ] && MAC="00:00:00:00:00:00"

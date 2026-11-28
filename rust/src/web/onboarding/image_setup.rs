@@ -228,9 +228,10 @@ fn snapshot(db: &Connection) -> Result<Snapshot, ErrorBox> {
             (_, Some((state, _))) if state == "failed" => {
                 downloads.push_str("<span>La préparation d’Alpine a échoué.</span>")
             }
-            (_, Some((state, _))) if state == "running" => {
-                downloads.push_str("<span>Téléchargement et vérification en cours…</span>")
-            }
+            (_, Some((state, percent))) if state == "running" => write!(
+                downloads,
+                r#"<span>Téléchargement et vérification · {percent} %</span><progress aria-label="Préparation d’Alpine" max="100" value="{percent}"></progress>"#,
+            )?,
             _ => downloads.push_str("<span>En attente</span>"),
         }
         downloads.push_str("</li>");
